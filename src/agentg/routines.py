@@ -42,10 +42,15 @@ DEFAULT_RULES_DOC = """\
 - Respect every injury the Member volunteers: avoid movements that load an
   injured joint, and prefer a safer substitute from the catalog.
 
-## Progression (used later when suggesting weights)
-- Add 2.5 kg (or one small plate) once all prescribed sets hit the top of the
-  rep range; deload ~10% after two stalled sessions.
-- After a gap of 10+ days, offer ~10% lighter to ease back in.
+## Progression (the coach may edit these numbers)
+- Add the increment once all prescribed sets hit the top of the rep range;
+  deload after a stall; ease back after a long gap. The numbers below drive
+  the weight suggestions — change them here, no code change needed.
+- increment: 2.5
+- deload_percent: 10
+- stall_sessions: 2
+- gap_deload_days: 10
+- gap_deload_percent: 10
 """
 
 Clock = Callable[[], datetime]
