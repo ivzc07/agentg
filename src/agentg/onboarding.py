@@ -12,7 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from agentg.messages import IncomingMessage
-from agentg.store import Gym, LinkedIdentity, LinkingStore
+from agentg.models import Gym
+from agentg.store import LinkedIdentity, LinkingStore
 
 DEAD_END = (
     "Hey! 👋 I'm a coach that works with partner gyms, so I can only get you "
@@ -41,13 +42,26 @@ SWITCHED = (
     "Fresh start from here; your history stayed with your old gym."
 )
 SWITCH_CANCELLED = "No problem — you're still with {gym}. 👍"
+LINK_EXPIRED = (
+    "Sorry — that invite isn't active anymore. 😕 Ask your gym for their "
+    "current link or QR code, tap that, and we'll get you set up."
+)
 
 AFFIRMATIVES = {"yes", "y", "yep", "yeah", "yup", "ok", "okay", "sure", "si", "sí", "correct"}
+NEGATIVES = {"no", "n", "nope", "nah"}
 MAX_NAME_LENGTH = 100
 
 
+def _normalized(text: str) -> str:
+    return text.strip().lower().strip("!. ")
+
+
 def _is_affirmative(text: str) -> bool:
-    return text.strip().lower().strip("!. ") in AFFIRMATIVES
+    return _normalized(text) in AFFIRMATIVES
+
+
+def _is_negative(text: str) -> bool:
+    return _normalized(text) in NEGATIVES
 
 
 def _clean_name(text: str) -> str:
@@ -58,6 +72,7 @@ def _clean_name(text: str) -> str:
 class _AwaitingName:
     gym_id: int
     gym_name: str
+    invite_code: str
     prefilled: str
 
 
@@ -65,6 +80,7 @@ class _AwaitingName:
 class _AwaitingSwitch:
     gym_id: int
     gym_name: str
+    invite_code: str
 
 
 _Pending = _AwaitingName | _AwaitingSwitch
@@ -116,12 +132,14 @@ class Onboarding:
         if linked is not None:
             if linked.gym.id == gym.id:
                 return SAME_GYM.format(gym=gym.name, name=linked.member.name)
-            self._pending[identity] = _AwaitingSwitch(gym_id=gym.id, gym_name=gym.name)
+            self._pending[identity] = _AwaitingSwitch(
+                gym_id=gym.id, gym_name=gym.name, invite_code=gym.invite_code
+            )
             return SWITCH_CONFIRM.format(new_gym=gym.name, old_gym=linked.gym.name)
 
         prefilled = _clean_name(msg.display_name)
         self._pending[identity] = _AwaitingName(
-            gym_id=gym.id, gym_name=gym.name, prefilled=prefilled
+            gym_id=gym.id, gym_name=gym.name, invite_code=gym.invite_code, prefilled=prefilled
         )
         if prefilled:
             return NAME_CONFIRM.format(gym=gym.name, name=prefilled)
@@ -130,13 +148,25 @@ class Onboarding:
     async def _confirm_name(
         self, identity: _Identity, msg: IncomingMessage, pending: _AwaitingName
     ) -> str:
+        # A pasted Invite code mid-flow restarts linking, not a name change.
+        typed_gym = await self.store.gym_by_invite_code(msg.text)
+        if typed_gym is not None:
+            del self._pending[identity]
+            return self._start_link(identity, msg, None, typed_gym)
         if pending.prefilled and _is_affirmative(msg.text):
             name = pending.prefilled
+        elif _is_negative(msg.text):
+            pending.prefilled = ""  # they declined the prefill; ask outright
+            return NAME_ASK.format(gym=pending.gym_name)
         else:
             name = _clean_name(msg.text)
         if not name:
             return NAME_ASK.format(gym=pending.gym_name)  # still waiting
+        if not await self._code_still_active(pending.gym_id, pending.invite_code):
+            del self._pending[identity]
+            return LINK_EXPIRED
         await self.store.link_member(pending.gym_id, name, *identity)
+        # Cleared only after the write: a store error keeps the step retryable.
         del self._pending[identity]
         return WELCOME.format(name=name, gym=pending.gym_name)
 
@@ -147,12 +177,23 @@ class Onboarding:
         linked: LinkedIdentity | None,
         pending: _AwaitingSwitch,
     ) -> str:
-        del self._pending[identity]
         if linked is None:  # identity vanished mid-flow; start over
+            del self._pending[identity]
             return DEAD_END
         if not _is_affirmative(msg.text):  # anything but a clear yes stays put
+            del self._pending[identity]
             return SWITCH_CANCELLED.format(gym=linked.gym.name)
+        if not await self._code_still_active(pending.gym_id, pending.invite_code):
+            del self._pending[identity]
+            return LINK_INACTIVE.format(gym=linked.gym.name)
         # Fresh start at the new Gym: new Member row (same person, same name),
         # old row untouched, channel identity re-pointed.
         await self.store.link_member(pending.gym_id, linked.member.name, *identity)
+        # Cleared only after the write: a store error keeps the step retryable.
+        del self._pending[identity]
         return SWITCHED.format(new_gym=pending.gym_name, name=linked.member.name)
+
+    async def _code_still_active(self, gym_id: int, invite_code: str) -> bool:
+        """Regenerating an Invite code invalidates flows the old code started."""
+        gym = await self.store.gym_by_invite_code(invite_code)
+        return gym is not None and gym.id == gym_id

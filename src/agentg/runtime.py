@@ -50,8 +50,8 @@ class AgentRuntime:
             reply = await self.onboarding.handle(msg, linked)
             if reply is not None:
                 return reply
-            # Onboarding always replies for unlinked identities.
-            assert linked is not None
+            if linked is None:  # onboarding always replies for unlinked identities
+                raise RuntimeError("unlinked message reached the agent loop")
             result = await Runner.run(
                 self.agent, msg.text, session=self.session_for_member(linked.member.id)
             )

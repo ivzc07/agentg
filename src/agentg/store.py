@@ -90,7 +90,9 @@ class LinkingStore:
         """Create a Member and point the channel identity at them.
 
         An identity that already points somewhere is re-pointed (the gym
-        switch), leaving the old Member row untouched.
+        switch), leaving the old Member row untouched. The read-then-write on
+        the pointer is race-free only because exactly one replica runs (spec
+        §Hosting) and the runtime serializes turns per identity.
         """
         async with self._sessions() as db:
             member = Member(gym_id=gym_id, name=name)

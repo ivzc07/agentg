@@ -90,6 +90,60 @@ async def test_missing_profile_name_is_asked_for_instead_of_confirmed(runtime):
     assert "Ana" in greet
 
 
+async def test_declining_the_prefilled_name_asks_for_one_instead(runtime):
+    gym = await runtime.store.create_gym("Iron Temple")
+    await runtime.handle_message(incoming("/start x", link_code=gym.invite_code))
+
+    ask = await runtime.handle_message(incoming("no"))
+    assert "no" not in ask.split()  # "no" must not become the name
+    assert await member_count(runtime.store) == 0
+
+    greet = await runtime.handle_message(incoming("Anita"))
+    linked = await runtime.store.identity_for("telegram", "42")
+    assert linked is not None and linked.member.name == "Anita"
+    assert "Anita" in greet
+
+
+async def test_pasting_a_code_mid_name_flow_restarts_linking(runtime):
+    gym_a = await runtime.store.create_gym("Iron Temple")
+    gym_b = await runtime.store.create_gym("Steel Yard")
+    await runtime.handle_message(incoming("/start x", link_code=gym_a.invite_code))
+
+    ask = await runtime.handle_message(incoming(gym_b.invite_code))
+    assert "Steel Yard" in ask  # linking restarted, code not taken as a name
+
+    await runtime.handle_message(incoming("yes"))
+    linked = await runtime.store.identity_for("telegram", "42")
+    assert linked is not None and linked.gym.id == gym_b.id
+    assert linked.member.name == "Ana García"
+
+
+async def test_regenerating_the_code_invalidates_a_pending_name_confirm(runtime):
+    gym = await runtime.store.create_gym("Iron Temple")
+    await runtime.handle_message(incoming("/start x", link_code=gym.invite_code))
+    await runtime.store.regenerate_invite_code(gym.id)
+
+    reply = await runtime.handle_message(incoming("yes"))
+
+    assert await member_count(runtime.store) == 0
+    assert "Iron Temple" not in reply  # expired invite, and gyms are not named
+
+
+async def test_regenerating_the_code_invalidates_a_pending_switch(runtime):
+    old_gym = await runtime.store.create_gym("Iron Temple")
+    new_gym = await runtime.store.create_gym("Steel Yard")
+    old_member = await runtime.store.link_member(old_gym.id, "Ana", "telegram", "42")
+    await runtime.handle_message(incoming("/start x", link_code=new_gym.invite_code))
+    await runtime.store.regenerate_invite_code(new_gym.id)
+
+    reply = await runtime.handle_message(incoming("yes"))
+
+    assert "Iron Temple" in reply  # still with the old Gym
+    linked = await runtime.store.identity_for("telegram", "42")
+    assert linked is not None and linked.member.id == old_member.id
+    assert await member_count(runtime.store) == 1
+
+
 # --- AC: the same code typed as plain text links too ---
 
 
