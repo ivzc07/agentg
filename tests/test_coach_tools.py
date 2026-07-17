@@ -5,6 +5,7 @@ import pytest
 from agentg.db import create_engine
 from agentg.notes import NotesStore
 from agentg.checkin_store import CheckinStore
+from agentg.demos import DemoStore
 from agentg.routines import DEFAULT_RULES_DOC, ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.store import LinkingStore
 from agentg.tools import (
@@ -34,6 +35,7 @@ async def make_context(engine, *, is_coach):
         routines=routines,
         linking=linking,
         checkins=CheckinStore(engine),
+        demos=DemoStore(engine),
         member_id=actor.id,
         gym_id=gym.id,
         member_name=actor.name,

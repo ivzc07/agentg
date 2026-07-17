@@ -19,6 +19,7 @@ from agentg.onboarding import DEAD_END, Onboarding
 from agentg.runtime import AgentRuntime
 from agentg.notes import NotesStore
 from agentg.checkin_store import CheckinStore
+from agentg.demos import DemoStore
 from agentg.routines import RoutineStore
 from agentg.store import LinkingStore
 from agentg.training import TrainingStore
@@ -41,6 +42,7 @@ async def runtime(tmp_path):
         notes=NotesStore(engine),
         routines=RoutineStore(engine),
         checkins=CheckinStore(engine),
+        demos=DemoStore(engine),
         summarizer=null_summarizer,
     )
     await runtime.ensure_schema()
