@@ -12,6 +12,7 @@ from agentg.config import Settings
 from agentg.db import create_engine
 from agentg.notes import NotesStore
 from agentg.onboarding import Onboarding
+from agentg.routines import RoutineStore
 from agentg.runtime import AgentRuntime
 from agentg.store import LinkingStore
 from agentg.training import TrainingStore
@@ -30,6 +31,7 @@ async def run() -> None:
         onboarding=Onboarding(store),
         training=TrainingStore(engine),
         notes=NotesStore(engine),
+        routines=RoutineStore(engine),
         summarizer=build_summarizer(settings),
     )
     await runtime.ensure_schema()

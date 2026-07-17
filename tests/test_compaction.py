@@ -7,6 +7,7 @@ import pytest
 from agentg.compaction import COMPACT_THRESHOLD, KEEP_RECENT, CompactionSummary, maybe_compact
 from agentg.db import create_engine
 from agentg.notes import NotesStore
+from agentg.routines import RoutineStore
 from agentg.runtime import AgentRuntime
 from agentg.store import LinkingStore
 from agentg.training import TrainingStore
@@ -44,6 +45,7 @@ async def env(tmp_path):
         onboarding=Onboarding(linking),
         training=training,
         notes=notes,
+        routines=RoutineStore(engine),
         summarizer=RecordingSummarizer(),
     )
     await runtime.ensure_schema()

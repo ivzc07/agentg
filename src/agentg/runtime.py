@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.messages import IncomingMessage
 from agentg.notes import NotesStore
+from agentg.routines import RoutineStore
 from agentg.onboarding import Onboarding
 from agentg.store import LinkedIdentity, LinkingStore
 from agentg.tools import MemberContext
@@ -34,6 +35,7 @@ class AgentRuntime:
     onboarding: Onboarding
     training: TrainingStore
     notes: NotesStore
+    routines: RoutineStore
     summarizer: Summarizer
     # One lock per channel identity so a rapid double message can't interleave
     # turns (or onboarding steps). Unbounded, but one entry per person who
@@ -56,6 +58,7 @@ class AgentRuntime:
         return MemberContext(
             training=self.training,
             notes=self.notes,
+            routines=self.routines,
             member_id=linked.member.id,
             gym_id=linked.gym.id,
             member_name=linked.member.name,

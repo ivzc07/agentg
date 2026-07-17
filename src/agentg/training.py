@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from agentg.catalog import find_exercise, find_or_create_exercise, normalize_exercise_name
 from agentg.models import Exercise, Gym, Session, Set
 from agentg.parsing import parse_set_line
 
@@ -45,7 +46,7 @@ def _utcnow() -> datetime:
 
 
 def _normalize(name: str) -> str:
-    return " ".join(name.strip().lower().split())
+    return normalize_exercise_name(name)
 
 
 @dataclass(frozen=True)
@@ -277,6 +278,11 @@ class TrainingStore:
             await db.commit()
             return resolved
 
+    async def catalog_names(self) -> list[str]:
+        """The Exercise catalog a Routine may draw from (spec §Routine gen)."""
+        async with self._sessions() as db:
+            return sorted((await db.scalars(select(Exercise.name))).all())
+
     def _add_sets(
         self,
         db: AsyncSession,
@@ -303,24 +309,11 @@ class TrainingStore:
             )
 
     async def _match_or_create(self, db: AsyncSession, text: str) -> Exercise:
-        norm = _normalize(text)
-        found = await self._find_exercise(db, norm)
-        if found is not None:
-            return found
         # A Member's reported movement is a fact — record it, never drop it.
-        created = Exercise(name=norm, aliases="")
-        db.add(created)
-        await db.flush()
-        return created
+        return await find_or_create_exercise(db, text)
 
     async def _find_exercise(self, db: AsyncSession, norm: str) -> Exercise | None:
-        found = await db.scalar(select(Exercise).where(Exercise.name == norm))
-        if found is not None:
-            return found
-        for candidate in await db.scalars(select(Exercise)):  # the catalog stays small
-            if norm in [alias for alias in candidate.aliases.split(",") if alias]:
-                return candidate
-        return None
+        return await find_exercise(db, norm)
 
     # --- internals ---
 
