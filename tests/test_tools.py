@@ -12,6 +12,7 @@ from agentg.runtime import AgentRuntime
 from agentg.notes import NotesStore
 from agentg.checkin_store import CheckinStore
 from agentg.demos import DemoStore
+from agentg.forget import ForgetStore
 from agentg.routines import RoutineStore
 from agentg.store import LinkingStore
 from agentg.tools import MemberContext
@@ -42,6 +43,7 @@ EXPECTED_TOOLS = {
     "resume_checkins",
     "show_demo",
     "flag_to_coach",
+    "delete_my_data",
 }
 
 
@@ -76,6 +78,7 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
         routines=RoutineStore(engine),
         checkins=CheckinStore(engine),
         demos=DemoStore(engine),
+        forget=ForgetStore(engine),
         summarizer=null_summarizer,
     )
     await runtime.ensure_schema()

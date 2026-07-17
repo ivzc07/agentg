@@ -9,6 +9,7 @@ from agentg.checkin_store import CheckinStore
 from agentg.db import create_engine
 from agentg.demo_media import SentAnimation
 from agentg.demos import DemoStore
+from agentg.forget import ForgetStore
 from agentg.messages import IncomingMessage
 from agentg.notes import NotesStore
 from agentg.onboarding import Onboarding
@@ -47,6 +48,7 @@ async def env(tmp_path):
         routines=RoutineStore(engine),
         checkins=CheckinStore(engine),
         demos=demos,
+        forget=ForgetStore(engine),
         summarizer=None,
         demo_sender=sender,
     )

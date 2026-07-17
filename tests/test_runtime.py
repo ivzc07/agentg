@@ -13,6 +13,7 @@ from agentg.runtime import AgentRuntime
 from agentg.notes import NotesStore
 from agentg.checkin_store import CheckinStore
 from agentg.demos import DemoStore
+from agentg.forget import ForgetStore
 from agentg.routines import RoutineStore
 from agentg.store import LinkingStore
 from agentg.store import LinkingStore
@@ -40,6 +41,7 @@ def make_runtime(url) -> AgentRuntime:
         routines=RoutineStore(engine),
         checkins=CheckinStore(engine),
         demos=DemoStore(engine),
+        forget=ForgetStore(engine),
         summarizer=null_summarizer,
     )
 

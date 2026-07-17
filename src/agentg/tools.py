@@ -19,6 +19,7 @@ from agentg.advice import suggest_for_today
 from agentg.checkin_store import CheckinStore
 from agentg.checkin_sweep import Notifier
 from agentg.demos import DemoStore
+from agentg.forget import ForgetStore
 from agentg.notes import NotesStore
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.store import LinkingStore
@@ -53,6 +54,7 @@ class MemberContext:
     linking: LinkingStore
     checkins: CheckinStore
     demos: DemoStore
+    forget: ForgetStore
     member_id: int
     gym_id: int
     member_name: str
@@ -497,6 +499,23 @@ async def flag_to_coach(
     return await flag_to_coach_action(ctx.context, summary, share_with_coach)
 
 
+@function_tool
+async def delete_my_data(ctx: RunContextWrapper[MemberContext], confirm: bool) -> dict[str, Any]:
+    """Forget-me: permanently erase EVERYTHING about the Member — profile,
+    Sessions, Sets, Routines, notes, and chat history — across every store.
+
+    Irreversible, no grace period. Ask for confirmation once first ("this wipes
+    everything permanently and can't be undone — are you sure?"); call with
+    confirm=True only on a clear yes. On confirm=False, nothing is deleted.
+    Only the Member can do this; never mention it to their coach.
+    """
+    c = ctx.context
+    if not confirm:
+        return {"deleted": False, "need_confirmation": True}
+    await c.forget.forget_member(c.member_id)
+    return {"deleted": True}
+
+
 def build_tools() -> list[Tool]:
     return [
         open_session,
@@ -519,4 +538,5 @@ def build_tools() -> list[Tool]:
         resume_checkins,
         show_demo,
         flag_to_coach,
+        delete_my_data,
     ]
