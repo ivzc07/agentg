@@ -23,6 +23,23 @@ predates chat bots — confirm with them that delivery through a Telegram bot co
 use (tracked as its own task ticket). Fallback if they say no: MoveKit (~170 clips,
 plain-English commercial license, covers the core lifts).
 
+## Decision — owner override (2026-07-17)
+
+The owner reviewed this research and decided differently: **use the free
+[hasaneyldrm/exercises-dataset](https://github.com/hasaneyldrm/exercises-dataset) GIFs
+(1,324 exercises, 180×180) as-is, with no Gymvisual purchase.** The rights gap was flagged
+explicitly — that repo's own README states the media is © Gymvisual and that reusers must
+obtain their own Gymvisual license — and the owner accepted it. Recorded on
+[#15](https://github.com/ivzc07/agentg/issues/15);
+[#18 (Confirm Gymvisual license covers Telegram bot delivery)](https://github.com/ivzc07/agentg/issues/18)
+is closed as moot since there is no purchase to confirm.
+
+Everything in [Telegram delivery](#telegram-delivery) and
+[Per-gym overrides](#per-gym-overrides) still applies unchanged; in the
+[pipeline](#recommended-pipeline), step 1 becomes "clone the dataset (JSON index + GIFs)"
+and step 2 transcodes those GIFs to soundless MP4s. The comparative research below is kept
+as-written for the record.
+
 ## Sources compared
 
 | Source | Media | Coverage | Media license | Verdict |
