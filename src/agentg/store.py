@@ -124,6 +124,28 @@ class LinkingStore:
             await db.execute(update(Member).where(Member.id == member_id).values(is_coach=is_coach))
             await db.commit()
 
+    async def members_by_name(self, gym_id: int, name: str) -> list[Member]:
+        """Members of a Gym whose name matches (case-insensitive), oldest first.
+
+        Lets a Coach address a Member by name; more than one match is the
+        Coach's to disambiguate.
+        """
+        def norm(value: str) -> str:
+            return " ".join(value.split()).lower()
+
+        target = norm(name)
+        async with self._sessions() as db:
+            members = await db.scalars(
+                select(Member).where(Member.gym_id == gym_id).order_by(Member.id)
+            )
+            return [m for m in members if norm(m.name) == target]
+
+    async def member_in_gym(self, gym_id: int, member_id: int) -> Member | None:
+        """A Member by id, scoped to a Gym so a Coach can't reach across gyms."""
+        async with self._sessions() as db:
+            member = await db.get(Member, member_id)
+            return member if member is not None and member.gym_id == gym_id else None
+
     async def regenerate_invite_code(self, gym_id: int) -> str:
         """The old code stops matching the moment this commits."""
         code = new_invite_code()

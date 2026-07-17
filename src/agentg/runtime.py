@@ -59,11 +59,13 @@ class AgentRuntime:
             training=self.training,
             notes=self.notes,
             routines=self.routines,
+            linking=self.store,
             member_id=linked.member.id,
             gym_id=linked.gym.id,
             member_name=linked.member.name,
             gym_name=linked.gym.name,
             weight_unit=linked.gym.weight_unit,
+            is_coach=linked.member.is_coach,
         )
 
     async def handle_message(self, msg: IncomingMessage) -> str:

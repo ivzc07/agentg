@@ -33,6 +33,7 @@ async def env(tmp_path):
         training=training,
         notes=notes,
         routines=routines,
+        linking=linking,
         member_id=member.id,
         gym_id=gym.id,
         member_name="Dani",
