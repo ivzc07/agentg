@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from agentg.catalog import find_exercise, find_or_create_exercise, normalize_exercise_name
@@ -129,10 +129,19 @@ class TrainingStore:
     async def latest_session_info(
         self, member_id: int
     ) -> tuple[int | None, dict[str, Any] | None]:
-        """Days since the newest Session (open or closed) and its headline —
-        derived, never stored; feeds the per-turn snapshot."""
+        """Days since the Member's last *prior* Session and its headline.
+
+        The currently-open Session (today's visit, once "I'm here" opens it)
+        is excluded, so the gap reflects the time off *before* today — that is
+        what the opener and the ease-back suggestions need. Derived, never
+        stored. A stale open Session is auto-closed first, so it counts.
+        """
         async with self._sessions() as db:
-            return await self._previous_session_info(db, member_id, None, self._clock())
+            open_session = await self._open_session_row(db, member_id)
+            exclude_id = open_session.id if open_session is not None else None
+            info = await self._previous_session_info(db, member_id, exclude_id, self._clock())
+            await db.commit()  # persist any auto-close the open-session check did
+            return info
 
     async def get_session(self, session_id: int) -> Session:
         async with self._sessions() as db:
@@ -282,6 +291,49 @@ class TrainingStore:
         """The Exercise catalog a Routine may draw from (spec §Routine gen)."""
         async with self._sessions() as db:
             return sorted((await db.scalars(select(Exercise.name))).all())
+
+    async def exercise_history(
+        self, member_id: int, exercise: str, limit: int
+    ) -> list[dict[str, Any]]:
+        """An Exercise's recent CLOSED Sessions, most-recent-first.
+
+        Each entry is the top working weight that Session and the reps of the
+        sets at that weight — the input the weight suggester reasons over. The
+        open Session (today, in progress) is excluded so a suggestion for now
+        never reads from itself.
+        """
+        async with self._sessions() as db:
+            resolved = await self._find_exercise(db, _normalize(exercise))
+            if resolved is None:
+                return []
+            session_ids = list(
+                await db.scalars(
+                    select(Session.id)
+                    .join(Set, Set.session_id == Session.id)
+                    .where(
+                        Session.member_id == member_id,
+                        Session.closed_at.is_not(None),
+                        Set.exercise_id == resolved.id,
+                    )
+                    .group_by(Session.id)
+                    .order_by(func.max(Session.started_at).desc())
+                    .limit(limit)
+                )
+            )
+            history: list[dict[str, Any]] = []
+            for session_id in session_ids:
+                rows = list(
+                    await db.scalars(
+                        select(Set)
+                        .where(Set.session_id == session_id, Set.exercise_id == resolved.id)
+                        .order_by(Set.id)
+                    )
+                )
+                weights = [row.weight for row in rows if row.weight is not None]
+                top_weight = max(weights) if weights else None
+                top_reps = [row.reps for row in rows if row.weight == top_weight]
+                history.append({"top_weight": top_weight, "top_reps": top_reps})
+            return history
 
     def _add_sets(
         self,
