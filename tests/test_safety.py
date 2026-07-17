@@ -129,6 +129,17 @@ async def test_the_referral_never_pings_the_member_themselves(env):
     assert result["logged"] is True
 
 
+async def test_consent_still_logs_when_no_channel_notifier_is_wired(env):
+    # a headless context (no notifier, e.g. a background run) can't ping, but
+    # the concern is still recorded rather than lost.
+    context = env.context()
+    object.__setattr__(context, "notifier", None)  # frozen dataclass
+    result = await flag_to_coach_action(context, "shoulder pain", share=True)
+    assert result["logged"] is True and result["coaches_notified"] == 0
+    assert env.notifier.sent == []
+    assert any("shoulder pain" in n.text for n in await env.notes.active(env.member_id))
+
+
 async def test_consent_with_no_coach_set_up_still_logs(env):
     # a gym with no coach: consent given, but nobody to ping
     linking = LinkingStore(env.engine)

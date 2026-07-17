@@ -487,7 +487,7 @@ async def flag_to_coach_action(c: MemberContext, summary: str, share: bool) -> d
 async def flag_to_coach(
     ctx: RunContextWrapper[MemberContext], summary: str, share_with_coach: bool
 ) -> dict[str, Any]:
-    """Log a safety concern, and ping the gym's coach only if the Member agrees.
+    """Log a safety concern, and ping the gym's coaches only if the Member agrees.
 
     First ask "want me to flag this to your coach?"; pass share_with_coach=True
     only on a clear yes, False on a no. Either way the concern is logged. Use
