@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentg"
+version = "0.1.0"
+description = "Gym coach Agent: chat-based coaching for gym members on Telegram"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "openai-agents[litellm,sqlalchemy]>=0.2.9",
+    "aiogram>=3.13",
+    "asyncpg>=0.29",
+]
+
+[project.scripts]
+agentg = "agentg.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "aiosqlite>=0.20",
+    "mypy>=1.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentg"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
