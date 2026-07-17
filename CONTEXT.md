@@ -16,6 +16,10 @@ _Avoid_: Trainer, staff
 The tenant every record belongs to. A Member, their Routine, and their Sessions all live under exactly one Gym. Moving to another Gym is a fresh start there.
 _Avoid_: Club, location, tenant
 
+**Invite code**:
+The short random slug that links a new Member (or Coach) to their Gym on Telegram — carried in the Gym's deep link (`t.me/<bot>?start=<code>`) or typed as plain text. One active, regenerable code per Gym; regenerating it invalidates the old one.
+_Avoid_: Referral code, signup code, token
+
 **Member**:
 A person who trains at a Gym and chats with the Agent. Every Member belongs to exactly one Gym.
 _Avoid_: Client, athlete, user
