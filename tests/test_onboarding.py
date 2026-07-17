@@ -17,8 +17,13 @@ from agentg.messages import IncomingMessage
 from agentg.models import Member
 from agentg.onboarding import DEAD_END, Onboarding
 from agentg.runtime import AgentRuntime
+from agentg.notes import NotesStore
 from agentg.store import LinkingStore
 from agentg.training import TrainingStore
+
+
+async def null_summarizer(old_items, existing_notes):
+    raise AssertionError("compaction should not trigger in this test")
 
 
 @pytest.fixture
@@ -31,6 +36,8 @@ async def runtime(tmp_path):
         store=store,
         onboarding=Onboarding(store),
         training=TrainingStore(engine),
+        notes=NotesStore(engine),
+        summarizer=null_summarizer,
     )
     await runtime.ensure_schema()
     yield runtime
