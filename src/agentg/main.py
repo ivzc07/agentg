@@ -7,8 +7,10 @@ from agents import set_tracing_disabled
 
 from agentg.agent import build_agent
 from agentg.channels.telegram import run_polling
+from agentg.compaction import build_summarizer
 from agentg.config import Settings
 from agentg.db import create_engine
+from agentg.notes import NotesStore
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
 from agentg.store import LinkingStore
@@ -27,6 +29,8 @@ async def run() -> None:
         store=store,
         onboarding=Onboarding(store),
         training=TrainingStore(engine),
+        notes=NotesStore(engine),
+        summarizer=build_summarizer(settings),
     )
     await runtime.ensure_schema()
     await run_polling(settings.telegram_bot_token, runtime.handle_message)

@@ -116,3 +116,21 @@ class Set(Base):
     rpe: Mapped[float | None] = mapped_column(Float, default=None)
     note: Mapped[str | None] = mapped_column(String(400), default=None)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+class MemberNote(Base):
+    """What the Agent learned from a Member: volunteered durable facts.
+
+    Deliberately plain rows (docs/design/memory.md): portable across
+    frameworks, inspectable by a Coach, soft-retired via retired_at.
+    """
+
+    __tablename__ = "member_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))  # injury/preference/goal/constraint/other
+    text: Mapped[str] = mapped_column(String(400))
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+    retired_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)

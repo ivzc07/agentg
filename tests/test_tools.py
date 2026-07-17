@@ -9,9 +9,14 @@ from agentg.db import create_engine
 from agentg.messages import IncomingMessage
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
+from agentg.notes import NotesStore
 from agentg.store import LinkingStore
 from agentg.tools import MemberContext
 from agentg.training import TrainingStore
+
+
+async def null_summarizer(old_items, existing_notes):
+    raise AssertionError("compaction should not trigger in this test")
 
 EXPECTED_TOOLS = {
     "open_session",
@@ -20,6 +25,8 @@ EXPECTED_TOOLS = {
     "edit_logged_sets",
     "get_last_sets",
     "close_session",
+    "remember_note",
+    "retire_note",
 }
 
 
@@ -50,6 +57,8 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
         store=store,
         onboarding=Onboarding(store),
         training=TrainingStore(engine),
+        notes=NotesStore(engine),
+        summarizer=null_summarizer,
     )
     await runtime.ensure_schema()
     gym = await store.create_gym("Iron Temple")

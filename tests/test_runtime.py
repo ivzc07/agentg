@@ -10,8 +10,14 @@ from agentg.db import create_engine
 from agentg.messages import IncomingMessage
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
+from agentg.notes import NotesStore
+from agentg.store import LinkingStore
 from agentg.store import LinkingStore
 from agentg.training import TrainingStore
+
+
+async def null_summarizer(old_items, existing_notes):
+    raise AssertionError("compaction should not trigger in this test")
 
 
 def sqlite_url(tmp_path) -> str:
@@ -27,6 +33,8 @@ def make_runtime(url) -> AgentRuntime:
         store=store,
         onboarding=Onboarding(store),
         training=TrainingStore(engine),
+        notes=NotesStore(engine),
+        summarizer=null_summarizer,
     )
 
 

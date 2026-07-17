@@ -125,6 +125,14 @@ class TrainingStore:
             await db.commit()
             return SessionSummary(session_id=session.id, total_sets=total, exercises=lines)
 
+    async def latest_session_info(
+        self, member_id: int
+    ) -> tuple[int | None, dict[str, Any] | None]:
+        """Days since the newest Session (open or closed) and its headline —
+        derived, never stored; feeds the per-turn snapshot."""
+        async with self._sessions() as db:
+            return await self._previous_session_info(db, member_id, None, self._clock())
+
     async def get_session(self, session_id: int) -> Session:
         async with self._sessions() as db:
             session = await db.get(Session, session_id)
