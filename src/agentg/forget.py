@@ -30,13 +30,25 @@ class ForgetStore:
 
     async def forget_member(self, member_id: int) -> None:
         """Hard-delete every trace of a Member. Idempotent: a second call on an
-        already-forgotten Member is a no-op, not an error."""
+        already-forgotten Member is a no-op, not an error.
+
+        The conversation history (the SDK's own tables) is cleared FIRST, then
+        the domain rows in one transaction. The two stores can't share a
+        transaction, so ordering is the guarantee: if the history clear fails,
+        nothing else has run and the still-linked Member can simply retry; the
+        Member's channel identity is only removed once the domain delete
+        commits, so we never strand orphaned history behind a cold-started id.
+        """
+        # 1. Conversation history — the most sensitive residue — goes first.
+        await SQLAlchemySession(f"member:{member_id}", engine=self.engine).clear_session()
+
+        # 2. Domain rows, atomically. Child rows before parents so foreign keys
+        #    never block the delete (Postgres); the channel identity dies last.
         member_session_ids = select(Session.id).where(Session.member_id == member_id)
         member_routine_ids = select(Routine.id).where(Routine.member_id == member_id)
         member_workout_ids = select(Workout.id).where(Workout.routine_id.in_(member_routine_ids))
 
         async with self._sessions() as db:
-            # Child rows first so foreign keys never block the delete (Postgres).
             await db.execute(delete(Set).where(Set.session_id.in_(member_session_ids)))
             await db.execute(delete(Session).where(Session.member_id == member_id))
             await db.execute(
@@ -48,6 +60,3 @@ class ForgetStore:
             await db.execute(delete(MemberChannel).where(MemberChannel.member_id == member_id))
             await db.execute(delete(Member).where(Member.id == member_id))
             await db.commit()
-
-        # The conversation history lives in the SDK's own session tables.
-        await SQLAlchemySession(f"member:{member_id}", engine=self.engine).clear_session()
