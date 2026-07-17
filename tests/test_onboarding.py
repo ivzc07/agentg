@@ -18,6 +18,7 @@ from agentg.models import Member
 from agentg.onboarding import DEAD_END, Onboarding
 from agentg.runtime import AgentRuntime
 from agentg.store import LinkingStore
+from agentg.training import TrainingStore
 
 
 @pytest.fixture
@@ -25,7 +26,11 @@ async def runtime(tmp_path):
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'app.db'}")
     store = LinkingStore(engine)
     runtime = AgentRuntime(
-        agent=object(), engine=engine, store=store, onboarding=Onboarding(store)
+        agent=object(),
+        engine=engine,
+        store=store,
+        onboarding=Onboarding(store),
+        training=TrainingStore(engine),
     )
     await runtime.ensure_schema()
     yield runtime
@@ -237,7 +242,7 @@ async def test_declining_the_switch_keeps_the_old_gym(runtime):
 async def test_linked_chat_runs_the_agent_with_a_member_keyed_session(runtime, monkeypatch):
     seen = {}
 
-    async def fake_run(agent, text, *, session):
+    async def fake_run(agent, text, *, session, context=None):
         seen["text"], seen["session_id"] = text, session.session_id
         return SimpleNamespace(final_output="nice!")
 
@@ -255,7 +260,7 @@ async def test_linked_chat_runs_the_agent_with_a_member_keyed_session(runtime, m
 async def test_switching_gyms_leaves_the_old_history_behind(runtime, monkeypatch):
     sessions_seen = []
 
-    async def fake_run(agent, text, *, session):
+    async def fake_run(agent, text, *, session, context=None):
         sessions_seen.append(session.session_id)
         return SimpleNamespace(final_output="ok")
 
@@ -277,7 +282,7 @@ async def test_switching_gyms_leaves_the_old_history_behind(runtime, monkeypatch
 
 
 async def test_linked_member_messages_go_to_the_agent(runtime, monkeypatch):
-    async def fake_run(agent, text, *, session):
+    async def fake_run(agent, text, *, session, context=None):
         return SimpleNamespace(final_output="let's go!")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)

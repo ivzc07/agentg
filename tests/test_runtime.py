@@ -11,6 +11,7 @@ from agentg.messages import IncomingMessage
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
 from agentg.store import LinkingStore
+from agentg.training import TrainingStore
 
 
 def sqlite_url(tmp_path) -> str:
@@ -20,7 +21,13 @@ def sqlite_url(tmp_path) -> str:
 def make_runtime(url) -> AgentRuntime:
     engine = create_engine(url)
     store = LinkingStore(engine)
-    return AgentRuntime(agent=object(), engine=engine, store=store, onboarding=Onboarding(store))
+    return AgentRuntime(
+        agent=object(),
+        engine=engine,
+        store=store,
+        onboarding=Onboarding(store),
+        training=TrainingStore(engine),
+    )
 
 
 def incoming(text, user_id):
@@ -61,7 +68,7 @@ async def test_turns_in_one_conversation_never_interleave(runtime, monkeypatch):
     running: set[str] = set()
     overlapped = []
 
-    async def fake_run(agent, text, *, session):
+    async def fake_run(agent, text, *, session, context=None):
         if session.session_id in running:
             overlapped.append(text)
         running.add(session.session_id)

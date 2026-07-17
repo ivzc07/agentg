@@ -1,0 +1,434 @@
+"""The Session loop: open, log, correct, close (spec §The logging conversation).
+
+All training facts flow through these methods — the Agent's tools are thin
+wrappers, and nothing here trusts chat history. The clock is injected so
+gap math and the auto-close timeout are testable.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from agentg.models import Exercise, Gym, Session, Set
+from agentg.parsing import parse_set_line
+
+# Build-time choice (#26): a Session abandoned without "done" closes itself
+# this long after its last activity, as of that activity.
+SESSION_AUTO_CLOSE = timedelta(hours=3)
+
+KG_PER_LB = 0.45359237
+
+SEED_EXERCISES: dict[str, tuple[str, ...]] = {
+    "bench press": ("bench",),
+    "overhead press": ("ohp", "press", "shoulder press"),
+    "squat": ("squats", "back squat"),
+    "deadlift": ("deadlifts", "dl"),
+    "dips": ("dip",),
+    "pull-up": ("pull up", "pull ups", "pullup", "pullups", "chin-up"),
+    "barbell row": ("row", "rows", "bent over row"),
+    "lat pulldown": ("pulldown", "pulldowns"),
+    "lunge": ("lunges",),
+    "biceps curl": ("curl", "curls"),
+}
+
+Clock = Callable[[], datetime]
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _normalize(name: str) -> str:
+    return " ".join(name.strip().lower().split())
+
+
+@dataclass(frozen=True)
+class OpenedSession:
+    session_id: int
+    reopened: bool
+    days_since_last: int | None
+    last_session: dict[str, Any] | None  # {"date", "exercises": [...]}
+
+
+@dataclass(frozen=True)
+class LoggedSets:
+    exercise: str
+    weight: float | None
+    reps: list[int]
+    previous: dict[str, Any] | None  # that exercise's previous-session numbers
+
+
+@dataclass(frozen=True)
+class SessionSummary:
+    session_id: int
+    total_sets: int
+    exercises: list[dict[str, Any]]
+
+
+class TrainingStore:
+    def __init__(self, engine: AsyncEngine, clock: Clock = _utcnow) -> None:
+        self._sessions = async_sessionmaker(engine, expire_on_commit=False)
+        self._clock = clock
+
+    async def ensure_seeded(self) -> None:
+        async with self._sessions() as db:
+            existing = set((await db.scalars(select(Exercise.name))).all())
+            for name, aliases in SEED_EXERCISES.items():
+                if name not in existing:
+                    db.add(Exercise(name=name, aliases=",".join(aliases)))
+            await db.commit()
+
+    # --- Sessions ---
+
+    async def open_session(self, member_id: int, gym_id: int) -> OpenedSession:
+        async with self._sessions() as db:
+            now = self._clock()
+            existing = await self._open_session_row(db, member_id)
+            if existing is not None:
+                await db.commit()
+                days, last = await self._previous_session_info(db, member_id, existing.id, now)
+                return OpenedSession(existing.id, True, days, last)
+            days, last = await self._previous_session_info(db, member_id, None, now)
+            session = Session(gym_id=gym_id, member_id=member_id, started_at=now)
+            db.add(session)
+            await db.commit()
+            return OpenedSession(session.id, False, days, last)
+
+    async def close_session(self, member_id: int) -> SessionSummary:
+        async with self._sessions() as db:
+            session = await self._open_session_row(db, member_id)
+            if session is None:
+                await db.commit()  # persists any auto-close that just happened
+                raise ValueError("no open session to close")
+            lines = await self._session_exercises(db, session.id)
+            total = 0
+            for line in lines:
+                total += len(line["reps"])
+                previous = await self._last_sets_info(
+                    db, member_id, line.pop("exercise_id"), exclude_session_id=session.id
+                )
+                line["previous_weight"] = previous["weight"] if previous else None
+                line["previous_reps"] = previous["reps"] if previous else None
+                line["weight_change"] = (
+                    line["weight"] - previous["weight"]
+                    if previous and line["weight"] is not None and previous["weight"] is not None
+                    else None
+                )
+                line["reps_change"] = sum(line["reps"]) - sum(previous["reps"]) if previous else None
+            session.closed_at = self._clock()
+            await db.commit()
+            return SessionSummary(session_id=session.id, total_sets=total, exercises=lines)
+
+    async def get_session(self, session_id: int) -> Session:
+        async with self._sessions() as db:
+            session = await db.get(Session, session_id)
+            if session is None:
+                raise ValueError(f"no session {session_id}")
+            return session
+
+    # --- Sets ---
+
+    async def log_sets(
+        self,
+        member_id: int,
+        gym_id: int,
+        line: str,
+        exercise: str | None = None,
+        rpe: float | None = None,
+        note: str | None = None,
+    ) -> LoggedSets:
+        parsed = parse_set_line(line)
+        if parsed is None:
+            raise ValueError(
+                f"could not parse {line!r} as sets — shorthand like 'bench 60 8,8,8' works"
+            )
+        name = parsed.exercise or exercise
+        if not name:
+            raise ValueError("the line names no exercise — pass the exercise it belongs to")
+        async with self._sessions() as db:
+            resolved = await self._match_or_create(db, name)
+            session = await self._require_open_session(db, member_id, gym_id)
+            weight = await self._to_gym_unit(db, gym_id, parsed.weight, parsed.unit)
+            previous = await self._last_sets_info(
+                db, member_id, resolved.id, exclude_session_id=session.id
+            )
+            self._add_sets(
+                db, session, resolved.id, weight, parsed.reps, self._clock(), rpe=rpe, note=note
+            )
+            await db.commit()
+            return LoggedSets(resolved.name, weight, list(parsed.reps), previous)
+
+    async def copy_last_sets(self, member_id: int, gym_id: int, exercise: str) -> LoggedSets:
+        async with self._sessions() as db:
+            resolved = await self._match_or_create(db, exercise)
+            session = await self._require_open_session(db, member_id, gym_id)
+            previous = await self._last_sets_info(
+                db, member_id, resolved.id, exclude_session_id=session.id
+            )
+            if previous is None:
+                raise ValueError(f"no earlier sets of {resolved.name} to copy")
+            self._add_sets(
+                db, session, resolved.id, previous["weight"], previous["reps"], self._clock()
+            )
+            await db.commit()
+            return LoggedSets(resolved.name, previous["weight"], list(previous["reps"]), previous)
+
+    async def edit_logged_sets(
+        self,
+        member_id: int,
+        exercise: str,
+        weight: float | None = None,
+        reps: list[int] | None = None,
+    ) -> LoggedSets:
+        """Correct the just-logged Sets of one Exercise — the latest batch in
+        the current Session, so an earlier warm-up batch stays untouched."""
+        async with self._sessions() as db:
+            resolved = await self._find_exercise(db, _normalize(exercise))
+            session = await self._open_session_row(db, member_id)
+            rows: list[Set] = []
+            if resolved is not None and session is not None:
+                rows = list(
+                    await db.scalars(
+                        select(Set)
+                        .where(Set.session_id == session.id, Set.exercise_id == resolved.id)
+                        .order_by(Set.id)
+                    )
+                )
+            if not rows:
+                await db.commit()  # persists any auto-close that just happened
+                raise ValueError(f"no {exercise} sets in the current session to edit")
+            batch_time = max(row.created_at for row in rows)  # one log call = one batch
+            batch = [row for row in rows if row.created_at == batch_time]
+            if weight is not None:
+                for row in batch:
+                    row.weight = weight
+            if reps is not None:
+                for row, rep in zip(batch, reps):
+                    row.reps = rep
+                for row in batch[len(reps) :]:
+                    await db.delete(row)
+                template = batch[0]
+                for rep in reps[len(batch) :]:
+                    db.add(
+                        Set(
+                            gym_id=template.gym_id,
+                            session_id=template.session_id,
+                            exercise_id=template.exercise_id,
+                            weight=weight if weight is not None else template.weight,
+                            reps=rep,
+                            created_at=batch_time,  # stays correctable as one batch
+                        )
+                    )
+            assert resolved is not None  # rows exist, so the exercise did too
+            previous = await self._last_sets_info(
+                db, member_id, resolved.id, exclude_session_id=session.id if session else None
+            )
+            await db.commit()
+            final_weight = weight if weight is not None else batch[0].weight
+            final_reps = list(reps) if reps is not None else [row.reps for row in batch]
+            return LoggedSets(resolved.name, final_weight, final_reps, previous)
+
+    async def last_sets(self, member_id: int, exercise: str) -> dict[str, Any] | None:
+        """The previous Session's numbers for an Exercise (never the open one)."""
+        async with self._sessions() as db:
+            resolved = await self._find_exercise(db, _normalize(exercise))
+            if resolved is None:
+                return None
+            current = await self._open_session_row(db, member_id)
+            info = await self._last_sets_info(
+                db, member_id, resolved.id, exclude_session_id=current.id if current else None
+            )
+            await db.commit()
+            return info
+
+    async def current_session_sets(self, member_id: int) -> list[Set]:
+        async with self._sessions() as db:
+            session = await self._open_session_row(db, member_id)
+            if session is None:
+                await db.commit()
+                return []
+            rows = list(
+                await db.scalars(
+                    select(Set).where(Set.session_id == session.id).order_by(Set.id)
+                )
+            )
+            await db.commit()
+            return rows
+
+    # --- Exercises ---
+
+    async def match_or_create_exercise(self, text: str) -> Exercise:
+        async with self._sessions() as db:
+            resolved = await self._match_or_create(db, text)
+            await db.commit()
+            return resolved
+
+    def _add_sets(
+        self,
+        db: AsyncSession,
+        session: Session,
+        exercise_id: int,
+        weight: float | None,
+        reps: list[int],
+        created_at: datetime,
+        rpe: float | None = None,
+        note: str | None = None,
+    ) -> None:
+        for rep in reps:
+            db.add(
+                Set(
+                    gym_id=session.gym_id,
+                    session_id=session.id,
+                    exercise_id=exercise_id,
+                    weight=weight,
+                    reps=rep,
+                    rpe=rpe,
+                    note=note,
+                    created_at=created_at,
+                )
+            )
+
+    async def _match_or_create(self, db: AsyncSession, text: str) -> Exercise:
+        norm = _normalize(text)
+        found = await self._find_exercise(db, norm)
+        if found is not None:
+            return found
+        # A Member's reported movement is a fact — record it, never drop it.
+        created = Exercise(name=norm, aliases="")
+        db.add(created)
+        await db.flush()
+        return created
+
+    async def _find_exercise(self, db: AsyncSession, norm: str) -> Exercise | None:
+        found = await db.scalar(select(Exercise).where(Exercise.name == norm))
+        if found is not None:
+            return found
+        for candidate in await db.scalars(select(Exercise)):  # the catalog stays small
+            if norm in [alias for alias in candidate.aliases.split(",") if alias]:
+                return candidate
+        return None
+
+    # --- internals ---
+
+    async def _open_session_row(self, db: AsyncSession, member_id: int) -> Session | None:
+        """The member's open Session — auto-closing it first if it went stale."""
+        session = await db.scalar(
+            select(Session)
+            .where(Session.member_id == member_id, Session.closed_at.is_(None))
+            .order_by(Session.started_at.desc())
+        )
+        if session is None:
+            return None
+        last_activity = await self._last_activity(db, session)
+        if self._clock() - last_activity > SESSION_AUTO_CLOSE:
+            session.closed_at = last_activity  # closed as of when it was abandoned
+            await db.flush()
+            return None
+        return session
+
+    async def _require_open_session(
+        self, db: AsyncSession, member_id: int, gym_id: int
+    ) -> Session:
+        session = await self._open_session_row(db, member_id)
+        if session is None:  # logging sets implies being at the gym
+            session = Session(gym_id=gym_id, member_id=member_id, started_at=self._clock())
+            db.add(session)
+            await db.flush()
+        return session
+
+    async def _last_activity(self, db: AsyncSession, session: Session) -> datetime:
+        newest_set = await db.scalar(
+            select(Set.created_at)
+            .where(Set.session_id == session.id)
+            .order_by(Set.created_at.desc())
+            .limit(1)
+        )
+        return newest_set or session.started_at
+
+    async def _previous_session_info(
+        self, db: AsyncSession, member_id: int, exclude_session_id: int | None, now: datetime
+    ) -> tuple[int | None, dict[str, Any] | None]:
+        query = (
+            select(Session)
+            .where(Session.member_id == member_id)
+            .order_by(Session.started_at.desc())
+            .limit(1)
+        )
+        if exclude_session_id is not None:
+            query = query.where(Session.id != exclude_session_id)
+        previous = await db.scalar(query)
+        if previous is None:
+            return None, None
+        days = (now.date() - previous.started_at.date()).days
+        lines = await self._session_exercises(db, previous.id)
+        for line in lines:
+            line.pop("exercise_id")
+        return days, {"date": previous.started_at.date().isoformat(), "exercises": lines}
+
+    async def _session_exercises(self, db: AsyncSession, session_id: int) -> list[dict[str, Any]]:
+        rows = (
+            await db.execute(
+                select(Set, Exercise.name)
+                .join(Exercise, Set.exercise_id == Exercise.id)
+                .where(Set.session_id == session_id)
+                .order_by(Set.id)
+            )
+        ).all()
+        by_exercise: dict[str, dict[str, Any]] = {}
+        for row, name in rows:
+            entry = by_exercise.setdefault(
+                name,
+                {"exercise": name, "exercise_id": row.exercise_id, "weight": None, "reps": []},
+            )
+            # Report the top set: a 40 kg warm-up must not mask the 60 kg work.
+            if row.weight is not None and (entry["weight"] is None or row.weight > entry["weight"]):
+                entry["weight"] = row.weight
+            entry["reps"].append(row.reps)
+        return list(by_exercise.values())
+
+    async def _last_sets_info(
+        self, db: AsyncSession, member_id: int, exercise_id: int, exclude_session_id: int | None
+    ) -> dict[str, Any] | None:
+        query = (
+            select(Session.id)
+            .join(Set, Set.session_id == Session.id)
+            .where(Session.member_id == member_id, Set.exercise_id == exercise_id)
+            .order_by(Session.started_at.desc())
+            .limit(1)
+        )
+        if exclude_session_id is not None:
+            query = query.where(Session.id != exclude_session_id)
+        session_id = await db.scalar(query)
+        if session_id is None:
+            return None
+        rows = list(
+            await db.scalars(
+                select(Set)
+                .where(Set.session_id == session_id, Set.exercise_id == exercise_id)
+                .order_by(Set.id)
+            )
+        )
+        weights = [row.weight for row in rows if row.weight is not None]
+        return {  # top-set weight: warm-ups must not set the reference
+            "weight": max(weights) if weights else None,
+            "reps": [row.reps for row in rows],
+        }
+
+    async def _to_gym_unit(
+        self, db: AsyncSession, gym_id: int, weight: float | None, unit: str | None
+    ) -> float | None:
+        if weight is None or unit is None:
+            return weight
+        gym = await db.get(Gym, gym_id)
+        gym_unit = gym.weight_unit if gym is not None else "kg"
+        if unit == gym_unit:
+            return weight
+        if unit == "lb":  # typed in pounds at a kg gym
+            return round(weight * KG_PER_LB, 2)
+        return round(weight / KG_PER_LB, 2)  # typed in kg at a lb gym
