@@ -133,6 +133,24 @@ def test_a_short_gap_does_not_trigger_ease_back():
     assert s.action == "increment"
 
 
+def unknown(weight: float) -> SessionResult:
+    return SessionResult(weight=weight, completed=None)
+
+
+def test_unverifiable_sessions_hold_and_never_deload():
+    # e.g. an AMRAP scheme — we can't confirm completion, so we neither push
+    # nor punish: two such sessions at the same weight must not deload.
+    s = suggest_weight([unknown(80.0), unknown(80.0)], gap_days=2, rules=rules())
+    assert s.action == "hold"
+    assert s.suggested_weight == 80.0
+
+
+def test_a_deload_always_reduces_even_for_small_loads():
+    s = suggest_weight([missed(5.0), missed(5.0)], gap_days=2, rules=rules())
+    assert s.action == "deload"
+    assert s.suggested_weight is not None and s.suggested_weight < 5.0
+
+
 def test_bodyweight_history_yields_no_weight_suggestion():
     s = suggest_weight([SessionResult(weight=None, completed=True)], gap_days=2, rules=rules())
     assert s.suggested_weight is None

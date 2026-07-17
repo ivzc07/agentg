@@ -9,6 +9,7 @@ code change.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 
@@ -28,10 +29,15 @@ class ProgressionRules:
 
 @dataclass(frozen=True)
 class SessionResult:
-    """One past Session's outcome for an Exercise, most-recent-first in a list."""
+    """One past Session's outcome for an Exercise, most-recent-first in a list.
+
+    ``completed`` is tri-state: True/False when the prescription let us judge
+    it, None when it couldn't be verified (e.g. an AMRAP or target-less
+    scheme). Unverifiable Sessions never drive an increment *or* a deload.
+    """
 
     weight: float | None  # the top working weight (None for bodyweight)
-    completed: bool  # did all prescribed sets at or above the target reps
+    completed: bool | None
 
 
 @dataclass(frozen=True)
@@ -101,21 +107,29 @@ def suggest_weight(
             f"{gap_days} days off — about {rules.gap_deload_percent:g}% lighter to ease back",
         )
 
-    if history[0].completed:
+    if history[0].completed is True:
         return Suggestion(
             last_weight + rules.increment,
             "increment",
             f"all sets done last time — up {rules.increment:g}",
         )
 
+    # A stall is only a stall when every Session in the window verifiably
+    # missed at the same weight — an unverifiable Session (completed is None)
+    # is not evidence of a stall, so it holds instead of deloading.
     window = history[: rules.stall_sessions]
     stalled = (
         len(window) >= rules.stall_sessions
-        and all(not result.completed for result in window)
-        and all(result.weight == last_weight for result in window)
+        and all(result.completed is False for result in window)
+        and all(
+            result.weight is not None and math.isclose(result.weight, last_weight, abs_tol=0.01)
+            for result in window
+        )
     )
     if stalled:
         deloaded = _plate_round(last_weight * (1 - rules.deload_percent / 100))
+        if deloaded >= last_weight:  # rounding must never leave a "deload" heavier or equal
+            deloaded = max(PLATE_STEP, last_weight - PLATE_STEP)
         return Suggestion(
             deloaded,
             "deload",

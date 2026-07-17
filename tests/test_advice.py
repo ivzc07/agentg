@@ -98,6 +98,32 @@ async def test_a_long_gap_eases_back(env):
     assert s.suggested_weight == 72.5  # ~10% under 80, not +2.5
 
 
+async def test_gap_ease_back_survives_opening_todays_session_first(env):
+    # the Agent opens today's Session before asking for suggestions; the gap
+    # must still be measured to the last *prior* Session, not collapse to 0.
+    await log_bench_session(env, 80, [12, 12, 12], day_offset=20)
+    env.clock.now = FakeClock().now
+    await env.training.open_session(env.member_id, env.gym_id)
+
+    s = (await bench(env))["bench press"]
+    assert s.action == "gap_deload"
+    assert s.suggested_weight == 72.5
+
+
+async def test_an_unverifiable_scheme_holds_and_never_deloads(env):
+    await env.routines.save_routine(
+        env.member_id,
+        env.gym_id,
+        [WorkoutSpec(weekday=2, name="Push", exercises=[ExerciseSpec("bench press", sets=3, reps="AMRAP")])],
+    )
+    await log_bench_session(env, 80, [10, 9, 8], day_offset=8)
+    await log_bench_session(env, 80, [9, 8, 7], day_offset=3)  # two "misses" we can't verify
+    env.clock.now = FakeClock().now
+
+    s = (await bench(env))["bench press"]
+    assert s.action == "hold"  # no spurious deload from an AMRAP scheme
+
+
 async def test_editing_the_doc_changes_the_suggestion_without_code(env):
     await env.routines.set_rules_doc(
         env.gym_id, "## Progression\n- increment: 5\n"

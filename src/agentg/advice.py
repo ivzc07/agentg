@@ -29,12 +29,14 @@ class ExerciseSuggestion:
     reason: str
 
 
-def _completed(top_reps: list[int], target_sets: int | None, target_top_reps: int | None) -> bool:
-    """A Session completed an Exercise when it hit the prescribed sets at the
-    top of the rep range. Without a clear prescription we can't confirm it, so
-    we hold rather than push."""
+def _completed(
+    top_reps: list[int], target_sets: int | None, target_top_reps: int | None
+) -> bool | None:
+    """Did a Session complete an Exercise — all prescribed sets at the top of
+    the rep range? ``None`` when the prescription can't tell us (no rep target,
+    or nothing logged), so the suggester holds rather than pushing OR deloading."""
     if target_sets is None or target_top_reps is None or not top_reps:
-        return False
+        return None
     return len(top_reps) >= target_sets and min(top_reps) >= target_top_reps
 
 
