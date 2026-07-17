@@ -1,0 +1,33 @@
+# Local dev: `docker compose up --build` brings up the app + Postgres.
+# The app long-polls Telegram, so keep it at a single replica — exactly one
+# instance may poll a given bot token.
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set the dev bot token in .env}
+      MODEL: ${MODEL:-}  # empty falls back to the app's default model
+      MODEL_API_KEY: ${MODEL_API_KEY:?set the model API key in .env}
+      DATABASE_URL: postgresql+asyncpg://agentg:agentg@db:5432/agentg
+
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentg
+      POSTGRES_PASSWORD: agentg
+      POSTGRES_DB: agentg
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentg -d agentg"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  pgdata:
