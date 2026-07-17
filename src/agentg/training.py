@@ -104,6 +104,7 @@ class TrainingStore:
         async with self._sessions() as db:
             session = await self._open_session_row(db, member_id)
             if session is None:
+                await db.commit()  # persists any auto-close that just happened
                 raise ValueError("no open session to close")
             lines = await self._session_exercises(db, session.id)
             total = 0
@@ -157,20 +158,9 @@ class TrainingStore:
             previous = await self._last_sets_info(
                 db, member_id, resolved.id, exclude_session_id=session.id
             )
-            now = self._clock()
-            for rep in parsed.reps:
-                db.add(
-                    Set(
-                        gym_id=gym_id,
-                        session_id=session.id,
-                        exercise_id=resolved.id,
-                        weight=weight,
-                        reps=rep,
-                        rpe=rpe,
-                        note=note,
-                        created_at=now,
-                    )
-                )
+            self._add_sets(
+                db, session, resolved.id, weight, parsed.reps, self._clock(), rpe=rpe, note=note
+            )
             await db.commit()
             return LoggedSets(resolved.name, weight, list(parsed.reps), previous)
 
@@ -183,18 +173,9 @@ class TrainingStore:
             )
             if previous is None:
                 raise ValueError(f"no earlier sets of {resolved.name} to copy")
-            now = self._clock()
-            for rep in previous["reps"]:
-                db.add(
-                    Set(
-                        gym_id=gym_id,
-                        session_id=session.id,
-                        exercise_id=resolved.id,
-                        weight=previous["weight"],
-                        reps=rep,
-                        created_at=now,
-                    )
-                )
+            self._add_sets(
+                db, session, resolved.id, previous["weight"], previous["reps"], self._clock()
+            )
             await db.commit()
             return LoggedSets(resolved.name, previous["weight"], list(previous["reps"]), previous)
 
@@ -205,7 +186,8 @@ class TrainingStore:
         weight: float | None = None,
         reps: list[int] | None = None,
     ) -> LoggedSets:
-        """Correct the current Session's sets of one Exercise — never earlier ones."""
+        """Correct the just-logged Sets of one Exercise — the latest batch in
+        the current Session, so an earlier warm-up batch stays untouched."""
         async with self._sessions() as db:
             resolved = await self._find_exercise(db, _normalize(exercise))
             session = await self._open_session_row(db, member_id)
@@ -221,17 +203,18 @@ class TrainingStore:
             if not rows:
                 await db.commit()  # persists any auto-close that just happened
                 raise ValueError(f"no {exercise} sets in the current session to edit")
+            batch_time = max(row.created_at for row in rows)  # one log call = one batch
+            batch = [row for row in rows if row.created_at == batch_time]
             if weight is not None:
-                for row in rows:
+                for row in batch:
                     row.weight = weight
             if reps is not None:
-                for row, rep in zip(rows, reps):
+                for row, rep in zip(batch, reps):
                     row.reps = rep
-                for row in rows[len(reps) :]:
+                for row in batch[len(reps) :]:
                     await db.delete(row)
-                template = rows[0]
-                now = self._clock()
-                for rep in reps[len(rows) :]:
+                template = batch[0]
+                for rep in reps[len(batch) :]:
                     db.add(
                         Set(
                             gym_id=template.gym_id,
@@ -239,14 +222,17 @@ class TrainingStore:
                             exercise_id=template.exercise_id,
                             weight=weight if weight is not None else template.weight,
                             reps=rep,
-                            created_at=now,
+                            created_at=batch_time,  # stays correctable as one batch
                         )
                     )
-            await db.commit()
-            final_weight = weight if weight is not None else rows[0].weight
-            final_reps = list(reps) if reps is not None else [row.reps for row in rows]
             assert resolved is not None  # rows exist, so the exercise did too
-            return LoggedSets(resolved.name, final_weight, final_reps, None)
+            previous = await self._last_sets_info(
+                db, member_id, resolved.id, exclude_session_id=session.id if session else None
+            )
+            await db.commit()
+            final_weight = weight if weight is not None else batch[0].weight
+            final_reps = list(reps) if reps is not None else [row.reps for row in batch]
+            return LoggedSets(resolved.name, final_weight, final_reps, previous)
 
     async def last_sets(self, member_id: int, exercise: str) -> dict[str, Any] | None:
         """The previous Session's numbers for an Exercise (never the open one)."""
@@ -282,6 +268,31 @@ class TrainingStore:
             resolved = await self._match_or_create(db, text)
             await db.commit()
             return resolved
+
+    def _add_sets(
+        self,
+        db: AsyncSession,
+        session: Session,
+        exercise_id: int,
+        weight: float | None,
+        reps: list[int],
+        created_at: datetime,
+        rpe: float | None = None,
+        note: str | None = None,
+    ) -> None:
+        for rep in reps:
+            db.add(
+                Set(
+                    gym_id=session.gym_id,
+                    session_id=session.id,
+                    exercise_id=exercise_id,
+                    weight=weight,
+                    reps=rep,
+                    rpe=rpe,
+                    note=note,
+                    created_at=created_at,
+                )
+            )
 
     async def _match_or_create(self, db: AsyncSession, text: str) -> Exercise:
         norm = _normalize(text)
@@ -375,7 +386,9 @@ class TrainingStore:
                 name,
                 {"exercise": name, "exercise_id": row.exercise_id, "weight": None, "reps": []},
             )
-            entry["weight"] = row.weight
+            # Report the top set: a 40 kg warm-up must not mask the 60 kg work.
+            if row.weight is not None and (entry["weight"] is None or row.weight > entry["weight"]):
+                entry["weight"] = row.weight
             entry["reps"].append(row.reps)
         return list(by_exercise.values())
 
@@ -401,7 +414,11 @@ class TrainingStore:
                 .order_by(Set.id)
             )
         )
-        return {"weight": rows[-1].weight, "reps": [row.reps for row in rows]}
+        weights = [row.weight for row in rows if row.weight is not None]
+        return {  # top-set weight: warm-ups must not set the reference
+            "weight": max(weights) if weights else None,
+            "reps": [row.reps for row in rows],
+        }
 
     async def _to_gym_unit(
         self, db: AsyncSession, gym_id: int, weight: float | None, unit: str | None

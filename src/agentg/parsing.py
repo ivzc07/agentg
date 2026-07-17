@@ -12,7 +12,9 @@ import re
 from dataclasses import dataclass
 
 MAX_WEIGHT = 999.0
-MAX_REPS = 100
+# Reps above this read as a weight that strayed into the reps group (e.g. the
+# fused "60,8,8" from "deadlift 60, 8,8") — refuse and let the Agent ask.
+MAX_REPS = 50
 MAX_SETS = 20
 
 _REPS_LIST = re.compile(r"^\d+(?:[,/]\d+)+$")
@@ -69,6 +71,8 @@ def _parse_reps(token: str) -> list[int] | None:
     elif _INT.fullmatch(token):
         reps = [int(token)]
     else:
+        return None
+    if len(reps) > MAX_SETS:
         return None
     if any(not 1 <= rep <= MAX_REPS for rep in reps):
         return None

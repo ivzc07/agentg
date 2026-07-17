@@ -140,6 +140,8 @@ def test_non_log_lines_return_none(text):
         "bench 60 0,8,8",  # a zero-rep set is noise
         "bench 60 999x8",  # absurd set count
         "bench 9999 8,8,8",  # absurd weight
+        "deadlift 60, 8,8",  # a stray comma fuses weight into reps; refuse and ask
+        "curls " + ",".join(["8"] * 25),  # more sets than plausible
     ],
 )
 def test_implausible_numbers_return_none(text):

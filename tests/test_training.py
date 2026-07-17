@@ -173,6 +173,25 @@ async def test_lb_lines_at_a_kg_gym_are_converted(env):
     assert logged.weight == pytest.approx(61.23, abs=0.01)  # stored in the gym's kg
 
 
+async def test_kg_lines_at_a_lb_gym_are_converted(env, tmp_path):
+    from agentg.db import create_engine
+    from agentg.store import LinkingStore
+    from agentg.training import TrainingStore
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'lbgym.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+    training = TrainingStore(engine, clock=env.clock)
+    await training.ensure_seeded()
+    gym = await linking.create_gym("Lone Star Barbell", weight_unit="lb")
+    member = await linking.link_member(gym.id, "Tex", "telegram", "7")
+
+    logged = await training.log_sets(member.id, gym.id, "squat 100kg 5,5,5")
+
+    assert logged.weight == pytest.approx(220.46, abs=0.01)  # stored in the gym's lb
+    await engine.dispose()
+
+
 async def test_volunteered_rpe_and_note_are_stored(env):
     await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8", rpe=8.5, note="pause reps")
     sets = await env.training.current_session_sets(env.member_id)
@@ -237,6 +256,41 @@ async def test_correcting_the_reps_replaces_the_rep_list(env):
     edited = await env.training.edit_logged_sets(env.member_id, "dips", reps=[10, 10, 9])
 
     assert edited.reps == [10, 10, 9]
+
+
+async def test_corrections_touch_only_the_just_logged_batch(env):
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 40 10")  # warm-up
+    env.clock.advance(timedelta(minutes=5))
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")  # work sets
+
+    await env.training.edit_logged_sets(env.member_id, "bench", weight=62.5)
+
+    weights = [s.weight for s in await env.training.current_session_sets(env.member_id)]
+    assert weights == [40.0, 62.5, 62.5, 62.5]  # the warm-up batch is untouched
+
+
+async def test_corrections_return_previous_numbers_for_the_echo(env):
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,7")
+    await env.training.close_session(env.member_id)
+    env.clock.advance(days(2))
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+
+    edited = await env.training.edit_logged_sets(env.member_id, "bench", weight=62.5)
+
+    assert edited.previous is not None
+    assert edited.previous["weight"] == 60.0  # so the Agent can note the +2.5
+
+
+async def test_reference_numbers_use_the_top_set_not_the_last(env):
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8")  # work sets
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 50 12")  # back-off after
+    await env.training.close_session(env.member_id)
+    env.clock.advance(days(2))
+
+    last = await env.training.last_sets(env.member_id, "bench")
+
+    assert last is not None
+    assert last["weight"] == 60.0  # the top set, not the trailing back-off
 
 
 async def test_corrections_never_reach_a_previous_session(env):
