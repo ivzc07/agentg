@@ -10,6 +10,7 @@ from agentg.messages import IncomingMessage
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
 from agentg.notes import NotesStore
+from agentg.routines import RoutineStore
 from agentg.store import LinkingStore
 from agentg.tools import MemberContext
 from agentg.training import TrainingStore
@@ -27,6 +28,10 @@ EXPECTED_TOOLS = {
     "close_session",
     "remember_note",
     "retire_note",
+    "get_rules_doc",
+    "list_exercises",
+    "save_routine",
+    "get_routine",
 }
 
 
@@ -58,6 +63,7 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
         onboarding=Onboarding(store),
         training=TrainingStore(engine),
         notes=NotesStore(engine),
+        routines=RoutineStore(engine),
         summarizer=null_summarizer,
     )
     await runtime.ensure_schema()

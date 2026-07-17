@@ -11,9 +11,27 @@ from dataclasses import dataclass
 from typing import Any
 
 from agents import RunContextWrapper, Tool, function_tool
+from pydantic import BaseModel
 
 from agentg.notes import NotesStore
+from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.training import LoggedSets, TrainingStore
+
+
+class ExerciseInput(BaseModel):
+    """One prescribed Exercise in a Workout. Never a target weight."""
+
+    exercise: str
+    sets: int | None = None
+    reps: str | None = None  # a scheme, e.g. "8-12" or "AMRAP"
+
+
+class WorkoutInput(BaseModel):
+    """One training day pinned to a weekday (0=Monday .. 6=Sunday)."""
+
+    weekday: int
+    name: str
+    exercises: list[ExerciseInput]
 
 
 @dataclass(frozen=True)
@@ -22,6 +40,7 @@ class MemberContext:
 
     training: TrainingStore
     notes: NotesStore
+    routines: RoutineStore
     member_id: int
     gym_id: int
     member_name: str
@@ -39,22 +58,29 @@ def _logged(payload: LoggedSets, unit: str) -> dict[str, Any]:
     }
 
 
-@function_tool
-async def open_session(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
-    """Open (or resume) a Session because the Member is at the gym now.
-
-    Returns days since the last Session and that Session's exercises with
-    weights and reps — reference numbers to offer, never to assume logged.
-    """
-    c = ctx.context
+async def open_session_payload(c: MemberContext) -> dict[str, Any]:
+    """Open (or resume) the Member's Session and assemble the opener facts:
+    the gap, the last Session's numbers, and today's Workout from the Routine."""
     opened = await c.training.open_session(c.member_id, c.gym_id)
     return {
         "session_id": opened.session_id,
         "resumed_existing": opened.reopened,
         "days_since_last_session": opened.days_since_last,
         "last_session": opened.last_session,
+        "todays_workout": await c.routines.todays_workout(c.member_id),
         "weight_unit": c.weight_unit,
     }
+
+
+@function_tool
+async def open_session(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
+    """Open (or resume) a Session because the Member is at the gym now.
+
+    Returns days since the last Session, that Session's exercises with weights
+    and reps (reference numbers to offer, never to assume logged), and today's
+    Workout from the Member's Routine.
+    """
+    return await open_session_payload(ctx.context)
 
 
 @function_tool
@@ -173,6 +199,65 @@ async def retire_note(ctx: RunContextWrapper[MemberContext], note_id: int) -> di
     return {"retired_note_id": note.id, "text": note.text}
 
 
+@function_tool
+async def get_rules_doc(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
+    """Read the gym's coaching rules doc. Follow it when generating a Routine.
+
+    It governs the split, set/rep schemes, injury handling, and progression.
+    Do not invent rules that contradict it.
+    """
+    c = ctx.context
+    return {"rules_doc": await c.routines.effective_rules_doc(c.gym_id)}
+
+
+@function_tool
+async def list_exercises(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
+    """The Exercise catalog to draw a Routine from. Prescribe only these names."""
+    c = ctx.context
+    return {"exercises": await c.training.catalog_names()}
+
+
+@function_tool
+async def save_routine(
+    ctx: RunContextWrapper[MemberContext], workouts: list[WorkoutInput]
+) -> dict[str, Any]:
+    """Save the generated Routine, replacing the Member's current one.
+
+    Each Workout is a weekday (0=Monday .. 6=Sunday), a name, and an ordered
+    list of exercises with optional sets and rep scheme. Structure only —
+    never include a target weight. Prescribe only exercises from
+    list_exercises, pin each Workout to a weekday the Member named, and
+    respect the rules doc and their injuries. Deliver directly after saving;
+    for a requested structural change, save again only once they agree.
+    """
+    c = ctx.context
+    if not workouts:
+        return {"error": "a routine needs at least one workout"}
+    specs = [
+        WorkoutSpec(
+            weekday=workout.weekday,
+            name=workout.name,
+            exercises=[
+                ExerciseSpec(exercise=item.exercise, sets=item.sets, reps=item.reps)
+                for item in workout.exercises
+            ],
+        )
+        for workout in workouts
+    ]
+    routine = await c.routines.save_routine(c.member_id, c.gym_id, specs)
+    return {"routine_id": routine.id, "workouts_saved": len(specs)}
+
+
+@function_tool
+async def get_routine(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
+    """Read the Member's current Routine (their weekly plan), or none if unset."""
+    c = ctx.context
+    routine = await c.routines.active_routine(c.member_id)
+    if routine is None:
+        return {"routine": None}
+    return {"routine": routine}
+
+
 def build_tools() -> list[Tool]:
     return [
         open_session,
@@ -183,4 +268,8 @@ def build_tools() -> list[Tool]:
         close_session,
         remember_note,
         retire_note,
+        get_rules_doc,
+        list_exercises,
+        save_routine,
+        get_routine,
     ]
