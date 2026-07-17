@@ -12,6 +12,7 @@ from agentg.db import create_engine
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
 from agentg.store import LinkingStore
+from agentg.training import TrainingStore
 
 
 async def run() -> None:
@@ -25,6 +26,7 @@ async def run() -> None:
         engine=engine,
         store=store,
         onboarding=Onboarding(store),
+        training=TrainingStore(engine),
     )
     await runtime.ensure_schema()
     await run_polling(settings.telegram_bot_token, runtime.handle_message)
