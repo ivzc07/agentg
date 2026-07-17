@@ -1,36 +1,73 @@
-"""Telegram adapter glue: handler wiring, reply chunking, failure fallback."""
+"""Telegram adapter glue: handler wiring, /start payloads, chunking, fallback."""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+
+import pytest
 
 from agentg.channels.telegram import (
     ERROR_REPLY,
     MAX_MESSAGE_LENGTH,
     create_dispatcher,
     make_message_handler,
+    parse_start_payload,
     split_reply,
 )
 
 
 class FakeMessage:
-    def __init__(self, user_id=42, text="hi"):
-        self.from_user = SimpleNamespace(id=user_id) if user_id is not None else None
+    def __init__(self, user_id=42, text="hi", full_name="Ana García"):
+        self.from_user = (
+            SimpleNamespace(id=user_id, full_name=full_name) if user_id is not None else None
+        )
         self.text = text
         self.answer = AsyncMock()
 
 
-async def test_handler_passes_channel_identity_and_sends_the_reply():
+@pytest.mark.parametrize(
+    ("text", "payload"),
+    [
+        ("/start abc123", "abc123"),
+        ("/start", ""),
+        ("/start@GymCoachBot abc123", "abc123"),
+        ("/start   abc123  ", "abc123"),
+        ("bench 60 8,8,8", None),
+        ("/started nope", None),
+    ],
+)
+def test_start_payload_parsing(text, payload):
+    assert parse_start_payload(text) == payload
+
+
+async def test_handler_passes_the_incoming_message_and_sends_the_reply():
     calls = {}
 
-    async def reply_fn(channel, channel_user_id, text):
-        calls["args"] = (channel, channel_user_id, text)
+    async def reply_fn(msg):
+        calls["msg"] = msg
         return "welcome back!"
 
     message = FakeMessage(user_id=42, text="I'm here")
     await make_message_handler(reply_fn)(message)
 
-    assert calls["args"] == ("telegram", "42", "I'm here")
+    msg = calls["msg"]
+    assert msg.channel == "telegram"
+    assert msg.channel_user_id == "42"  # the numeric id, never the @username
+    assert msg.text == "I'm here"
+    assert msg.display_name == "Ana García"
+    assert msg.link_code is None
     message.answer.assert_awaited_once_with("welcome back!")
+
+
+async def test_handler_extracts_the_deep_link_payload():
+    calls = {}
+
+    async def reply_fn(msg):
+        calls["msg"] = msg
+        return "hi"
+
+    await make_message_handler(reply_fn)(FakeMessage(text="/start gym-code"))
+
+    assert calls["msg"].link_code == "gym-code"
 
 
 async def test_handler_ignores_messages_without_a_sender():
@@ -40,7 +77,7 @@ async def test_handler_ignores_messages_without_a_sender():
 
 
 async def test_handler_answers_even_when_the_agent_loop_fails():
-    async def reply_fn(channel, channel_user_id, text):
+    async def reply_fn(msg):
         raise RuntimeError("model unavailable")
 
     message = FakeMessage()
@@ -49,7 +86,7 @@ async def test_handler_answers_even_when_the_agent_loop_fails():
 
 
 async def test_empty_reply_still_sends_something():
-    async def reply_fn(channel, channel_user_id, text):
+    async def reply_fn(msg):
         return ""
 
     message = FakeMessage()

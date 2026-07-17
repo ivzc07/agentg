@@ -1,6 +1,10 @@
-"""The channel-agnostic agent loop: channel identity + text in, reply text out.
+"""The channel-agnostic agent loop: incoming message in, reply text out.
 
-Imports nothing from aiogram (ADR 0001); channel adapters call ``handle_message``.
+Imports nothing from aiogram (ADR 0001); channel adapters call
+``handle_message``. Linking runs first (deterministic); the Agent only runs
+for linked Members, with history keyed ``member:{member_id}`` per
+docs/design/memory.md. Walking-skeleton history under the old
+``telegram:{user_id}`` keys was dev-only and is left behind (issue #25).
 """
 
 from __future__ import annotations
@@ -13,42 +17,42 @@ from agents import Agent, Runner
 from agents.extensions.memory import SQLAlchemySession
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-
-def conversation_key(channel: str, channel_user_id: str) -> str:
-    """One SDK session per person.
-
-    Keyed by channel identity until Members and gym linking exist (ticket #25);
-    docs/design/memory.md then switches this to ``member:{member_id}``.
-    """
-    return f"{channel}:{channel_user_id}"
+from agentg.messages import IncomingMessage
+from agentg.onboarding import Onboarding
+from agentg.store import LinkingStore
 
 
 @dataclass
 class AgentRuntime:
     agent: Agent
     engine: AsyncEngine
-    # One lock per conversation so a rapid double message can't interleave
-    # turns in the same session history. Unbounded, but one entry per person
-    # who ever messaged this process — fine at this scale.
-    _locks: defaultdict[str, asyncio.Lock] = field(
+    store: LinkingStore
+    onboarding: Onboarding
+    # One lock per channel identity so a rapid double message can't interleave
+    # turns (or onboarding steps). Unbounded, but one entry per person who
+    # ever messaged this process — fine at this scale.
+    _locks: defaultdict[tuple[str, str], asyncio.Lock] = field(
         default_factory=lambda: defaultdict(asyncio.Lock)
     )
 
     async def ensure_schema(self) -> None:
-        """Create the SDK session tables once at startup."""
+        """Create the domain and SDK session tables once at startup."""
+        await self.store.ensure_schema()
         session = SQLAlchemySession("startup:schema", engine=self.engine, create_tables=True)
         await session.get_items(limit=1)  # table creation happens on first use
 
-    def session_for(self, channel: str, channel_user_id: str) -> SQLAlchemySession:
-        return SQLAlchemySession(
-            conversation_key(channel, channel_user_id),
-            engine=self.engine,
-        )
+    def session_for_member(self, member_id: int) -> SQLAlchemySession:
+        return SQLAlchemySession(f"member:{member_id}", engine=self.engine)
 
-    async def handle_message(self, channel: str, channel_user_id: str, text: str) -> str:
-        key = conversation_key(channel, channel_user_id)
-        async with self._locks[key]:
+    async def handle_message(self, msg: IncomingMessage) -> str:
+        async with self._locks[(msg.channel, msg.channel_user_id)]:
+            linked = await self.store.identity_for(msg.channel, msg.channel_user_id)
+            reply = await self.onboarding.handle(msg, linked)
+            if reply is not None:
+                return reply
+            if linked is None:  # onboarding always replies for unlinked identities
+                raise RuntimeError("unlinked message reached the agent loop")
             result = await Runner.run(
-                self.agent, text, session=self.session_for(channel, channel_user_id)
+                self.agent, msg.text, session=self.session_for_member(linked.member.id)
             )
             return str(result.final_output)
