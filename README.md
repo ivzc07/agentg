@@ -19,6 +19,11 @@ history is stored in Postgres via the Agents SDK session store.
 Delivery is long polling — no public endpoint or webhook. Exactly one instance
 may poll a given bot token, so keep the app at a single replica.
 
+## Production
+
+Production runs on Coolify and auto-deploys on every push to `main`; secrets
+live as Coolify env vars. See [docs/deploy.md](docs/deploy.md).
+
 ## Development
 
 ```
