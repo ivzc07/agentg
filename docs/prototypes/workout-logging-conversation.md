@@ -2,6 +2,10 @@
 
 > **Throwaway script for [ticket #5](https://github.com/ivzc07/agentg/issues/5).** The question it answers: *how does a member log a workout mid-session with the least possible typing?* React to it — pick a variant, cross things out, rewrite lines. The verdict is the deliverable; this file gets absorbed or deleted once #5 closes.
 
+## Verdict
+
+**Variant A — "Just type it" (free text only) — chosen by the owner.** No inline buttons for set logging; the agent parses terse lines ("60 8,8,7", "same as last time"). Variants B and C are rejected. The scripted defaults stand: the agent *proposes* last-time numbers but never assumes them logged, and the tone (light emoji, specific encouragement, "no guilt" gap opener) is accepted as written.
+
 ## Fixtures
 
 - **Dani**, member at Iron Temple (gym). Routine: Mon **legs**, Wed **push**, Fri **pull**.
