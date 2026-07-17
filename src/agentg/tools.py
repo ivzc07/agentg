@@ -7,21 +7,24 @@ turn.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any
 
 from agents import RunContextWrapper, Tool, function_tool
 from pydantic import BaseModel, Field
 
-from datetime import date
-
 from agentg.advice import suggest_for_today
 from agentg.checkin_store import CheckinStore
+from agentg.checkin_sweep import Notifier
 from agentg.demos import DemoStore
 from agentg.notes import NotesStore
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.store import LinkingStore
 from agentg.training import LoggedSets, TrainingStore
+
+logger = logging.getLogger(__name__)
 
 
 class ExerciseInput(BaseModel):
@@ -56,6 +59,8 @@ class MemberContext:
     gym_name: str
     weight_unit: str
     is_coach: bool = False
+    # Channel notifier for pinging a Gym's Coach on a consented safety referral.
+    notifier: Notifier | None = None
     # Exercises the Agent asked to demo this turn; the channel sends them
     # after the reply so the agent loop stays channel-agnostic (ADR 0001).
     demo_requests: list[str] = field(default_factory=list)
@@ -458,6 +463,40 @@ async def show_demo(ctx: RunContextWrapper[MemberContext], exercise: str) -> dic
     return {"available": True, "exercise": ref.exercise_name}
 
 
+async def flag_to_coach_action(c: MemberContext, summary: str, share: bool) -> dict[str, Any]:
+    """Log a safety concern and, only on consent, ping the Gym's Coaches.
+
+    The note is always recorded (the Member's own record); the Coach ping fires
+    only when ``share`` is True. The Member controls what's shared."""
+    await c.notes.remember(c.member_id, c.gym_id, "other", f"Safety flag: {summary}")
+    if not share or c.notifier is None:
+        return {"logged": True, "coaches_notified": 0}
+    coaches = await c.linking.coaches_for_gym(c.gym_id, exclude_member_id=c.member_id)
+    text = f"Heads-up from your member {c.member_name}: {summary}"
+    notified = 0
+    for _member_id, _name, channel, channel_user_id in coaches:
+        try:
+            await c.notifier.send(channel, channel_user_id, text)
+            notified += 1
+        except Exception:
+            logger.exception("failed to ping coach %s", channel_user_id)
+    return {"logged": True, "coaches_notified": notified}
+
+
+@function_tool
+async def flag_to_coach(
+    ctx: RunContextWrapper[MemberContext], summary: str, share_with_coach: bool
+) -> dict[str, Any]:
+    """Log a safety concern, and ping the gym's coach only if the Member agrees.
+
+    First ask "want me to flag this to your coach?"; pass share_with_coach=True
+    only on a clear yes, False on a no. Either way the concern is logged. Use
+    this for the consent-gated referrals in the rules doc (injuries, disordered-
+    eating red flags, anything you'd want a human to know).
+    """
+    return await flag_to_coach_action(ctx.context, summary, share_with_coach)
+
+
 def build_tools() -> list[Tool]:
     return [
         open_session,
@@ -479,4 +518,5 @@ def build_tools() -> list[Tool]:
         snooze_checkins,
         resume_checkins,
         show_demo,
+        flag_to_coach,
     ]

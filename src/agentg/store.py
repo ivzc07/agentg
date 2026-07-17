@@ -146,6 +146,31 @@ class LinkingStore:
             member = await db.get(Member, member_id)
             return member if member is not None and member.gym_id == gym_id else None
 
+    async def coaches_for_gym(
+        self, gym_id: int, exclude_member_id: int | None = None
+    ) -> list[tuple[int, str, str, str]]:
+        """The Gym's Coaches reachable on a channel, as
+        ``(member_id, name, channel, channel_user_id)`` — who a consented
+        safety referral gets pinged to."""
+        async with self._sessions() as db:
+            rows = (
+                await db.execute(
+                    select(
+                        Member.id,
+                        Member.name,
+                        MemberChannel.channel,
+                        MemberChannel.channel_user_id,
+                    )
+                    .join(MemberChannel, MemberChannel.member_id == Member.id)
+                    .where(Member.gym_id == gym_id, Member.is_coach.is_(True))
+                )
+            ).all()
+        return [
+            (member_id, name, channel, channel_user_id)
+            for member_id, name, channel, channel_user_id in rows
+            if member_id != exclude_member_id
+        ]
+
     async def regenerate_invite_code(self, gym_id: int) -> str:
         """The old code stops matching the moment this commits."""
         code = new_invite_code()
