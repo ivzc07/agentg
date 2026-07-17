@@ -41,6 +41,7 @@ EXPECTED_TOOLS = {
     "snooze_checkins",
     "resume_checkins",
     "show_demo",
+    "flag_to_coach",
 }
 
 

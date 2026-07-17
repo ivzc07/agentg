@@ -43,6 +43,7 @@ async def run() -> None:
     demos = DemoStore(engine)
 
     bot = build_bot(settings.telegram_bot_token)
+    notifier = TelegramNotifier(bot)
     demo_sender = TelegramDemoSender(
         bot, settings.demo_media_root, bot_id(settings.telegram_bot_token)
     )
@@ -58,10 +59,9 @@ async def run() -> None:
         demos=demos,
         summarizer=build_summarizer(settings),
         demo_sender=demo_sender,
+        notifier=notifier,
     )
     await runtime.ensure_schema()
-
-    notifier = TelegramNotifier(bot)
 
     # In-process proactive check-in sweep. Runs on the hour; the decision layer
     # only fires each Member at 09:00 in their gym's timezone.
