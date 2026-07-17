@@ -4,24 +4,15 @@ Facts flow only through these methods (the Agent's tools are thin wrappers);
 the clock is injected so gaps and the auto-close timeout are testable.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
+
+from conftest import FakeClock
 
 from agentg.db import create_engine
 from agentg.store import LinkingStore
 from agentg.training import SESSION_AUTO_CLOSE, SEED_EXERCISES, TrainingStore
-
-
-class FakeClock:
-    def __init__(self, start: datetime | None = None):
-        self.now = start or datetime(2026, 7, 15, 18, 0, tzinfo=UTC)
-
-    def __call__(self) -> datetime:
-        return self.now
-
-    def advance(self, delta: timedelta) -> None:
-        self.now += delta
 
 
 @pytest.fixture

@@ -12,6 +12,7 @@ from typing import Any
 
 from agents import RunContextWrapper, Tool, function_tool
 
+from agentg.notes import NotesStore
 from agentg.training import LoggedSets, TrainingStore
 
 
@@ -20,6 +21,7 @@ class MemberContext:
     """Everything a tool needs to act for the Member this turn is about."""
 
     training: TrainingStore
+    notes: NotesStore
     member_id: int
     gym_id: int
     member_name: str
@@ -141,5 +143,44 @@ async def close_session(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]
     }
 
 
+@function_tool
+async def remember_note(
+    ctx: RunContextWrapper[MemberContext], kind: str, text: str
+) -> dict[str, Any]:
+    """Store a durable fact the Member VOLUNTEERED — never one you asked for.
+
+    kind is one of injury / preference / goal / constraint / other. Use it
+    for things worth knowing next month ("shoulder's been hurting", "hates
+    burpees", "training for a half marathon") — not for small talk.
+    """
+    c = ctx.context
+    note = await c.notes.remember(c.member_id, c.gym_id, kind, text)
+    return {"note_id": note.id, "kind": note.kind, "text": note.text}
+
+
+@function_tool
+async def retire_note(ctx: RunContextWrapper[MemberContext], note_id: int) -> dict[str, Any]:
+    """Retire a note that no longer holds ("the shoulder's fine now").
+
+    Use the note id shown in your snapshot. The note is kept, dated, for the
+    Coach — it just leaves your recall.
+    """
+    c = ctx.context
+    try:
+        note = await c.notes.retire(c.member_id, note_id)
+    except ValueError as error:
+        return {"error": str(error)}
+    return {"retired_note_id": note.id, "text": note.text}
+
+
 def build_tools() -> list[Tool]:
-    return [open_session, log_sets, copy_last_sets, edit_logged_sets, get_last_sets, close_session]
+    return [
+        open_session,
+        log_sets,
+        copy_last_sets,
+        edit_logged_sets,
+        get_last_sets,
+        close_session,
+        remember_note,
+        retire_note,
+    ]

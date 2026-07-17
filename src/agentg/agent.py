@@ -1,10 +1,11 @@
 """The Agent — the software Members chat with (CONTEXT.md). Channel-agnostic."""
 
-from agents import Agent
+from agents import Agent, RunContextWrapper
 from agents.extensions.models.litellm_model import LitellmModel
 
 from agentg.config import Settings
-from agentg.tools import build_tools
+from agentg.snapshot import member_snapshot
+from agentg.tools import MemberContext, build_tools
 
 INSTRUCTIONS = """\
 You are the coach Members chat with at their gym — warm, direct, and brief; \
@@ -39,14 +40,31 @@ only what changed.
 what went up, what held, plus one line of real encouragement.
 - Record rpe or note only when the Member volunteers them; never ask for \
 effort scores.
+
+Long-term memory:
+- When the Member volunteers something durable — an injury, a preference, \
+a goal, a constraint — call remember_note. Never interrogate for facts; if \
+it wasn't volunteered, it isn't a note.
+- When they say a note no longer holds ("the shoulder's fine now"), call \
+retire_note with that note's id from your snapshot.
+- Your snapshot below is the ground truth for identity, gap, last Session, \
+and active notes. When chat memory and the snapshot disagree, the snapshot \
+wins.
 If a tool returns an error, say what's missing conversationally and ask.\
 """
+
+
+async def dynamic_instructions(
+    wrapper: RunContextWrapper[MemberContext], agent: Agent | None
+) -> str:
+    """The protocol plus this turn's member snapshot (docs/design/memory.md)."""
+    return INSTRUCTIONS + "\n\n" + await member_snapshot(wrapper.context)
 
 
 def build_agent(settings: Settings) -> Agent:
     return Agent(
         name="Agent",
-        instructions=INSTRUCTIONS,
+        instructions=dynamic_instructions,
         model=LitellmModel(model=settings.model, api_key=settings.model_api_key),
         tools=build_tools(),
     )
