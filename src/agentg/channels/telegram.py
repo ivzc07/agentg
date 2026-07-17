@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import FSInputFile, Message
 
+from agentg.demo_media import SentAnimation
 from agentg.messages import IncomingMessage
 
 logger = logging.getLogger(__name__)
@@ -104,8 +106,52 @@ class TelegramNotifier:
             await self._bot.send_message(chat_id=int(channel_user_id), text=chunk)
 
 
+class TelegramDemoSender:
+    """Sends exercise demos via ``sendAnimation`` — autoplaying, looping, muted.
+
+    Resends by cached ``file_id`` when one exists (no bytes re-transferred);
+    otherwise uploads the canonical MP4 from the media store and returns the
+    fresh file_id for the core to cache. The cache namespace is the bot id, so
+    a token migration simply misses and re-uploads (ADR 0001; research doc)."""
+
+    def __init__(self, bot: Bot, media_root: str, bot_id: str) -> None:
+        self._bot = bot
+        self._media_root = Path(media_root)
+        self._bot_id = bot_id
+
+    @property
+    def cache_namespace(self) -> str:
+        return self._bot_id
+
+    async def send_animation(
+        self, channel: str, channel_user_id: str, slug: str, cached_file_id: str | None
+    ) -> SentAnimation | None:
+        if channel != CHANNEL:
+            return None
+        animation: str | FSInputFile = cached_file_id or FSInputFile(self._media_root / slug)
+        try:
+            message = await self._bot.send_animation(
+                chat_id=int(channel_user_id), animation=animation
+            )
+        except Exception:
+            logger.exception("send_animation failed for %s", slug)
+            return None
+        if message.animation is None:  # Telegram didn't render it as an animation
+            return SentAnimation(file_id=cached_file_id) if cached_file_id else None
+        return SentAnimation(
+            file_id=message.animation.file_id,
+            file_unique_id=message.animation.file_unique_id,
+        )
+
+
 def build_bot(token: str) -> Bot:
     return Bot(token=token)
+
+
+def bot_id(token: str) -> str:
+    """The numeric bot id embedded in the token (before the colon) — a stable
+    per-bot cache namespace that changes when the token does."""
+    return token.split(":", 1)[0]
 
 
 async def run_polling(bot: Bot, reply_fn: ReplyFn) -> None:

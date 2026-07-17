@@ -96,8 +96,8 @@ class MemberChannel(Base):
 
 
 class Exercise(Base):
-    """A named movement. Product-level catalog; gym-scoped demo overrides
-    arrive with the demo-media ticket (#32)."""
+    """A named movement. Product-level catalog; a demo animation the Agent can
+    send to show how it's done (spec §Exercise demo media)."""
 
     __tablename__ = "exercises"
 
@@ -105,6 +105,49 @@ class Exercise(Base):
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     # Comma-separated normalized alternate names ("bench" -> bench press).
     aliases: Mapped[str] = mapped_column(String(400), default="")
+    # Filename of the canonical soundless MP4 in our media store (the system of
+    # record), or NULL when this Exercise has no demo yet.
+    demo_slug: Mapped[str | None] = mapped_column(String(200), default=None)
+
+
+class DemoOverride(Base):
+    """A Gym's own demo for an Exercise — wins over the Exercise default.
+
+    Same media path as the default (a soundless MP4 slug in our store); a
+    Coach's filmed clip lands here (spec §Exercise demo media)."""
+
+    __tablename__ = "demo_overrides"
+    __table_args__ = (
+        UniqueConstraint("gym_id", "exercise_id", name="uq_demo_override_gym_exercise"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    exercise_id: Mapped[int] = mapped_column(ForeignKey("exercises.id"))
+    demo_slug: Mapped[str] = mapped_column(String(200))
+
+
+class DemoFileId(Base):
+    """A disposable per-bot cache of a demo's Telegram file_id.
+
+    The MP4 in our store is canonical; this is a lazily-seeded cache so later
+    sends resend by file_id with no upload. file_ids are unique per bot, so the
+    bot is part of the key — a token migration simply misses and re-uploads.
+    ``gym_id`` NULL caches the Exercise default; set caches a Gym override."""
+
+    __tablename__ = "demo_file_ids"
+    __table_args__ = (
+        UniqueConstraint(
+            "exercise_id", "gym_id", "bot", name="uq_demo_file_id_scope"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    exercise_id: Mapped[int] = mapped_column(ForeignKey("exercises.id"))
+    gym_id: Mapped[int | None] = mapped_column(ForeignKey("gyms.id"), default=None)
+    bot: Mapped[str] = mapped_column(String(64))  # cache namespace (per bot)
+    file_id: Mapped[str] = mapped_column(String(256))
+    file_unique_id: Mapped[str | None] = mapped_column(String(64), default=None)
 
 
 class Session(Base):

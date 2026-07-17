@@ -7,7 +7,7 @@ turn.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from agents import RunContextWrapper, Tool, function_tool
@@ -17,6 +17,7 @@ from datetime import date
 
 from agentg.advice import suggest_for_today
 from agentg.checkin_store import CheckinStore
+from agentg.demos import DemoStore
 from agentg.notes import NotesStore
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.store import LinkingStore
@@ -48,12 +49,16 @@ class MemberContext:
     routines: RoutineStore
     linking: LinkingStore
     checkins: CheckinStore
+    demos: DemoStore
     member_id: int
     gym_id: int
     member_name: str
     gym_name: str
     weight_unit: str
     is_coach: bool = False
+    # Exercises the Agent asked to demo this turn; the channel sends them
+    # after the reply so the agent loop stays channel-agnostic (ADR 0001).
+    demo_requests: list[str] = field(default_factory=list)
 
 
 def _logged(payload: LoggedSets, unit: str) -> dict[str, Any]:
@@ -436,6 +441,23 @@ async def resume_checkins(ctx: RunContextWrapper[MemberContext]) -> dict[str, An
     return {"checkins": "on"}
 
 
+@function_tool
+async def show_demo(ctx: RunContextWrapper[MemberContext], exercise: str) -> dict[str, Any]:
+    """Send the Member a short autoplaying demo of how to do an Exercise.
+
+    Use it when they ask how to do a movement ("how do I do a goblet squat?").
+    If a demo exists it's queued and sent right after your reply — tell them
+    it's on the way and add a form cue or two. If none exists, say so and
+    describe the movement in words instead.
+    """
+    c = ctx.context
+    ref = await c.demos.resolve(exercise, c.gym_id)
+    if ref is None:
+        return {"available": False, "exercise": exercise}
+    c.demo_requests.append(ref.exercise_name)
+    return {"available": True, "exercise": ref.exercise_name}
+
+
 def build_tools() -> list[Tool]:
     return [
         open_session,
@@ -456,4 +478,5 @@ def build_tools() -> list[Tool]:
         stop_checkins,
         snooze_checkins,
         resume_checkins,
+        show_demo,
     ]

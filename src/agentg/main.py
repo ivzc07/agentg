@@ -8,12 +8,19 @@ from agents import set_tracing_disabled
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from agentg.agent import build_agent
-from agentg.channels.telegram import TelegramNotifier, build_bot, run_polling
+from agentg.channels.telegram import (
+    TelegramDemoSender,
+    TelegramNotifier,
+    bot_id,
+    build_bot,
+    run_polling,
+)
 from agentg.checkin_store import CheckinStore
 from agentg.checkin_sweep import run_sweep
 from agentg.compaction import build_summarizer
 from agentg.config import Settings
 from agentg.db import create_engine
+from agentg.demos import DemoStore
 from agentg.notes import NotesStore
 from agentg.onboarding import Onboarding
 from agentg.routines import RoutineStore
@@ -33,6 +40,12 @@ async def run() -> None:
     training = TrainingStore(engine)
     routines = RoutineStore(engine)
     checkins = CheckinStore(engine)
+    demos = DemoStore(engine)
+
+    bot = build_bot(settings.telegram_bot_token)
+    demo_sender = TelegramDemoSender(
+        bot, settings.demo_media_root, bot_id(settings.telegram_bot_token)
+    )
     runtime = AgentRuntime(
         agent=build_agent(settings),
         engine=engine,
@@ -42,11 +55,12 @@ async def run() -> None:
         notes=NotesStore(engine),
         routines=routines,
         checkins=checkins,
+        demos=demos,
         summarizer=build_summarizer(settings),
+        demo_sender=demo_sender,
     )
     await runtime.ensure_schema()
 
-    bot = build_bot(settings.telegram_bot_token)
     notifier = TelegramNotifier(bot)
 
     # In-process proactive check-in sweep. Runs on the hour; the decision layer

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 DEFAULT_MODEL = "openai/gpt-4o-mini"
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://agentg:agentg@localhost:5432/agentg"
+DEFAULT_DEMO_MEDIA_ROOT = "/data/demos"  # where the canonical demo MP4s live
 
 REQUIRED_VARS = ("TELEGRAM_BOT_TOKEN", "MODEL_API_KEY")
 
@@ -22,6 +23,7 @@ class Settings:
     model: str
     model_api_key: str
     database_url: str
+    demo_media_root: str = DEFAULT_DEMO_MEDIA_ROOT
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -35,6 +37,7 @@ class Settings:
             model=env.get("MODEL") or DEFAULT_MODEL,
             model_api_key=env["MODEL_API_KEY"],
             database_url=_as_asyncpg_url(env.get("DATABASE_URL") or DEFAULT_DATABASE_URL),
+            demo_media_root=env.get("DEMO_MEDIA_ROOT") or DEFAULT_DEMO_MEDIA_ROOT,
         )
 
 

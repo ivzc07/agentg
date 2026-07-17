@@ -8,6 +8,7 @@ from agentg.compaction import COMPACT_THRESHOLD, KEEP_RECENT, CompactionSummary,
 from agentg.db import create_engine
 from agentg.notes import NotesStore
 from agentg.checkin_store import CheckinStore
+from agentg.demos import DemoStore
 from agentg.routines import RoutineStore
 from agentg.runtime import AgentRuntime
 from agentg.store import LinkingStore
@@ -48,6 +49,7 @@ async def env(tmp_path):
         notes=notes,
         routines=RoutineStore(engine),
         checkins=CheckinStore(engine),
+        demos=DemoStore(engine),
         summarizer=RecordingSummarizer(),
     )
     await runtime.ensure_schema()

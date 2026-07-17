@@ -10,6 +10,7 @@ docs/design/memory.md. Walking-skeleton history under the old
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -19,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from agentg.checkin_store import CheckinStore
 from agentg.compaction import Summarizer, maybe_compact
+from agentg.demo_media import DemoSender, serve_demo
+from agentg.demos import DemoStore
 from agentg.messages import IncomingMessage
 from agentg.notes import NotesStore
 from agentg.routines import RoutineStore
@@ -26,6 +29,8 @@ from agentg.onboarding import Onboarding
 from agentg.store import LinkedIdentity, LinkingStore
 from agentg.tools import MemberContext
 from agentg.training import TrainingStore
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,7 +43,11 @@ class AgentRuntime:
     notes: NotesStore
     routines: RoutineStore
     checkins: CheckinStore
+    demos: DemoStore
     summarizer: Summarizer
+    # The channel's demo-animation sender; None disables demo delivery (tests
+    # that don't exercise demos leave it unset).
+    demo_sender: DemoSender | None = None
     # One lock per channel identity so a rapid double message can't interleave
     # turns (or onboarding steps). Unbounded, but one entry per person who
     # ever messaged this process — fine at this scale.
@@ -63,6 +72,7 @@ class AgentRuntime:
             routines=self.routines,
             linking=self.store,
             checkins=self.checkins,
+            demos=self.demos,
             member_id=linked.member.id,
             gym_id=linked.gym.id,
             member_name=linked.member.name,
@@ -85,10 +95,24 @@ class AgentRuntime:
             await maybe_compact(
                 session, self.summarizer, self.notes, linked.member.id, linked.gym.id
             )
+            context = self.member_context(linked)
             result = await Runner.run(
                 self.agent,
                 msg.text,
                 session=session,
-                context=self.member_context(linked),
+                context=context,
             )
+            await self._serve_demos(context, msg.channel, msg.channel_user_id)
             return str(result.final_output)
+
+    async def _serve_demos(self, context: MemberContext, channel: str, user_id: str) -> None:
+        """Send any demo animations the Agent queued this turn (after the reply)."""
+        if self.demo_sender is None:
+            return
+        for exercise in context.demo_requests:
+            try:
+                await serve_demo(
+                    self.demos, self.demo_sender, exercise, context.gym_id, channel, user_id
+                )
+            except Exception:
+                logger.exception("failed to serve demo %r to %s", exercise, user_id)
