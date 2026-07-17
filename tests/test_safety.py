@@ -5,6 +5,7 @@ import pytest
 
 from agentg.agent import INSTRUCTIONS
 from agentg.db import create_engine
+from agentg.forget import ForgetStore
 from agentg.notes import NotesStore
 from agentg.routines import DEFAULT_RULES_DOC, RoutineStore
 from agentg.store import LinkingStore
@@ -40,6 +41,7 @@ async def env(tmp_path):
             linking=linking,
             checkins=None,  # not used by the safety tool
             demos=None,
+            forget=None,
             notifier=notifier,
             member_id=member_id or member.id,
             gym_id=gym.id,
@@ -152,6 +154,7 @@ async def test_consent_with_no_coach_set_up_still_logs(env):
         linking=linking,
         checkins=None,
         demos=None,
+        forget=None,
         notifier=env.notifier,
         member_id=m.id,
         gym_id=gym2.id,

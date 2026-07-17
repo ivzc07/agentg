@@ -23,6 +23,7 @@ from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.demo_media import DemoSender, serve_demo
 from agentg.demos import DemoStore
+from agentg.forget import ForgetStore
 from agentg.messages import IncomingMessage, Reply
 from agentg.notes import NotesStore
 from agentg.routines import RoutineStore
@@ -45,6 +46,7 @@ class AgentRuntime:
     routines: RoutineStore
     checkins: CheckinStore
     demos: DemoStore
+    forget: ForgetStore
     summarizer: Summarizer
     # The channel's demo-animation sender; None disables demo delivery (tests
     # that don't exercise demos leave it unset).
@@ -76,6 +78,7 @@ class AgentRuntime:
             linking=self.store,
             checkins=self.checkins,
             demos=self.demos,
+            forget=self.forget,
             notifier=self.notifier,
             member_id=linked.member.id,
             gym_id=linked.gym.id,

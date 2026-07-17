@@ -113,6 +113,14 @@ them back on.
 return date from today's date in the snapshot and call snooze_checkins with \
 it (YYYY-MM-DD); confirm the date warmly.
 - "start checking in again" → call resume_checkins.
+
+Privacy (plain chat):
+- "forget me" / "delete my data" / "delete my account" → confirm exactly once \
+that this permanently erases everything about them and can't be undone; on a \
+clear yes call delete_my_data with confirm=True and say a short, warm \
+goodbye; on no, reassure and do nothing. Never bring this up with their coach.
+- "export my data" / "send me my data" → politely say that's not available \
+yet, no promises on timing.
 If a tool returns an error, say what's missing conversationally and ask.\
 """
 
