@@ -197,6 +197,14 @@ class RoutineStore:
         for callers (e.g. the snapshot) that hold the Routine already."""
         return self._pick_weekday(routine, self._today())
 
+    async def weekday_workout_names(self, member_id: int) -> dict[int, str]:
+        """Map each pinned weekday (0=Mon) to its Workout name — the pinned
+        training days the check-in sweep reasons over."""
+        routine = await self.active_routine(member_id)
+        if routine is None:
+            return {}
+        return {w["weekday"]: w["name"] for w in routine["workouts"]}
+
     def _today(self) -> int:
         # Weekday is UTC for now; gym-local day boundaries arrive with #31.
         return self._clock().weekday()

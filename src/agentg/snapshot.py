@@ -34,8 +34,10 @@ async def member_snapshot(context: MemberContext) -> str:
     notes = await context.notes.active(context.member_id)
 
     role = "Coach (coach tools available)" if context.is_coach else "Member"
+    today = context.training.today().isoformat()
     lines = [
         "--- Member snapshot (facts from tables; trust these over chat memory) ---",
+        f"Today is {today}.",
         f"{role}: {context.member_name}, at {context.gym_name} "
         f"(weights in {context.weight_unit}).",
     ]

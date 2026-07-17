@@ -8,6 +8,7 @@ from agentg.agent import build_agent
 from agentg.config import Settings
 from agentg.db import create_engine
 from agentg.notes import NotesStore
+from agentg.checkin_store import CheckinStore
 from agentg.routines import DEFAULT_RULES_DOC, ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.snapshot import member_snapshot
 from agentg.store import LinkingStore
@@ -35,6 +36,7 @@ async def env(tmp_path):
         notes=notes,
         routines=routines,
         linking=linking,
+        checkins=CheckinStore(engine),
         member_id=member.id,
         gym_id=gym.id,
         member_name="Dani",

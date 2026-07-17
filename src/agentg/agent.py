@@ -82,6 +82,15 @@ Workouts pin to weekdays, exercises from the catalog, no target weights). It \
 saves as coach-written and goes to that Member.
 - These tools are coach-only; for anyone else they return an error — never \
 imply a non-coach can use them.
+
+Check-in preferences (plain chat, no commands):
+- "stop checking in on me" / "leave me alone" → call stop_checkins, then \
+confirm warmly and mention they can say "start checking in again" to turn \
+them back on.
+- "I'm traveling for two weeks" / "away until the 28th" → work out the \
+return date from today's date in the snapshot and call snooze_checkins with \
+it (YYYY-MM-DD); confirm the date warmly.
+- "start checking in again" → call resume_checkins.
 If a tool returns an error, say what's missing conversationally and ask.\
 """
 
