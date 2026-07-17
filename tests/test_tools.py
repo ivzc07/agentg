@@ -11,6 +11,7 @@ from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
 from agentg.notes import NotesStore
 from agentg.checkin_store import CheckinStore
+from agentg.demos import DemoStore
 from agentg.routines import RoutineStore
 from agentg.store import LinkingStore
 from agentg.tools import MemberContext
@@ -39,6 +40,7 @@ EXPECTED_TOOLS = {
     "stop_checkins",
     "snooze_checkins",
     "resume_checkins",
+    "show_demo",
 }
 
 
@@ -72,6 +74,7 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
         notes=NotesStore(engine),
         routines=RoutineStore(engine),
         checkins=CheckinStore(engine),
+        demos=DemoStore(engine),
         summarizer=null_summarizer,
     )
     await runtime.ensure_schema()
