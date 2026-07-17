@@ -130,12 +130,15 @@ class LinkingStore:
         Lets a Coach address a Member by name; more than one match is the
         Coach's to disambiguate.
         """
-        target = " ".join(name.split()).lower()
+        def norm(value: str) -> str:
+            return " ".join(value.split()).lower()
+
+        target = norm(name)
         async with self._sessions() as db:
             members = await db.scalars(
                 select(Member).where(Member.gym_id == gym_id).order_by(Member.id)
             )
-            return [m for m in members if m.name.lower() == target]
+            return [m for m in members if norm(m.name) == target]
 
     async def member_in_gym(self, gym_id: int, member_id: int) -> Member | None:
         """A Member by id, scoped to a Gym so a Coach can't reach across gyms."""

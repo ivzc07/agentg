@@ -47,6 +47,12 @@ async def test_an_unknown_name_matches_nobody(env):
     assert await env.linking.members_by_name(env.gym_id, "nobody") == []
 
 
+async def test_name_matching_collapses_whitespace_on_both_sides(env):
+    spaced = await env.linking.link_member(env.gym_id, "Ana  Lee", "telegram", "55")
+    matches = await env.linking.members_by_name(env.gym_id, "ana lee")  # single space, lower
+    assert [m.id for m in matches] == [spaced.id]
+
+
 async def test_a_duplicate_name_returns_every_match(env):
     twin = await env.linking.link_member(env.gym_id, "Dani", "telegram", "77")
     matches = await env.linking.members_by_name(env.gym_id, "Dani")

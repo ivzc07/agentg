@@ -316,14 +316,14 @@ async def _resolve_member(
     if member_id is not None:
         member = await c.linking.member_in_gym(c.gym_id, member_id)
         if member is None:
-            return {"error": f"no member with id {member_id} in your gym"}
+            return {"error": f"no Member with id {member_id} in your Gym"}
         return member
     matches = await c.linking.members_by_name(c.gym_id, member_name)
     if not matches:
-        return {"error": f"no member named {member_name!r} in your gym"}
+        return {"error": f"no Member named {member_name!r} in your Gym"}
     if len(matches) > 1:
         return {
-            "error": f"several members named {member_name!r}: {[m.id for m in matches]} "
+            "error": f"several Members named {member_name!r}: {[m.id for m in matches]} "
             "— pass member_id to pick one"
         }
     return matches[0]
@@ -335,7 +335,7 @@ async def write_routine_action(
     if not c.is_coach:
         return _NOT_A_COACH
     if not specs:
-        return {"error": "a routine needs at least one workout"}
+        return {"error": "a Routine needs at least one Workout"}
     target = await _resolve_member(c, member_name, member_id)
     if isinstance(target, dict):
         return target
