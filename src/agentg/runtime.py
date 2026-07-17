@@ -22,7 +22,7 @@ from agentg.checkin_store import CheckinStore
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.demo_media import DemoSender, serve_demo
 from agentg.demos import DemoStore
-from agentg.messages import IncomingMessage
+from agentg.messages import IncomingMessage, Reply
 from agentg.notes import NotesStore
 from agentg.routines import RoutineStore
 from agentg.onboarding import Onboarding
@@ -102,17 +102,21 @@ class AgentRuntime:
                 session=session,
                 context=context,
             )
-            await self._serve_demos(context, msg.channel, msg.channel_user_id)
-            return str(result.final_output)
+            text = str(result.final_output)
+            sender = self.demo_sender
+            if sender is None or not context.demo_requests:
+                return Reply(text)
+            # Defer the demo sends so the channel delivers the reply text first,
+            # then the animations land beneath it.
+            requests = list(context.demo_requests)
+            gym_id = context.gym_id
+            channel, user_id = msg.channel, msg.channel_user_id
 
-    async def _serve_demos(self, context: MemberContext, channel: str, user_id: str) -> None:
-        """Send any demo animations the Agent queued this turn (after the reply)."""
-        if self.demo_sender is None:
-            return
-        for exercise in context.demo_requests:
-            try:
-                await serve_demo(
-                    self.demos, self.demo_sender, exercise, context.gym_id, channel, user_id
-                )
-            except Exception:
-                logger.exception("failed to serve demo %r to %s", exercise, user_id)
+            async def after_send() -> None:
+                for exercise in requests:
+                    try:
+                        await serve_demo(self.demos, sender, exercise, gym_id, channel, user_id)
+                    except Exception:
+                        logger.exception("failed to serve demo %r to %s", exercise, user_id)
+
+            return Reply(text, after_send=after_send)

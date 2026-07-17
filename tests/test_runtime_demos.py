@@ -80,6 +80,8 @@ async def test_a_queued_demo_is_sent_after_the_reply(env, monkeypatch):
     )
 
     assert "way" in reply
+    assert env.sender.sent == []  # not sent yet — deferred until after the text
+    await reply.after_send()  # the channel runs this once the reply text is out
     assert env.sender.sent == [("telegram", "42", "goblet-squat.mp4")]
 
 
@@ -88,7 +90,8 @@ async def test_no_send_when_nothing_was_queued(env, monkeypatch):
         return SimpleNamespace(final_output="hey!")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
-    await env.runtime.handle_message(
+    reply = await env.runtime.handle_message(
         IncomingMessage(channel="telegram", channel_user_id="42", text="hi")
     )
+    assert getattr(reply, "after_send", None) is None  # nothing deferred
     assert env.sender.sent == []

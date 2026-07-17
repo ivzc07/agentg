@@ -61,7 +61,14 @@ class DemoStore:
         file_id: str,
         file_unique_id: str | None = None,
     ) -> None:
-        """Lazily seed (or refresh) the file_id cache for a demo scope."""
+        """Lazily seed (or refresh) the file_id cache for a demo scope.
+
+        The default scope keys on a NULL gym_id, which the UNIQUE constraint
+        treats as distinct, so two Members of different Gyms racing the first
+        send of the same default demo can each insert a row — self-healing
+        (both hold valid ids; a media change drops all rows), at the cost of
+        one wasted upload. Not worth a DB-specific upsert at this scale.
+        """
         async with self._sessions() as db:
             row = await self._cache_row(db, exercise_id, gym_id, bot)
             if row is None:

@@ -2,7 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+
+
+class Reply(str):
+    """The reply text, plus optional follow-up work to run *after* the text is
+    sent (e.g. sending demo animations, so they land beneath the reply).
+
+    A ``str`` subclass so every existing caller keeps treating a reply as
+    plain text; the channel adapter awaits ``after_send`` once the text is out.
+    """
+
+    after_send: Callable[[], Awaitable[None]] | None
+
+    def __new__(
+        cls, text: str, after_send: Callable[[], Awaitable[None]] | None = None
+    ) -> "Reply":
+        obj = super().__new__(cls, text)
+        obj.after_send = after_send
+        return obj
 
 
 @dataclass(frozen=True)

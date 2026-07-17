@@ -79,6 +79,13 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
             return
         for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
             await message.answer(chunk)
+        # Follow-up media (demo animations) lands beneath the reply text.
+        after_send = getattr(reply, "after_send", None)
+        if after_send is not None:
+            try:
+                await after_send()
+            except Exception:
+                logger.exception("post-reply delivery failed for sender %s", message.from_user.id)
 
     return on_text
 

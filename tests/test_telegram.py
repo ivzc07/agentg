@@ -94,6 +94,24 @@ async def test_empty_reply_still_sends_something():
     assert message.answer.await_count == 1
 
 
+async def test_after_send_runs_only_once_the_reply_text_is_out():
+    from agentg.messages import Reply
+
+    order = []
+
+    async def after_send():
+        order.append("demo")
+
+    async def reply_fn(msg):
+        return Reply("on its way!", after_send=after_send)
+
+    message = FakeMessage()
+    message.answer.side_effect = lambda *a, **k: order.append("text")
+    await make_message_handler(reply_fn)(message)
+
+    assert order == ["text", "demo"]  # the animation lands beneath the reply
+
+
 def test_short_reply_is_a_single_chunk():
     assert split_reply("hello") == ["hello"]
 
