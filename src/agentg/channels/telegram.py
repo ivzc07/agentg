@@ -12,6 +12,8 @@ from collections.abc import Awaitable, Callable
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
 
+from agentg.messages import IncomingMessage
+
 logger = logging.getLogger(__name__)
 
 CHANNEL = "telegram"
@@ -19,8 +21,20 @@ MAX_MESSAGE_LENGTH = 4096  # Telegram's hard cap per message
 ERROR_REPLY = "Sorry — something went wrong on my end. Give it another try in a moment."
 EMPTY_REPLY_FALLBACK = "Hmm, I came up empty — mind trying that again?"
 
-# (channel, channel_user_id, text) -> reply text
-ReplyFn = Callable[[str, str, str], Awaitable[str]]
+ReplyFn = Callable[[IncomingMessage], Awaitable[str]]
+
+
+def parse_start_payload(text: str) -> str | None:
+    """The deep-link payload of a ``/start`` command, if this is one.
+
+    A Gym's deep link ``t.me/<bot>?start=<code>`` arrives as the message
+    ``/start <code>``; a bare ``/start`` (no payload) returns ``""`` and any
+    other message returns ``None``.
+    """
+    parts = text.split(maxsplit=1)
+    if not parts or parts[0].split("@")[0] != "/start":
+        return None
+    return parts[1].strip() if len(parts) > 1 else ""
 
 
 def split_reply(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
@@ -48,8 +62,15 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
     async def on_text(message: Message) -> None:
         if message.from_user is None or message.text is None:
             return
+        incoming = IncomingMessage(
+            channel=CHANNEL,
+            channel_user_id=str(message.from_user.id),  # numeric id, never @username
+            text=message.text,
+            display_name=message.from_user.full_name or "",
+            link_code=parse_start_payload(message.text),
+        )
         try:
-            reply = await reply_fn(CHANNEL, str(message.from_user.id), message.text)
+            reply = await reply_fn(incoming)
         except Exception:
             logger.exception("agent loop failed for sender %s", message.from_user.id)
             await message.answer(ERROR_REPLY)
