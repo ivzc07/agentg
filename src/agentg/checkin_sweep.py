@@ -50,6 +50,7 @@ async def _build_data(
         signup_date=row.signup_date,
         pinned_weekdays=pinned,
         missed_workout=names.get(missed_weekday) if missed_weekday is not None else None,
+        missed_weekday=missed_weekday,
         todays_workout=names.get(today.weekday()),
     )
 
@@ -89,6 +90,9 @@ async def run_sweep(
             logger.exception("failed to send check-in to member %s", row.member_id)
             continue
         sent += 1
+        # Best-effort: a crash between the send and the record could re-nudge
+        # next day. The frequency cap bounds the blast radius (never worse than
+        # one extra nudge), so no idempotency key is warranted at this scale.
         if decision.action == "winddown":
             await checkin_store.lapse(row.member_id)
         else:

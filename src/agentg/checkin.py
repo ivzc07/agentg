@@ -20,6 +20,8 @@ GIVE_UP_NUDGES = 4  # this many ignored ≈ two weeks → wind down and lapse
 
 ON, OFF, SNOOZED, LAPSED = "on", "off", "snoozed", "lapsed"
 
+WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
 # Canonical copy (spec §Proactive check-ins / #8 resolution): warm, direct,
 # zero guilt.
 GAP_NUDGE = "It's been {days} days — got time for a session today?"
@@ -39,6 +41,7 @@ class CheckinData:
     signup_date: date  # the fallback gap anchor before any Session exists
     pinned_weekdays: frozenset[int]  # Routine training days (empty = no Routine)
     missed_workout: str | None = None  # name of the skipped Workout, for the copy
+    missed_weekday: int | None = None  # weekday of the skipped Workout (0=Mon)
     todays_workout: str | None = None  # name of today's Workout, for the copy
 
 
@@ -113,6 +116,8 @@ def _gap_message(data: CheckinData, today: date) -> str:
 
 def _pinned_message(data: CheckinData) -> str:
     missed = data.missed_workout or "your last session"
+    if data.missed_weekday is not None:  # "Missed Legs Monday" — matches the canonical copy
+        missed = f"{missed} {WEEKDAY_NAMES[data.missed_weekday]}"
     if data.todays_workout:
         return PINNED_NUDGE_WITH_TODAY.format(missed=missed, today=data.todays_workout)
     return PINNED_NUDGE.format(missed=missed)

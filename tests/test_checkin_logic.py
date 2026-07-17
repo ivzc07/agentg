@@ -35,6 +35,7 @@ def data(**overrides) -> CheckinData:
         signup_date=date(2026, 7, 1),
         pinned_weekdays=frozenset(),
         missed_workout=None,
+        missed_weekday=None,
         todays_workout=None,
     )
     base.update(overrides)
@@ -191,15 +192,17 @@ def test_the_gap_nudge_copy_is_warm_and_guilt_free():
     assert not any(word in message.lower() for word in ("lazy", "should", "fail", "guilt"))
 
 
-def test_the_pinned_nudge_names_the_workout_warmly():
+def test_the_pinned_nudge_names_the_workout_and_missed_day():
     d = data(
         pinned_weekdays=frozenset({MON, WED}),
         last_session_date=date(2026, 7, 10),
         todays_workout="Push",
         missed_workout="Legs",
+        missed_weekday=MON,  # skipped Monday's Legs; today is Wednesday
     )
     message = decide_checkin(at(date(2026, 7, 15)), d).message
-    assert message and "Legs" in message and "?" in message
+    assert message and "Legs" in message and "Monday" in message and "?" in message
+    assert "Push" in message  # names today's workout too
 
 
 def test_the_winddown_copy_leaves_the_door_open():

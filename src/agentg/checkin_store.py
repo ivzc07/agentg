@@ -100,6 +100,8 @@ class CheckinStore:
             member = await db.get(Member, member_id)
             if member is None:
                 return
+            if member.ignored_nudges == 0 and member.checkin_state != LAPSED:
+                return  # nothing to change — avoid a write on every message
             member.ignored_nudges = 0
             if member.checkin_state == LAPSED:
                 member.checkin_state = ON
