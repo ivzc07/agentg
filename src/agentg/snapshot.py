@@ -29,6 +29,9 @@ def _headline(exercises: list[dict[str, Any]], unit: str) -> str:
 
 async def member_snapshot(context: MemberContext) -> str:
     days, last = await context.training.latest_session_info(context.member_id)
+    routine = await context.routines.active_routine(context.member_id)
+    todays_workout = context.routines.pick_todays_workout(routine)
+    has_routine = routine is not None
     notes = await context.notes.active(context.member_id)
 
     lines = [
@@ -41,6 +44,13 @@ async def member_snapshot(context: MemberContext) -> str:
         gap = "today" if days == 0 else f"{days} day{'s' if days != 1 else ''} ago"
         headline = _headline(last["exercises"], context.weight_unit) or "no sets logged"
         lines.append(f"Last Session: {gap} ({last['date']}): {headline}.")
+    if not has_routine:
+        lines.append("No routine yet — run intake and generate one before coaching sessions.")
+    elif todays_workout is None:
+        lines.append("Today is a rest day in the Member's routine.")
+    else:
+        plan = ", ".join(e["exercise"] for e in todays_workout["exercises"]) or "no exercises"
+        lines.append(f"Today's Workout: {todays_workout['name']} ({plan}).")
     if not notes:
         lines.append("No active notes.")
     else:

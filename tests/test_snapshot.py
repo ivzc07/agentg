@@ -9,6 +9,7 @@ from conftest import FakeClock
 
 from agentg.db import create_engine
 from agentg.notes import NotesStore
+from agentg.routines import RoutineStore
 from agentg.snapshot import member_snapshot
 from agentg.store import LinkingStore
 from agentg.tools import MemberContext
@@ -24,12 +25,14 @@ async def env(tmp_path):
     training = TrainingStore(engine, clock=clock)
     await training.ensure_seeded()
     notes = NotesStore(engine, clock=clock)
+    routines = RoutineStore(engine, clock=clock)
     gym = await linking.create_gym("Iron Temple")
     member = await linking.link_member(gym.id, "Dani", "telegram", "42")
 
     context = MemberContext(
         training=training,
         notes=notes,
+        routines=routines,
         member_id=member.id,
         gym_id=gym.id,
         member_name="Dani",

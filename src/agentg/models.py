@@ -5,7 +5,17 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, String, TypeDecorator, UniqueConstraint, func
+from sqlalchemy import (
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    TypeDecorator,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -41,6 +51,9 @@ class Gym(Base):
     invite_code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     weight_unit: Mapped[str] = mapped_column(String(8), default="kg")
+    # The Gym's own plain-text rules doc, or NULL to follow the shipped
+    # default. Exactly one doc governs generation (spec §Routine generation).
+    rules_doc: Mapped[str | None] = mapped_column(Text, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -134,3 +147,51 @@ class MemberNote(Base):
     text: Mapped[str] = mapped_column(String(400))
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     retired_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+
+
+class Routine(Base):
+    """A Member's written training plan: Workouts pinned to weekdays.
+
+    Structure only, never target weights (spec §Data model). One active
+    Routine per Member; superseded plans stay, deactivated.
+    """
+
+    __tablename__ = "routines"
+    __table_args__ = (Index("ix_routines_member_active", "member_id", "is_active"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    is_active: Mapped[bool] = mapped_column(default=True)
+    # Set when a Coach hand-writes the plan (ticket #30); the Agent never
+    # restructures a coach-authored Routine.
+    coach_authored: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+class Workout(Base):
+    """The plan for one training day: a named, ordered list of Exercises
+    pinned to a weekday (0=Monday .. 6=Sunday)."""
+
+    __tablename__ = "workouts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    routine_id: Mapped[int] = mapped_column(ForeignKey("routines.id"), index=True)
+    weekday: Mapped[int]  # 0=Monday .. 6=Sunday
+    name: Mapped[str] = mapped_column(String(100))
+
+
+class WorkoutExercise(Base):
+    """One Exercise in a Workout: structure (order, optional set/rep scheme)
+    drawn from the Exercise catalog. Never a target weight."""
+
+    __tablename__ = "workout_exercises"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    workout_id: Mapped[int] = mapped_column(ForeignKey("workouts.id"), index=True)
+    exercise_id: Mapped[int] = mapped_column(ForeignKey("exercises.id"))
+    position: Mapped[int]
+    sets: Mapped[int | None] = mapped_column(default=None)
+    reps: Mapped[str | None] = mapped_column(String(40), default=None)  # e.g. "8-12", "AMRAP"
