@@ -93,17 +93,25 @@ class RoutineStore:
             await db.commit()
 
     async def save_routine(
-        self, member_id: int, gym_id: int, workouts: list[WorkoutSpec]
+        self,
+        member_id: int,
+        gym_id: int,
+        workouts: list[WorkoutSpec],
+        *,
+        coach_authored: bool = False,
     ) -> Routine:
-        """Save a generated Routine, replacing the Member's active one.
+        """Save a Routine, replacing the Member's active one.
 
         The old Routine row is kept, deactivated (history), so exactly one is
         active. Exercises must already exist in the catalog — generation draws
-        from it, it does not extend it (spec §Routine generation). A
-        coach-authored Routine is never overwritten by generation.
+        from it, it does not extend it (spec §Routine generation).
+
+        Generation (``coach_authored=False``) never overwrites a coach-written
+        Routine; a Coach hand-writing one (``coach_authored=True``) may replace
+        anything and flags the result coach-authored.
 
         Raises ``ValueError`` naming any exercises not in the catalog, or if
-        the Member's active Routine was hand-written by a Coach.
+        generation would overwrite a Coach's Routine.
         """
         async with self._sessions() as db:
             resolved: dict[str, int] = {}
@@ -126,7 +134,7 @@ class RoutineStore:
                     Routine.member_id == member_id, Routine.is_active.is_(True)
                 )
             )
-            if active is not None and active.coach_authored:
+            if active is not None and active.coach_authored and not coach_authored:
                 raise ValueError(
                     "this Member has a coach-written Routine; only the Coach can change it"
                 )
@@ -134,7 +142,11 @@ class RoutineStore:
                 active.is_active = False
 
             routine = Routine(
-                gym_id=gym_id, member_id=member_id, is_active=True, created_at=self._clock()
+                gym_id=gym_id,
+                member_id=member_id,
+                is_active=True,
+                coach_authored=coach_authored,
+                created_at=self._clock(),
             )
             db.add(routine)
             await db.flush()

@@ -33,6 +33,8 @@ EXPECTED_TOOLS = {
     "save_routine",
     "get_routine",
     "suggest_weights",
+    "update_rules_doc",
+    "write_routine",
 }
 
 
