@@ -24,7 +24,7 @@ A chat-based gym coach agent. The agent **is** the coach: each gym member chats 
 | Telegram | aiogram v3, isolated in a `channels/` adapter |
 | Database | PostgreSQL via SQLAlchemy — domain tables (every row carries `gym_id`) + SDK `SQLAlchemySession` for conversation memory |
 | Scheduling | APScheduler (check-in sweeps), in-process |
-| Deploy | Docker Compose on Coolify |
+| Deploy | Coolify: Dockerfile app + standalone Postgres resource (see §Hosting & deployment) |
 
 Structured coach memory (lifts, session dates, injuries) is deliberately **our own Postgres tables accessed through tools**, not framework memory — the memory design stays framework-independent.
 

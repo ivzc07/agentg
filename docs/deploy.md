@@ -17,11 +17,20 @@ lives in Coolify — nothing secret is in this repo.
   backups cover it). Not publicly exposed; the app reaches it over the shared
   Docker network at hostname `bvsw36dl6dnqq1mhn7lm22ed:5432`.
 
+Single-instance is enforced by shape, not by an option: Coolify runs one
+container per application and nothing here configures replicas or additional
+servers. Scaling the app up would break long polling — don't.
+
 ## Auto-deploy
 
 Push to `main` → GitHub webhook (`.../webhooks/source/github/events/manual` on
 the Coolify instance, secured with the app's webhook secret) → Coolify pulls,
 builds the Dockerfile, and swaps the container. Merging a PR is a deploy.
+
+To recreate the webhook: GitHub → ivzc07/agentg → Settings → Webhooks — push
+events, JSON payload, to the URL above; the secret is the application's
+"Manual Git Webhook Secret (GitHub)" shown in Coolify under
+Application → agentg → Webhooks.
 
 ## Configuration (Coolify env vars, runtime-only)
 
@@ -36,8 +45,9 @@ builds the Dockerfile, and swaps the container. Merging a PR is a deploy.
 `MODEL_API_KEY` hold `CHANGE_ME…` placeholders until the owner sets the real
 values in Coolify (Application → agentg → Environment Variables) and starts the
 app. With placeholders the container exits at aiogram's token validation — after
-it has connected to Postgres and created the schema, so the pipeline itself is
-verified end to end.
+it has connected to Postgres and created the schema, so clone, build, deploy,
+and database wiring are all verified; only the Telegram reply path waits on the
+real secrets.
 
 ## Backups
 
@@ -56,4 +66,4 @@ Production only. Developers test locally with a separate dev bot token
 1. Create the production bot with @BotFather.
 2. In Coolify, replace the `TELEGRAM_BOT_TOKEN` and `MODEL_API_KEY` placeholders.
 3. Start (or redeploy) the `agentg` application.
-4. Message the production bot — it should reply.
+4. Message the production bot — the Agent should reply.
