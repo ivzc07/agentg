@@ -39,6 +39,12 @@ def test_sync_postgres_urls_are_normalized_to_the_async_driver(url):
     assert settings.database_url == "postgresql+asyncpg://u:p@h/db"
 
 
+def test_empty_optional_vars_fall_back_to_defaults():
+    settings = Settings.from_env({**FULL_ENV, "MODEL": "", "DATABASE_URL": ""})
+    assert settings.model
+    assert settings.database_url.startswith("postgresql+asyncpg://")
+
+
 def test_non_postgres_urls_pass_through_unchanged():
     url = "sqlite+aiosqlite:///tmp/x.db"
     settings = Settings.from_env({**FULL_ENV, "DATABASE_URL": url})

@@ -32,9 +32,9 @@ class Settings:
             raise ConfigError(f"missing required environment variables: {', '.join(missing)}")
         return cls(
             telegram_bot_token=env["TELEGRAM_BOT_TOKEN"],
-            model=env.get("MODEL", DEFAULT_MODEL),
+            model=env.get("MODEL") or DEFAULT_MODEL,
             model_api_key=env["MODEL_API_KEY"],
-            database_url=_as_asyncpg_url(env.get("DATABASE_URL", DEFAULT_DATABASE_URL)),
+            database_url=_as_asyncpg_url(env.get("DATABASE_URL") or DEFAULT_DATABASE_URL),
         )
 
 

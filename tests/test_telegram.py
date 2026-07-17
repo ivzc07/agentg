@@ -68,6 +68,17 @@ def test_long_replies_are_split_within_the_telegram_limit():
     assert "".join(chunks) == text
 
 
+def utf16_units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def test_split_counts_utf16_units_the_way_telegram_does():
+    text = "💪" * (MAX_MESSAGE_LENGTH + 10)  # each emoji is 2 UTF-16 units
+    chunks = split_reply(text)
+    assert all(utf16_units(chunk) <= MAX_MESSAGE_LENGTH for chunk in chunks)
+    assert "".join(chunks) == text
+
+
 def test_dispatcher_registers_one_message_handler():
     dispatcher = create_dispatcher(AsyncMock())
     assert len(dispatcher.message.handlers) == 1

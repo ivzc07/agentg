@@ -24,7 +24,24 @@ ReplyFn = Callable[[str, str, str], Awaitable[str]]
 
 
 def split_reply(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
-    return [text[i : i + limit] for i in range(0, len(text), limit)]
+    """Split into chunks of at most ``limit`` UTF-16 code units.
+
+    Telegram's 4096 cap counts UTF-16 units, not code points — an emoji
+    weighs 2. Splitting per character keeps surrogate pairs intact.
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    units = 0
+    for char in text:
+        weight = 2 if ord(char) > 0xFFFF else 1
+        if units + weight > limit:
+            chunks.append("".join(current))
+            current, units = [], 0
+        current.append(char)
+        units += weight
+    if current:
+        chunks.append("".join(current))
+    return chunks
 
 
 def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[None]]:
@@ -34,7 +51,7 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
         try:
             reply = await reply_fn(CHANNEL, str(message.from_user.id), message.text)
         except Exception:
-            logger.exception("agent loop failed for user %s", message.from_user.id)
+            logger.exception("agent loop failed for sender %s", message.from_user.id)
             await message.answer(ERROR_REPLY)
             return
         for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:

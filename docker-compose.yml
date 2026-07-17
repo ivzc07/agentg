@@ -10,7 +10,7 @@ services:
         condition: service_healthy
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set the dev bot token in .env}
-      MODEL: ${MODEL:-openai/gpt-4o-mini}
+      MODEL: ${MODEL:-}  # empty falls back to the app's default model
       MODEL_API_KEY: ${MODEL_API_KEY:?set the model API key in .env}
       DATABASE_URL: postgresql+asyncpg://agentg:agentg@db:5432/agentg
 

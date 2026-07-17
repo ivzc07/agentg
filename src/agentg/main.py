@@ -20,6 +20,7 @@ async def run() -> None:
         agent=build_agent(settings),
         engine=create_engine(settings.database_url),
     )
+    await runtime.ensure_schema()
     await run_polling(settings.telegram_bot_token, runtime.handle_message)
 
 
