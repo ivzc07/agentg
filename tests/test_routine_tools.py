@@ -65,6 +65,18 @@ def wednesday_push() -> list[WorkoutSpec]:
     ]
 
 
+def test_workout_input_rejects_an_out_of_range_weekday():
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from agentg.tools import WorkoutInput
+
+    with _pytest.raises(ValidationError):
+        WorkoutInput(weekday=7, name="Nope", exercises=[])
+    with _pytest.raises(ValidationError):
+        WorkoutInput(weekday=-1, name="Nope", exercises=[])
+
+
 async def test_the_agent_carries_the_routine_tools():
     settings = Settings(
         telegram_bot_token="123:abc",

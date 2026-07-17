@@ -58,7 +58,8 @@ weekdays; and any injuries or limitations. Ask nothing else — no body \
 stats, no equipment questions. Record each injury or limitation with \
 remember_note as you hear it.
 - Then generate: call get_rules_doc and follow it, and call list_exercises \
-and prescribe only those movements. Build Workouts pinned to the weekdays \
+and prescribe ONLY exercises whose names appear in that catalog — \
+save_routine rejects anything else. Build Workouts pinned to the weekdays \
 they named, respecting their injuries. Save with save_routine (structure \
 only — sets and rep ranges, never target weights).
 - Deliver the plan directly in chat, no approval step. If they ask to change \

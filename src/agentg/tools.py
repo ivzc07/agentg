@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agents import RunContextWrapper, Tool, function_tool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agentg.notes import NotesStore
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
@@ -29,7 +29,7 @@ class ExerciseInput(BaseModel):
 class WorkoutInput(BaseModel):
     """One training day pinned to a weekday (0=Monday .. 6=Sunday)."""
 
-    weekday: int
+    weekday: int = Field(ge=0, le=6)
     name: str
     exercises: list[ExerciseInput]
 
@@ -244,7 +244,12 @@ async def save_routine(
         )
         for workout in workouts
     ]
-    routine = await c.routines.save_routine(c.member_id, c.gym_id, specs)
+    try:
+        routine = await c.routines.save_routine(c.member_id, c.gym_id, specs)
+    except ValueError as error:
+        # e.g. an exercise not in the catalog — the Agent should pick from
+        # list_exercises and try again.
+        return {"error": str(error)}
     return {"routine_id": routine.id, "workouts_saved": len(specs)}
 
 

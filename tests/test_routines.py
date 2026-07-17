@@ -142,6 +142,39 @@ async def test_no_routine_yet_reads_back_as_none(env):
     assert await env.routines.active_routine(env.member_id) is None
 
 
+async def test_unknown_exercises_are_rejected_not_added_to_the_catalog(env):
+    with pytest.raises(ValueError, match="not in the exercise catalog"):
+        await env.routines.save_routine(
+            env.member_id,
+            env.gym_id,
+            [WorkoutSpec(weekday=0, name="Push", exercises=[ExerciseSpec("incline hammer press")])],
+        )
+    # nothing saved, and the phantom movement was not created
+    assert await env.routines.active_routine(env.member_id) is None
+    async with env.engine.connect() as conn:
+        count = (
+            await conn.execute(
+                text("SELECT count(*) FROM exercises WHERE name = 'incline hammer press'")
+            )
+        ).scalar()
+    assert count == 0
+
+
+async def test_generation_never_overwrites_a_coach_authored_routine(env):
+    await env.routines.save_routine(env.member_id, env.gym_id, push_pull_legs())
+    async with env.engine.begin() as conn:  # a Coach hand-writes it (ticket #30)
+        await conn.execute(text("UPDATE routines SET coach_authored = 1 WHERE is_active = 1"))
+
+    with pytest.raises(ValueError, match="coach-written"):
+        await env.routines.save_routine(
+            env.member_id,
+            env.gym_id,
+            [WorkoutSpec(weekday=1, name="Full body", exercises=[ExerciseSpec("squat")])],
+        )
+    routine = await env.routines.active_routine(env.member_id)
+    assert routine["coach_authored"] is True  # the Coach's plan stands
+
+
 # --- naming today's Workout (feeds the Session opener) ---
 
 

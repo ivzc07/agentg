@@ -15,7 +15,7 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from agentg.catalog import find_or_create_exercise
+from agentg.catalog import find_exercise, normalize_exercise_name
 from agentg.models import Gym, Routine, Workout, WorkoutExercise
 
 # The rules doc that ships with the product. A Gym gets its own editable copy
@@ -93,16 +93,44 @@ class RoutineStore:
         """Save a generated Routine, replacing the Member's active one.
 
         The old Routine row is kept, deactivated (history), so exactly one is
-        active. Exercises resolve against the catalog; a novel movement is
-        added rather than dropped.
+        active. Exercises must already exist in the catalog — generation draws
+        from it, it does not extend it (spec §Routine generation). A
+        coach-authored Routine is never overwritten by generation.
+
+        Raises ``ValueError`` naming any exercises not in the catalog, or if
+        the Member's active Routine was hand-written by a Coach.
         """
         async with self._sessions() as db:
-            await db.execute(
-                update(Routine)
-                .where(Routine.member_id == member_id, Routine.is_active.is_(True))
-                .values(is_active=False)
+            resolved: dict[str, int] = {}
+            unknown: list[str] = []
+            for spec in workouts:
+                for exercise_spec in spec.exercises:
+                    norm = normalize_exercise_name(exercise_spec.exercise)
+                    if norm in resolved or norm in unknown:
+                        continue
+                    found = await find_exercise(db, norm)
+                    if found is None:
+                        unknown.append(exercise_spec.exercise)
+                    else:
+                        resolved[norm] = found.id
+            if unknown:
+                raise ValueError("not in the exercise catalog: " + ", ".join(unknown))
+
+            active = await db.scalar(
+                select(Routine).where(
+                    Routine.member_id == member_id, Routine.is_active.is_(True)
+                )
             )
-            routine = Routine(gym_id=gym_id, member_id=member_id, is_active=True, created_at=self._clock())
+            if active is not None and active.coach_authored:
+                raise ValueError(
+                    "this Member has a coach-written Routine; only the Coach can change it"
+                )
+            if active is not None:
+                active.is_active = False
+
+            routine = Routine(
+                gym_id=gym_id, member_id=member_id, is_active=True, created_at=self._clock()
+            )
             db.add(routine)
             await db.flush()
             for spec in workouts:
@@ -112,12 +140,11 @@ class RoutineStore:
                 db.add(workout)
                 await db.flush()
                 for position, exercise_spec in enumerate(spec.exercises):
-                    exercise = await find_or_create_exercise(db, exercise_spec.exercise)
                     db.add(
                         WorkoutExercise(
                             gym_id=gym_id,
                             workout_id=workout.id,
-                            exercise_id=exercise.id,
+                            exercise_id=resolved[normalize_exercise_name(exercise_spec.exercise)],
                             position=position,
                             sets=exercise_spec.sets,
                             reps=exercise_spec.reps,
