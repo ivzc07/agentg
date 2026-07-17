@@ -1,76 +1,63 @@
-"""AgentRuntime: conversation keys, agent invocation, history across restarts."""
+"""AgentRuntime: schema startup, member-keyed history, serialized turns."""
 
+import asyncio
 from types import SimpleNamespace
+
+import pytest
 
 import agentg.runtime as runtime_module
 from agentg.db import create_engine
-from agentg.runtime import AgentRuntime, conversation_key
+from agentg.messages import IncomingMessage
+from agentg.onboarding import Onboarding
+from agentg.runtime import AgentRuntime
+from agentg.store import LinkingStore
 
 
 def sqlite_url(tmp_path) -> str:
     return f"sqlite+aiosqlite:///{tmp_path / 'memory.db'}"
 
 
-def test_conversation_key_is_channel_scoped():
-    assert conversation_key("telegram", "42") == "telegram:42"
+def make_runtime(url) -> AgentRuntime:
+    engine = create_engine(url)
+    store = LinkingStore(engine)
+    return AgentRuntime(agent=object(), engine=engine, store=store, onboarding=Onboarding(store))
 
 
-async def test_handle_message_runs_the_agent_against_the_conversation_session(
-    tmp_path, monkeypatch
-):
-    seen = {}
+def incoming(text, user_id):
+    return IncomingMessage(
+        channel="telegram", channel_user_id=user_id, text=text, display_name="Ana"
+    )
 
-    async def fake_run(agent, text, *, session):
-        seen["agent"], seen["text"], seen["session"] = agent, text, session
-        return SimpleNamespace(final_output="hey!")
 
-    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
-    engine = create_engine(sqlite_url(tmp_path))
-    agent = object()
-    runtime = AgentRuntime(agent=agent, engine=engine)
-
-    reply = await runtime.handle_message("telegram", "42", "hi")
-
-    assert reply == "hey!"
-    assert seen["agent"] is agent
-    assert seen["text"] == "hi"
-    assert seen["session"].session_id == "telegram:42"
-    await engine.dispose()
+@pytest.fixture
+async def runtime(tmp_path):
+    runtime = make_runtime(sqlite_url(tmp_path))
+    await runtime.ensure_schema()
+    yield runtime
+    await runtime.engine.dispose()
 
 
 async def test_history_survives_a_process_restart(tmp_path):
     url = sqlite_url(tmp_path)
     turn = [{"role": "user", "content": "bench was 60 today"}]
 
-    engine = create_engine(url)
-    runtime = AgentRuntime(agent=object(), engine=engine)
+    runtime = make_runtime(url)
     await runtime.ensure_schema()
-    await runtime.session_for("telegram", "42").add_items(turn)
-    await engine.dispose()  # the process dies
+    await runtime.session_for_member(1).add_items(turn)
+    await runtime.engine.dispose()  # the process dies
 
-    engine = create_engine(url)  # ...and comes back
-    runtime = AgentRuntime(agent=object(), engine=engine)
+    runtime = make_runtime(url)  # ...and comes back
     await runtime.ensure_schema()
-    assert await runtime.session_for("telegram", "42").get_items() == turn
-    await engine.dispose()
+    assert await runtime.session_for_member(1).get_items() == turn
+    await runtime.engine.dispose()
 
 
-async def test_conversations_are_isolated_from_each_other(tmp_path):
-    engine = create_engine(sqlite_url(tmp_path))
-    runtime = AgentRuntime(agent=object(), engine=engine)
-    await runtime.ensure_schema()
-
-    await runtime.session_for("telegram", "1").add_items(
-        [{"role": "user", "content": "my knee hurts"}]
-    )
-
-    assert await runtime.session_for("telegram", "2").get_items() == []
-    await engine.dispose()
+async def test_member_histories_are_isolated_from_each_other(runtime):
+    await runtime.session_for_member(1).add_items([{"role": "user", "content": "my knee hurts"}])
+    assert await runtime.session_for_member(2).get_items() == []
 
 
-async def test_turns_in_one_conversation_never_interleave(tmp_path, monkeypatch):
-    import asyncio
-
+async def test_turns_in_one_conversation_never_interleave(runtime, monkeypatch):
     running: set[str] = set()
     overlapped = []
 
@@ -83,14 +70,14 @@ async def test_turns_in_one_conversation_never_interleave(tmp_path, monkeypatch)
         return SimpleNamespace(final_output="ok")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
-    engine = create_engine(sqlite_url(tmp_path))
-    runtime = AgentRuntime(agent=object(), engine=engine)
+    gym = await runtime.store.create_gym("Iron Temple")
+    await runtime.store.link_member(gym.id, "Ana", "telegram", "42")
+    await runtime.store.link_member(gym.id, "Ben", "telegram", "7")
 
     await asyncio.gather(
-        runtime.handle_message("telegram", "42", "first"),
-        runtime.handle_message("telegram", "42", "second"),
-        runtime.handle_message("telegram", "7", "other member"),
+        runtime.handle_message(incoming("first", "42")),
+        runtime.handle_message(incoming("second", "42")),
+        runtime.handle_message(incoming("other member", "7")),
     )
 
     assert overlapped == []
-    await engine.dispose()
