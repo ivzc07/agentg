@@ -13,6 +13,7 @@ from typing import Any
 from agents import RunContextWrapper, Tool, function_tool
 from pydantic import BaseModel, Field
 
+from agentg.advice import suggest_for_today
 from agentg.notes import NotesStore
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.training import LoggedSets, TrainingStore
@@ -263,6 +264,33 @@ async def get_routine(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     return {"routine": routine}
 
 
+@function_tool
+async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
+    """Suggested working weights for today's Workout, derived from logged Sets.
+
+    Per Exercise: the last weight, a suggested next weight, and why (action is
+    increment / hold / deload / gap_deload / none). These come from the gym's
+    progression rules — offer them in chat as suggestions, never as logged
+    sets, and never state a number this tool did not return. After a long gap
+    the suggestions ease back; open warm and guilt-free.
+    """
+    c = ctx.context
+    suggestions = await suggest_for_today(c.training, c.routines, c.member_id, c.gym_id)
+    return {
+        "weight_unit": c.weight_unit,
+        "suggestions": [
+            {
+                "exercise": s.exercise,
+                "last_weight": s.last_weight,
+                "suggested_weight": s.suggested_weight,
+                "action": s.action,
+                "reason": s.reason,
+            }
+            for s in suggestions
+        ],
+    }
+
+
 def build_tools() -> list[Tool]:
     return [
         open_session,
@@ -277,4 +305,5 @@ def build_tools() -> list[Tool]:
         list_exercises,
         save_routine,
         get_routine,
+        suggest_weights,
     ]

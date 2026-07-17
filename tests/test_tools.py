@@ -32,6 +32,7 @@ EXPECTED_TOOLS = {
     "list_exercises",
     "save_routine",
     "get_routine",
+    "suggest_weights",
 }
 
 

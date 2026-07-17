@@ -1,0 +1,75 @@
+"""Turn logged Sets + the rules doc into per-Exercise weight suggestions.
+
+Derives suggestions for today's Workout (spec §Routine adaptation): reads
+the Gym's progression rules and each Exercise's recent completion history,
+then defers the arithmetic to the pure ``progression`` module. Reads only —
+suggestions are ephemeral, never written to Routine/Workout rows.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from agentg.progression import (
+    SessionResult,
+    parse_progression_rules,
+    parse_top_reps,
+    suggest_weight,
+)
+from agentg.routines import RoutineStore
+from agentg.training import TrainingStore
+
+
+@dataclass(frozen=True)
+class ExerciseSuggestion:
+    exercise: str
+    last_weight: float | None
+    suggested_weight: float | None
+    action: str  # increment | hold | deload | gap_deload | none
+    reason: str
+
+
+def _completed(top_reps: list[int], target_sets: int | None, target_top_reps: int | None) -> bool:
+    """A Session completed an Exercise when it hit the prescribed sets at the
+    top of the rep range. Without a clear prescription we can't confirm it, so
+    we hold rather than push."""
+    if target_sets is None or target_top_reps is None or not top_reps:
+        return False
+    return len(top_reps) >= target_sets and min(top_reps) >= target_top_reps
+
+
+async def suggest_for_today(
+    training: TrainingStore, routines: RoutineStore, member_id: int, gym_id: int
+) -> list[ExerciseSuggestion]:
+    """Weight suggestions for each Exercise in today's Workout (empty on a
+    rest day or with no Routine)."""
+    workout = await routines.todays_workout(member_id)
+    if workout is None:
+        return []
+    rules = parse_progression_rules(await routines.effective_rules_doc(gym_id))
+    gap_days, _last = await training.latest_session_info(member_id)
+
+    suggestions: list[ExerciseSuggestion] = []
+    for exercise in workout["exercises"]:
+        target_top = parse_top_reps(exercise.get("reps"))
+        rows = await training.exercise_history(
+            member_id, exercise["exercise"], limit=rules.stall_sessions + 1
+        )
+        history = [
+            SessionResult(
+                weight=row["top_weight"],
+                completed=_completed(row["top_reps"], exercise.get("sets"), target_top),
+            )
+            for row in rows
+        ]
+        result = suggest_weight(history, gap_days, rules)
+        suggestions.append(
+            ExerciseSuggestion(
+                exercise=exercise["exercise"],
+                last_weight=history[0].weight if history else None,
+                suggested_weight=result.suggested_weight,
+                action=result.action,
+                reason=result.reason,
+            )
+        )
+    return suggestions
