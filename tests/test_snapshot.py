@@ -1,27 +1,18 @@
 """The per-turn member snapshot injected via dynamic instructions."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
 
 from agentg.agent import dynamic_instructions
+from conftest import FakeClock
+
 from agentg.db import create_engine
 from agentg.notes import NotesStore
 from agentg.snapshot import member_snapshot
 from agentg.store import LinkingStore
 from agentg.tools import MemberContext
 from agentg.training import TrainingStore
-
-
-class FakeClock:
-    def __init__(self):
-        self.now = datetime(2026, 7, 15, 18, 0, tzinfo=UTC)
-
-    def __call__(self):
-        return self.now
-
-    def advance(self, delta):
-        self.now += delta
 
 
 @pytest.fixture

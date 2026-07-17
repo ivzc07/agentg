@@ -1,24 +1,15 @@
 """NotesStore: volunteered durable facts as plain, coach-inspectable rows."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import text
 
+from conftest import FakeClock
+
 from agentg.db import create_engine
 from agentg.notes import NOTE_KINDS, NotesStore
 from agentg.store import LinkingStore
-
-
-class FakeClock:
-    def __init__(self):
-        self.now = datetime(2026, 7, 15, 18, 0, tzinfo=UTC)
-
-    def __call__(self):
-        return self.now
-
-    def advance(self, delta):
-        self.now += delta
 
 
 @pytest.fixture
