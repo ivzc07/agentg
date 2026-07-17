@@ -10,6 +10,7 @@ from agentg.messages import IncomingMessage
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
 from agentg.notes import NotesStore
+from agentg.checkin_store import CheckinStore
 from agentg.routines import RoutineStore
 from agentg.store import LinkingStore
 from agentg.tools import MemberContext
@@ -35,6 +36,9 @@ EXPECTED_TOOLS = {
     "suggest_weights",
     "update_rules_doc",
     "write_routine",
+    "stop_checkins",
+    "snooze_checkins",
+    "resume_checkins",
 }
 
 
@@ -67,6 +71,7 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
         training=TrainingStore(engine),
         notes=NotesStore(engine),
         routines=RoutineStore(engine),
+        checkins=CheckinStore(engine),
         summarizer=null_summarizer,
     )
     await runtime.ensure_schema()

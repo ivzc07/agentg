@@ -87,8 +87,28 @@ def create_dispatcher(reply_fn: ReplyFn) -> Dispatcher:
     return dispatcher
 
 
-async def run_polling(token: str, reply_fn: ReplyFn) -> None:
-    bot = Bot(token=token)
+class TelegramNotifier:
+    """Sends proactive messages (check-in nudges) outside the polling loop.
+
+    Channel-agnostic callers (the check-in sweep) hold this as a ``Notifier``;
+    it ignores anything not addressed to Telegram (ADR 0001).
+    """
+
+    def __init__(self, bot: Bot) -> None:
+        self._bot = bot
+
+    async def send(self, channel: str, channel_user_id: str, text: str) -> None:
+        if channel != CHANNEL:
+            return
+        for chunk in split_reply(text):
+            await self._bot.send_message(chat_id=int(channel_user_id), text=chunk)
+
+
+def build_bot(token: str) -> Bot:
+    return Bot(token=token)
+
+
+async def run_polling(bot: Bot, reply_fn: ReplyFn) -> None:
     dispatcher = create_dispatcher(reply_fn)
     logger.info("starting Telegram long polling")
     await dispatcher.start_polling(bot)

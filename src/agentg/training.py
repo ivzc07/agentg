@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -142,6 +142,26 @@ class TrainingStore:
             info = await self._previous_session_info(db, member_id, exclude_id, self._clock())
             await db.commit()  # persist any auto-close the open-session check did
             return info
+
+    def today(self) -> date:
+        """The process clock's current date (UTC; gym-local lands with #31's
+        successors) — lets the Agent compute snooze dates from the snapshot."""
+        return self._clock().date()
+
+    async def newest_session_date(self, member_id: int) -> date | None:
+        """The date of the Member's most recent Session (open or closed).
+
+        Any visit counts as activity for the check-in gap, so unlike
+        ``latest_session_info`` this includes today's open Session.
+        """
+        async with self._sessions() as db:
+            started = await db.scalar(
+                select(Session.started_at)
+                .where(Session.member_id == member_id)
+                .order_by(Session.started_at.desc())
+                .limit(1)
+            )
+            return started.date() if started is not None else None
 
     async def get_session(self, session_id: int) -> Session:
         async with self._sessions() as db:

@@ -1,12 +1,16 @@
-"""Process entrypoint: settings -> engine -> stores -> Agent -> Telegram polling."""
+"""Process entrypoint: settings -> engine -> stores -> Agent -> polling + sweep."""
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 
 from agents import set_tracing_disabled
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from agentg.agent import build_agent
-from agentg.channels.telegram import run_polling
+from agentg.channels.telegram import TelegramNotifier, build_bot, run_polling
+from agentg.checkin_store import CheckinStore
+from agentg.checkin_sweep import run_sweep
 from agentg.compaction import build_summarizer
 from agentg.config import Settings
 from agentg.db import create_engine
@@ -17,6 +21,8 @@ from agentg.runtime import AgentRuntime
 from agentg.store import LinkingStore
 from agentg.training import TrainingStore
 
+logger = logging.getLogger(__name__)
+
 
 async def run() -> None:
     settings = Settings.from_env()
@@ -24,18 +30,41 @@ async def run() -> None:
     set_tracing_disabled(True)
     engine = create_engine(settings.database_url)
     store = LinkingStore(engine)
+    training = TrainingStore(engine)
+    routines = RoutineStore(engine)
+    checkins = CheckinStore(engine)
     runtime = AgentRuntime(
         agent=build_agent(settings),
         engine=engine,
         store=store,
         onboarding=Onboarding(store),
-        training=TrainingStore(engine),
+        training=training,
         notes=NotesStore(engine),
-        routines=RoutineStore(engine),
+        routines=routines,
+        checkins=checkins,
         summarizer=build_summarizer(settings),
     )
     await runtime.ensure_schema()
-    await run_polling(settings.telegram_bot_token, runtime.handle_message)
+
+    bot = build_bot(settings.telegram_bot_token)
+    notifier = TelegramNotifier(bot)
+
+    # In-process proactive check-in sweep. Runs on the hour; the decision layer
+    # only fires each Member at 09:00 in their gym's timezone.
+    scheduler = AsyncIOScheduler(timezone="UTC")
+
+    async def sweep() -> None:
+        try:
+            sent = await run_sweep(datetime.now(UTC), checkins, training, routines, notifier)
+            if sent:
+                logger.info("check-in sweep sent %d nudges", sent)
+        except Exception:
+            logger.exception("check-in sweep failed")
+
+    scheduler.add_job(sweep, "cron", minute=0, id="checkin-sweep")
+    scheduler.start()
+
+    await run_polling(bot, runtime.handle_message)
 
 
 def main() -> None:
