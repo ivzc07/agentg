@@ -21,6 +21,7 @@ from agentg.compaction import build_summarizer
 from agentg.config import Settings
 from agentg.db import create_engine
 from agentg.demos import DemoStore
+from agentg.forget import ForgetStore
 from agentg.notes import NotesStore
 from agentg.onboarding import Onboarding
 from agentg.routines import RoutineStore
@@ -57,6 +58,7 @@ async def run() -> None:
         routines=routines,
         checkins=checkins,
         demos=demos,
+        forget=ForgetStore(engine),
         summarizer=build_summarizer(settings),
         demo_sender=demo_sender,
         notifier=notifier,

@@ -11,6 +11,7 @@ from agentg.db import create_engine
 from agentg.notes import NotesStore
 from agentg.checkin_store import CheckinStore
 from agentg.demos import DemoStore
+from agentg.forget import ForgetStore
 from agentg.routines import RoutineStore
 from agentg.snapshot import member_snapshot
 from agentg.store import LinkingStore
@@ -38,6 +39,7 @@ async def env(tmp_path):
         linking=linking,
         checkins=CheckinStore(engine),
         demos=DemoStore(engine),
+        forget=ForgetStore(engine),
         member_id=member.id,
         gym_id=gym.id,
         member_name="Dani",
