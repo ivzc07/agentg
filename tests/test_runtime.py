@@ -11,6 +11,7 @@ from agentg.messages import IncomingMessage
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
 from agentg.notes import NotesStore
+from agentg.checkin_store import CheckinStore
 from agentg.routines import RoutineStore
 from agentg.store import LinkingStore
 from agentg.store import LinkingStore
@@ -36,6 +37,7 @@ def make_runtime(url) -> AgentRuntime:
         training=TrainingStore(engine),
         notes=NotesStore(engine),
         routines=RoutineStore(engine),
+        checkins=CheckinStore(engine),
         summarizer=null_summarizer,
     )
 

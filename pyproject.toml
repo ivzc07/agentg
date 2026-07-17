@@ -12,6 +12,8 @@ dependencies = [
     "openai-agents[litellm,sqlalchemy]>=0.2.9",
     "aiogram>=3.13",
     "asyncpg>=0.29",
+    "apscheduler>=3.10",
+    "tzdata>=2024.1",  # IANA timezone data for zoneinfo (gym-local check-in times)
 ]
 
 [project.scripts]

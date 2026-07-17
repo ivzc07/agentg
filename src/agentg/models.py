@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import (
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -71,6 +72,12 @@ class Member(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # Proactive check-in state (spec §Proactive check-ins).
+    checkin_state: Mapped[str] = mapped_column(String(12), default="on")  # on/off/snoozed/lapsed
+    snoozed_until: Mapped[date | None] = mapped_column(Date, default=None)
+    last_nudge_on: Mapped[date | None] = mapped_column(Date, default=None)
+    nudges_this_week: Mapped[int] = mapped_column(default=0)
+    ignored_nudges: Mapped[int] = mapped_column(default=0)  # sends since a reply/Session
 
 
 class MemberChannel(Base):

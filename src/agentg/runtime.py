@@ -17,6 +17,7 @@ from agents import Agent, Runner
 from agents.extensions.memory import SQLAlchemySession
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from agentg.checkin_store import CheckinStore
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.messages import IncomingMessage
 from agentg.notes import NotesStore
@@ -36,6 +37,7 @@ class AgentRuntime:
     training: TrainingStore
     notes: NotesStore
     routines: RoutineStore
+    checkins: CheckinStore
     summarizer: Summarizer
     # One lock per channel identity so a rapid double message can't interleave
     # turns (or onboarding steps). Unbounded, but one entry per person who
@@ -60,6 +62,7 @@ class AgentRuntime:
             notes=self.notes,
             routines=self.routines,
             linking=self.store,
+            checkins=self.checkins,
             member_id=linked.member.id,
             gym_id=linked.gym.id,
             member_name=linked.member.name,
@@ -76,6 +79,8 @@ class AgentRuntime:
                 return reply
             if linked is None:  # onboarding always replies for unlinked identities
                 raise RuntimeError("unlinked message reached the agent loop")
+            # Any reply resets the check-in rhythm and revives a lapsed Member.
+            await self.checkins.reset_rhythm(linked.member.id)
             session = self.session_for_member(linked.member.id)
             await maybe_compact(
                 session, self.summarizer, self.notes, linked.member.id, linked.gym.id

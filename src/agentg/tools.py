@@ -13,7 +13,10 @@ from typing import Any
 from agents import RunContextWrapper, Tool, function_tool
 from pydantic import BaseModel, Field
 
+from datetime import date
+
 from agentg.advice import suggest_for_today
+from agentg.checkin_store import CheckinStore
 from agentg.notes import NotesStore
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.store import LinkingStore
@@ -44,6 +47,7 @@ class MemberContext:
     notes: NotesStore
     routines: RoutineStore
     linking: LinkingStore
+    checkins: CheckinStore
     member_id: int
     gym_id: int
     member_name: str
@@ -395,6 +399,43 @@ async def write_routine(
     return await write_routine_action(ctx.context, member_name, member_id, specs)
 
 
+@function_tool
+async def stop_checkins(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
+    """Turn off proactive check-ins ("stop checking in on me").
+
+    Confirm warmly and tell them they can say "start checking in again" to
+    turn them back on.
+    """
+    c = ctx.context
+    await c.checkins.turn_off(c.member_id)
+    return {"checkins": "off", "reenable": "say 'start checking in again' anytime"}
+
+
+@function_tool
+async def snooze_checkins(ctx: RunContextWrapper[MemberContext], until: str) -> dict[str, Any]:
+    """Pause check-ins until a date ("I'm traveling for two weeks").
+
+    ``until`` is an ISO date (YYYY-MM-DD) — compute it from today's date in
+    the snapshot. Confirm the date warmly and note they'll hear from you again
+    after it.
+    """
+    c = ctx.context
+    try:
+        until_date = date.fromisoformat(until)
+    except ValueError:
+        return {"error": f"{until!r} isn't a YYYY-MM-DD date"}
+    await c.checkins.snooze_until(c.member_id, until_date)
+    return {"checkins": "snoozed", "until": until_date.isoformat()}
+
+
+@function_tool
+async def resume_checkins(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
+    """Turn proactive check-ins back on ("start checking in again")."""
+    c = ctx.context
+    await c.checkins.resume(c.member_id)
+    return {"checkins": "on"}
+
+
 def build_tools() -> list[Tool]:
     return [
         open_session,
@@ -412,4 +453,7 @@ def build_tools() -> list[Tool]:
         suggest_weights,
         update_rules_doc,
         write_routine,
+        stop_checkins,
+        snooze_checkins,
+        resume_checkins,
     ]
