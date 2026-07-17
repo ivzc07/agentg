@@ -31,12 +31,13 @@ async def member_snapshot(context: MemberContext) -> str:
     days, last = await context.training.latest_session_info(context.member_id)
     routine = await context.routines.active_routine(context.member_id)
     todays_workout = context.routines.pick_todays_workout(routine)
-    has_routine = routine is not None
     notes = await context.notes.active(context.member_id)
 
+    role = "Coach (coach tools available)" if context.is_coach else "Member"
     lines = [
         "--- Member snapshot (facts from tables; trust these over chat memory) ---",
-        f"Member: {context.member_name}, at {context.gym_name} (weights in {context.weight_unit}).",
+        f"{role}: {context.member_name}, at {context.gym_name} "
+        f"(weights in {context.weight_unit}).",
     ]
     if last is None:
         lines.append("No Sessions logged yet.")
@@ -44,13 +45,15 @@ async def member_snapshot(context: MemberContext) -> str:
         gap = "today" if days == 0 else f"{days} day{'s' if days != 1 else ''} ago"
         headline = _headline(last["exercises"], context.weight_unit) or "no sets logged"
         lines.append(f"Last Session: {gap} ({last['date']}): {headline}.")
-    if not has_routine:
+    if routine is None:
         lines.append("No routine yet — run intake and generate one before coaching sessions.")
-    elif todays_workout is None:
-        lines.append("Today is a rest day in the Member's routine.")
     else:
-        plan = ", ".join(e["exercise"] for e in todays_workout["exercises"]) or "no exercises"
-        lines.append(f"Today's Workout: {todays_workout['name']} ({plan}).")
+        authored = "coach-written" if routine["coach_authored"] else "agent-generated"
+        if todays_workout is None:
+            lines.append(f"Today is a rest day in the Member's {authored} routine.")
+        else:
+            plan = ", ".join(e["exercise"] for e in todays_workout["exercises"]) or "no exercises"
+            lines.append(f"Today's Workout ({authored} routine): {todays_workout['name']} ({plan}).")
     if not notes:
         lines.append("No active notes.")
     else:

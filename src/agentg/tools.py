@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from agentg.advice import suggest_for_today
 from agentg.notes import NotesStore
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
+from agentg.store import LinkingStore
 from agentg.training import LoggedSets, TrainingStore
 
 
@@ -42,11 +43,13 @@ class MemberContext:
     training: TrainingStore
     notes: NotesStore
     routines: RoutineStore
+    linking: LinkingStore
     member_id: int
     gym_id: int
     member_name: str
     gym_name: str
     weight_unit: str
+    is_coach: bool = False
 
 
 def _logged(payload: LoggedSets, unit: str) -> dict[str, Any]:
@@ -291,6 +294,107 @@ async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, An
     }
 
 
+# --- Coach-only tools (spec §Routine generation & coach overrides) ---
+
+# A single message is the enforcement point: a Member without the coach flag
+# never gets past it, whatever the model is asked to do.
+_NOT_A_COACH = {"error": "that's a coach-only action, and you're not flagged as a coach"}
+
+
+async def update_rules_doc_action(c: MemberContext, new_doc: str) -> dict[str, Any]:
+    if not c.is_coach:
+        return _NOT_A_COACH
+    # A Gym still on the shipped default gets its own editable copy here.
+    await c.routines.set_rules_doc(c.gym_id, new_doc)
+    return {"saved": True, "gym": c.gym_name}
+
+
+async def _resolve_member(
+    c: MemberContext, member_name: str, member_id: int | None
+) -> Any:
+    """The target Member for a coach action, or an ``{"error": ...}`` payload."""
+    if member_id is not None:
+        member = await c.linking.member_in_gym(c.gym_id, member_id)
+        if member is None:
+            return {"error": f"no member with id {member_id} in your gym"}
+        return member
+    matches = await c.linking.members_by_name(c.gym_id, member_name)
+    if not matches:
+        return {"error": f"no member named {member_name!r} in your gym"}
+    if len(matches) > 1:
+        return {
+            "error": f"several members named {member_name!r}: {[m.id for m in matches]} "
+            "— pass member_id to pick one"
+        }
+    return matches[0]
+
+
+async def write_routine_action(
+    c: MemberContext, member_name: str, member_id: int | None, specs: list[WorkoutSpec]
+) -> dict[str, Any]:
+    if not c.is_coach:
+        return _NOT_A_COACH
+    if not specs:
+        return {"error": "a routine needs at least one workout"}
+    target = await _resolve_member(c, member_name, member_id)
+    if isinstance(target, dict):
+        return target
+    try:
+        routine = await c.routines.save_routine(
+            target.id, c.gym_id, specs, coach_authored=True
+        )
+    except ValueError as error:
+        return {"error": str(error)}
+    return {
+        "routine_id": routine.id,
+        "member": target.name,
+        "member_id": target.id,
+        "coach_authored": True,
+        "workouts_saved": len(specs),
+    }
+
+
+@function_tool
+async def update_rules_doc(ctx: RunContextWrapper[MemberContext], new_doc: str) -> dict[str, Any]:
+    """(Coach only) Replace the gym's rules doc with new plain text.
+
+    Show the coach the proposed doc first and call this only once they
+    confirm. A gym still on the shipped default gets its own copy on first
+    edit. Keep the progression parameter lines (increment, deload_percent,
+    stall_sessions, gap_deload_days, gap_deload_percent) — they drive weight
+    suggestions.
+    """
+    return await update_rules_doc_action(ctx.context, new_doc)
+
+
+@function_tool
+async def write_routine(
+    ctx: RunContextWrapper[MemberContext],
+    member_name: str,
+    workouts: list[WorkoutInput],
+    member_id: int | None = None,
+) -> dict[str, Any]:
+    """(Coach only) Hand-write a Routine for a Member of your gym.
+
+    Identify the Member by name (or member_id if the name is ambiguous).
+    Preview the plan to the coach and call this only on confirm. The saved
+    Routine is flagged coach-authored and delivered to the Member; structure
+    only, exercises from the catalog, never target weights.
+    """
+    specs = [
+        WorkoutSpec(
+            weekday=workout.weekday,
+            name=workout.name,
+            exercises=[
+                ExerciseSpec(exercise=item.exercise, sets=item.sets, reps=item.reps)
+                for item in workout.exercises
+            ],
+        )
+        for workout in workouts
+    ]
+    return await write_routine_action(ctx.context, member_name, member_id, specs)
+
+
 def build_tools() -> list[Tool]:
     return [
         open_session,
@@ -306,4 +410,6 @@ def build_tools() -> list[Tool]:
         save_routine,
         get_routine,
         suggest_weights,
+        update_rules_doc,
+        write_routine,
     ]
