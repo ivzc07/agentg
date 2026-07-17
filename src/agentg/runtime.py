@@ -19,6 +19,7 @@ from agents.extensions.memory import SQLAlchemySession
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from agentg.checkin_store import CheckinStore
+from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.demo_media import DemoSender, serve_demo
 from agentg.demos import DemoStore
@@ -48,6 +49,8 @@ class AgentRuntime:
     # The channel's demo-animation sender; None disables demo delivery (tests
     # that don't exercise demos leave it unset).
     demo_sender: DemoSender | None = None
+    # Channel notifier for consented safety referrals (pinging a Gym's Coach).
+    notifier: Notifier | None = None
     # One lock per channel identity so a rapid double message can't interleave
     # turns (or onboarding steps). Unbounded, but one entry per person who
     # ever messaged this process — fine at this scale.
@@ -73,6 +76,7 @@ class AgentRuntime:
             linking=self.store,
             checkins=self.checkins,
             demos=self.demos,
+            notifier=self.notifier,
             member_id=linked.member.id,
             gym_id=linked.gym.id,
             member_name=linked.member.name,
