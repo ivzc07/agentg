@@ -40,11 +40,12 @@ def parse_start_payload(text: str) -> str | None:
 
 
 def split_reply(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
-    """Split into chunks of at most ``limit`` UTF-16 code units.
+    """Strip model bold markup, then split by Telegram's UTF-16 limit.
 
     Telegram's 4096 cap counts UTF-16 units, not code points — an emoji
     weighs 2. Splitting per character keeps surrogate pairs intact.
     """
+    text = text.replace("**", "")
     chunks: list[str] = []
     current: list[str] = []
     units = 0
