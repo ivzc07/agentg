@@ -1,6 +1,6 @@
 """The Agent — the software Members chat with (CONTEXT.md). Channel-agnostic."""
 
-from agents import Agent, RunContextWrapper
+from agents import Agent, ModelSettings, RunContextWrapper
 from agents.extensions.models.litellm_model import LitellmModel
 
 from agentg.config import Settings
@@ -137,5 +137,10 @@ def build_agent(settings: Settings) -> Agent:
         name="Agent",
         instructions=dynamic_instructions,
         model=LitellmModel(model=settings.model, api_key=settings.model_api_key),
+        # litellm imports its proxy/MCP handler chain (fastapi, orjson, …) on any
+        # tool-calling completion; we never run that proxy, so skip the import
+        # rather than ship its dependencies. The SDK forwards extra_args to
+        # litellm.acompletion. See tests/test_model_backend.py.
+        model_settings=ModelSettings(extra_args={"_skip_mcp_handler": True}),
         tools=build_tools(),
     )
