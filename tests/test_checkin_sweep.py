@@ -165,7 +165,7 @@ async def test_an_ignored_member_winds_down_and_is_flagged_lapsed(env):
     count, notifier = await sweep(env, datetime(2026, 7, 16, 9, 0, tzinfo=UTC))
 
     assert count == 1
-    assert "whenever" in notifier.sent[0][2].lower()  # the wind-down copy
+    assert "cuando" in notifier.sent[0][2].lower()  # the wind-down copy (Spanish)
     state, _ = await env.checkins.get_state(member.id)
     assert state == "lapsed"
     # and now silent

@@ -70,11 +70,11 @@ async def env(tmp_path):
 
 
 def test_the_agent_carries_the_non_editable_safety_floor():
+    # The floor is behavioral (ADR 0002 dropped the spoken disclaimer): never
+    # diagnose or prescribe; refer acute pain / medical questions to a professional.
     text = INSTRUCTIONS.lower()
-    assert "not a medical professional" in text
-    # never diagnose or prescribe; refer acute pain / medical questions out
     assert "diagnose" in text and "prescribe" in text
-    assert "professional" in text
+    assert "refer" in text and "professional" in text
 
 
 # --- the shipped refuse-or-refer defaults live in the (editable) doc ---
@@ -86,7 +86,7 @@ def test_the_default_doc_ships_the_refuse_or_refer_defaults():
     assert "steroid" in doc or "ped" in doc
     assert "physio" in doc or "rehab" in doc
     assert "emergency" in doc  # urgent symptoms → seek emergency care
-    assert "disclaimer" in doc or "ai coach" in doc
+    # ADR 0002: the doc no longer ships a spoken AI/medical disclaimer.
 
 
 async def test_editing_the_doc_can_strip_the_safety_section(env):
@@ -94,7 +94,8 @@ async def test_editing_the_doc_can_strip_the_safety_section(env):
     await routines.set_rules_doc(env.gym_id, "Just do squats. No safety section.")
     effective = await routines.effective_rules_doc(env.gym_id)
     assert "steroid" not in effective.lower()  # the doc floor is gone...
-    assert "not a medical professional" in INSTRUCTIONS.lower()  # ...but the baked floor stays
+    floor = INSTRUCTIONS.lower()  # ...but the baked behavioral floor stays (ADR 0002)
+    assert "diagnose" in floor and "refer" in floor and "professional" in floor
 
 
 # --- consent-gated coach referral ---

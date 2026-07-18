@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 CHANNEL = "telegram"
 MAX_MESSAGE_LENGTH = 4096  # Telegram's hard cap per message
-ERROR_REPLY = "Sorry — something went wrong on my end. Give it another try in a moment."
-EMPTY_REPLY_FALLBACK = "Hmm, I came up empty — mind trying that again?"
+ERROR_REPLY = "Uy — algo falló de mi lado. Inténtalo de nuevo en un momento."
+EMPTY_REPLY_FALLBACK = "Mmm, me quedé en blanco — ¿lo intentas de nuevo?"
 
 ReplyFn = Callable[[IncomingMessage], Awaitable[str]]
 
