@@ -16,35 +16,37 @@ from agentg.models import Gym
 from agentg.store import LinkedIdentity, LinkingStore
 
 DEAD_END = (
-    "Hey! 👋 I'm a coach that works with partner gyms, so I can only get you "
-    "set up through your gym. Grab your gym's invite link or QR code — the "
-    "front desk or your coach has it — tap it, and we'll get going."
+    "¡Hola! 👋 Soy un coach que trabaja con gyms asociados, así que solo "
+    "puedo darte de alta a través de tu gym. Consigue el enlace o el código QR "
+    "de invitación de tu gym — lo tiene la recepción o tu coach —, tócalo y "
+    "arrancamos."
 )
 NAME_CONFIRM = (
-    "Welcome to {gym}! 🎉 I've got your name as {name} from your profile — "
-    "should I use that? Reply yes, or tell me what you'd like to be called."
+    "¡Qué gusto tenerte en {gym}! 🎉 Tengo tu nombre como {name} según tu "
+    "perfil, ¿lo uso? Responde sí, o dime cómo te gustaría que te llame."
 )
-NAME_ASK = "Welcome to {gym}! 🎉 What should I call you?"
+NAME_ASK = "¡Qué gusto tenerte en {gym}! 🎉 ¿Cómo te gustaría que te llame?"
 WELCOME = (
-    "You're all set, {name} — welcome to {gym}! 💪 "
-    "Tell me when you're at the gym and we'll take it from there."
+    "¡Todo listo, {name} — qué gusto tenerte en {gym}! 💪 "
+    "Avísame cuando estés en el gym y de ahí seguimos."
 )
-SAME_GYM = "You're already set up at {gym}, {name} — no need to link again. What's on for today?"
+SAME_GYM = "Ya estás en {gym}, {name} — no hace falta volver a vincularte. ¿Qué toca hoy?"
 LINK_INACTIVE = (
-    "That invite link doesn't seem to be active. No worries — you're still set up at {gym}."
+    "Ese enlace de invitación no parece estar activo. Sin bronca — sigues en {gym}."
 )
 SWITCH_CONFIRM = (
-    "That's an invite for {new_gym}. Switching means a fresh start there — "
-    "your training history stays with {old_gym}. Want to switch? (yes / no)"
+    "Ese es un enlace de invitación de {new_gym}. Cambiarte significa empezar "
+    "de cero ahí — tu historial de entrenamiento se queda con {old_gym}. "
+    "¿Quieres cambiarte? (sí / no)"
 )
 SWITCHED = (
-    "Done — welcome to {new_gym}, {name}! 💪 "
-    "Fresh start from here; your history stayed with your old gym."
+    "¡Listo — qué gusto tenerte en {new_gym}, {name}! 💪 "
+    "Empezamos de cero desde aquí; tu historial se quedó con tu gym anterior."
 )
-SWITCH_CANCELLED = "No problem — you're still with {gym}. 👍"
+SWITCH_CANCELLED = "Sin problema — sigues con {gym}. 👍"
 LINK_EXPIRED = (
-    "Sorry — that invite isn't active anymore. 😕 Ask your gym for their "
-    "current link or QR code, tap that, and we'll get you set up."
+    "Lo siento — esa invitación ya no está activa. 😕 Pídele a tu gym su enlace "
+    "o código QR actual, tócalo y te doy de alta."
 )
 
 AFFIRMATIVES = {"yes", "y", "yep", "yeah", "yup", "ok", "okay", "sure", "si", "sí", "correct"}

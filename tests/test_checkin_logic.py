@@ -201,14 +201,14 @@ def test_the_pinned_nudge_names_the_workout_and_missed_day():
         missed_weekday=MON,  # skipped Monday's Legs; today is Wednesday
     )
     message = decide_checkin(at(date(2026, 7, 15)), d).message
-    assert message and "Legs" in message and "Monday" in message and "?" in message
+    assert message and "Legs" in message and "lunes" in message and "?" in message
     assert "Push" in message  # names today's workout too
 
 
 def test_the_winddown_copy_leaves_the_door_open():
     d = data(last_session_date=date(2026, 6, 20), ignored_nudges=GIVE_UP_NUDGES)
     message = decide_checkin(at(date(2026, 7, 16)), d).message
-    assert message and "whenever" in message.lower()
+    assert message and "cuando" in message.lower()  # "escríbeme cuando quieras"
 
 
 @pytest.mark.parametrize("hour", [8, 21, 22, 0, 7])

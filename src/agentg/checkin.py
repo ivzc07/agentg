@@ -20,14 +20,15 @@ GIVE_UP_NUDGES = 4  # this many ignored ≈ two weeks → wind down and lapse
 
 ON, OFF, SNOOZED, LAPSED = "on", "off", "snoozed", "lapsed"
 
-WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+WEEKDAY_NAMES = ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo")
 
 # Canonical copy (spec §Proactive check-ins / #8 resolution): warm, direct,
-# zero guilt.
-GAP_NUDGE = "It's been {days} days — got time for a session today?"
-PINNED_NUDGE = "Missed {missed} — back on it today?"
-PINNED_NUDGE_WITH_TODAY = "Missed {missed} — back on it today? I've got your {today} ready."
-WINDDOWN = "I'll stop checking in for now. Message me whenever — we'll pick it right back up."
+# zero guilt. Spanish — the check-in has no incoming message to mirror, and
+# Spanish is the default (ADR 0002).
+GAP_NUDGE = "Ya van {days} días — ¿tienes chance de una sesión hoy?"
+PINNED_NUDGE = "Te saltaste {missed} — ¿lo retomamos hoy?"
+PINNED_NUDGE_WITH_TODAY = "Te saltaste {missed} — ¿lo retomamos hoy? Ya tengo listo tu {today}."
+WINDDOWN = "Dejaré de escribirte por ahora. Escríbeme cuando quieras y lo retomamos al instante."
 
 
 @dataclass(frozen=True)
@@ -115,8 +116,8 @@ def _gap_message(data: CheckinData, today: date) -> str:
 
 
 def _pinned_message(data: CheckinData) -> str:
-    missed = data.missed_workout or "your last session"
-    if data.missed_weekday is not None:  # "Missed Legs Monday" — matches the canonical copy
+    missed = data.missed_workout or "tu última sesión"
+    if data.missed_weekday is not None:  # "Te saltaste Piernas lunes" — matches the canonical copy
         missed = f"{missed} {WEEKDAY_NAMES[data.missed_weekday]}"
     if data.todays_workout:
         return PINNED_NUDGE_WITH_TODAY.format(missed=missed, today=data.todays_workout)

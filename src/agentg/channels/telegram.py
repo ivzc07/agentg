@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 CHANNEL = "telegram"
 MAX_MESSAGE_LENGTH = 4096  # Telegram's hard cap per message
-ERROR_REPLY = "Sorry — something went wrong on my end. Give it another try in a moment."
-EMPTY_REPLY_FALLBACK = "Hmm, I came up empty — mind trying that again?"
+ERROR_REPLY = "Uy — algo falló de mi lado. Inténtalo de nuevo en un momento."
+EMPTY_REPLY_FALLBACK = "Mmm, me quedé en blanco — ¿lo intentas de nuevo?"
 
 ReplyFn = Callable[[IncomingMessage], Awaitable[str]]
 
@@ -40,11 +40,12 @@ def parse_start_payload(text: str) -> str | None:
 
 
 def split_reply(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
-    """Split into chunks of at most ``limit`` UTF-16 code units.
+    """Strip model bold markup, then split by Telegram's UTF-16 limit.
 
     Telegram's 4096 cap counts UTF-16 units, not code points — an emoji
     weighs 2. Splitting per character keeps surrogate pairs intact.
     """
+    text = text.replace("**", "")
     chunks: list[str] = []
     current: list[str] = []
     units = 0

@@ -67,10 +67,6 @@ DEFAULT_RULES_DOC = """\
   to stop training now and seek emergency care.
 - On any of these, and on a new injury or new pain, offer to flag it to their
   coach — share only if they say yes.
-
-## Disclaimer
-- "I'm an AI coach, not a medical professional." Say it warmly at intake, again
-  on the first Routine, and whenever an injury or new pain comes up.
 """
 
 Clock = Callable[[], datetime]

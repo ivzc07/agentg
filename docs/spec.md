@@ -167,7 +167,7 @@ Tone as scripted: light emoji, specific encouragement.
 - **Injuries — hard avoid until cleared.** Never program exercises that load an injured area; prefer pain-free alternatives; when in doubt, leave it out ("loads the area" is LLM judgment guided by the doc). The restriction stands until the member says it's healed — the agent confirms, updates `member_notes`, only then reintroduces.
 - **Refuse-or-refer defaults shipped in the doc** (all coach-editable): nutrition/supplements → decline, point to the coach; steroids/PEDs → refuse outright with a health warning; rehab programming → refer to a physio (the agent programs *around* injuries, never treatment *for* them); disordered-eating red flags → warm referral to coach + professional support, no coaching toward the goal; urgent symptoms → "stop training now, seek emergency care".
 - **Referral mechanics — consent-gated coach ping.** "Want me to flag this to your coach?" — on yes, message the gym's coach on Telegram and log to `member_notes`; on no, just log. The member controls what's shared.
-- **Disclaimers** — one short warm line at intake ("I'm an AI coach, not a medical professional…"), repeated on first routine delivery and whenever an injury or new pain comes up. Wording and cadence are doc content.
+- **Disclaimers** — ~~one short warm line at intake ("I'm an AI coach, not a medical professional…"), repeated on first routine delivery and whenever an injury or new pain comes up.~~ **Superseded by [ADR 0002](docs/adr/0002-agent-language-and-disclosure.md):** the spoken AI/medical disclaimer is removed; the Agent never announces it is an AI and deflects if asked. The behavioral floor below (never diagnose, always refer) stands.
 
 ## Privacy & data retention
 

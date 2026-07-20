@@ -58,6 +58,16 @@ async def test_handler_passes_the_incoming_message_and_sends_the_reply():
     message.answer.assert_awaited_once_with("welcome back!")
 
 
+async def test_handler_sends_model_markdown_as_plain_text():
+    async def reply_fn(msg):
+        return "Do **bench** today 💪"
+
+    message = FakeMessage()
+    await make_message_handler(reply_fn)(message)
+
+    message.answer.assert_awaited_once_with("Do bench today 💪")
+
+
 async def test_handler_extracts_the_deep_link_payload():
     calls = {}
 
