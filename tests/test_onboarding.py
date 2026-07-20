@@ -15,7 +15,7 @@ import agentg.runtime as runtime_module
 from agentg.db import create_engine
 from agentg.messages import IncomingMessage
 from agentg.models import Member
-from agentg.onboarding import DEAD_END, Onboarding
+from agentg.onboarding import DEAD_END_INSTRUCTION, Onboarding
 from agentg.runtime import AgentRuntime
 from agentg.notes import NotesStore
 from agentg.checkin_store import CheckinStore
@@ -24,6 +24,7 @@ from agentg.forget import ForgetStore
 from agentg.routines import RoutineStore
 from agentg.store import LinkingStore
 from agentg.training import TrainingStore
+from conftest import identity_phraser
 
 
 async def null_summarizer(old_items, existing_notes):
@@ -38,7 +39,7 @@ async def runtime(tmp_path):
         agent=object(),
         engine=engine,
         store=store,
-        onboarding=Onboarding(store),
+        onboarding=Onboarding(store, identity_phraser),
         training=TrainingStore(engine),
         notes=NotesStore(engine),
         routines=RoutineStore(engine),
@@ -94,6 +95,22 @@ async def test_correcting_the_prefilled_name_uses_the_typed_name(runtime):
     assert "Call me Anita" in greet
     linked = await runtime.store.identity_for("telegram", "42")
     assert linked is not None and linked.member.name == "Call me Anita"
+
+
+async def test_a_deflecting_reply_is_re_asked_instead_of_becoming_the_name(runtime):
+    gym = await runtime.store.create_gym("Iron Temple")
+    await runtime.handle_message(incoming("/start x", link_code=gym.invite_code))
+
+    ask = await runtime.handle_message(incoming("Ponme el nombre que tu quieras"))
+
+    assert "Ponme el nombre que tu quieras" not in ask
+    assert "Iron Temple" in ask  # still re-asking, not a dead end
+    assert await member_count(runtime.store) == 0
+
+    greet = await runtime.handle_message(incoming("Anita"))
+    linked = await runtime.store.identity_for("telegram", "42")
+    assert linked is not None and linked.member.name == "Anita"
+    assert "Anita" in greet
 
 
 async def test_missing_profile_name_is_asked_for_instead_of_confirmed(runtime):
@@ -178,6 +195,26 @@ async def test_invite_code_typed_as_plain_text_links(runtime):
     assert linked is not None and linked.gym.id == gym.id
 
 
+# --- AC: the phraser sees what the person actually said, not just a template ---
+
+
+async def test_the_phraser_receives_what_the_member_said(runtime):
+    seen = []
+
+    async def recording_phraser(instruction, member_text):
+        seen.append((instruction, member_text))
+        return instruction
+
+    runtime.onboarding.phraser = recording_phraser
+    gym = await runtime.store.create_gym("Iron Temple")
+
+    await runtime.handle_message(incoming("/start x", link_code=gym.invite_code))
+    await runtime.handle_message(incoming("No sé cómo podría llamarme"))
+
+    assert seen[-1][1] == "No sé cómo podría llamarme"
+    assert "Iron Temple" in seen[-1][0]
+
+
 # --- AC: no or invalid code -> polite dead end, no Member row, no gym list ---
 
 
@@ -186,7 +223,7 @@ async def test_cold_start_without_a_code_is_a_polite_dead_end(runtime):
 
     reply = await runtime.handle_message(incoming("/start", link_code=""))
 
-    assert reply == DEAD_END
+    assert reply == DEAD_END_INSTRUCTION
     assert "Iron Temple" not in reply  # gyms are never listed
     assert await member_count(runtime.store) == 0
 
@@ -196,7 +233,7 @@ async def test_invalid_code_is_a_polite_dead_end(runtime):
 
     for message in (incoming("/start x", link_code="wrong-code"), incoming("hello there")):
         reply = await runtime.handle_message(message)
-        assert reply == DEAD_END
+        assert reply == DEAD_END_INSTRUCTION
         assert "Iron Temple" not in reply
     assert await member_count(runtime.store) == 0
 

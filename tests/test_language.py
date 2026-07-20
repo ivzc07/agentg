@@ -1,8 +1,10 @@
 """Language rule & AI-disclosure (ADR 0002).
 
-The Agent mirrors the Member's language, defaulting to Spanish; onboarding and
-check-in templates — the surfaces with no LLM turn to mirror — are Spanish; and
-the Agent never announces it is an AI (deflects if asked) while keeping the
+The Agent mirrors the Member's language, defaulting to Spanish. Onboarding's
+phraser follows the same mirror-or-Spanish-default rule (its instructions are
+English on purpose — they're never sent as-is, only phrased); check-in
+templates — the one surface with no LLM turn at all — stay fixed Spanish. The
+Agent never announces it is an AI (deflects if asked) while keeping the
 behavioral safety floor.
 """
 
@@ -47,16 +49,13 @@ def test_the_default_rules_doc_drops_the_disclaimer_section():
     assert "i'm an ai coach" not in doc
 
 
-# --- onboarding copy is Spanish ---
+# --- onboarding's phraser follows the same mirror-or-Spanish rule ---
 
 
-def test_onboarding_copy_is_spanish():
-    assert "recepción" in onboarding.DEAD_END.lower()
-    assert "gusto" in onboarding.WELCOME.lower()
-    assert "cambiarte" in onboarding.SWITCH_CONFIRM.lower()
-    assert "sí / no" in onboarding.SWITCH_CONFIRM.lower()
-    for constant in (onboarding.DEAD_END, onboarding.WELCOME, onboarding.NAME_ASK):
-        assert "welcome" not in constant.lower()  # no leftover English
+def test_onboarding_phraser_pins_the_mirror_and_spanish_default():
+    text = onboarding._PHRASER_PROMPT.lower()
+    assert "mirror" in text
+    assert "spanish" in text  # the default when there is no signal yet
 
 
 def test_onboarding_still_accepts_spanish_yes():
