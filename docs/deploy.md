@@ -1,7 +1,7 @@
 # Production deployment (Coolify)
 
 Spec: [docs/spec.md — Hosting & deployment](spec.md#hosting--deployment).
-Production runs on the Coolify instance at **`<coolify-host>`** (host IP
+Production runs on the owner's Coolify instance (host IP
 `187.77.195.48`, server `localhost`), project **agentg**, environment
 **production**. Everything below was created via the Coolify API and lives in
 Coolify — nothing secret is in this repo.
@@ -54,8 +54,8 @@ secrets.
 ## Backups
 
 **Not yet configured on this instance.** The spec calls for a daily `pg_dump`
-to an S3-compatible offsite bucket with ~30-day retention, but
-`<coolify-host>` has no S3 storage set up. To enable it:
+to an S3-compatible offsite bucket with ~30-day retention, but the Coolify
+instance has no S3 storage set up. To enable it:
 
 1. In Coolify, add an S3-compatible storage (R2 / B2 / Hetzner) under Storages.
 2. On Database → `agentg-postgres` → Backups, add a scheduled backup: daily,
