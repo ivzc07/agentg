@@ -23,7 +23,7 @@ from agentg.db import create_engine
 from agentg.demos import DemoStore
 from agentg.forget import ForgetStore
 from agentg.notes import NotesStore
-from agentg.onboarding import Onboarding
+from agentg.onboarding import Onboarding, build_phraser
 from agentg.routines import RoutineStore
 from agentg.runtime import AgentRuntime
 from agentg.store import LinkingStore
@@ -52,7 +52,7 @@ async def run() -> None:
         agent=build_agent(settings),
         engine=engine,
         store=store,
-        onboarding=Onboarding(store),
+        onboarding=Onboarding(store, build_phraser(settings)),
         training=training,
         notes=NotesStore(engine),
         routines=routines,

@@ -16,6 +16,7 @@ from agentg.store import LinkingStore
 from agentg.training import TrainingStore
 from agentg.onboarding import Onboarding
 from agentg.messages import IncomingMessage
+from conftest import unused_phraser
 
 
 def item(i: int, role: str = "user") -> dict:
@@ -45,7 +46,7 @@ async def env(tmp_path):
         agent=object(),
         engine=engine,
         store=linking,
-        onboarding=Onboarding(linking),
+        onboarding=Onboarding(linking, unused_phraser),
         training=training,
         notes=notes,
         routines=RoutineStore(engine),

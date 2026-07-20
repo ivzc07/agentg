@@ -3,6 +3,19 @@
 from datetime import UTC, datetime, timedelta
 
 
+async def unused_phraser(instruction: str, member_text: str) -> str:
+    """An Onboarding phraser for tests that don't exercise onboarding replies."""
+    raise AssertionError("onboarding should not phrase anything in this test")
+
+
+async def identity_phraser(instruction: str, member_text: str) -> str:
+    """An Onboarding phraser for tests that exercise onboarding replies: no
+    model, so a reply is exactly its instruction — assertions about facts
+    (gym/name) exercise the real instruction text the production phraser
+    would receive."""
+    return instruction
+
+
 class FakeClock:
     """An injectable clock: starts at a fixed instant, advances on demand."""
 

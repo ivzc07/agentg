@@ -18,6 +18,7 @@ from agentg.routines import RoutineStore
 from agentg.store import LinkingStore
 from agentg.store import LinkingStore
 from agentg.training import TrainingStore
+from conftest import unused_phraser
 
 
 async def null_summarizer(old_items, existing_notes):
@@ -35,7 +36,7 @@ def make_runtime(url) -> AgentRuntime:
         agent=object(),
         engine=engine,
         store=store,
-        onboarding=Onboarding(store),
+        onboarding=Onboarding(store, unused_phraser),
         training=TrainingStore(engine),
         notes=NotesStore(engine),
         routines=RoutineStore(engine),

@@ -133,14 +133,15 @@ async def test_forget_is_idempotent(env):
 
 async def test_messaging_after_forget_dead_ends_in_onboarding(env):
     from agentg.messages import IncomingMessage
-    from agentg.onboarding import DEAD_END, Onboarding
+    from agentg.onboarding import DEAD_END_INSTRUCTION, Onboarding
+    from conftest import identity_phraser
 
     member = await populate(env, channel_user_id="42")
     await env.forget.forget_member(member.id)
 
     # a fresh onboarding sees no identity → the polite invite-code dead end
-    onboarding = Onboarding(env.linking)
+    onboarding = Onboarding(env.linking, identity_phraser)
     msg = IncomingMessage(channel="telegram", channel_user_id="42", text="hey again")
     linked = await env.linking.identity_for("telegram", "42")
     reply = await onboarding.handle(msg, linked)
-    assert reply == DEAD_END
+    assert reply == DEAD_END_INSTRUCTION

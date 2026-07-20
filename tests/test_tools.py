@@ -17,6 +17,7 @@ from agentg.routines import RoutineStore
 from agentg.store import LinkingStore
 from agentg.tools import MemberContext
 from agentg.training import TrainingStore
+from conftest import unused_phraser
 
 
 async def null_summarizer(old_items, existing_notes):
@@ -72,7 +73,7 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
         agent=object(),
         engine=engine,
         store=store,
-        onboarding=Onboarding(store),
+        onboarding=Onboarding(store, unused_phraser),
         training=TrainingStore(engine),
         notes=NotesStore(engine),
         routines=RoutineStore(engine),

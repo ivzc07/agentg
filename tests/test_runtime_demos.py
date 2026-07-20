@@ -17,6 +17,7 @@ from agentg.routines import RoutineStore
 from agentg.runtime import AgentRuntime
 from agentg.store import LinkingStore
 from agentg.training import TrainingStore
+from conftest import unused_phraser
 
 
 class FakeSender:
@@ -42,7 +43,7 @@ async def env(tmp_path):
         agent=object(),
         engine=engine,
         store=store,
-        onboarding=Onboarding(store),
+        onboarding=Onboarding(store, unused_phraser),
         training=TrainingStore(engine),
         notes=NotesStore(engine),
         routines=RoutineStore(engine),
