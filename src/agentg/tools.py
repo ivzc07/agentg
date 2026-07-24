@@ -137,7 +137,12 @@ async def get_last_sets(ctx: RunContextWrapper[MemberContext], exercise: str) ->
     c = ctx.context
     info = await c.stores.training.last_sets(c.member_id, exercise)
     if info is None:
-        return {"error": f"no logged sets of {exercise} yet"}
+        return {
+            "error": (
+                f"no logged sets of {exercise} yet — ask the Member for the weight "
+                "and reps, or try a different exercise name"
+            )
+        }
     return {**info, "weight_unit": c.weight_unit}
 
 
@@ -224,7 +229,12 @@ async def save_routine(
     """
     c = ctx.context
     if not workouts:
-        return {"error": "a routine needs at least one workout"}
+        return {
+            "error": (
+                "a routine needs at least one workout — include at least one weekday "
+                "with exercises from list_exercises"
+            )
+        }
     specs = [
         WorkoutSpec(
             weekday=workout.weekday,
@@ -353,7 +363,12 @@ async def snooze_checkins(ctx: RunContextWrapper[MemberContext], until: str) -> 
     try:
         until_date = date.fromisoformat(until)
     except ValueError:
-        return {"error": f"{until!r} isn't a YYYY-MM-DD date"}
+        return {
+            "error": (
+                f"{until!r} isn't a YYYY-MM-DD date — pass an ISO date like "
+                f"{c.stores.training.today().isoformat()}"
+            )
+        }
     await c.stores.checkins.snooze_until(c.member_id, until_date)
     return {"checkins": "snoozed", "until": until_date.isoformat()}
 

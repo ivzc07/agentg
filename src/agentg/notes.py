@@ -47,7 +47,10 @@ class NotesStore:
         async with self._sessions() as db:
             note = await db.get(MemberNote, note_id)
             if note is None or note.member_id != member_id:
-                raise ValueError(f"no note #{note_id} for this member")
+                raise ValueError(
+                    f"no note #{note_id} for this member — check the note ids "
+                    "in your snapshot, or ask the Member which one they mean"
+                )
             note.retired_at = self._clock()
             await db.commit()
             return note
