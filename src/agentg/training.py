@@ -308,7 +308,13 @@ class TrainingStore:
             await db.commit()
             final_weight = weight if weight is not None else batch[0].weight
             final_reps = list(reps) if reps is not None else [row.reps for row in batch]
-            return LoggedSets(resolved.name, final_weight, final_reps, previous)
+            return LoggedSets(
+                resolved.name,
+                final_weight,
+                final_reps,
+                previous,
+                suspect=_suspect_hint(final_weight, previous),
+            )
 
     async def last_sets(self, member_id: int, exercise: str) -> dict[str, Any] | None:
         """The previous Session's numbers for an Exercise (never the open one)."""

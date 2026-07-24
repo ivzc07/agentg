@@ -243,6 +243,39 @@ async def test_first_log_of_an_exercise_is_not_suspect(env):
     assert logged.suspect is None
 
 
+async def test_an_edit_to_a_weight_beyond_2x_last_is_flagged_suspect(env):
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+    await env.training.close_session(env.member_id)
+    env.clock.advance(days(2))
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 62.5 8,8,8")
+
+    edited = await env.training.edit_logged_sets(env.member_id, "bench", weight=600)
+
+    assert edited.weight == 600.0  # still stored — same typo surface as log_sets
+    assert edited.suspect is not None
+
+
+async def test_a_plausible_edit_is_not_suspect(env):
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+    await env.training.close_session(env.member_id)
+    env.clock.advance(days(2))
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 600 8,8,8")
+
+    edited = await env.training.edit_logged_sets(env.member_id, "bench", weight=62.5)
+
+    assert edited.suspect is None
+
+
+async def test_copy_last_sets_is_never_suspect(env):
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+    await env.training.close_session(env.member_id)
+    env.clock.advance(days(2))
+
+    copied = await env.training.copy_last_sets(env.member_id, env.gym_id, "bench")
+
+    assert copied.suspect is None  # copies the previous weight, nothing to flag
+
+
 # --- "same as last time" ---
 
 

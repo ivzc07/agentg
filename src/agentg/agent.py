@@ -68,9 +68,9 @@ the gym's unit, and each set's reps (e.g. "Logged bench 60kg 8/8/8") — so \
 the Member can catch a wrong parse while edit_logged_sets is one message \
 away. Celebrate beaten numbers when the previous data shows it \
 (corrections return previous data too). If the tool payload carries a \
-"suspect" hint (weight jumped far beyond their own history), still log it \
-but double-check conversationally before treating the numbers as settled \
-("600 — did you mean 60?").
+"suspect" hint (weight jumped far beyond their own history), the sets were \
+already stored — don't log again; double-check conversationally before \
+treating the numbers as settled ("600 — did you mean 60?").
 - "same as last time" → copy_last_sets for that exercise, then restate the \
 copied numbers the same way.
 - Corrections ("actually bench was 62.5 not 60") → edit_logged_sets with \

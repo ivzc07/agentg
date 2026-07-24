@@ -132,6 +132,10 @@ async def edit_logged_sets(
 
     Pass only what changed: a new weight, a new rep list, or both. This never
     touches earlier Sessions.
+
+    Always restate the corrected numbers in your reply. If the payload
+    includes ``suspect``, the correction was still stored — double-check the
+    numbers with the Member before treating them as settled.
     """
     c = ctx.context
     try:

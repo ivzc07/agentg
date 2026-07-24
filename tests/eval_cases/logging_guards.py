@@ -12,7 +12,17 @@ silently poison that history. Two cheap layers:
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+
+def _has_number_token(text: str, token: str) -> bool:
+    """True when ``token`` appears as a whole number, not inside a longer one.
+
+    "60" is present in "60kg" but not in "600" or "3.60" — a wrong echo must
+    not satisfy the check via substring accident.
+    """
+    return re.search(rf"(?<![\d.]){re.escape(token)}(?![\d.])", text) is not None
 
 
 def reply_restates_logged_sets(reply: str, logged: dict[str, Any]) -> bool:
@@ -29,10 +39,10 @@ def reply_restates_logged_sets(reply: str, logged: dict[str, Any]) -> bool:
         candidates = {f"{weight:g}", f"{weight:.1f}", f"{weight:.2f}"}
         if float(weight) == int(weight):
             candidates.add(str(int(weight)))
-        if not any(token in text for token in candidates):
+        if not any(_has_number_token(text, token) for token in candidates):
             return False
     for rep in logged["reps"]:
-        if str(rep) not in text:
+        if not _has_number_token(text, str(rep)):
             return False
     return True
 

@@ -39,6 +39,12 @@ def test_restate_scorer_rejects_a_reply_that_drops_the_weight():
     assert not reply_restates_logged_sets("Bench ×8 ×8 ×8 logged.", logged)
 
 
+def test_restate_scorer_rejects_a_wrong_echo_containing_the_digits():
+    # "600" must not satisfy weight 60 via substring accident.
+    logged = RESTATE_AFTER_LOG_SETS["logged"]
+    assert not reply_restates_logged_sets("Bench 600 kg ×8 ×8 ×8 ✅", logged)
+
+
 def test_suspect_scorer_accepts_a_double_check():
     # Issue #53 example: "600 - did you mean 60?"
     assert reply_double_checks_suspect(
