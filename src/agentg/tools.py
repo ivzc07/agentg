@@ -16,14 +16,10 @@ from agents import RunContextWrapper, Tool, function_tool
 from pydantic import BaseModel, Field
 
 from agentg.advice import suggest_for_today
-from agentg.checkin_store import CheckinStore
 from agentg.checkin_sweep import Notifier
-from agentg.demos import DemoStore
-from agentg.forget import ForgetStore
-from agentg.notes import NotesStore
-from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
-from agentg.store import LinkingStore
-from agentg.training import LoggedSets, TrainingStore
+from agentg.routines import ExerciseSpec, WorkoutSpec
+from agentg.stores import Stores
+from agentg.training import LoggedSets
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +44,7 @@ class WorkoutInput(BaseModel):
 class MemberContext:
     """Everything a tool needs to act for the Member this turn is about."""
 
-    training: TrainingStore
-    notes: NotesStore
-    routines: RoutineStore
-    linking: LinkingStore
-    checkins: CheckinStore
-    demos: DemoStore
-    forget: ForgetStore
+    stores: Stores
     member_id: int
     gym_id: int
     member_name: str
@@ -81,13 +71,13 @@ def _logged(payload: LoggedSets, unit: str) -> dict[str, Any]:
 async def open_session_payload(c: MemberContext) -> dict[str, Any]:
     """Open (or resume) the Member's Session and assemble the opener facts:
     the gap, the last Session's numbers, and today's Workout from the Routine."""
-    opened = await c.training.open_session(c.member_id, c.gym_id)
+    opened = await c.stores.training.open_session(c.member_id, c.gym_id)
     return {
         "session_id": opened.session_id,
         "resumed_existing": opened.reopened,
         "days_since_last_session": opened.days_since_last,
         "last_session": opened.last_session,
-        "todays_workout": await c.routines.todays_workout(c.member_id),
+        "todays_workout": await c.stores.routines.todays_workout(c.member_id),
         "weight_unit": c.weight_unit,
     }
 
@@ -120,7 +110,7 @@ async def log_sets(
     """
     c = ctx.context
     try:
-        logged = await c.training.log_sets(
+        logged = await c.stores.training.log_sets(
             c.member_id, c.gym_id, line, exercise=exercise, rpe=rpe, note=note
         )
     except ValueError as error:
@@ -133,7 +123,7 @@ async def copy_last_sets(ctx: RunContextWrapper[MemberContext], exercise: str) -
     """Log "same as last time": copy this exercise's Sets from the previous Session."""
     c = ctx.context
     try:
-        logged = await c.training.copy_last_sets(c.member_id, c.gym_id, exercise)
+        logged = await c.stores.training.copy_last_sets(c.member_id, c.gym_id, exercise)
     except ValueError as error:
         return {"error": str(error)}
     return _logged(logged, c.weight_unit)
@@ -153,7 +143,7 @@ async def edit_logged_sets(
     """
     c = ctx.context
     try:
-        edited = await c.training.edit_logged_sets(c.member_id, exercise, weight=weight, reps=reps)
+        edited = await c.stores.training.edit_logged_sets(c.member_id, exercise, weight=weight, reps=reps)
     except ValueError as error:
         return {"error": str(error)}
     return _logged(edited, c.weight_unit)
@@ -163,7 +153,7 @@ async def edit_logged_sets(
 async def get_last_sets(ctx: RunContextWrapper[MemberContext], exercise: str) -> dict[str, Any]:
     """Read an exercise's numbers from the previous Session (never from memory)."""
     c = ctx.context
-    info = await c.training.last_sets(c.member_id, exercise)
+    info = await c.stores.training.last_sets(c.member_id, exercise)
     if info is None:
         return {"error": f"no logged sets of {exercise} yet"}
     return {**info, "weight_unit": c.weight_unit}
@@ -178,7 +168,7 @@ async def close_session(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]
     """
     c = ctx.context
     try:
-        summary = await c.training.close_session(c.member_id)
+        summary = await c.stores.training.close_session(c.member_id)
     except ValueError as error:
         return {"error": str(error)}
     return {
@@ -200,7 +190,7 @@ async def remember_note(
     burpees", "training for a half marathon") — not for small talk.
     """
     c = ctx.context
-    note = await c.notes.remember(c.member_id, c.gym_id, kind, text)
+    note = await c.stores.notes.remember(c.member_id, c.gym_id, kind, text)
     return {"note_id": note.id, "kind": note.kind, "text": note.text}
 
 
@@ -213,7 +203,7 @@ async def retire_note(ctx: RunContextWrapper[MemberContext], note_id: int) -> di
     """
     c = ctx.context
     try:
-        note = await c.notes.retire(c.member_id, note_id)
+        note = await c.stores.notes.retire(c.member_id, note_id)
     except ValueError as error:
         return {"error": str(error)}
     return {"retired_note_id": note.id, "text": note.text}
@@ -227,14 +217,14 @@ async def get_rules_doc(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]
     Do not invent rules that contradict it.
     """
     c = ctx.context
-    return {"rules_doc": await c.routines.effective_rules_doc(c.gym_id)}
+    return {"rules_doc": await c.stores.routines.effective_rules_doc(c.gym_id)}
 
 
 @function_tool
 async def list_exercises(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     """The Exercise catalog to draw a Routine from. Prescribe only these names."""
     c = ctx.context
-    return {"exercises": await c.training.catalog_names()}
+    return {"exercises": await c.stores.training.catalog_names()}
 
 
 @function_tool
@@ -265,7 +255,7 @@ async def save_routine(
         for workout in workouts
     ]
     try:
-        routine = await c.routines.save_routine(c.member_id, c.gym_id, specs)
+        routine = await c.stores.routines.save_routine(c.member_id, c.gym_id, specs)
     except ValueError as error:
         # e.g. an exercise not in the catalog — the Agent should pick from
         # list_exercises and try again.
@@ -277,7 +267,7 @@ async def save_routine(
 async def get_routine(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     """Read the Member's current Routine (their weekly plan), or none if unset."""
     c = ctx.context
-    routine = await c.routines.active_routine(c.member_id)
+    routine = await c.stores.routines.active_routine(c.member_id)
     if routine is None:
         return {"routine": None}
     return {"routine": routine}
@@ -294,7 +284,9 @@ async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, An
     the suggestions ease back; open warm and guilt-free.
     """
     c = ctx.context
-    suggestions = await suggest_for_today(c.training, c.routines, c.member_id, c.gym_id)
+    suggestions = await suggest_for_today(
+        c.stores.training, c.stores.routines, c.member_id, c.gym_id
+    )
     return {
         "weight_unit": c.weight_unit,
         "suggestions": [
@@ -321,7 +313,7 @@ async def update_rules_doc_action(c: MemberContext, new_doc: str) -> dict[str, A
     if not c.is_coach:
         return _NOT_A_COACH
     # A Gym still on the shipped default gets its own editable copy here.
-    await c.routines.set_rules_doc(c.gym_id, new_doc)
+    await c.stores.routines.set_rules_doc(c.gym_id, new_doc)
     return {"saved": True, "gym": c.gym_name}
 
 
@@ -330,11 +322,11 @@ async def _resolve_member(
 ) -> Any:
     """The target Member for a coach action, or an ``{"error": ...}`` payload."""
     if member_id is not None:
-        member = await c.linking.member_in_gym(c.gym_id, member_id)
+        member = await c.stores.linking.member_in_gym(c.gym_id, member_id)
         if member is None:
             return {"error": f"no Member with id {member_id} in your Gym"}
         return member
-    matches = await c.linking.members_by_name(c.gym_id, member_name)
+    matches = await c.stores.linking.members_by_name(c.gym_id, member_name)
     if not matches:
         return {"error": f"no Member named {member_name!r} in your Gym"}
     if len(matches) > 1:
@@ -356,7 +348,7 @@ async def write_routine_action(
     if isinstance(target, dict):
         return target
     try:
-        routine = await c.routines.save_routine(
+        routine = await c.stores.routines.save_routine(
             target.id, c.gym_id, specs, coach_authored=True
         )
     except ValueError as error:
@@ -419,7 +411,7 @@ async def stop_checkins(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]
     turn them back on.
     """
     c = ctx.context
-    await c.checkins.turn_off(c.member_id)
+    await c.stores.checkins.turn_off(c.member_id)
     return {"checkins": "off", "reenable": "say 'start checking in again' anytime"}
 
 
@@ -436,7 +428,7 @@ async def snooze_checkins(ctx: RunContextWrapper[MemberContext], until: str) -> 
         until_date = date.fromisoformat(until)
     except ValueError:
         return {"error": f"{until!r} isn't a YYYY-MM-DD date"}
-    await c.checkins.snooze_until(c.member_id, until_date)
+    await c.stores.checkins.snooze_until(c.member_id, until_date)
     return {"checkins": "snoozed", "until": until_date.isoformat()}
 
 
@@ -444,7 +436,7 @@ async def snooze_checkins(ctx: RunContextWrapper[MemberContext], until: str) -> 
 async def resume_checkins(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     """Turn proactive check-ins back on ("start checking in again")."""
     c = ctx.context
-    await c.checkins.resume(c.member_id)
+    await c.stores.checkins.resume(c.member_id)
     return {"checkins": "on"}
 
 
@@ -458,7 +450,7 @@ async def show_demo(ctx: RunContextWrapper[MemberContext], exercise: str) -> dic
     describe the movement in words instead.
     """
     c = ctx.context
-    ref = await c.demos.resolve(exercise, c.gym_id)
+    ref = await c.stores.demos.resolve(exercise, c.gym_id)
     if ref is None:
         return {"available": False, "exercise": exercise}
     c.demo_requests.append(ref.exercise_name)
@@ -470,10 +462,10 @@ async def flag_to_coach_action(c: MemberContext, summary: str, share: bool) -> d
 
     The note is always recorded (the Member's own record); the Coach ping fires
     only when ``share`` is True. The Member controls what's shared."""
-    await c.notes.remember(c.member_id, c.gym_id, "other", f"Safety flag: {summary}")
+    await c.stores.notes.remember(c.member_id, c.gym_id, "other", f"Safety flag: {summary}")
     if not share or c.notifier is None:
         return {"logged": True, "coaches_notified": 0}
-    coaches = await c.linking.coaches_for_gym(c.gym_id, exclude_member_id=c.member_id)
+    coaches = await c.stores.linking.coaches_for_gym(c.gym_id, exclude_member_id=c.member_id)
     text = f"Heads-up from your member {c.member_name}: {summary}"
     notified = 0
     for _member_id, _name, channel, channel_user_id in coaches:
@@ -512,7 +504,7 @@ async def delete_my_data(ctx: RunContextWrapper[MemberContext], confirm: bool) -
     c = ctx.context
     if not confirm:
         return {"deleted": False, "need_confirmation": True}
-    await c.forget.forget_member(c.member_id)
+    await c.stores.forget.forget_member(c.member_id)
     return {"deleted": True}
 
 

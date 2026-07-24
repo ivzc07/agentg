@@ -15,19 +15,13 @@ from agentg.channels.telegram import (
     build_bot,
     run_polling,
 )
-from agentg.checkin_store import CheckinStore
 from agentg.checkin_sweep import run_sweep
 from agentg.compaction import build_summarizer
 from agentg.config import Settings
 from agentg.db import create_engine
-from agentg.demos import DemoStore
-from agentg.forget import ForgetStore
-from agentg.notes import NotesStore
 from agentg.onboarding import Onboarding, build_phraser
-from agentg.routines import RoutineStore
 from agentg.runtime import AgentRuntime
-from agentg.store import LinkingStore
-from agentg.training import TrainingStore
+from agentg.stores import Stores
 
 logger = logging.getLogger(__name__)
 
@@ -37,11 +31,7 @@ async def run() -> None:
     # Tracing exports to the OpenAI platform; we may not be running OpenAI models.
     set_tracing_disabled(True)
     engine = create_engine(settings.database_url)
-    store = LinkingStore(engine)
-    training = TrainingStore(engine)
-    routines = RoutineStore(engine)
-    checkins = CheckinStore(engine)
-    demos = DemoStore(engine)
+    stores = Stores.from_engine(engine)
 
     bot = build_bot(settings.telegram_bot_token)
     notifier = TelegramNotifier(bot)
@@ -51,14 +41,8 @@ async def run() -> None:
     runtime = AgentRuntime(
         agent=build_agent(settings),
         engine=engine,
-        store=store,
-        onboarding=Onboarding(store, build_phraser(settings)),
-        training=training,
-        notes=NotesStore(engine),
-        routines=routines,
-        checkins=checkins,
-        demos=demos,
-        forget=ForgetStore(engine),
+        stores=stores,
+        onboarding=Onboarding(stores.linking, build_phraser(settings)),
         summarizer=build_summarizer(settings),
         demo_sender=demo_sender,
         notifier=notifier,
@@ -71,7 +55,9 @@ async def run() -> None:
 
     async def sweep() -> None:
         try:
-            sent = await run_sweep(datetime.now(UTC), checkins, training, routines, notifier)
+            sent = await run_sweep(
+                datetime.now(UTC), stores.checkins, stores.training, stores.routines, notifier
+            )
             if sent:
                 logger.info("check-in sweep sent %d nudges", sent)
         except Exception:

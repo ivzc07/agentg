@@ -14,6 +14,7 @@ from agentg.forget import ForgetStore
 from agentg.routines import DEFAULT_RULES_DOC, ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.snapshot import member_snapshot
 from agentg.store import LinkingStore
+from agentg.stores import Stores
 from agentg.tools import MemberContext, open_session_payload
 from agentg.training import TrainingStore
 
@@ -34,13 +35,15 @@ async def env(tmp_path):
     gym = await linking.create_gym("Iron Temple")
     member = await linking.link_member(gym.id, "Dani", "telegram", "42")
     context = MemberContext(
-        training=training,
-        notes=notes,
-        routines=routines,
-        linking=linking,
-        checkins=CheckinStore(engine),
-        demos=DemoStore(engine),
-        forget=ForgetStore(engine),
+        stores=Stores(
+            linking=linking,
+            training=training,
+            notes=notes,
+            routines=routines,
+            checkins=CheckinStore(engine),
+            demos=DemoStore(engine),
+            forget=ForgetStore(engine),
+        ),
         member_id=member.id,
         gym_id=gym.id,
         member_name="Dani",
@@ -96,11 +99,11 @@ async def test_the_agent_carries_the_routine_tools():
 
 
 async def test_the_effective_rules_doc_defaults_to_the_shipped_one(env):
-    assert await env.context.routines.effective_rules_doc(env.gym_id) == DEFAULT_RULES_DOC
+    assert await env.context.stores.routines.effective_rules_doc(env.gym_id) == DEFAULT_RULES_DOC
 
 
 async def test_the_catalog_is_available_to_draw_a_routine_from(env):
-    names = await env.context.training.catalog_names()
+    names = await env.context.stores.training.catalog_names()
     assert "bench press" in names and "squat" in names
 
 

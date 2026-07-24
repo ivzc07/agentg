@@ -10,14 +10,7 @@ from agentg.db import create_engine
 from agentg.messages import IncomingMessage
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
-from agentg.notes import NotesStore
-from agentg.checkin_store import CheckinStore
-from agentg.demos import DemoStore
-from agentg.forget import ForgetStore
-from agentg.routines import RoutineStore
-from agentg.store import LinkingStore
-from agentg.store import LinkingStore
-from agentg.training import TrainingStore
+from agentg.stores import Stores
 from conftest import unused_phraser
 
 
@@ -31,18 +24,12 @@ def sqlite_url(tmp_path) -> str:
 
 def make_runtime(url) -> AgentRuntime:
     engine = create_engine(url)
-    store = LinkingStore(engine)
+    stores = Stores.from_engine(engine)
     return AgentRuntime(
         agent=object(),
         engine=engine,
-        store=store,
-        onboarding=Onboarding(store, unused_phraser),
-        training=TrainingStore(engine),
-        notes=NotesStore(engine),
-        routines=RoutineStore(engine),
-        checkins=CheckinStore(engine),
-        demos=DemoStore(engine),
-        forget=ForgetStore(engine),
+        stores=stores,
+        onboarding=Onboarding(stores.linking, unused_phraser),
         summarizer=null_summarizer,
     )
 
@@ -94,9 +81,9 @@ async def test_turns_in_one_conversation_never_interleave(runtime, monkeypatch):
         return SimpleNamespace(final_output="ok")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
-    gym = await runtime.store.create_gym("Iron Temple")
-    await runtime.store.link_member(gym.id, "Ana", "telegram", "42")
-    await runtime.store.link_member(gym.id, "Ben", "telegram", "7")
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    await runtime.stores.linking.link_member(gym.id, "Ben", "telegram", "7")
 
     await asyncio.gather(
         runtime.handle_message(incoming("first", "42")),

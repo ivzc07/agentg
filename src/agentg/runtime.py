@@ -18,19 +18,14 @@ from agents import Agent, Runner
 from agents.extensions.memory import SQLAlchemySession
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from agentg.checkin_store import CheckinStore
 from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.demo_media import DemoSender, serve_demo
-from agentg.demos import DemoStore
-from agentg.forget import ForgetStore
 from agentg.messages import IncomingMessage, Reply
-from agentg.notes import NotesStore
-from agentg.routines import RoutineStore
 from agentg.onboarding import Onboarding
-from agentg.store import LinkedIdentity, LinkingStore
+from agentg.store import LinkedIdentity
+from agentg.stores import Stores
 from agentg.tools import MemberContext
-from agentg.training import TrainingStore
 
 logger = logging.getLogger(__name__)
 
@@ -39,14 +34,8 @@ logger = logging.getLogger(__name__)
 class AgentRuntime:
     agent: Agent
     engine: AsyncEngine
-    store: LinkingStore
+    stores: Stores
     onboarding: Onboarding
-    training: TrainingStore
-    notes: NotesStore
-    routines: RoutineStore
-    checkins: CheckinStore
-    demos: DemoStore
-    forget: ForgetStore
     summarizer: Summarizer
     # The channel's demo-animation sender; None disables demo delivery (tests
     # that don't exercise demos leave it unset).
@@ -62,8 +51,8 @@ class AgentRuntime:
 
     async def ensure_schema(self) -> None:
         """Create the domain and SDK session tables once at startup."""
-        await self.store.ensure_schema()
-        await self.training.ensure_seeded()
+        await self.stores.linking.ensure_schema()
+        await self.stores.training.ensure_seeded()
         session = SQLAlchemySession("startup:schema", engine=self.engine, create_tables=True)
         await session.get_items(limit=1)  # table creation happens on first use
 
@@ -72,13 +61,7 @@ class AgentRuntime:
 
     def member_context(self, linked: LinkedIdentity) -> MemberContext:
         return MemberContext(
-            training=self.training,
-            notes=self.notes,
-            routines=self.routines,
-            linking=self.store,
-            checkins=self.checkins,
-            demos=self.demos,
-            forget=self.forget,
+            stores=self.stores,
             notifier=self.notifier,
             member_id=linked.member.id,
             gym_id=linked.gym.id,
@@ -90,17 +73,17 @@ class AgentRuntime:
 
     async def handle_message(self, msg: IncomingMessage) -> Reply:
         async with self._locks[(msg.channel, msg.channel_user_id)]:
-            linked = await self.store.identity_for(msg.channel, msg.channel_user_id)
+            linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
             reply = await self.onboarding.handle(msg, linked)
             if reply is not None:
                 return Reply(reply)
             if linked is None:  # onboarding always replies for unlinked identities
                 raise RuntimeError("unlinked message reached the agent loop")
             # Any reply resets the check-in rhythm and revives a lapsed Member.
-            await self.checkins.reset_rhythm(linked.member.id)
+            await self.stores.checkins.reset_rhythm(linked.member.id)
             session = self.session_for_member(linked.member.id)
             await maybe_compact(
-                session, self.summarizer, self.notes, linked.member.id, linked.gym.id
+                session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
             )
             context = self.member_context(linked)
             result = await Runner.run(
@@ -122,7 +105,9 @@ class AgentRuntime:
             async def after_send() -> None:
                 for exercise in requests:
                     try:
-                        await serve_demo(self.demos, sender, exercise, gym_id, channel, user_id)
+                        await serve_demo(
+                            self.stores.demos, sender, exercise, gym_id, channel, user_id
+                        )
                     except Exception:
                         logger.exception("failed to serve demo %r to %s", exercise, user_id)
 
