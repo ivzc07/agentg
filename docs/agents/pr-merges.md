@@ -5,8 +5,8 @@ Two gates protect `main`: Greptile's review comments and the pytest CI check.
 
 ## Before merging
 
-1. Fetch Greptile's inline comments:
-   `gh api repos/ivzc07/agentg/pulls/<N>/comments`
+1. Fetch Greptile's inline comments (use `--paginate` so a PR with many comments does not hide later findings):
+   `gh api --paginate repos/ivzc07/agentg/pulls/<N>/comments`
 2. Read the checks: `gh pr checks <N> --repo ivzc07/agentg`.
 
 ## Handling P1/P2 findings
@@ -25,7 +25,7 @@ Reply on each comment thread noting what you did (the fix commit, or the dismiss
 
 ## The tests gate
 
-Do not merge unless the `tests` check (GitHub Actions pytest workflow, `.github/workflows/tests.yml`) has completed successfully.
+Do not merge unless the `pytest` check (the job in `.github/workflows/tests.yml`; the workflow's display name is "tests" but the status check is named after the job, `pytest`) has completed successfully.
 Pending, missing, or cancelled also blocks the merge.
 `main` enforces this with a branch ruleset requiring the `pytest` check, so a red or absent check blocks the merge button as well.
 
