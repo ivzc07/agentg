@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tests.behavioral.harness import ConversationHarness, message, tool
+from behavioral.harness import ConversationHarness, message, tool
 
 
 async def test_bare_numbers_attach_to_exercise_under_discussion(tmp_path):
@@ -73,7 +73,6 @@ async def test_correction_rewrites_weight_on_current_session_only(tmp_path):
         assert {s["weight"] for s in by_ex["bench press"]} == {62.5}
         # Prior closed session is untouched.
         prior = await h.stores.training.last_sets(h.member_id, "bench press")
-        # last_sets excludes current open session's numbers once... check API
         # After edit, last_sets still reads previous closed session when
         # excluding current — weight there stays 60.
         assert prior is not None

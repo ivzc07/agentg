@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agentg.models import Member, MemberChannel, MemberNote, Routine, Session, Set
-from tests.behavioral.harness import ConversationHarness, message, tool
+from behavioral.harness import ConversationHarness, message, tool
 
 
 async def _count(engine, model, **where) -> int:

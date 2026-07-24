@@ -197,9 +197,16 @@ class LiteLLMJudgeBackend:
 
     def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
         self.model = model or os.environ.get("AGENTG_JUDGE_MODEL") or DEFAULT_JUDGE_MODEL
-        self.api_key = api_key or os.environ.get("MODEL_API_KEY") or os.environ.get(
-            "ANTHROPIC_API_KEY"
-        )
+        # The key must match the judge's provider — MODEL_API_KEY belongs to
+        # the agent's model, which may be a different provider than the judge.
+        if api_key is not None:
+            self.api_key = api_key
+        elif self.model.startswith("anthropic/"):
+            self.api_key = os.environ.get("ANTHROPIC_API_KEY")
+        else:
+            self.api_key = os.environ.get("MODEL_API_KEY") or os.environ.get(
+                "ANTHROPIC_API_KEY"
+            )
 
     async def complete(self, system: str, user: str) -> str:
         import litellm

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tests.behavioral.harness import ConversationHarness, message, tool
+from behavioral.harness import ConversationHarness, message, tool
 
 _PUSH_PULL_LEGS = [
     {
@@ -62,7 +62,10 @@ async def test_routine_request_saves_catalog_only_weekdays(tmp_path):
                 assert set(ex) <= {"exercise", "sets", "reps"}
 
 
-async def test_routine_with_injury_records_note_and_avoids_loading_it(tmp_path):
+async def test_routine_with_injury_records_note_and_stores_scripted_routine(tmp_path):
+    # The scripted model picks the shoulder-friendly exercises here — this
+    # proves the note + routine plumbing, not the real model's judgment
+    # under injury (the judge layer covers that on the live path).
     async with ConversationHarness.create(tmp_path) as h:
         await h.linked_member()
 

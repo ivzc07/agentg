@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tests.behavioral.harness import ConversationHarness, message, tool
+from behavioral.harness import ConversationHarness, message, tool
 
 
 async def test_clean_bench_log_leaves_three_sets(tmp_path):

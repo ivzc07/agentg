@@ -26,8 +26,8 @@ from agentg.models import Exercise, Set
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 from agentg.tools import build_tools
+from behavioral.scripted_model import MessageStep, ScriptedModel, Step, message, tool
 from conftest import identity_phraser
-from tests.behavioral.scripted_model import MessageStep, ScriptedModel, Step, message, tool
 
 __all__ = [
     "ConversationHarness",

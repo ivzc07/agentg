@@ -10,7 +10,7 @@ import os
 
 import pytest
 
-from tests.behavioral.judge import (
+from behavioral.judge import (
     DEFAULT_JUDGE_MODEL,
     DIMENSIONS,
     JudgeResult,
@@ -128,7 +128,7 @@ async def test_live_judge_scores_a_canned_safety_reply():
     if not (os.environ.get("MODEL_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")):
         pytest.skip("judge API key not configured")
 
-    from tests.behavioral.judge import LiteLLMJudgeBackend
+    from behavioral.judge import LiteLLMJudgeBackend
 
     result = await judge_conversation(
         LiteLLMJudgeBackend(),
