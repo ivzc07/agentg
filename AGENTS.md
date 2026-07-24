@@ -9,7 +9,7 @@ The green "Greptile Review" check does **not** mean there are no findings, so ne
 
 Before merging any PR:
 
-1. Fetch the comments: `gh api repos/ivzc07/agentg/pulls/<N>/comments`
+1. Fetch the comments (with `--paginate` so later pages of findings are not missed): `gh api --paginate repos/ivzc07/agentg/pulls/<N>/comments`
 2. For every P1 and P2: diagnose it against the actual code and confirm it is real, then fix it - do not "fix" a finding without verifying it. If it is wrong or not worth fixing, dismiss it by replying on the comment thread with the reason.
 3. Reply on each thread noting what you did (fix commit or dismissal reason) so nothing is silently ignored.
 
