@@ -6,14 +6,8 @@ import pytest
 
 from agentg.compaction import COMPACT_THRESHOLD, KEEP_RECENT, CompactionSummary, maybe_compact
 from agentg.db import create_engine
-from agentg.notes import NotesStore
-from agentg.checkin_store import CheckinStore
-from agentg.demos import DemoStore
-from agentg.forget import ForgetStore
-from agentg.routines import RoutineStore
 from agentg.runtime import AgentRuntime
-from agentg.store import LinkingStore
-from agentg.training import TrainingStore
+from agentg.stores import Stores
 from agentg.onboarding import Onboarding
 from agentg.messages import IncomingMessage
 from conftest import unused_phraser
@@ -39,25 +33,17 @@ class RecordingSummarizer:
 @pytest.fixture
 async def env(tmp_path):
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'compact.db'}")
-    linking = LinkingStore(engine)
-    training = TrainingStore(engine)
-    notes = NotesStore(engine)
+    stores = Stores.from_engine(engine)
     runtime = AgentRuntime(
         agent=object(),
         engine=engine,
-        store=linking,
-        onboarding=Onboarding(linking, unused_phraser),
-        training=training,
-        notes=notes,
-        routines=RoutineStore(engine),
-        checkins=CheckinStore(engine),
-        demos=DemoStore(engine),
-        forget=ForgetStore(engine),
+        stores=stores,
+        onboarding=Onboarding(stores.linking, unused_phraser),
         summarizer=RecordingSummarizer(),
     )
     await runtime.ensure_schema()
-    gym = await linking.create_gym("Iron Temple")
-    member = await linking.link_member(gym.id, "Dani", "telegram", "42")
+    gym = await stores.linking.create_gym("Iron Temple")
+    member = await stores.linking.link_member(gym.id, "Dani", "telegram", "42")
 
     class Env:
         pass
@@ -65,7 +51,7 @@ async def env(tmp_path):
     env = Env()
     env.engine = engine
     env.runtime = runtime
-    env.notes = notes
+    env.notes = stores.notes
     env.member_id = member.id
     env.gym_id = gym.id
     env.session = runtime.session_for_member(member.id)

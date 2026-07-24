@@ -8,8 +8,10 @@ from agentg.db import create_engine
 from agentg.forget import ForgetStore
 from agentg.notes import NotesStore
 from agentg.routines import DEFAULT_RULES_DOC, RoutineStore
+from agentg.coaching import flag_to_coach_action
+from agentg.context import MemberContext
 from agentg.store import LinkingStore
-from agentg.tools import MemberContext, flag_to_coach_action
+from agentg.stores import Stores
 from agentg.training import TrainingStore
 
 
@@ -35,13 +37,15 @@ async def env(tmp_path):
 
     def context(is_coach=False, member_id=None):
         return MemberContext(
-            training=TrainingStore(engine),
-            notes=notes,
-            routines=RoutineStore(engine),
-            linking=linking,
-            checkins=None,  # not used by the safety tool
-            demos=None,
-            forget=None,
+            stores=Stores(
+                linking=linking,
+                training=TrainingStore(engine),
+                notes=notes,
+                routines=RoutineStore(engine),
+                checkins=None,  # not used by the safety tool
+                demos=None,
+                forget=None,
+            ),
             notifier=notifier,
             member_id=member_id or member.id,
             gym_id=gym.id,
@@ -149,13 +153,15 @@ async def test_consent_with_no_coach_set_up_still_logs(env):
     gym2 = await linking.create_gym("Solo Box")
     m = await linking.link_member(gym2.id, "Rob", "telegram", "99")
     ctx = MemberContext(
-        training=TrainingStore(env.engine),
-        notes=env.notes,
-        routines=RoutineStore(env.engine),
-        linking=linking,
-        checkins=None,
-        demos=None,
-        forget=None,
+        stores=Stores(
+            linking=linking,
+            training=TrainingStore(env.engine),
+            notes=env.notes,
+            routines=RoutineStore(env.engine),
+            checkins=None,
+            demos=None,
+            forget=None,
+        ),
         notifier=env.notifier,
         member_id=m.id,
         gym_id=gym2.id,

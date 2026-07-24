@@ -5,18 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 import agentg.runtime as runtime_module
-from agentg.checkin_store import CheckinStore
 from agentg.db import create_engine
 from agentg.demo_media import SentAnimation
-from agentg.demos import DemoStore
-from agentg.forget import ForgetStore
 from agentg.messages import IncomingMessage
-from agentg.notes import NotesStore
 from agentg.onboarding import Onboarding
-from agentg.routines import RoutineStore
 from agentg.runtime import AgentRuntime
-from agentg.store import LinkingStore
-from agentg.training import TrainingStore
+from agentg.stores import Stores
 from conftest import unused_phraser
 
 
@@ -36,27 +30,20 @@ class FakeSender:
 @pytest.fixture
 async def env(tmp_path):
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'rt.db'}")
-    store = LinkingStore(engine)
-    demos = DemoStore(engine)
+    stores = Stores.from_engine(engine)
     sender = FakeSender()
     runtime = AgentRuntime(
         agent=object(),
         engine=engine,
-        store=store,
-        onboarding=Onboarding(store, unused_phraser),
-        training=TrainingStore(engine),
-        notes=NotesStore(engine),
-        routines=RoutineStore(engine),
-        checkins=CheckinStore(engine),
-        demos=demos,
-        forget=ForgetStore(engine),
+        stores=stores,
+        onboarding=Onboarding(stores.linking, unused_phraser),
         summarizer=None,
         demo_sender=sender,
     )
     await runtime.ensure_schema()
-    gym = await store.create_gym("Iron Temple")
-    await store.link_member(gym.id, "Dani", "telegram", "42")
-    await demos.set_default_demo("goblet squat", "goblet-squat.mp4")
+    gym = await stores.linking.create_gym("Iron Temple")
+    await stores.linking.link_member(gym.id, "Dani", "telegram", "42")
+    await stores.demos.set_default_demo("goblet squat", "goblet-squat.mp4")
 
     class Env:
         pass
@@ -64,7 +51,7 @@ async def env(tmp_path):
     env = Env()
     env.engine = engine
     env.runtime = runtime
-    env.demos = demos
+    env.demos = stores.demos
     env.sender = sender
     yield env
     await engine.dispose()

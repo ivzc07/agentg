@@ -15,7 +15,8 @@ from agentg.forget import ForgetStore
 from agentg.routines import RoutineStore
 from agentg.snapshot import member_snapshot
 from agentg.store import LinkingStore
-from agentg.tools import MemberContext
+from agentg.context import MemberContext
+from agentg.stores import Stores
 from agentg.training import TrainingStore
 
 
@@ -33,13 +34,15 @@ async def env(tmp_path):
     member = await linking.link_member(gym.id, "Dani", "telegram", "42")
 
     context = MemberContext(
-        training=training,
-        notes=notes,
-        routines=routines,
-        linking=linking,
-        checkins=CheckinStore(engine),
-        demos=DemoStore(engine),
-        forget=ForgetStore(engine),
+        stores=Stores(
+            linking=linking,
+            training=training,
+            notes=notes,
+            routines=routines,
+            checkins=CheckinStore(engine),
+            demos=DemoStore(engine),
+            forget=ForgetStore(engine),
+        ),
         member_id=member.id,
         gym_id=gym.id,
         member_name="Dani",

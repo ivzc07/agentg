@@ -5,7 +5,8 @@ from agents.extensions.models.litellm_model import LitellmModel
 
 from agentg.config import Settings
 from agentg.snapshot import member_snapshot
-from agentg.tools import MemberContext, build_tools
+from agentg.context import MemberContext
+from agentg.tools import build_tools
 
 INSTRUCTIONS = """\
 You are the coach Members chat with at their gym — warm, direct, and brief; \

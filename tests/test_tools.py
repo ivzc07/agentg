@@ -9,14 +9,8 @@ from agentg.db import create_engine
 from agentg.messages import IncomingMessage
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
-from agentg.notes import NotesStore
-from agentg.checkin_store import CheckinStore
-from agentg.demos import DemoStore
-from agentg.forget import ForgetStore
-from agentg.routines import RoutineStore
-from agentg.store import LinkingStore
-from agentg.tools import MemberContext
-from agentg.training import TrainingStore
+from agentg.context import MemberContext
+from agentg.stores import Stores
 from conftest import unused_phraser
 
 
@@ -68,23 +62,17 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'app.db'}")
-    store = LinkingStore(engine)
+    stores = Stores.from_engine(engine)
     runtime = AgentRuntime(
         agent=object(),
         engine=engine,
-        store=store,
-        onboarding=Onboarding(store, unused_phraser),
-        training=TrainingStore(engine),
-        notes=NotesStore(engine),
-        routines=RoutineStore(engine),
-        checkins=CheckinStore(engine),
-        demos=DemoStore(engine),
-        forget=ForgetStore(engine),
+        stores=stores,
+        onboarding=Onboarding(stores.linking, unused_phraser),
         summarizer=null_summarizer,
     )
     await runtime.ensure_schema()
-    gym = await store.create_gym("Iron Temple")
-    member = await store.link_member(gym.id, "Dani", "telegram", "42")
+    gym = await stores.linking.create_gym("Iron Temple")
+    member = await stores.linking.link_member(gym.id, "Dani", "telegram", "42")
 
     await runtime.handle_message(
         IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
@@ -95,5 +83,5 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
     assert context.member_id == member.id
     assert context.gym_id == gym.id
     assert context.weight_unit == "kg"
-    assert context.training is runtime.training
+    assert context.stores is runtime.stores
     await engine.dispose()

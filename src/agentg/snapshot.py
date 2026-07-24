@@ -13,7 +13,7 @@ MAX_SNAPSHOT_NOTES = 15
 MAX_NOTE_DISPLAY = 120
 
 if TYPE_CHECKING:
-    from agentg.tools import MemberContext
+    from agentg.context import MemberContext
 
 
 def _headline(exercises: list[dict[str, Any]], unit: str) -> str:
@@ -28,13 +28,13 @@ def _headline(exercises: list[dict[str, Any]], unit: str) -> str:
 
 
 async def member_snapshot(context: MemberContext) -> str:
-    days, last = await context.training.latest_session_info(context.member_id)
-    routine = await context.routines.active_routine(context.member_id)
-    todays_workout = context.routines.pick_todays_workout(routine)
-    notes = await context.notes.active(context.member_id)
+    days, last = await context.stores.training.latest_session_info(context.member_id)
+    routine = await context.stores.routines.active_routine(context.member_id)
+    todays_workout = context.stores.routines.pick_todays_workout(routine)
+    notes = await context.stores.notes.active(context.member_id)
 
     role = "Coach (coach tools available)" if context.is_coach else "Member"
-    today = context.training.today().isoformat()
+    today = context.stores.training.today().isoformat()
     lines = [
         "--- Member snapshot (facts from tables; trust these over chat memory) ---",
         f"Today is {today}.",
