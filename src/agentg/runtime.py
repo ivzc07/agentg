@@ -22,8 +22,8 @@ from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.demo_media import DemoSender, serve_demo
 from agentg.messages import IncomingMessage, Reply
-from agentg.onboarding import Onboarding
-from agentg.store import LinkedIdentity
+from agentg.linking import Linking
+from agentg.linking_store import LinkedIdentity
 from agentg.context import MemberContext
 from agentg.stores import Stores
 
@@ -35,7 +35,7 @@ class AgentRuntime:
     agent: Agent
     engine: AsyncEngine
     stores: Stores
-    onboarding: Onboarding
+    linking: Linking
     summarizer: Summarizer
     # The channel's demo-animation sender; None disables demo delivery (tests
     # that don't exercise demos leave it unset).
@@ -43,7 +43,7 @@ class AgentRuntime:
     # Channel notifier for consented safety referrals (pinging a Gym's Coach).
     notifier: Notifier | None = None
     # One lock per channel identity so a rapid double message can't interleave
-    # turns (or onboarding steps). Unbounded, but one entry per person who
+    # turns (or linking steps). Unbounded, but one entry per person who
     # ever messaged this process — fine at this scale.
     _locks: defaultdict[tuple[str, str], asyncio.Lock] = field(
         default_factory=lambda: defaultdict(asyncio.Lock)
@@ -74,10 +74,10 @@ class AgentRuntime:
     async def handle_message(self, msg: IncomingMessage) -> Reply:
         async with self._locks[(msg.channel, msg.channel_user_id)]:
             linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
-            reply = await self.onboarding.handle(msg, linked)
+            reply = await self.linking.handle(msg, linked)
             if reply is not None:
                 return Reply(reply)
-            if linked is None:  # onboarding always replies for unlinked identities
+            if linked is None:  # linking always replies for unlinked identities
                 raise RuntimeError("unlinked message reached the agent loop")
             # Any reply resets the check-in rhythm and revives a lapsed Member.
             await self.stores.checkins.reset_rhythm(linked.member.id)

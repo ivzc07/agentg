@@ -14,7 +14,7 @@ from agentg.routines import (
     RoutineStore,
     WorkoutSpec,
 )
-from agentg.store import LinkingStore
+from agentg.linking_store import LinkingStore
 from agentg.training import TrainingStore
 
 

@@ -13,7 +13,7 @@ from agentg.demos import DemoStore
 from agentg.forget import ForgetStore
 from agentg.routines import DEFAULT_RULES_DOC, ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.snapshot import member_snapshot
-from agentg.store import LinkingStore
+from agentg.linking_store import LinkingStore
 from agentg.context import MemberContext
 from agentg.stores import Stores
 from agentg.tools import open_session_payload

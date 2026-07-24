@@ -8,7 +8,7 @@ from agentg.db import create_engine
 from agentg.demo_ingest import DemoManifestEntry, ingest_demo_manifest, load_manifest
 from agentg.demo_media import SentAnimation, serve_demo
 from agentg.demos import DemoStore
-from agentg.store import LinkingStore
+from agentg.linking_store import LinkingStore
 from agentg.training import TrainingStore
 
 

@@ -14,7 +14,7 @@ from agentg.demos import DemoStore
 from agentg.forget import ForgetStore
 from agentg.routines import RoutineStore
 from agentg.snapshot import member_snapshot
-from agentg.store import LinkingStore
+from agentg.linking_store import LinkingStore
 from agentg.context import MemberContext
 from agentg.stores import Stores
 from agentg.training import TrainingStore

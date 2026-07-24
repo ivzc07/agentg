@@ -8,7 +8,7 @@ import agentg.runtime as runtime_module
 from agentg.db import create_engine
 from agentg.demo_media import SentAnimation
 from agentg.messages import IncomingMessage
-from agentg.onboarding import Onboarding
+from agentg.linking import Linking
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 from conftest import unused_phraser
@@ -36,7 +36,7 @@ async def env(tmp_path):
         agent=object(),
         engine=engine,
         stores=stores,
-        onboarding=Onboarding(stores.linking, unused_phraser),
+        linking=Linking(stores.linking, unused_phraser),
         summarizer=None,
         demo_sender=sender,
     )

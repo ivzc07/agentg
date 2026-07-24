@@ -8,7 +8,7 @@ from agentg.compaction import COMPACT_THRESHOLD, KEEP_RECENT, CompactionSummary,
 from agentg.db import create_engine
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
-from agentg.onboarding import Onboarding
+from agentg.linking import Linking
 from agentg.messages import IncomingMessage
 from conftest import unused_phraser
 
@@ -38,7 +38,7 @@ async def env(tmp_path):
         agent=object(),
         engine=engine,
         stores=stores,
-        onboarding=Onboarding(stores.linking, unused_phraser),
+        linking=Linking(stores.linking, unused_phraser),
         summarizer=RecordingSummarizer(),
     )
     await runtime.ensure_schema()

@@ -7,7 +7,7 @@ from agentg.agent import build_agent
 from agentg.config import Settings
 from agentg.db import create_engine
 from agentg.messages import IncomingMessage
-from agentg.onboarding import Onboarding
+from agentg.linking import Linking
 from agentg.runtime import AgentRuntime
 from agentg.context import MemberContext
 from agentg.stores import Stores
@@ -67,7 +67,7 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
         agent=object(),
         engine=engine,
         stores=stores,
-        onboarding=Onboarding(stores.linking, unused_phraser),
+        linking=Linking(stores.linking, unused_phraser),
         summarizer=null_summarizer,
     )
     await runtime.ensure_schema()

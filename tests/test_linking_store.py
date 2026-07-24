@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agentg.db import create_engine
 from agentg.models import Member, MemberChannel
-from agentg.store import INVITE_CODE_LENGTH, LinkingStore, new_invite_code
+from agentg.linking_store import INVITE_CODE_LENGTH, LinkingStore, new_invite_code
 
 
 @pytest.fixture

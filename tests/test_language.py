@@ -1,6 +1,6 @@
 """Language rule & AI-disclosure (ADR 0002).
 
-The Agent mirrors the Member's language, defaulting to Spanish. Onboarding's
+The Agent mirrors the Member's language, defaulting to Spanish. Linking's
 phraser follows the same mirror-or-Spanish-default rule (its instructions are
 English on purpose — they're never sent as-is, only phrased); check-in
 templates — the one surface with no LLM turn at all — stay fixed Spanish. The
@@ -8,7 +8,7 @@ Agent never announces it is an AI (deflects if asked) while keeping the
 behavioral safety floor.
 """
 
-from agentg import checkin, onboarding
+from agentg import checkin, linking
 from agentg.agent import INSTRUCTIONS
 from agentg.routines import DEFAULT_RULES_DOC
 
@@ -49,18 +49,18 @@ def test_the_default_rules_doc_drops_the_disclaimer_section():
     assert "i'm an ai coach" not in doc
 
 
-# --- onboarding's phraser follows the same mirror-or-Spanish rule ---
+# --- linking's phraser follows the same mirror-or-Spanish rule ---
 
 
-def test_onboarding_phraser_pins_the_mirror_and_spanish_default():
-    text = onboarding._PHRASER_PROMPT.lower()
+def test_linking_phraser_pins_the_mirror_and_spanish_default():
+    text = linking._PHRASER_PROMPT.lower()
     assert "mirror" in text
     assert "spanish" in text  # the default when there is no signal yet
 
 
-def test_onboarding_still_accepts_spanish_yes():
-    assert onboarding._is_affirmative("sí")
-    assert onboarding._is_affirmative("si")
+def test_linking_still_accepts_spanish_yes():
+    assert linking._is_affirmative("sí")
+    assert linking._is_affirmative("si")
 
 
 # --- check-in templates are Spanish ---

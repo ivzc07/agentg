@@ -1,7 +1,7 @@
 """Conversational tone: one standing trait, not a patch per symptom.
 
 The Agent must react to what's actually said instead of running a script —
-that covers both not re-greeting (onboarding already said hello) and not
+that covers both not re-greeting (linking already said hello) and not
 steamrolling past a joke or hesitation to the next scripted step.
 """
 
