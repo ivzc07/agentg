@@ -41,13 +41,16 @@ class WorkoutInput(BaseModel):
 
 
 def _logged(payload: LoggedSets, unit: str) -> dict[str, Any]:
-    return {
+    result: dict[str, Any] = {
         "exercise": payload.exercise,
         "weight": payload.weight,
         "weight_unit": unit,
         "reps": payload.reps,
         "previous": payload.previous,
     }
+    if payload.suspect is not None:
+        result["suspect"] = payload.suspect
+    return result
 
 
 async def open_session_payload(c: MemberContext) -> dict[str, Any]:
@@ -89,6 +92,10 @@ async def log_sets(
     "dips 10,10,9", "60 8/7/6"). When the line omits the exercise name, pass
     the exercise the conversation is about as ``exercise``. Pass ``rpe`` or
     ``note`` ONLY when the Member volunteered them — never ask for effort.
+
+    Always restate the returned exercise/weight/reps in your reply. If the
+    payload includes ``suspect``, the sets were still stored — double-check
+    the numbers with the Member before treating them as settled.
     """
     c = ctx.context
     try:
@@ -102,7 +109,10 @@ async def log_sets(
 
 @function_tool
 async def copy_last_sets(ctx: RunContextWrapper[MemberContext], exercise: str) -> dict[str, Any]:
-    """Log "same as last time": copy this exercise's Sets from the previous Session."""
+    """Log "same as last time": copy this exercise's Sets from the previous Session.
+
+    Always restate the returned exercise/weight/reps in your reply.
+    """
     c = ctx.context
     try:
         logged = await c.stores.training.copy_last_sets(c.member_id, c.gym_id, exercise)
@@ -122,6 +132,10 @@ async def edit_logged_sets(
 
     Pass only what changed: a new weight, a new rep list, or both. This never
     touches earlier Sessions.
+
+    Always restate the corrected numbers in your reply. If the payload
+    includes ``suspect``, the correction was still stored — double-check the
+    numbers with the Member before treating them as settled.
     """
     c = ctx.context
     try:

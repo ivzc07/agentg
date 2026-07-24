@@ -11,6 +11,8 @@ from agentg.linking import Linking
 from agentg.runtime import AgentRuntime
 from agentg.context import MemberContext
 from agentg.stores import Stores
+from agentg.tools import _logged
+from agentg.training import LoggedSets
 from conftest import unused_phraser
 
 
@@ -51,6 +53,28 @@ def test_the_agent_carries_the_session_loop_tools():
     )
     agent = build_agent(settings)
     assert {tool.name for tool in agent.tools} == EXPECTED_TOOLS
+
+
+def test_log_sets_payload_surfaces_a_suspect_hint():
+    # The Agent only sees the tool payload — suspect must ride along there.
+    payload = LoggedSets(
+        exercise="bench press",
+        weight=121.0,
+        reps=[5, 5, 5],
+        previous={"weight": 60.0, "reps": [8, 8, 8]},
+        suspect="121 is more than 2× last time's 60 — double-check with the Member",
+    )
+    assert _logged(payload, "kg")["suspect"] == payload.suspect
+
+
+def test_log_sets_payload_omits_suspect_when_the_jump_is_plausible():
+    payload = LoggedSets(
+        exercise="bench press",
+        weight=62.5,
+        reps=[8, 8, 8],
+        previous={"weight": 60.0, "reps": [8, 8, 7]},
+    )
+    assert "suspect" not in _logged(payload, "kg")
 
 
 async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch):

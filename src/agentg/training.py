@@ -25,6 +25,12 @@ SESSION_AUTO_CLOSE = timedelta(hours=3)
 
 KG_PER_LB = 0.45359237
 
+# A logged weight beyond this multiple of the Member's own last top set is
+# still stored (the Member is right once they confirm) but flagged so the
+# Agent double-checks conversationally — guards against plausible-but-wrong
+# parses (unit mix-up, swapped weight/reps) poisoning future sessions.
+SUSPECT_WEIGHT_MULTIPLE = 2.0
+
 SEED_EXERCISES: dict[str, tuple[str, ...]] = {
     "bench press": ("bench",),
     "overhead press": ("ohp", "press", "shoulder press"),
@@ -49,6 +55,21 @@ def _normalize(name: str) -> str:
     return normalize_exercise_name(name)
 
 
+def _suspect_hint(weight: float | None, previous: dict[str, Any] | None) -> str | None:
+    """Flag a weight that jumps beyond SUSPECT_WEIGHT_MULTIPLE × the last top set."""
+    if weight is None or previous is None:
+        return None
+    last = previous.get("weight")
+    if last is None or last <= 0:
+        return None
+    if weight > SUSPECT_WEIGHT_MULTIPLE * last:
+        return (
+            f"{weight:g} is more than {SUSPECT_WEIGHT_MULTIPLE:g}× last time's "
+            f"{last:g} — double-check with the Member"
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class OpenedSession:
     session_id: int
@@ -63,6 +84,7 @@ class LoggedSets:
     weight: float | None
     reps: list[int]
     previous: dict[str, Any] | None  # that exercise's previous-session numbers
+    suspect: str | None = None  # hint when the weight jumps implausibly vs history
 
 
 @dataclass(frozen=True)
@@ -203,7 +225,13 @@ class TrainingStore:
                 db, session, resolved.id, weight, parsed.reps, self._clock(), rpe=rpe, note=note
             )
             await db.commit()
-            return LoggedSets(resolved.name, weight, list(parsed.reps), previous)
+            return LoggedSets(
+                resolved.name,
+                weight,
+                list(parsed.reps),
+                previous,
+                suspect=_suspect_hint(weight, previous),
+            )
 
     async def copy_last_sets(self, member_id: int, gym_id: int, exercise: str) -> LoggedSets:
         async with self._sessions() as db:
@@ -280,7 +308,13 @@ class TrainingStore:
             await db.commit()
             final_weight = weight if weight is not None else batch[0].weight
             final_reps = list(reps) if reps is not None else [row.reps for row in batch]
-            return LoggedSets(resolved.name, final_weight, final_reps, previous)
+            return LoggedSets(
+                resolved.name,
+                final_weight,
+                final_reps,
+                previous,
+                suspect=_suspect_hint(final_weight, previous),
+            )
 
     async def last_sets(self, member_id: int, exercise: str) -> dict[str, Any] | None:
         """The previous Session's numbers for an Exercise (never the open one)."""
