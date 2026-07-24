@@ -128,7 +128,10 @@ class TrainingStore:
             session = await self._open_session_row(db, member_id)
             if session is None:
                 await db.commit()  # persists any auto-close that just happened
-                raise ValueError("no open session to close")
+                raise ValueError(
+                    "no open session to close — tell the Member nothing was open, "
+                    "or call open_session if they're starting now"
+                )
             lines = await self._session_exercises(db, session.id)
             total = 0
             for line in lines:
@@ -238,7 +241,10 @@ class TrainingStore:
                 db, member_id, resolved.id, exclude_session_id=session.id
             )
             if previous is None:
-                raise ValueError(f"no earlier sets of {resolved.name} to copy")
+                raise ValueError(
+                    f"no earlier sets of {resolved.name} to copy — check the exercise "
+                    "name, or ask the Member for the weight and reps to log fresh"
+                )
             self._add_sets(
                 db, session, resolved.id, previous["weight"], previous["reps"], self._clock()
             )
@@ -268,7 +274,11 @@ class TrainingStore:
                 )
             if not rows:
                 await db.commit()  # persists any auto-close that just happened
-                raise ValueError(f"no {exercise} sets in the current session to edit")
+                raise ValueError(
+                    f"no {exercise} sets in the current session to edit — check the "
+                    "exercise name matches what was just logged, or ask the Member "
+                    "what to change"
+                )
             batch_time = max(row.created_at for row in rows)  # one log call = one batch
             batch = [row for row in rows if row.created_at == batch_time]
             if weight is not None:
