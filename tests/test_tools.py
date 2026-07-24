@@ -9,8 +9,8 @@ from agentg.db import create_engine
 from agentg.messages import IncomingMessage
 from agentg.onboarding import Onboarding
 from agentg.runtime import AgentRuntime
+from agentg.context import MemberContext
 from agentg.stores import Stores
-from agentg.tools import MemberContext
 from conftest import unused_phraser
 
 

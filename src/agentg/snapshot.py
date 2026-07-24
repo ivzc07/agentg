@@ -13,7 +13,7 @@ MAX_SNAPSHOT_NOTES = 15
 MAX_NOTE_DISPLAY = 120
 
 if TYPE_CHECKING:
-    from agentg.tools import MemberContext
+    from agentg.context import MemberContext
 
 
 def _headline(exercises: list[dict[str, Any]], unit: str) -> str:

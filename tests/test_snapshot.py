@@ -15,8 +15,8 @@ from agentg.forget import ForgetStore
 from agentg.routines import RoutineStore
 from agentg.snapshot import member_snapshot
 from agentg.store import LinkingStore
+from agentg.context import MemberContext
 from agentg.stores import Stores
-from agentg.tools import MemberContext
 from agentg.training import TrainingStore
 
 

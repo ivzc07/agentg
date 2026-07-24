@@ -24,8 +24,8 @@ from agentg.demo_media import DemoSender, serve_demo
 from agentg.messages import IncomingMessage, Reply
 from agentg.onboarding import Onboarding
 from agentg.store import LinkedIdentity
+from agentg.context import MemberContext
 from agentg.stores import Stores
-from agentg.tools import MemberContext
 
 logger = logging.getLogger(__name__)
 

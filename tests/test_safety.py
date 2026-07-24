@@ -8,9 +8,10 @@ from agentg.db import create_engine
 from agentg.forget import ForgetStore
 from agentg.notes import NotesStore
 from agentg.routines import DEFAULT_RULES_DOC, RoutineStore
+from agentg.coaching import flag_to_coach_action
+from agentg.context import MemberContext
 from agentg.store import LinkingStore
 from agentg.stores import Stores
-from agentg.tools import MemberContext, flag_to_coach_action
 from agentg.training import TrainingStore
 
 
