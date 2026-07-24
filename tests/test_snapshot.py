@@ -115,3 +115,17 @@ async def test_dynamic_instructions_prepend_the_protocol_and_append_the_snapshot
 
     assert "coach" in text.lower()  # the protocol is still there
     assert "Dani" in text  # and the snapshot rides along
+
+
+async def test_notes_sit_at_the_attention_favored_edge_of_the_prompt(env):
+    """Notes ride in the snapshot tail of instructions (U-curve end), not mid-context."""
+    await env.notes.remember(env.member_id, env.gym_id, "injury", "left shoulder impingement")
+
+    class Wrapper:
+        context = env.context
+
+    text = await dynamic_instructions(Wrapper(), agent=None)
+
+    # protocol first, notes last — attention-favored edges of the system prompt
+    assert text.index("You are the coach") < text.index("left shoulder impingement")
+    assert text.rstrip().endswith("left shoulder impingement")
