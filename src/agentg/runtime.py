@@ -88,12 +88,12 @@ class AgentRuntime:
             is_coach=linked.member.is_coach,
         )
 
-    async def handle_message(self, msg: IncomingMessage) -> str:
+    async def handle_message(self, msg: IncomingMessage) -> Reply:
         async with self._locks[(msg.channel, msg.channel_user_id)]:
             linked = await self.store.identity_for(msg.channel, msg.channel_user_id)
             reply = await self.onboarding.handle(msg, linked)
             if reply is not None:
-                return reply
+                return Reply(reply)
             if linked is None:  # onboarding always replies for unlinked identities
                 raise RuntimeError("unlinked message reached the agent loop")
             # Any reply resets the check-in rhythm and revives a lapsed Member.

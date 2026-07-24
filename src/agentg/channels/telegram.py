@@ -14,7 +14,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import FSInputFile, Message
 
 from agentg.demo_media import SentAnimation
-from agentg.messages import IncomingMessage
+from agentg.messages import IncomingMessage, Reply
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ MAX_MESSAGE_LENGTH = 4096  # Telegram's hard cap per message
 ERROR_REPLY = "Uy — algo falló de mi lado. Inténtalo de nuevo en un momento."
 EMPTY_REPLY_FALLBACK = "Mmm, me quedé en blanco — ¿lo intentas de nuevo?"
 
-ReplyFn = Callable[[IncomingMessage], Awaitable[str]]
+ReplyFn = Callable[[IncomingMessage], Awaitable[Reply]]
 
 
 def parse_start_payload(text: str) -> str | None:
@@ -81,10 +81,9 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
         for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
             await message.answer(chunk)
         # Follow-up media (demo animations) lands beneath the reply text.
-        after_send = getattr(reply, "after_send", None)
-        if after_send is not None:
+        if reply.after_send is not None:
             try:
-                await after_send()
+                await reply.after_send()
             except Exception:
                 logger.exception("post-reply delivery failed for sender %s", message.from_user.id)
 

@@ -13,6 +13,7 @@ from agentg.channels.telegram import (
     parse_start_payload,
     split_reply,
 )
+from agentg.messages import Reply
 
 
 class FakeMessage:
@@ -44,7 +45,7 @@ async def test_handler_passes_the_incoming_message_and_sends_the_reply():
 
     async def reply_fn(msg):
         calls["msg"] = msg
-        return "welcome back!"
+        return Reply("welcome back!")
 
     message = FakeMessage(user_id=42, text="I'm here")
     await make_message_handler(reply_fn)(message)
@@ -60,7 +61,7 @@ async def test_handler_passes_the_incoming_message_and_sends_the_reply():
 
 async def test_handler_sends_model_markdown_as_plain_text():
     async def reply_fn(msg):
-        return "Do **bench** today 💪"
+        return Reply("Do **bench** today 💪")
 
     message = FakeMessage()
     await make_message_handler(reply_fn)(message)
@@ -73,7 +74,7 @@ async def test_handler_extracts_the_deep_link_payload():
 
     async def reply_fn(msg):
         calls["msg"] = msg
-        return "hi"
+        return Reply("hi")
 
     await make_message_handler(reply_fn)(FakeMessage(text="/start gym-code"))
 
@@ -97,7 +98,7 @@ async def test_handler_answers_even_when_the_agent_loop_fails():
 
 async def test_empty_reply_still_sends_something():
     async def reply_fn(msg):
-        return ""
+        return Reply("")
 
     message = FakeMessage()
     await make_message_handler(reply_fn)(message)
@@ -105,8 +106,6 @@ async def test_empty_reply_still_sends_something():
 
 
 async def test_after_send_runs_only_once_the_reply_text_is_out():
-    from agentg.messages import Reply
-
     order = []
 
     async def after_send():
