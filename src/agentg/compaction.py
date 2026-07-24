@@ -25,7 +25,10 @@ logger = logging.getLogger(__name__)
 # tokenizer dependency). Compact when the estimate exceeds ~70% of the
 # budget history may occupy, so we fire well before the attention cliff
 # (issue #54). KEEP_RECENT is an item floor — the live exchange is never
-# folded away even when tokens are high.
+# folded away even when tokens are high. The floor outranks the budget: if
+# the newest KEEP_RECENT items alone exceed COMPACT_AT_TOKENS, history stays
+# over budget and every message re-triggers a compaction attempt (one
+# summarizer call each) that folds only the few aged-out items.
 HISTORY_TOKEN_BUDGET = 12_000
 COMPACT_AT_TOKENS = (HISTORY_TOKEN_BUDGET * 7) // 10  # 8_400 ≈ 70%
 KEEP_RECENT = 20
