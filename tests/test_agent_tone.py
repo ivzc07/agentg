@@ -1,24 +1,18 @@
-"""Conversational tone: one standing trait, not a patch per symptom.
+"""Conversational tone lives in behavioral end-state evals, not prompt wording.
 
-The Agent must react to what's actually said instead of running a script —
-that covers both not re-greeting (linking already said hello) and not
-steamrolling past a joke or hesitation to the next scripted step.
+Historically this file asserted that words like "react" / "greet" / "joke"
+appeared in ``INSTRUCTIONS``. Those checks passed even when the agent
+misbehaved and failed on harmless rewording (issue #51).
+
+Tone, safety-compliance, and no-nagging are now covered by:
+- ``tests/behavioral/`` deterministic conversations (end-state DB asserts)
+- ``tests/behavioral/test_judge.py`` optional per-dimension judge rubric
 """
 
 from agentg.agent import INSTRUCTIONS
 
 
-def test_the_instructions_say_to_react_to_what_was_actually_said():
-    text = INSTRUCTIONS.lower()
-    assert "react" in text
-
-
-def test_the_instructions_cover_not_re_greeting():
-    text = INSTRUCTIONS.lower()
-    assert "greeting" in text or "greet" in text
-
-
-def test_the_instructions_cover_not_steamrolling_past_a_joke_or_hesitation():
-    text = INSTRUCTIONS.lower()
-    assert "joke" in text
-    assert "hesitation" in text
+def test_agent_still_ships_non_empty_instructions():
+    """Smoke only — wording is not the contract; behavior is."""
+    assert isinstance(INSTRUCTIONS, str)
+    assert len(INSTRUCTIONS) > 100
