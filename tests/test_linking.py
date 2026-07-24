@@ -15,7 +15,7 @@ import agentg.runtime as runtime_module
 from agentg.db import create_engine
 from agentg.messages import IncomingMessage
 from agentg.models import Member
-from agentg.onboarding import DEAD_END_INSTRUCTION, Onboarding
+from agentg.linking import DEAD_END_INSTRUCTION, Linking
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 from conftest import identity_phraser
@@ -33,7 +33,7 @@ async def runtime(tmp_path):
         agent=object(),
         engine=engine,
         stores=stores,
-        onboarding=Onboarding(stores.linking, identity_phraser),
+        linking=Linking(stores.linking, identity_phraser),
         summarizer=null_summarizer,
     )
     await runtime.ensure_schema()
@@ -193,7 +193,7 @@ async def test_the_phraser_receives_what_the_member_said(runtime):
         seen.append((instruction, member_text))
         return instruction
 
-    runtime.onboarding.phraser = recording_phraser
+    runtime.linking.phraser = recording_phraser
     gym = await runtime.stores.linking.create_gym("Iron Temple")
 
     await runtime.handle_message(incoming("/start x", link_code=gym.invite_code))

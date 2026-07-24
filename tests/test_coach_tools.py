@@ -10,7 +10,7 @@ from agentg.forget import ForgetStore
 from agentg.routines import DEFAULT_RULES_DOC, ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.coaching import update_rules_doc_action, write_routine_action
 from agentg.context import MemberContext
-from agentg.store import LinkingStore
+from agentg.linking_store import LinkingStore
 from agentg.stores import Stores
 from agentg.tools import build_tools
 from agentg.training import TrainingStore

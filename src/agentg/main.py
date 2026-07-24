@@ -19,7 +19,7 @@ from agentg.checkin_sweep import run_sweep
 from agentg.compaction import build_summarizer
 from agentg.config import Settings
 from agentg.db import create_engine
-from agentg.onboarding import Onboarding, build_phraser
+from agentg.linking import Linking, build_phraser
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 
@@ -42,7 +42,7 @@ async def run() -> None:
         agent=build_agent(settings),
         engine=engine,
         stores=stores,
-        onboarding=Onboarding(stores.linking, build_phraser(settings)),
+        linking=Linking(stores.linking, build_phraser(settings)),
         summarizer=build_summarizer(settings),
         demo_sender=demo_sender,
         notifier=notifier,

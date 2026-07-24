@@ -19,7 +19,7 @@ from agentg.models import (
 from agentg.notes import NotesStore
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.runtime import AgentRuntime
-from agentg.store import LinkingStore
+from agentg.linking_store import LinkingStore
 from agentg.training import TrainingStore
 
 
@@ -95,7 +95,7 @@ async def test_forget_leaves_no_trace_in_any_store(env):
 async def test_after_forget_the_channel_is_a_cold_start(env):
     member = await populate(env, channel_user_id="42")
     await env.forget.forget_member(member.id)
-    # messaging the bot again resolves to nobody → onboarding dead-ends
+    # messaging the bot again resolves to nobody → linking dead-ends
     assert await env.linking.identity_for("telegram", "42") is None
 
 
@@ -131,17 +131,17 @@ async def test_forget_is_idempotent(env):
     assert await count(env, Member, id=member.id) == 0
 
 
-async def test_messaging_after_forget_dead_ends_in_onboarding(env):
+async def test_messaging_after_forget_dead_ends_in_linking(env):
     from agentg.messages import IncomingMessage
-    from agentg.onboarding import DEAD_END_INSTRUCTION, Onboarding
+    from agentg.linking import DEAD_END_INSTRUCTION, Linking
     from conftest import identity_phraser
 
     member = await populate(env, channel_user_id="42")
     await env.forget.forget_member(member.id)
 
-    # a fresh onboarding sees no identity → the polite invite-code dead end
-    onboarding = Onboarding(env.linking, identity_phraser)
+    # a fresh linking sees no identity → the polite invite-code dead end
+    linking = Linking(env.linking, identity_phraser)
     msg = IncomingMessage(channel="telegram", channel_user_id="42", text="hey again")
     linked = await env.linking.identity_for("telegram", "42")
-    reply = await onboarding.handle(msg, linked)
+    reply = await linking.handle(msg, linked)
     assert reply == DEAD_END_INSTRUCTION

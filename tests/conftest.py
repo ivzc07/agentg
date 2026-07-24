@@ -4,12 +4,12 @@ from datetime import UTC, datetime, timedelta
 
 
 async def unused_phraser(instruction: str, member_text: str) -> str:
-    """An Onboarding phraser for tests that don't exercise onboarding replies."""
-    raise AssertionError("onboarding should not phrase anything in this test")
+    """A Linking phraser for tests that don't exercise linking replies."""
+    raise AssertionError("linking should not phrase anything in this test")
 
 
 async def identity_phraser(instruction: str, member_text: str) -> str:
-    """An Onboarding phraser for tests that exercise onboarding replies: no
+    """A Linking phraser for tests that exercise linking replies: no
     model, so a reply is exactly its instruction — assertions about facts
     (gym/name) exercise the real instruction text the production phraser
     would receive."""

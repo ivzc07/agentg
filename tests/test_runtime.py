@@ -8,7 +8,7 @@ import pytest
 import agentg.runtime as runtime_module
 from agentg.db import create_engine
 from agentg.messages import IncomingMessage
-from agentg.onboarding import Onboarding
+from agentg.linking import Linking
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 from conftest import unused_phraser
@@ -29,7 +29,7 @@ def make_runtime(url) -> AgentRuntime:
         agent=object(),
         engine=engine,
         stores=stores,
-        onboarding=Onboarding(stores.linking, unused_phraser),
+        linking=Linking(stores.linking, unused_phraser),
         summarizer=null_summarizer,
     )
 

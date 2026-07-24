@@ -7,7 +7,7 @@ it no longer has to be fixed strings: each step hands the phraser an
 instruction (the facts, never invented) plus what the person just said, and
 the phraser turns that into one natural reply. The Agent only ever speaks
 for linked Members; this is the voice before that. Pending steps live in
-memory: a restart mid-onboarding just means the person taps the Gym's
+memory: a restart mid-linking just means the person taps the Gym's
 invite link again.
 """
 
@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from agentg.config import Settings
 from agentg.messages import IncomingMessage
 from agentg.models import Gym
-from agentg.store import LinkedIdentity, LinkingStore
+from agentg.linking_store import LinkedIdentity, LinkingStore
 
 DEAD_END_INSTRUCTION = (
     "They aren't linked to any gym yet and just sent something that isn't a "
@@ -77,7 +77,7 @@ LINK_EXPIRED_INSTRUCTION = (
 Phraser = Callable[[str, str], Awaitable[str]]
 
 _PHRASER_PROMPT = """\
-You are this app's onboarding voice — the first messages a gym Member gets, \
+You are this app's linking voice — the first messages a gym Member gets, \
 before they're linked to their coach. Turn the instruction below into one \
 short, warm reply to send right now: brief and direct, light emoji OK. \
 Mirror the language of what they just said; with no signal yet, speak \
@@ -87,7 +87,7 @@ asks for. Reply with the message text only, nothing else.\
 
 
 def build_phraser(settings: Settings) -> Phraser:
-    """The production phraser: one plain model call per onboarding reply."""
+    """The production phraser: one plain model call per linking reply."""
 
     async def phrase(instruction: str, member_text: str) -> str:
         from litellm import acompletion  # deferred: import cost and test isolation
@@ -150,7 +150,7 @@ _Identity = tuple[str, str]
 
 
 @dataclass
-class Onboarding:
+class Linking:
     store: LinkingStore
     phraser: Phraser
     _pending: dict[_Identity, _Pending] = field(default_factory=dict)

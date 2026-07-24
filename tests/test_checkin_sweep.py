@@ -8,7 +8,7 @@ from agentg.checkin_store import CheckinStore
 from agentg.checkin_sweep import run_sweep
 from agentg.db import create_engine
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
-from agentg.store import LinkingStore
+from agentg.linking_store import LinkingStore
 from agentg.training import TrainingStore
 
 

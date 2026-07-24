@@ -34,3 +34,29 @@ If the concept you need isn't in the glossary yet, that's a signal — either yo
 If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
 
 > _Contradicts ADR-0007 (event-sourced orders) — but worth reopening because…_
+
+## Term → code map
+
+Where each glossary term lives in `src/agentg/`:
+
+| Term | Code home |
+|---|---|
+| Linking, Invite code | `linking_store.py` (`LinkingStore`), `linking.py` (the conversation) |
+| Session, Set, Gap | `training.py` (`TrainingStore`) |
+| Routine, Workout, Rules doc | `routines.py` (`RoutineStore`) |
+| Weight suggestion | `progression.py` (pure math), `advice.py` (wiring) |
+| Note | `notes.py` (`NotesStore`) |
+| Snapshot | `snapshot.py` |
+| Check-in, Nudge | `checkin.py` (decision), `checkin_store.py` (state), `checkin_sweep.py` (send) |
+| Demo | `demos.py` (`DemoStore`), `demo_media.py`, `demo_ingest.py` |
+| Catalog | `catalog.py` |
+| Compaction | `compaction.py` |
+| Forget-me | `forget.py` (`ForgetStore`) |
+| Coach-only actions | `coaching.py` |
+
+## Known naming drift
+
+Flagged during domain modeling (2026-07-24); don't spread further:
+
+- "Session" carries three meanings in code: the domain Session (gym visit), the SDK conversation session (`SQLAlchemySession`, keyed `member:{id}`), and SQLAlchemy DB sessions (`async_sessionmaker`). Domain language reserves **Session** for the gym visit; call the SDK one "chat history".
+- docs/spec.md keeps its historical section title "Onboarding & gym linking"; code and glossary say **Linking**.

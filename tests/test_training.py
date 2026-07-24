@@ -11,7 +11,7 @@ import pytest
 from conftest import FakeClock
 
 from agentg.db import create_engine
-from agentg.store import LinkingStore
+from agentg.linking_store import LinkingStore
 from agentg.training import SESSION_AUTO_CLOSE, SEED_EXERCISES, TrainingStore
 
 
@@ -166,7 +166,7 @@ async def test_lb_lines_at_a_kg_gym_are_converted(env):
 
 async def test_kg_lines_at_a_lb_gym_are_converted(env, tmp_path):
     from agentg.db import create_engine
-    from agentg.store import LinkingStore
+    from agentg.linking_store import LinkingStore
     from agentg.training import TrainingStore
 
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'lbgym.db'}")

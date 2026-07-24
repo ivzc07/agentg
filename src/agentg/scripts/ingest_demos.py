@@ -12,7 +12,7 @@ from agentg.config import Settings
 from agentg.db import create_engine
 from agentg.demo_ingest import ingest_demo_manifest, load_manifest
 from agentg.demos import DemoStore
-from agentg.store import LinkingStore
+from agentg.linking_store import LinkingStore
 
 
 async def _run(manifest_path: str) -> int:

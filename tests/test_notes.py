@@ -9,7 +9,7 @@ from conftest import FakeClock
 
 from agentg.db import create_engine
 from agentg.notes import NOTE_KINDS, NotesStore
-from agentg.store import LinkingStore
+from agentg.linking_store import LinkingStore
 
 
 @pytest.fixture

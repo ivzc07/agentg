@@ -7,7 +7,7 @@ proxy/MCP handler chain whenever ``tools`` are present — and that chain needs
 ``fastapi``/``orjson``/… that a normal ``openai-agents[litellm]`` install does
 not ship. The Agent always sends tools, so it hit that import on every turn.
 
-Onboarding never calls the model, so linking still worked — which is exactly
+Linking never calls the model, so linking still worked — which is exactly
 why the gap slipped past the existing tests (they all monkeypatch
 ``Runner.run``, never touching the real litellm path).
 
