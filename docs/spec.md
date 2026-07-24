@@ -92,7 +92,7 @@ Every domain row carries `gym_id`. Fields below are consolidated from ticket res
 Three layers, each with one job:
 
 1. **Domain tables (Postgres)** — the facts. Source of truth; the agent reads/writes only through function tools (`log_session`, `get_last_sets`, …) and never trusts chat history for a fact a table holds.
-2. **Conversation history (SDK Sessions)** — what was said. `SQLAlchemySession` in the same Postgres, one session per member (`member:{id}`). Growth is ours to manage: past ~50 items, compact old turns into a summary item and push anything durable into notes.
+2. **Conversation history (SDK Sessions)** — what was said. `SQLAlchemySession` in the same Postgres, one session per member (`member:{id}`). Growth is ours to manage: compact when a chars/4 token estimate exceeds ~70% of the history budget (not on item count), keep the newest turns raw, fold older ones into a summary item, and push anything durable into notes.
 3. **Member notes (`member_notes`)** — what the agent learned. Written only when the member volunteers something durable, via a `remember_note` tool. Deliberately not framework memory — portable and editable.
 
 **Recall**: each turn injects a compact member snapshot (identity, today's workout, days-since-last-session, last-session headline, active notes — a few hundred tokens) via dynamic instructions; anything bulkier sits behind a tool.
