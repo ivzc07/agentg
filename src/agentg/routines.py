@@ -143,7 +143,11 @@ class RoutineStore:
                     else:
                         resolved[norm] = found.id
             if unknown:
-                raise ValueError("not in the exercise catalog: " + ", ".join(unknown))
+                raise ValueError(
+                    "not in the exercise catalog: "
+                    + ", ".join(unknown)
+                    + " — call list_exercises and pick exact catalog names"
+                )
 
             active = await db.scalar(
                 select(Routine).where(
@@ -152,7 +156,8 @@ class RoutineStore:
             )
             if active is not None and active.coach_authored and not coach_authored:
                 raise ValueError(
-                    "this Member has a coach-written Routine; only the Coach can change it"
+                    "this Member has a coach-written Routine; only the Coach can change it "
+                    "— tell the Member to ask their Coach, don't try to save again"
                 )
             if active is not None:
                 active.is_active = False

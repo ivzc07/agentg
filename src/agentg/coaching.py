@@ -19,7 +19,12 @@ logger = logging.getLogger(__name__)
 
 # A single message is the enforcement point: a Member without the coach flag
 # never gets past it, whatever the model is asked to do.
-_NOT_A_COACH = {"error": "that's a coach-only action, and you're not flagged as a coach"}
+_NOT_A_COACH = {
+    "error": (
+        "that's a coach-only action, and you're not flagged as a coach — "
+        "tell the Member only their Coach can do this"
+    )
+}
 
 
 async def update_rules_doc_action(c: MemberContext, new_doc: str) -> dict[str, Any]:
@@ -37,11 +42,21 @@ async def _resolve_member(
     if member_id is not None:
         member = await c.stores.linking.member_in_gym(c.gym_id, member_id)
         if member is None:
-            return {"error": f"no Member with id {member_id} in your Gym"}
+            return {
+                "error": (
+                    f"no Member with id {member_id} in your Gym — check the id "
+                    "or look them up by name instead"
+                )
+            }
         return member
     matches = await c.stores.linking.members_by_name(c.gym_id, member_name)
     if not matches:
-        return {"error": f"no Member named {member_name!r} in your Gym"}
+        return {
+            "error": (
+                f"no Member named {member_name!r} in your Gym — check the spelling "
+                "or ask the Coach which Member they mean"
+            )
+        }
     if len(matches) > 1:
         return {
             "error": f"several Members named {member_name!r}: {[m.id for m in matches]} "
@@ -56,7 +71,12 @@ async def write_routine_action(
     if not c.is_coach:
         return _NOT_A_COACH
     if not specs:
-        return {"error": "a Routine needs at least one Workout"}
+        return {
+            "error": (
+                "a Routine needs at least one Workout — include at least one weekday "
+                "with exercises from list_exercises"
+            )
+        }
     target = await _resolve_member(c, member_name, member_id)
     if isinstance(target, dict):
         return target
