@@ -6,3 +6,9 @@ dist/
 .pytest_cache/
 .mypy_cache/
 promo/
+
+# Demo media (© Gymvisual — app use, not redistribution; see docs/demo-media.md)
+*.mp4
+*.gif
+manifest.json
+exercises-dataset/

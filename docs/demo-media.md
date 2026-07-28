@@ -17,7 +17,19 @@ The free [hasaneyldrm/exercises-dataset](https://github.com/hasaneyldrm/exercise
 ## 2. Transcode each GIF to a soundless H.264 MP4
 
 Telegram re-encodes GIFs to MP4 anyway; author the MP4 directly to skip the
-lossy step. Per demo:
+lossy step. Run the build script over the whole dataset:
+
+```
+python -m agentg.scripts.build_demo_media <dataset_dir> <media_root> [--jobs N]
+```
+
+It transcodes every GIF with the recipe below (in parallel, skipping MP4s
+that already exist, so re-runs are resumable), writes the MP4s under the
+media root, and writes `manifest.json` next to them — step 3's input. Slugs
+are `<dataset-id>-<name>.mp4`, anchored on the dataset id so re-runs never
+rename a file. The script also wires the seed catalog's staples (bench press,
+squat, ...) onto their dataset counterparts, so ingest resolves onto the
+existing rows instead of creating near-duplicates. Per-file equivalent:
 
 ```
 ffmpeg -i <src>.gif -an -vf "scale=720:-2" -c:v libx264 -pix_fmt yuv420p \
