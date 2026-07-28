@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE v2 — Coach dashboard (#76)</title>
+<style>
+  /* PROTOTYPE v2 for github.com/ivzc07/agentg/issues/76 — throwaway.
+     Rebuilt from the three design reviews in docs/prototypes/review-*.md.
+     One responsive roster (no view switcher), schedule-aware severity,
+     Member page reordered around rewriting a Routine. */
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --ink: #14181f; --ink-2: #5a6472; --ink-3: #8a94a3;
+    --line: #e3e7ec; --line-2: #eef1f4;
+    --accent: #1f5fd0; --accent-soft: #eaf1fd;
+    --hot: #b3261e; --hot-soft: #fdeceb; --warm: #9a5b00; --warm-soft: #fdf3e3; --cool: #1f7a4d;
+    --radius: 10px; --shadow: 0 1px 2px rgba(20,24,31,.05), 0 8px 24px rgba(20,24,31,.06);
+    --rail: 332px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased; padding-bottom: 84px;
+  }
+  h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  a { color: inherit; text-decoration: none; }
+  button { font: inherit; cursor: pointer; }
+  .mono { font-variant-numeric: tabular-nums; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ---- shell ---- */
+  .top {
+    display: flex; align-items: center; gap: 12px; padding: 0 16px; height: 54px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 30;
+  }
+  .brand { font-weight: 650; letter-spacing: -0.02em; font-size: 15px; }
+  .brand small { display: block; font-weight: 450; font-size: 11px; color: var(--ink-3); letter-spacing: 0; }
+  .top .spacer { flex: 1; }
+  .who { color: var(--ink-2); font-size: 13px; }
+  @container (max-width: 560px) { .who { display: none; } }
+
+  .seg { display: inline-flex; background: var(--line-2); border-radius: 8px; padding: 3px; gap: 2px; }
+  .seg button { border: 0; background: transparent; color: var(--ink-2); padding: 5px 10px; border-radius: 6px; font-size: 13px; font-weight: 600; }
+  .seg button.on { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(20,24,31,.10); }
+
+  /* ---- responsive frame: rail + detail above 900px, one column below ---- */
+  .frame { display: block; }
+  .rail { background: var(--panel); border-right: 1px solid var(--line); }
+  .detail { padding: 18px 16px 8px; }
+  .detail-inner { max-width: 760px; margin: 0 auto; }
+  /* Container queries, not media queries, so the prototype's width buttons
+     really do change the layout the way a narrower device would. */
+  #app { container-type: inline-size; }
+  @container (min-width: 900px) {
+    .frame { display: grid; grid-template-columns: var(--rail) minmax(0, 1fr); height: calc(100vh - 54px - 84px); }
+    .frame > * { min-width: 0; }
+    .rail { overflow: auto; }
+    .detail { overflow: auto; padding: 22px 24px; }
+    .backlink { display: none; }
+  }
+  @container (max-width: 899px) {
+    /* one screen at a time */
+    body[data-screen="member"] .rail { display: none; }
+    body[data-screen="list"] .detail { display: none; }
+    .rail { border-right: 0; }
+  }
+
+  /* ---- roster ---- */
+  .rosterhead { position: sticky; top: 0; background: var(--panel); z-index: 5; padding: 12px 14px 10px; border-bottom: 1px solid var(--line); }
+  .rosterhead .r1 { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+  .rosterhead h1 { font-size: 17px; }
+  .rosterhead .count { color: var(--ink-3); font-size: 13px; }
+  .searchrow { display: flex; gap: 8px; }
+  .search {
+    flex: 1; border: 1px solid var(--line); border-radius: 8px; padding: 8px 11px;
+    font: inherit; font-size: 14px; background: var(--bg); color: var(--ink); min-width: 0;
+  }
+  .search::placeholder { color: var(--ink-3); }
+  .filter {
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink-2);
+    border-radius: 8px; padding: 8px 11px; font-size: 13px; font-weight: 600; white-space: nowrap;
+  }
+  .filter.on { background: var(--hot-soft); border-color: #f0c9c6; color: var(--hot); }
+
+  .row {
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 12px;
+    width: 100%; text-align: left; background: transparent; border: 0;
+    border-bottom: 1px solid var(--line-2); padding: 11px 14px; min-height: 60px;
+  }
+  .row:hover { background: #fafbfc; }
+  .row.on { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+  .row .nm { font-weight: 600; display: flex; align-items: center; gap: 7px; font-size: 15px; }
+  .row .gapn { font-weight: 700; font-size: 15px; }
+  .row .strip { grid-column: 1; }
+  .row .why { grid-column: 2; text-align: right; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+  .flagdot { width: 8px; height: 8px; border-radius: 50%; background: var(--hot); flex: none; }
+
+  .tail { padding: 12px 14px; }
+  .tail summary { cursor: pointer; color: var(--ink-3); font-size: 13px; list-style: none; }
+  .tail summary::-webkit-details-marker { display: none; }
+  .tail summary:before { content: "▸ "; }
+  .tail[open] summary:before { content: "▾ "; }
+  .empty { padding: 28px 16px; text-align: center; color: var(--ink-3); font-size: 14px; }
+
+  /* ---- day strip / grid: hit, missed (scheduled, no Session), rest, future ---- */
+  .strip { display: flex; gap: 3px; }
+  .strip i { width: 11px; height: 11px; border-radius: 3px; background: var(--line-2); flex: none; }
+  .strip i.hit { background: var(--cool); }
+  .strip i.missed { background: transparent; box-shadow: inset 0 0 0 2px var(--hot); }
+  .strip i.future { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+
+  .daygrid { display: grid; grid-template-columns: repeat(7, 22px); gap: 4px; }
+  .daygrid i { height: 22px; border-radius: 4px; background: var(--line-2); }
+  .daygrid i.hit { background: var(--cool); }
+  .daygrid i.missed { background: transparent; box-shadow: inset 0 0 0 2px var(--hot); }
+  .daygrid i.future { background: transparent; box-shadow: inset 0 0 0 1px var(--line); }
+  .daygrid .wd { font-size: 10px; line-height: 1; text-align: center; color: var(--ink-3); }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 10px; font-size: 12px; color: var(--ink-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .legend i { width: 11px; height: 11px; border-radius: 3px; background: var(--line-2); }
+  .legend i.hit { background: var(--cool); }
+  .legend i.missed { background: transparent; box-shadow: inset 0 0 0 2px var(--hot); }
+
+  .sev-hot { color: var(--hot); } .sev-warm { color: var(--warm); } .sev-cool { color: var(--cool); }
+
+  /* ---- cards ---- */
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 14px; }
+  .card > header { display: flex; align-items: center; gap: 10px; padding: 12px 15px; border-bottom: 1px solid var(--line-2); flex-wrap: wrap; }
+  .card > header h3 { font-size: 12.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); }
+  .card > header .spacer { flex: 1; }
+  .card .body { padding: 15px; }
+  .muted { color: var(--ink-3); } .sub { color: var(--ink-2); font-size: 13.5px; }
+
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+  .chip-quiet { background: var(--line-2); color: var(--ink-2); }
+  .chip-flag { background: var(--hot-soft); color: var(--hot); }
+  .chip-new { background: var(--accent-soft); color: var(--accent); }
+
+  .btn { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px; padding: 8px 13px; font-size: 14px; font-weight: 600; }
+  .btn:hover { border-color: var(--ink-3); }
+  .btn-p { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn-p:hover { filter: brightness(1.06); }
+
+  .backlink { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 14px; margin-bottom: 12px; }
+
+  .mhead h1 { font-size: 21px; }
+  .mhead .line { color: var(--ink-2); font-size: 13.5px; margin-top: 4px; }
+  .mhead { margin-bottom: 14px; display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+  .mhead .spacer { flex: 1; }
+
+  .flagbox { border: 1px solid #f0c9c6; background: var(--hot-soft); border-radius: var(--radius); padding: 13px 15px; margin-bottom: 14px; }
+  .flagbox .t { font-weight: 600; }
+  .flagbox .r { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+  .flagbox .r .spacer { flex: 1; }
+  .flagbox.done { border-color: var(--line); background: var(--panel); }
+
+  .note { display: flex; gap: 10px; align-items: flex-start; padding: 10px 15px; border-bottom: 1px solid var(--line-2); }
+  .note:last-child { border-bottom: 0; }
+  .note .k { min-width: 96px; flex: none; }
+  .note .txt { flex: 1; overflow-wrap: anywhere; }
+  .note .when { color: var(--ink-3); font-size: 12px; white-space: nowrap; }
+  @container (max-width: 560px) { .note { flex-wrap: wrap; } .note .k { min-width: 0; } }
+  .verbatim { border-left: 2px solid var(--line); padding-left: 9px; }
+  .langtag { display: inline-block; white-space: nowrap; font-size: 10.5px; letter-spacing: .06em; color: var(--ink-3); margin-left: 6px; }
+  details.retired { padding: 10px 15px; }
+  details.retired summary { cursor: pointer; color: var(--ink-3); font-size: 13px; }
+
+  .day { padding: 11px 15px; border-bottom: 1px solid var(--line-2); }
+  .day:last-child { border-bottom: 0; }
+  .day .dn { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; }
+  .day .dn b { font-weight: 650; }
+  .day .dn span { color: var(--ink-3); font-size: 12.5px; }
+  .ex { display: grid; grid-template-columns: 1fr auto; gap: 2px 14px; padding: 3px 0; align-items: baseline; }
+  .ex .n { color: var(--ink); }
+  .ex .p { color: var(--ink-3); font-size: 13px; }
+  .ex .last { grid-column: 1 / -1; color: var(--ink-2); font-size: 12.5px; }
+
+  .sess { border-bottom: 1px solid var(--line-2); }
+  .sess:last-child { border-bottom: 0; }
+  .sess > summary { padding: 11px 15px; cursor: pointer; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; list-style: none; }
+  .sess > summary::-webkit-details-marker { display: none; }
+  .sess > summary b { font-weight: 650; }
+  .sess .setcount { color: var(--ink-3); font-size: 13px; margin-left: auto; }
+  .sess .inner { padding: 0 15px 12px; color: var(--ink-2); font-size: 13.5px; }
+  .sess .inner div { padding: 2px 0; overflow-wrap: anywhere; }
+  .offplan { color: var(--warm); font-size: 12px; }
+
+  dialog { border: 0; border-radius: 12px; padding: 0; max-width: 460px; box-shadow: 0 24px 60px rgba(0,0,0,.25); }
+  dialog::backdrop { background: rgba(20,24,31,.45); }
+  dialog .body { padding: 20px; }
+  dialog h2 { font-size: 17px; margin-bottom: 8px; }
+  dialog p { color: var(--ink-2); font-size: 14px; margin: 0 0 14px; }
+  dialog .acts { display: flex; gap: 8px; justify-content: flex-end; }
+
+  .bar {
+    position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 8px; z-index: 60;
+    background: #14181f; color: #fff; padding: 7px 9px; border-radius: 12px;
+    box-shadow: 0 10px 34px rgba(0,0,0,.28); font-size: 12px;
+  }
+  .bar .lab { text-transform: uppercase; letter-spacing: .08em; color: #97a1b0; font-size: 10.5px; }
+  .bar button { background: #262c36; border: 0; color: #cdd4de; padding: 5px 10px; border-radius: 7px; font-size: 12px; font-weight: 600; }
+  .bar button.on { background: #fff; color: #14181f; }
+</style>
+</head>
+<body data-screen="list">
+<div id="app"></div>
+
+<dialog id="ownerdlg"><div class="body">
+  <h2 id="dlgTitle"></h2>
+  <p id="dlgBody"></p>
+  <div class="acts">
+    <button class="btn" data-dlg="cancel" id="dlgCancel"></button>
+    <button class="btn btn-p" data-dlg="ok" id="dlgOk"></button>
+  </div>
+</div></dialog>
+
+<div class="bar">
+  <span class="lab">Width</span>
+  <button data-w="380">Phone</button>
+  <button data-w="760">Tablet</button>
+  <button data-w="1280">Desk</button>
+  <span class="lab">v2</span>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * PROTOTYPE v2 — coach dashboard, issue #76. Throwaway, fixtures only.
+ *
+ * Rebuilt from docs/prototypes/review-fable.md, review-codex-sol.md and
+ * review-codex.md. The three changes that matter:
+ *   1. ONE roster. The rail/full-page split is a breakpoint, not a choice.
+ *   2. Severity comes from MISSED SCHEDULED Workout days, not raw Gap.
+ *      Gap still sorts, as decided on #71 — sorting and alarming are
+ *      different jobs.
+ *   3. The Member page reads in the order someone rewriting a plan needs:
+ *      who / safety / constraints / pattern / Routine+last Sets / Sessions.
+ * ------------------------------------------------------------------ */
+
+const GYM = { name: "Iron Temple", unit: "kg", coach: "Ale" };
+const TODAY = new Date(2025, 6, 23);          // Wed 23 Jul 2025
+const GRID_START = new Date(2025, 5, 30);     // Mon 30 Jun — 4 whole weeks
+const dt = (m, day) => new Date(2025, m - 1, day);
+const key = (d) => `${d.getMonth() + 1}/${d.getDate()}`;
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const mondayIdx = (d) => (d.getDay() + 6) % 7;
+
+const I18N = {
+  en: {
+    short: "EN", subtitle: "coach dashboard", coachTag: "(coach)",
+    members: "Members", search: "Search members", flagsFilter: (n) => `${n} safety`,
+    away: "Away", noneYet: "No Session yet", lapsed: (n) => `Lapsed (${n})`,
+    nobody: "No member matches.",
+    pickBody: (a, b) => `${a} members have missed a scheduled day. ${b} open safety flag. Pick someone.`,
+    why: { missed: (n) => `${n} missed`, onplan: "on plan", newm: "new" },
+    legend: { hit: "Session", missed: "scheduled, missed", rest: "rest day", future: "ahead" },
+    back: "All members",
+    since: (d) => `Member since ${d}`, sessions: (n) => `${n} sessions`,
+    lastWas: (s) => `last ${s}`, awayFor: (s) => `away ${s}`,
+    gapText: (g) => (g === 0 ? "today" : g === 1 ? "1 day" : `${g} days`),
+    missedLine: (n) => (n === 0 ? "on plan" : n === 1 ? "1 scheduled day missed" : `${n} scheduled days missed`),
+    safety: "Safety flag", tick: "Tick off", untick: "Undo", tickedBy: (w, d) => `Ticked off by ${w} · ${d}`,
+    notes: "Notes", retired: (n) => `${n} retired note`, noteKind: { safety: "safety", injury: "injury", goal: "goal", constraint: "constraint", preference: "preference" },
+    pattern: "Last 4 weeks", routine: "Routine", editRoutine: "Edit Routine",
+    authored: (w) => `${w}-written`, agent: "Agent", coachW: "Coach", activeSince: (s) => `active ${s}`,
+    lastSet: (w, r, d) => `last logged ${w} × ${r} · ${d}`, noLast: "never logged",
+    sessionsCard: "Sessions", showMore: (n) => `${n} older sessions`,
+    setCount: (n) => (n === 1 ? "1 set" : `${n} sets`), noSets: "visit logged, no sets",
+    offplan: "not a scheduled day", verbatimFrom: (l) => l,
+    dlgTitle: "This makes the Routine coach-authored",
+    dlgBody: "The Agent will keep following this Routine, but it will never restructure it again. Replacing it keeps the old Routine, deactivated.",
+    dlgOk: "Take it over", dlgCancel: "Cancel",
+    weekday: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+    wd: ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"],
+    mon: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+    dow: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    dec: ".",
+  },
+  es: {
+    short: "ES", subtitle: "panel del entrenador", coachTag: "(entrenador)",
+    members: "Miembros", search: "Buscar miembros", flagsFilter: (n) => `${n} seguridad`,
+    away: "Sin venir", noneYet: "Aún sin sesiones", lapsed: (n) => `Se perdieron (${n})`,
+    nobody: "Ningún miembro coincide.",
+    pickBody: (a, b) => `${a} miembros faltaron a un día que tocaba. ${b} alerta de seguridad abierta. Elige a alguien.`,
+    why: { missed: (n) => `${n} sin acudir`, onplan: "al día", newm: "nuevo" },
+    legend: { hit: "sesión", missed: "tocaba y faltó", rest: "descanso", future: "por venir" },
+    back: "Todos los miembros",
+    since: (d) => `Miembro desde ${d}`, sessions: (n) => `${n} sesiones`,
+    lastWas: (s) => `última ${s}`, awayFor: (s) => `${s} sin venir`,
+    gapText: (g) => (g === 0 ? "hoy" : g === 1 ? "1 día" : `${g} días`),
+    missedLine: (n) => (n === 0 ? "al día" : n === 1 ? "faltó 1 día que tocaba" : `faltó a ${n} días que tocaban`),
+    safety: "Alerta de seguridad", tick: "Marcar revisada", untick: "Deshacer", tickedBy: (w, d) => `Revisada por ${w} · ${d}`,
+    notes: "Notas", retired: (n) => `${n} nota retirada`, noteKind: { safety: "seguridad", injury: "lesión", goal: "objetivo", constraint: "limitación", preference: "preferencia" },
+    pattern: "Últimas 4 semanas", routine: "Rutina", editRoutine: "Editar rutina",
+    authored: (w) => `escrita por ${w}`, agent: "el Agente", coachW: "el entrenador", activeSince: (s) => `activa desde ${s}`,
+    lastSet: (w, r, d) => `último registro ${w} × ${r} · ${d}`, noLast: "nunca registrado",
+    sessionsCard: "Sesiones", showMore: (n) => `${n} sesiones anteriores`,
+    setCount: (n) => (n === 1 ? "1 serie" : `${n} series`), noSets: "visita registrada, sin series",
+    offplan: "no tocaba ese día", verbatimFrom: (l) => l,
+    dlgTitle: "La rutina pasará a ser del entrenador",
+    dlgBody: "El Agente seguirá la rutina, pero no volverá a reestructurarla nunca. Al reemplazarla, la anterior se conserva desactivada.",
+    dlgOk: "Tomar el control", dlgCancel: "Cancelar",
+    weekday: ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"],
+    wd: ["lu", "ma", "mi", "ju", "vi", "sá", "do"],
+    mon: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"],
+    dow: ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"],
+    dec: ",",
+  },
+};
+
+/* schedule = the active Routine's pinned weekdays (0=Mon). This is what turns
+   an empty square from "rest day" into "missed" — the hole every review named. */
+const MEMBERS = [
+  { id: 1, name: "Marta Ruiz", gap: 12, lastAt: dt(7, 11), lastWorkout: "Pull", schedule: [0, 2, 4],
+    trained: ["6/30","7/2","7/4","7/7","7/9","7/11"],
+    flag: { text: "Sharp shoulder pain on overhead press — stopped mid-set", lang: "en", at: dt(7, 20), acknowledged: false } },
+  { id: 2, name: "Tom Beckett", gap: 9, lastAt: dt(7, 14), lastWorkout: "Legs", schedule: [1, 3], isNew: true,
+    trained: ["7/14"], flag: null },
+  { id: 3, name: "Priya Nair", gap: 6, lastAt: dt(7, 17), lastWorkout: "Push", schedule: [0, 3],
+    trained: ["6/30","7/3","7/8","7/10","7/15","7/17"], flag: null },
+  { id: 4, name: "Dani Osei", gap: 5, lastAt: dt(7, 18), lastWorkout: "Pull", schedule: [1, 3, 4],
+    trained: ["7/1","7/3","7/7","7/9","7/11","7/14","7/16","7/18"],
+    flag: { text: "Lower-back twinge deadlifting — eased off", lang: "en", at: dt(7, 4), acknowledged: true, by: "Ale", ackAt: dt(7, 6) } },
+  { id: 5, name: "Luis Ferrer", gap: 3, lastAt: dt(7, 20), lastWorkout: "Legs", schedule: [2, 6],
+    trained: ["7/2","7/6","7/9","7/13","7/16","7/20"], flag: null },
+  { id: 6, name: "Ana Vidal", gap: 2, lastAt: dt(7, 21), lastWorkout: "Full body", schedule: [0], isNew: true,
+    trained: ["7/21"], flag: null },
+  { id: 7, name: "Jonas Weiss", gap: 1, lastAt: dt(7, 22), lastWorkout: "Push", schedule: [0, 2, 4],
+    trained: ["6/30","7/2","7/4","7/7","7/9","7/11","7/14","7/16","7/18","7/21","7/22"], flag: null },
+  { id: 8, name: "Kim Ryder", gap: 1, lastAt: dt(7, 22), lastWorkout: "Legs", schedule: [1, 3],
+    trained: ["7/1","7/3","7/8","7/10","7/15","7/17","7/22"], flag: null },
+  { id: 9, name: "Sofia Marino", gap: 0, lastAt: dt(7, 23), lastWorkout: "Pull", schedule: [0, 1, 3, 4],
+    trained: ["7/1","7/2","7/4","7/7","7/8","7/11","7/14","7/15","7/18","7/21","7/22","7/23"], flag: null },
+  { id: 10, name: "Hugo Sáez", gap: 141, lastAt: dt(3, 4), lastWorkout: "Legs", schedule: [0, 3],
+    trained: [], flag: null, lapsed: true },
+];
+
+const DETAIL = {
+  memberId: 1, sinceMonth: 11, sinceYear: 2024, sessionCount: 41,
+  routine: { author: "agent", activeFrom: dt(6, 12), days: [
+    { weekday: 0, name: "Legs", ex: [["Back squat", 4, "6-8"], ["Leg press", 3, "10"], ["Calf raise", 3, "12"]] },
+    { weekday: 2, name: "Push", ex: [["Bench press", 4, "6-8"], ["Overhead press", 3, "8"], ["Dips", 3, "AMRAP"]] },
+    { weekday: 4, name: "Pull", ex: [["Deadlift", 3, "5"], ["Barbell row", 4, "8"], ["Biceps curl", 3, "12"]] },
+  ] },
+  // last logged Set per Exercise: weight, reps of that set, date. Never a target.
+  lastSet: {
+    "Back squat": [70, "8", dt(7, 7)], "Leg press": [120, "10", dt(7, 7)], "Calf raise": [40, "12", dt(7, 7)],
+    "Bench press": [45, "8", dt(7, 9)], "Overhead press": [27.5, "5", dt(7, 9)], "Dips": null,
+    "Deadlift": [85, "5", dt(7, 11)], "Barbell row": [40, "8", dt(7, 11)], "Biceps curl": [12.5, "12", dt(7, 11)],
+  },
+  sessions: [
+    { at: dt(7, 11), workout: "Pull", sets: [["Deadlift", 85, "5-5-4"], ["Barbell row", 40, "8-8-8"], ["Biceps curl", 12.5, "12-12-10"]] },
+    { at: dt(7, 9), workout: "Push", sets: [["Bench press", 45, "8-8-6"], ["Overhead press", 27.5, "8-5"]], said: { text: "stopped early — shoulder", lang: "en" } },
+    { at: dt(7, 7), workout: "Legs", sets: [["Back squat", 70, "8-8-7"], ["Leg press", 120, "10-10-10"], ["Calf raise", 40, "12-12-12"]] },
+    { at: dt(7, 4), workout: "Pull", sets: [["Deadlift", 82.5, "5-5-5"], ["Barbell row", 40, "8-8-7"]] },
+    { at: dt(7, 2), workout: null, sets: [] },
+    { at: dt(6, 30), workout: "Legs", sets: [["Back squat", 70, "8-7-7"], ["Leg press", 115, "10-10-10"]] },
+  ],
+  notes: [
+    { kind: "injury", text: "Left knee ACL repair 2019 — no deep lunges", lang: "en", at: dt(3, 4) },
+    { kind: "constraint", text: "Solo puede entrenar por la mañana, antes de las 8", lang: "es", at: dt(6, 2) },
+    { kind: "goal", text: "Quiere hacer press de banca con su propio peso antes de diciembre", lang: "es", at: dt(4, 18) },
+    { kind: "preference", text: "Hates burpees, will not do them", lang: "en", at: dt(2, 9) },
+    { kind: "goal", text: "Training for a 10k in May", lang: "en", at: dt(1, 15), retired: true },
+  ],
+};
+const NOTE_ORDER = { injury: 0, constraint: 1, goal: 2, preference: 3 };
+
+/* ---------------- session state (in memory, as a prototype should be) -------- */
+const S = { lang: "en", screen: "list", memberId: null, q: "", flagsOnly: false, ack: {} };
+
+/* ---------------- helpers ---------------- */
+let T = I18N.en;
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtDay = (d) => `${T.dow[mondayIdx(d)]} ${d.getDate()} ${T.mon[d.getMonth()]}`;
+const fmtShort = (d) => `${d.getDate()} ${T.mon[d.getMonth()]}`;
+const num = (n) => String(n).replace(".", T.dec);
+const kgs = (n) => `${num(n)} ${GYM.unit}`;
+const member = (id) => MEMBERS.find((m) => m.id === id);
+const isAcked = (m) => (m.flag ? (S.ack[m.id] !== undefined ? S.ack[m.id] : m.flag.acknowledged) : false);
+const openFlags = () => MEMBERS.filter((m) => m.flag && !isAcked(m) && !m.lapsed).length;
+
+/** Scheduled Workout days since the last Session that carry no Session.
+ *  Today does not count as missed until it is over. This is the severity
+ *  signal; Gap remains the sort key. */
+function missedDays(m) {
+  if (!m.trained.length && !m.lapsed) return 0;
+  let n = 0;
+  for (let d = addDays(m.lastAt, 1); d < TODAY; d = addDays(d, 1)) {
+    if (m.schedule.includes(mondayIdx(d))) n++;
+  }
+  return n;
+}
+const severity = (m) => { const n = missedDays(m); return n >= 3 ? "hot" : n >= 1 ? "warm" : "cool"; };
+
+/** 4 weeks of cells; a scheduled day with no Session is `missed`. */
+function cells(m, count) {
+  // The 4-week grid is weekday-aligned (Mon-first); the row strip is not, so
+  // it ends on today rather than trailing four empty future squares.
+  const start = count === 28 ? GRID_START : addDays(TODAY, 1 - count);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const d = addDays(start, i);
+    const hit = m.trained.includes(key(d));
+    const future = d > TODAY;
+    // Today is not a miss until it is over — same rule as missedDays().
+    const missed = !hit && d < TODAY && m.schedule.includes(mondayIdx(d));
+    out.push({ d, hit, future, missed });
+  }
+  return out;
+}
+const cellClass = (c) => (c.future ? "future" : c.hit ? "hit" : c.missed ? "missed" : "");
+
+function verbatim(text, lang) {
+  const tag = lang !== S.lang ? `<span class="langtag">${esc(I18N[lang].short)}</span>` : "";
+  return `<span class="verbatim">${esc(text)}${tag}</span>`;
+}
+
+/* ---------------- roster ---------------- */
+
+function rosterRow(m) {
+  const sev = severity(m);
+  const miss = missedDays(m);
+  const why = m.isNew && m.trained.length <= 1 ? T.why.newm : miss ? T.why.missed(miss) : T.why.onplan;
+  return `<button class="row ${m.id === S.memberId ? "on" : ""}" data-id="${m.id}"
+      aria-label="${esc(m.name)}, ${esc(T.awayFor(T.gapText(m.gap)))}, ${esc(why)}">
+    <span class="nm">${m.flag && !isAcked(m) ? `<span class="flagdot" aria-hidden="true"></span>` : ""}${esc(m.name)}${m.isNew ? ` <span class="chip chip-new">${esc(T.why.newm)}</span>` : ""}</span>
+    <span class="gapn mono sev-${sev}">${esc(T.gapText(m.gap))}</span>
+    <span class="strip" aria-hidden="true">${cells(m, 14).map((c) => `<i class="${cellClass(c)}"></i>`).join("")}</span>
+    <span class="why">${esc(why)}</span>
+  </button>`;
+}
+
+function roster() {
+  const q = S.q.trim().toLowerCase();
+  let list = MEMBERS.filter((m) => !m.lapsed);
+  if (q) list = list.filter((m) => m.name.toLowerCase().includes(q));
+  if (S.flagsOnly) list = list.filter((m) => m.flag && !isAcked(m));
+  list.sort((a, b) => b.gap - a.gap);
+  const lapsed = MEMBERS.filter((m) => m.lapsed && (!q || m.name.toLowerCase().includes(q)) && !S.flagsOnly);
+  const flags = openFlags();
+  return `<div class="rail">
+    <div class="rosterhead">
+      <div class="r1"><h1>${esc(T.members)}</h1><span class="count">${MEMBERS.length - 1}</span></div>
+      <div class="searchrow">
+        <label class="sr" for="q">${esc(T.search)}</label>
+        <input id="q" class="search" type="search" placeholder="${esc(T.search)}" value="${esc(S.q)}" autocomplete="off">
+        ${flags ? `<button class="filter ${S.flagsOnly ? "on" : ""}" data-filter="flags" aria-pressed="${S.flagsOnly}">${esc(T.flagsFilter(flags))}</button>` : ""}
+      </div>
+    </div>
+    ${list.length ? list.map(rosterRow).join("") : `<p class="empty">${esc(T.nobody)}</p>`}
+    ${lapsed.length ? `<details class="tail"><summary>${esc(T.lapsed(lapsed.length))}</summary>${lapsed.map(rosterRow).join("")}</details>` : ""}
+  </div>`;
+}
+
+/* ---------------- member page ---------------- */
+
+function flagBox(m) {
+  if (!m.flag) return "";
+  const acked = isAcked(m);
+  if (acked)
+    return `<div class="flagbox done">
+      <div class="sub">${verbatim(m.flag.text, m.flag.lang)}</div>
+      <div class="r"><span class="muted" style="font-size:12.5px">${esc(T.tickedBy(m.flag.by || GYM.coach, fmtShort(m.flag.ackAt || TODAY)))}</span>
+      <span class="spacer"></span><button class="btn" data-ack="0">${esc(T.untick)}</button></div>
+    </div>`;
+  return `<div class="flagbox">
+    <div class="t">${esc(T.safety)}</div>
+    <div class="sub" style="margin-top:5px">${verbatim(m.flag.text, m.flag.lang)}</div>
+    <div class="r"><span class="muted" style="font-size:12.5px">${esc(fmtShort(m.flag.at))}</span>
+    <span class="spacer"></span><button class="btn" data-ack="1">${esc(T.tick)}</button></div>
+  </div>`;
+}
+
+function notesCard() {
+  const active = DETAIL.notes.filter((n) => !n.retired)
+    .sort((a, b) => (NOTE_ORDER[a.kind] ?? 9) - (NOTE_ORDER[b.kind] ?? 9));
+  const retired = DETAIL.notes.filter((n) => n.retired);
+  const row = (n) => `<div class="note">
+    <span class="k"><span class="chip chip-quiet">${esc(T.noteKind[n.kind])}</span></span>
+    <span class="txt">${verbatim(n.text, n.lang)}</span>
+    <span class="when">${esc(fmtShort(n.at))}</span>
+  </div>`;
+  return `<div class="card">
+    <header><h3>${esc(T.notes)}</h3></header>
+    ${active.map(row).join("")}
+    ${retired.length ? `<details class="retired"><summary>${esc(T.retired(retired.length))}</summary>${retired.map(row).join("")}</details>` : ""}
+  </div>`;
+}
+
+function patternCard(m) {
+  return `<div class="card">
+    <header><h3>${esc(T.pattern)}</h3><div class="spacer"></div>
+      <span class="muted sev-${severity(m)}" style="font-size:12.5px;font-weight:600">${esc(T.missedLine(missedDays(m)))}</span></header>
+    <div class="body">
+      <div class="daygrid" role="img" aria-label="${esc(T.pattern)}">
+        ${T.wd.map((w) => `<span class="wd">${esc(w)}</span>`).join("")}
+        ${cells(m, 28).map((c) => `<i class="${cellClass(c)}" title="${esc(fmtShort(c.d))}"></i>`).join("")}
+      </div>
+      <div class="legend">
+        <span><i class="hit"></i>${esc(T.legend.hit)}</span>
+        <span><i class="missed"></i>${esc(T.legend.missed)}</span>
+        <span><i></i>${esc(T.legend.rest)}</span>
+      </div>
+    </div>
+  </div>`;
+}
+
+function routineCard() {
+  const r = DETAIL.routine;
+  const who = r.author === "agent" ? T.agent : T.coachW;
+  return `<div class="card">
+    <header>
+      <h3>${esc(T.routine)}</h3>
+      <span class="chip chip-quiet">${esc(T.authored(who))}</span>
+      <div class="spacer"></div>
+      <span class="muted" style="font-size:12.5px">${esc(T.activeSince(fmtShort(r.activeFrom)))}</span>
+      <button class="btn btn-p" data-edit="1">${esc(T.editRoutine)}</button>
+    </header>
+    ${r.days.map((day) => `<div class="day">
+      <div class="dn"><b>${esc(T.weekday[day.weekday])}</b><span>${esc(day.name)}</span></div>
+      ${day.ex.map(([n, sets, reps]) => {
+        const ls = DETAIL.lastSet[n];
+        return `<div class="ex">
+          <span class="n">${esc(n)}</span><span class="p">${sets} × ${esc(reps)}</span>
+          <span class="last">${ls ? esc(T.lastSet(kgs(ls[0]), ls[1], fmtShort(ls[2]))) : esc(T.noLast)}</span>
+        </div>`;
+      }).join("")}
+    </div>`).join("")}
+  </div>`;
+}
+
+function sessionsCard(m) {
+  const show = DETAIL.sessions.slice(0, 4);
+  const rest = DETAIL.sessions.slice(4);
+  const one = (s, open) => {
+    const off = s.workout && !m.schedule.includes(mondayIdx(s.at));
+    return `<details class="sess" ${open ? "open" : ""}>
+      <summary><b>${esc(fmtDay(s.at))}</b>${s.workout ? `<span class="chip chip-quiet">${esc(s.workout)}</span>` : ""}
+        ${off ? `<span class="offplan">${esc(T.offplan)}</span>` : ""}
+        <span class="setcount">${s.sets.length ? esc(T.setCount(s.sets.length)) : esc(T.noSets)}</span></summary>
+      <div class="inner">
+        ${s.sets.map(([n, w, reps]) => `<div>${esc(n)} ${esc(kgs(w))} × ${esc(reps)}</div>`).join("")}
+        ${s.said ? `<div style="color:var(--hot)">“${verbatim(s.said.text, s.said.lang)}”</div>` : ""}
+      </div>
+    </details>`;
+  };
+  return `<div class="card">
+    <header><h3>${esc(T.sessionsCard)}</h3><div class="spacer"></div>
+      <span class="muted" style="font-size:12.5px">${DETAIL.sessionCount}</span></header>
+    ${show.map((s, i) => one(s, i === 0)).join("")}
+    ${rest.length ? `<details class="retired"><summary>${esc(T.showMore(DETAIL.sessionCount - show.length))}</summary>${rest.map((s) => one(s, false)).join("")}</details>` : ""}
+  </div>`;
+}
+
+function emptyPane() {
+  const behind = MEMBERS.filter((m) => !m.lapsed && missedDays(m) > 0).length;
+  return `<div class="detail"><div class="detail-inner">
+    <p class="empty">${esc(T.pickBody(behind, openFlags()))}</p>
+  </div></div>`;
+}
+
+function memberPage() {
+  const m = member(S.memberId);
+  if (!m) return `<div class="detail"><div class="detail-inner"><p class="empty">${esc(T.nobody)}</p></div></div>`;
+  return `<div class="detail"><div class="detail-inner">
+    <a class="backlink" href="#" data-nav="list">← ${esc(T.back)}</a>
+    <div class="mhead">
+      <div>
+        <h1>${esc(m.name)}</h1>
+        <div class="line">${esc(T.since(`${T.mon[DETAIL.sinceMonth]} ${DETAIL.sinceYear}`))} · ${esc(T.sessions(DETAIL.sessionCount))}
+          · <span class="sev-${severity(m)}" style="font-weight:600">${esc(T.awayFor(T.gapText(m.gap)))}</span>
+          · ${esc(T.lastWas(`${fmtDay(m.lastAt)} · ${m.lastWorkout}`))}</div>
+      </div>
+    </div>
+    ${flagBox(m)}
+    ${notesCard()}
+    ${patternCard(m)}
+    ${routineCard()}
+    ${sessionsCard(m)}
+  </div></div>`;
+}
+
+/* ---------------- render ---------------- */
+
+function render(keepFocus) {
+  T = I18N[S.lang];
+  document.documentElement.lang = S.lang;
+  document.body.dataset.screen = S.screen;
+  document.getElementById("app").innerHTML = `
+    <div class="top">
+      <div class="brand">${esc(GYM.name)}<small>${esc(T.subtitle)}</small></div>
+      <div class="spacer"></div>
+      <div class="seg">${Object.keys(I18N).map((l) => `<button data-lang="${l}" class="${l === S.lang ? "on" : ""}">${esc(I18N[l].short)}</button>`).join("")}</div>
+      <div class="who">${esc(GYM.coach)} ${esc(T.coachTag)}</div>
+    </div>
+    <div class="frame">${roster()}${S.memberId ? memberPage() : emptyPane()}</div>`;
+  if (keepFocus) {
+    const q = document.getElementById("q");
+    if (q) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
+  }
+}
+
+/* ---------------- events ---------------- */
+
+document.getElementById("app").addEventListener("click", (e) => {
+  const lang = e.target.closest("[data-lang]");
+  if (lang) { S.lang = lang.dataset.lang; return render(); }
+  if (e.target.closest("[data-filter=flags]")) { S.flagsOnly = !S.flagsOnly; return render(); }
+  const nav = e.target.closest("[data-nav=list]");
+  if (nav) { e.preventDefault(); S.screen = "list"; return render(); }
+  const ack = e.target.closest("[data-ack]");
+  if (ack) { S.ack[S.memberId] = ack.dataset.ack === "1"; return render(); }
+  if (e.target.closest("[data-edit]")) return openOwnershipDialog();
+  const row = e.target.closest(".row");
+  if (row) { S.memberId = Number(row.dataset.id); S.screen = "member"; return render(); }
+});
+
+document.getElementById("app").addEventListener("input", (e) => {
+  if (e.target.id === "q") { S.q = e.target.value; render(true); }
+});
+
+const dlg = document.getElementById("ownerdlg");
+function openOwnershipDialog() {
+  document.getElementById("dlgTitle").textContent = T.dlgTitle;
+  document.getElementById("dlgBody").textContent = T.dlgBody;
+  document.getElementById("dlgOk").textContent = T.dlgOk;
+  document.getElementById("dlgCancel").textContent = T.dlgCancel;
+  dlg.showModal();
+}
+dlg.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-dlg]");
+  if (!b) return;
+  if (b.dataset.dlg === "ok") DETAIL.routine.author = "coach";
+  dlg.close();
+  render();
+});
+
+document.querySelector(".bar").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-w]");
+  if (!b) return;
+  const w = Number(b.dataset.w);
+  document.querySelectorAll(".bar [data-w]").forEach((x) => x.classList.toggle("on", x === b));
+  // Prototype-only: fake a viewport by clamping the app width.
+  document.getElementById("app").style.maxWidth = w >= 1280 ? "none" : w + "px";
+  document.getElementById("app").style.margin = w >= 1280 ? "0" : "0 auto";
+  document.getElementById("app").style.boxShadow = w >= 1280 ? "none" : "0 0 0 1px var(--line)";
+});
+
+render();
+</script>
+</body>
+</html>

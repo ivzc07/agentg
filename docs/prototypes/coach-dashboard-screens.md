@@ -17,7 +17,15 @@ Then open <http://localhost:8777/coach-dashboard-screens.html>.
 
 ## Verdict
 
-_Pending — filled in when the owner reacts._
+**This prototype is the one, chosen by the owner.** Three roster views the Coach switches between - Table, Cards, Split - over one shared Member page.
+The Cards day grid is per **day**, not per week, because a Routine pins Workouts to weekdays and the weekly version hid which day was being missed.
+
+Two later prototypes were built and **parked, not adopted**:
+
+- [`coach-dashboard-v2.html`](coach-dashboard-v2.html) - a rebuild driven by three independent design reviews (`review-fable.md`, `review-codex-sol.md`, `review-codex.md`). It collapses the three views into one responsive roster and makes severity schedule-aware. Rejected for now: the owner wants the view switcher.
+- [`coach-dashboard-v3-dark.html`](coach-dashboard-v3-dark.html) - the same information in a black, zero-radius, monospace-eyebrow visual language. **Kept for later**: the look is wanted, the timing is not.
+
+The reviews' substantive findings are recorded on the map rather than lost with the prototypes they came from.
 
 ## Fixtures
 

@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE v3 — Coach dashboard, dark editorial</title>
+<style>
+  /* PROTOTYPE v3 for github.com/ivzc07/agentg/issues/76 — throwaway.
+     Same information architecture as v2 (one roster, schedule-aware severity,
+     Member page ordered for rewriting a Routine), re-skinned in the visual
+     language mined from a reference iOS fitness app: pure black, white as the
+     accent, zero corner radius, monospace uppercase eyebrows, 48px/3 gutter.
+     No brand marks, logos or copy are reproduced — this is the grammar only. */
+  :root {
+    --bg: #000;
+    --surface: #131313;
+    --surface-2: #1b1c1e;
+    --badge: #2a2a2a;
+    --line: #2a2b2d;
+    --line-2: #3a3a3c;
+    --ink: #fff;
+    --ink-2: #9a9a9a;
+    --ink-3: #5e5e60;
+    --mint: #6ef3a5;
+    --mint-tint: #0f2a1c;
+    --purple: #8b7cf6;
+    --purple-tint: #201e33;
+    --coral: #f58060;
+    --gut: 16px;
+    --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); }
+  body {
+    color: var(--ink);
+    font: 15px/1.45 ui-sans-serif, -apple-system, "Helvetica Neue", Inter, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding-bottom: 78px;
+  }
+  h1, h2, h3 { margin: 0; font-weight: 700; letter-spacing: -0.02em; }
+  button { font: inherit; cursor: pointer; }
+  a { color: inherit; text-decoration: none; }
+  :focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+  /* ---- the one typographic signature: mono uppercase classifier ---- */
+  .eyebrow {
+    font-family: var(--mono); text-transform: uppercase;
+    font-size: 11px; letter-spacing: .14em; color: var(--ink-2);
+    display: block;
+  }
+  .eyebrow.w { color: var(--ink); }
+
+  #app { container-type: inline-size; margin: 0 auto; }
+
+  /* ---- shell ---- */
+  .nav {
+    display: flex; align-items: center; gap: 12px; height: 46px;
+    padding: 0 var(--gut); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; background: var(--bg); z-index: 20;
+  }
+  .nav .title { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  .nav .spacer { flex: 1; }
+  .nav .who { color: var(--ink-2); font-size: 13px; }
+  .iconbtn { background: none; border: 0; color: var(--ink); font-size: 19px; line-height: 1; padding: 6px 2px; }
+
+  .frame { display: block; }
+  .rail { border-right: 0; }
+  .pane { padding: 0 0 24px; }
+  @container (min-width: 900px) {
+    .frame { display: grid; grid-template-columns: 380px minmax(0, 1fr); height: calc(100vh - 46px - 78px); }
+    .frame > * { min-width: 0; }
+    .rail { overflow: auto; border-right: 1px solid var(--line); }
+    .pane { overflow: auto; }
+    .backrow { display: none; }
+  }
+  @container (max-width: 899px) {
+    body[data-screen="member"] .rail { display: none; }
+    body[data-screen="list"] .pane { display: none; }
+  }
+
+  /* ---- roster ---- */
+  .hero { padding: 26px var(--gut) 18px; }
+  .hero h1 { font-size: 33px; line-height: 1.05; }
+  .chips { display: flex; gap: 8px; padding: 0 var(--gut) 16px; overflow-x: auto; scrollbar-width: none; }
+  .chips::-webkit-scrollbar { display: none; }
+  .chip {
+    border-radius: 999px; padding: 7px 14px; font-size: 13px; font-weight: 500; white-space: nowrap;
+    background: transparent; border: 1px solid var(--line-2); color: var(--ink-2);
+  }
+  .chip.on { background: #fff; border-color: #fff; color: #000; }
+
+  .countbar {
+    display: flex; align-items: baseline; padding: 12px var(--gut);
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    font-size: 15px;
+  }
+  .countbar .spacer { flex: 1; }
+  .countbar .sortby { color: var(--ink-2); font-size: 14px; }
+
+  .row {
+    display: grid; grid-template-columns: 52px 1fr; gap: 0 14px; align-items: start;
+    width: 100%; text-align: left; background: none; border: 0; color: inherit;
+    padding: 14px var(--gut); border-bottom: 1px solid var(--line);
+  }
+  .row:hover { background: #0b0b0b; }
+  .row.on { background: #0e0e0e; box-shadow: inset 2px 0 0 #fff; }
+  .tile {
+    width: 52px; height: 52px; background: var(--surface-2);
+    display: grid; place-items: center; font-size: 17px; font-weight: 600; letter-spacing: .02em;
+  }
+  .row .t { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .row .meta { font-size: 13px; color: var(--ink-2); margin-top: 3px; display: block; }
+  .row .meta.sub2 { color: var(--ink-3); margin-top: 1px; }
+  .row .meta .lead { color: var(--ink); }
+  .row .meta .coral { color: var(--coral); }
+  .row .meta .mint { color: var(--mint); }
+  .dot { display: inline-block; width: 3px; height: 3px; border-radius: 50%; background: var(--ink-3); vertical-align: middle; margin: 0 7px 2px; }
+
+  /* the loudest thing in the system is a white block, so a safety flag is white */
+  .flagchip {
+    background: #fff; color: #000; font-family: var(--mono); text-transform: uppercase;
+    font-size: 9.5px; letter-spacing: .12em; padding: 3px 6px; font-weight: 700;
+  }
+  .newchip {
+    border: 1px solid var(--line-2); color: var(--ink-2); font-family: var(--mono);
+    text-transform: uppercase; font-size: 9.5px; letter-spacing: .12em; padding: 2px 6px;
+  }
+
+  .strip { display: flex; gap: 3px; margin-top: 8px; }
+  .strip i { width: 9px; height: 9px; background: var(--surface-2); flex: none; }
+  .strip i.hit { background: var(--mint); }
+  .strip i.missed { background: transparent; box-shadow: inset 0 0 0 1.5px var(--coral); }
+
+  details.tail { border-bottom: 1px solid var(--line); }
+  details.tail > summary { padding: 14px var(--gut); color: var(--ink-3); font-size: 14px; cursor: pointer; list-style: none; }
+  details.tail > summary::-webkit-details-marker { display: none; }
+  .emptystate { padding: 90px 32px; text-align: center; }
+  .emptystate h2 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+  .emptystate p { color: var(--ink-2); font-size: 15px; margin: 0; }
+
+  /* ---- member page ---- */
+  .backrow { padding: 12px var(--gut) 0; }
+  .backrow a { color: var(--ink); font-size: 15px; }
+  .mhero { padding: 18px var(--gut) 6px; }
+  .mhero h1 { font-size: 33px; line-height: 1.05; margin-top: 8px; }
+  .mhero .meta { color: var(--ink-2); font-size: 14px; margin-top: 10px; }
+
+  section.blk { padding: 34px var(--gut) 0; }
+  section.blk > h2 { font-size: 20px; font-weight: 700; margin-bottom: 14px; }
+
+  .flagcard { background: #fff; color: #000; padding: 16px; margin: 22px var(--gut) 0; }
+  .flagcard .eyebrow { color: #000; font-weight: 700; }
+  .flagcard .q { font-size: 17px; font-weight: 600; margin: 10px 0 14px; letter-spacing: -0.01em; }
+  .flagcard .r { display: flex; align-items: center; gap: 12px; }
+  .flagcard .r .when { font-size: 13px; color: #555; }
+  .flagcard .r .spacer { flex: 1; }
+  .btn-inv { background: #000; color: #fff; border: 0; padding: 11px 18px; font-size: 14px; font-weight: 600; }
+  .flagcard.done { background: var(--surface); color: var(--ink); }
+  .flagcard.done .eyebrow { color: var(--ink-2); }
+  .flagcard.done .q { font-weight: 400; color: var(--ink-2); font-size: 15px; }
+  .flagcard.done .btn-inv { background: transparent; color: var(--ink); border: 1px solid var(--line-2); }
+  .flagcard.done .r .when { color: var(--ink-3); }
+
+  /* adherence: fraction + percentage + arc, all three */
+  .adh { display: flex; align-items: center; gap: 24px; flex-wrap: wrap; }
+  .rings { flex: none; }
+  .pcts { display: grid; gap: 16px; }
+  .pct .n { font-size: 36px; font-weight: 700; line-height: 1; letter-spacing: -0.03em; }
+  .pct .n.mint { color: var(--mint); }
+  .pct .n.purple { color: var(--purple); }
+  .pct .s { color: var(--ink-2); font-size: 13px; margin-top: 4px; }
+
+  table.weeks { width: 100%; border-collapse: collapse; margin-top: 22px; }
+  table.weeks th {
+    font-family: var(--mono); text-transform: uppercase; font-size: 10.5px; letter-spacing: .12em;
+    color: var(--ink-2); font-weight: 400; text-align: right; padding: 0 10px 9px;
+  }
+  table.weeks th:first-child { text-align: left; padding-left: 0; }
+  table.weeks td { padding: 11px 10px; border-top: 1px solid var(--line); font-size: 15px; text-align: right; }
+  table.weeks td:first-child { text-align: left; padding-left: 0; color: var(--ink-3); font-family: var(--mono); font-size: 13px; }
+  table.weeks .c-req { background: var(--mint-tint); }
+  table.weeks .c-opt { background: var(--purple-tint); }
+  table.weeks .met { color: var(--mint); font-weight: 600; }
+  table.weeks .met-opt { color: var(--purple); font-weight: 600; }
+
+  /* month calendar: filled = Session, hollow = scheduled and missed */
+  .cal { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px 0; }
+  .cal .wd { font-size: 11px; color: var(--ink-2); text-align: center; padding-bottom: 6px; }
+  .cal .cell { display: grid; justify-items: center; gap: 4px; padding: 4px 0; }
+  .cal .num { font-size: 12px; color: var(--ink); }
+  .cal .cell.adj .num { color: var(--ink-3); }
+  .cal .mark { width: 18px; height: 18px; border-radius: 50%; background: var(--surface-2); }
+  .cal .mark.hit { background: var(--mint); }
+  .cal .mark.missed { background: transparent; box-shadow: inset 0 0 0 1.5px var(--coral); }
+  .cal .cell.today { background: #1a1a1a; }
+  .legend { display: flex; gap: 16px; margin-top: 14px; font-size: 12px; color: var(--ink-2); flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .legend i { width: 12px; height: 12px; border-radius: 50%; background: var(--surface-2); }
+  .legend i.hit { background: var(--mint); }
+  .legend i.missed { background: transparent; box-shadow: inset 0 0 0 1.5px var(--coral); }
+
+  /* routine day cards: identity half, divider, status half */
+  .daycard { background: var(--surface); margin-bottom: 12px; }
+  .daycard .top { padding: 14px 16px 12px; }
+  .daycard .top .h { display: flex; align-items: baseline; gap: 10px; margin-top: 6px; }
+  .daycard .top .h b { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+  .daycard .top .h span { color: var(--ink-2); font-size: 13px; }
+  .daycard .ex { display: flex; justify-content: space-between; gap: 14px; padding: 7px 0 0; }
+  .daycard .ex .n { font-size: 15px; }
+  .daycard .ex .p { color: var(--ink-2); font-size: 13px; white-space: nowrap; }
+  .daycard .ex .last { color: var(--ink-3); font-size: 12px; }
+  .daycard .foot { border-top: 1px solid var(--line); padding: 11px 16px; font-size: 13px; color: var(--ink-2); }
+  .daycard .foot .mint { color: var(--mint); }
+
+  .sess { border-bottom: 1px solid var(--line); }
+  .sess > summary { display: flex; align-items: baseline; gap: 10px; padding: 13px 0; cursor: pointer; list-style: none; flex-wrap: wrap; }
+  .sess > summary::-webkit-details-marker { display: none; }
+  .sess .d { font-size: 15px; font-weight: 600; }
+  .sess .w { color: var(--ink-2); font-size: 13px; }
+  .sess .c { margin-left: auto; color: var(--ink-3); font-size: 13px; }
+  .sess .inner { padding: 0 0 14px; color: var(--ink-2); font-size: 14px; }
+  .sess .inner div { padding: 2px 0; }
+  .sess .said { color: var(--coral); }
+
+  .note { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); align-items: baseline; }
+  .note .k { width: 96px; flex: none; }
+  .note .txt { flex: 1; font-size: 15px; }
+  .note .when { color: var(--ink-3); font-size: 12px; white-space: nowrap; }
+  details.more > summary { padding: 13px 0; color: var(--ink-3); font-size: 13px; cursor: pointer; list-style: none; }
+  details.more > summary::-webkit-details-marker { display: none; }
+
+  .cta { padding: 30px var(--gut) 10px; }
+  .btn-primary { display: block; width: 100%; background: #fff; color: #000; border: 0; height: 55px; font-size: 16px; font-weight: 600; }
+  .btn-secondary { display: block; width: 100%; background: transparent; color: #fff; border: 1px solid var(--line-2); height: 55px; font-size: 16px; font-weight: 600; margin-top: 12px; }
+
+  dialog { border: 0; background: #000; color: #fff; padding: 0; max-width: 400px; width: calc(100% - 32px); }
+  dialog::backdrop { background: rgba(0,0,0,.7); backdrop-filter: blur(14px); }
+  dialog .b { padding: 22px; }
+  dialog h2 { font-size: 22px; font-weight: 400; line-height: 1.2; margin: 10px 0 12px; letter-spacing: -0.01em; }
+  dialog p { color: var(--ink-2); font-size: 14px; margin: 0 0 20px; }
+
+  .bar {
+    position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 7px; z-index: 60;
+    background: rgba(20,20,20,.92); border: 1px solid var(--line-2); padding: 6px 8px; border-radius: 999px;
+    backdrop-filter: blur(10px);
+  }
+  .bar span { font-family: var(--mono); text-transform: uppercase; font-size: 9.5px; letter-spacing: .12em; color: var(--ink-3); }
+  .bar button { background: transparent; border: 0; color: var(--ink-2); padding: 5px 11px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .bar button.on { background: #fff; color: #000; }
+</style>
+</head>
+<body data-screen="list">
+<div id="app"></div>
+
+<dialog id="dlg"><div class="b">
+  <span class="eyebrow">Routine ownership</span>
+  <h2>This makes the Routine coach-authored.</h2>
+  <p>The Agent will keep following it, but it will never restructure it again. Replacing a Routine keeps the old one, deactivated.</p>
+  <button class="btn-primary" data-dlg="ok">Take it over</button>
+  <button class="btn-secondary" data-dlg="cancel">Cancel</button>
+</div></dialog>
+
+<div class="bar">
+  <span>Width</span>
+  <button data-w="390">Phone</button>
+  <button data-w="820">Tablet</button>
+  <button data-w="0" class="on">Desk</button>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * PROTOTYPE v3 — coach dashboard, issue #76. Throwaway, fixtures only.
+ *
+ * Information architecture is v2's, unchanged. What is new is the skin,
+ * translated from the reference app's grammar:
+ *   - pure black, two surfaces, no shadows, radius 0 except pills
+ *   - WHITE is the accent, so the safety flag is a white block, not a red one
+ *   - mono uppercase eyebrow above anything that classifies the value below
+ *   - adherence stated three times over: fraction, percentage, arc
+ *   - mint = kept the plan, coral = scheduled and missed
+ * ------------------------------------------------------------------ */
+
+const GYM = { name: "Iron Temple", unit: "kg", coach: "Ale" };
+const TODAY = new Date(2025, 6, 23);
+const dt = (m, d) => new Date(2025, m - 1, d);
+const key = (d) => `${d.getMonth() + 1}/${d.getDate()}`;
+const addDays = (d, n) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
+const mIdx = (d) => (d.getDay() + 6) % 7;
+const WD = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+const WEEKDAY = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+const MEMBERS = [
+  { id: 1, name: "Marta Ruiz", gap: 12, lastAt: dt(7, 11), lastWorkout: "Pull", schedule: [0, 2, 4],
+    trained: ["6/30","7/2","7/4","7/7","7/9","7/11"],
+    flag: { text: "Sharp shoulder pain on overhead press — stopped mid-set", at: dt(7, 20), acknowledged: false } },
+  { id: 2, name: "Tom Beckett", gap: 9, lastAt: dt(7, 14), lastWorkout: "Legs", schedule: [1, 3], isNew: true, trained: ["7/14"], flag: null },
+  { id: 3, name: "Priya Nair", gap: 6, lastAt: dt(7, 17), lastWorkout: "Push", schedule: [0, 3], trained: ["6/30","7/3","7/8","7/10","7/15","7/17"], flag: null },
+  { id: 4, name: "Dani Osei", gap: 5, lastAt: dt(7, 18), lastWorkout: "Pull", schedule: [1, 3, 4],
+    trained: ["7/1","7/3","7/7","7/9","7/11","7/14","7/16","7/18"],
+    flag: { text: "Lower-back twinge deadlifting — eased off", at: dt(7, 4), acknowledged: true, by: "Ale", ackAt: dt(7, 6) } },
+  { id: 5, name: "Luis Ferrer", gap: 3, lastAt: dt(7, 20), lastWorkout: "Legs", schedule: [2, 6], trained: ["7/2","7/6","7/9","7/13","7/16","7/20"], flag: null },
+  { id: 6, name: "Ana Vidal", gap: 2, lastAt: dt(7, 21), lastWorkout: "Full body", schedule: [0], isNew: true, trained: ["7/21"], flag: null },
+  { id: 7, name: "Jonas Weiss", gap: 1, lastAt: dt(7, 22), lastWorkout: "Push", schedule: [0, 2, 4], trained: ["6/30","7/2","7/4","7/7","7/9","7/11","7/14","7/16","7/18","7/21","7/22"], flag: null },
+  { id: 8, name: "Kim Ryder", gap: 1, lastAt: dt(7, 22), lastWorkout: "Legs", schedule: [1, 3], trained: ["7/1","7/3","7/8","7/10","7/15","7/17","7/22"], flag: null },
+  { id: 9, name: "Sofia Marino", gap: 0, lastAt: dt(7, 23), lastWorkout: "Pull", schedule: [0, 1, 3, 4], trained: ["7/1","7/2","7/4","7/7","7/8","7/11","7/14","7/15","7/18","7/21","7/22","7/23"], flag: null },
+  { id: 10, name: "Hugo Sáez", gap: 141, lastAt: dt(3, 4), lastWorkout: "Legs", schedule: [0, 3], trained: [], flag: null, lapsed: true },
+];
+
+const DETAIL = {
+  since: "Dec 2024", sessionCount: 41,
+  routine: { author: "Agent", activeFrom: dt(6, 12), days: [
+    { weekday: 0, name: "Legs", ex: [["Back squat", "4 × 6-8"], ["Leg press", "3 × 10"], ["Calf raise", "3 × 12"]] },
+    { weekday: 2, name: "Push", ex: [["Bench press", "4 × 6-8"], ["Overhead press", "3 × 8"], ["Dips", "3 × AMRAP"]] },
+    { weekday: 4, name: "Pull", ex: [["Deadlift", "3 × 5"], ["Barbell row", "4 × 8"], ["Biceps curl", "3 × 12"]] },
+  ] },
+  lastSet: {
+    "Back squat": [70, "8", dt(7, 7)], "Leg press": [120, "10", dt(7, 7)], "Calf raise": [40, "12", dt(7, 7)],
+    "Bench press": [45, "8", dt(7, 9)], "Overhead press": [27.5, "5", dt(7, 9)], "Dips": null,
+    "Deadlift": [85, "5", dt(7, 11)], "Barbell row": [40, "8", dt(7, 11)], "Biceps curl": [12.5, "12", dt(7, 11)],
+  },
+  lastDone: { 0: dt(7, 7), 2: dt(7, 9), 4: dt(7, 11) },
+  sessions: [
+    { at: dt(7, 11), workout: "Pull", sets: [["Deadlift", 85, "5-5-4"], ["Barbell row", 40, "8-8-8"], ["Biceps curl", 12.5, "12-12-10"]] },
+    { at: dt(7, 9), workout: "Push", sets: [["Bench press", 45, "8-8-6"], ["Overhead press", 27.5, "8-5"]], said: "stopped early — shoulder" },
+    { at: dt(7, 7), workout: "Legs", sets: [["Back squat", 70, "8-8-7"], ["Leg press", 120, "10-10-10"], ["Calf raise", 40, "12-12-12"]] },
+    { at: dt(7, 4), workout: "Pull", sets: [["Deadlift", 82.5, "5-5-5"], ["Barbell row", 40, "8-8-7"]] },
+    { at: dt(7, 2), workout: null, sets: [] },
+    { at: dt(6, 30), workout: "Legs", sets: [["Back squat", 70, "8-7-7"], ["Leg press", 115, "10-10-10"]] },
+  ],
+  notes: [
+    { kind: "injury", text: "Left knee ACL repair 2019 — no deep lunges", at: dt(3, 4) },
+    { kind: "constraint", text: "Can only train mornings, before 8am", at: dt(6, 2) },
+    { kind: "goal", text: "Wants to bench bodyweight by December", at: dt(4, 18) },
+    { kind: "preference", text: "Hates burpees, will not do them", at: dt(2, 9) },
+    { kind: "goal", text: "Training for a 10k in May", at: dt(1, 15), retired: true },
+  ],
+};
+const NOTE_ORDER = { injury: 0, constraint: 1, goal: 2, preference: 3 };
+
+const S = { screen: "list", memberId: null, flagsOnly: false, behindOnly: false, ack: {}, author: DETAIL.routine.author };
+
+/* ---------------- helpers ---------------- */
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const fmtDay = (d) => `${DOW[mIdx(d)]} ${d.getDate()} ${MON[d.getMonth()]}`;
+const fmtShort = (d) => `${d.getDate()} ${MON[d.getMonth()]}`;
+const kgs = (n) => `${n} ${GYM.unit}`;
+const gapText = (g) => (g === 0 ? "today" : g === 1 ? "1 day" : `${g} days`);
+const member = (id) => MEMBERS.find((m) => m.id === id);
+const initials = (n) => n.split(" ").map((p) => p[0]).slice(0, 2).join("");
+const isAcked = (m) => (m.flag ? (S.ack[m.id] !== undefined ? S.ack[m.id] : m.flag.acknowledged) : false);
+const openFlags = () => MEMBERS.filter((m) => m.flag && !isAcked(m) && !m.lapsed).length;
+
+/** Scheduled Workout days since the last Session with no Session. Today is not
+ *  a miss until it is over. Gap still sorts; this only colours. */
+function missedDays(m) {
+  if (!m.trained.length && !m.lapsed) return 0;
+  let n = 0;
+  for (let d = addDays(m.lastAt, 1); d < TODAY; d = addDays(d, 1)) if (m.schedule.includes(mIdx(d))) n++;
+  return n;
+}
+const behind = () => MEMBERS.filter((m) => !m.lapsed && missedDays(m) > 0).length;
+
+function cells(m, count) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const d = addDays(TODAY, 1 - count + i);
+    const hit = m.trained.includes(key(d));
+    out.push({ d, hit, missed: !hit && d < TODAY && m.schedule.includes(mIdx(d)) });
+  }
+  return out;
+}
+
+/** Four weeks Mon 30 Jun -> Sun 27 Jul: attended vs scheduled-so-far. */
+function weeks(m) {
+  const out = [];
+  for (let w = 0; w < 4; w++) {
+    const start = addDays(dt(6, 30), w * 7);
+    let sched = 0, done = 0, extra = 0;
+    for (let i = 0; i < 7; i++) {
+      const d = addDays(start, i);
+      const isSched = m.schedule.includes(mIdx(d));
+      const isDone = m.trained.includes(key(d));
+      if (isSched && d < TODAY) sched++;
+      if (isSched && isDone) done++;
+      if (!isSched && isDone) extra++;
+    }
+    out.push({ w: w + 1, sched, done, extra });
+  }
+  return out;
+}
+
+/* ---------------- roster ---------------- */
+
+function rosterRow(m) {
+  const miss = missedDays(m);
+  const flagged = m.flag && !isAcked(m);
+  const lead = miss
+    ? `<span class="coral">${miss} scheduled ${miss === 1 ? "day" : "days"} missed</span>`
+    : `<span class="mint">on plan</span>`;
+  return `<button class="row ${m.id === S.memberId ? "on" : ""}" data-id="${m.id}">
+    <span class="tile" aria-hidden="true">${esc(initials(m.name))}</span>
+    <span>
+      <span class="t">${esc(m.name)}
+        ${flagged ? `<span class="flagchip">Safety flag</span>` : ""}
+        ${m.isNew ? `<span class="newchip">New</span>` : ""}</span>
+      <span class="meta"><span class="lead">${esc(gapText(m.gap))} away</span><span class="dot"></span>${lead}</span>
+      <span class="meta sub2">${esc(fmtDay(m.lastAt))} · ${esc(m.lastWorkout)}</span>
+      <span class="strip" aria-hidden="true">${cells(m, 14).map((c) => `<i class="${c.hit ? "hit" : c.missed ? "missed" : ""}"></i>`).join("")}</span>
+    </span>
+  </button>`;
+}
+
+function roster() {
+  let list = MEMBERS.filter((m) => !m.lapsed);
+  if (S.flagsOnly) list = list.filter((m) => m.flag && !isAcked(m));
+  if (S.behindOnly) list = list.filter((m) => missedDays(m) > 0);
+  list.sort((a, b) => b.gap - a.gap);
+  const lapsed = MEMBERS.filter((m) => m.lapsed);
+  return `<div class="rail">
+    <div class="hero">
+      <span class="eyebrow">${esc(GYM.name)}</span>
+      <h1>Who needs me</h1>
+    </div>
+    <div class="chips">
+      <button class="chip ${S.flagsOnly ? "on" : ""}" data-f="flags">Safety flags ${openFlags()}</button>
+      <button class="chip ${S.behindOnly ? "on" : ""}" data-f="behind">Behind plan ${behind()}</button>
+    </div>
+    <div class="countbar"><span>${list.length} Members</span><span class="spacer"></span><span class="sortby">Sorted by gap ⌄</span></div>
+    ${list.length ? list.map(rosterRow).join("") : `<div class="emptystate"><h2>Nobody here.</h2><p>No member matches these filters.</p></div>`}
+    ${!S.flagsOnly && !S.behindOnly && lapsed.length ? `<details class="tail"><summary>Lapsed (${lapsed.length})</summary>${lapsed.map(rosterRow).join("")}</details>` : ""}
+  </div>`;
+}
+
+/* ---------------- member page ---------------- */
+
+function flagCard(m) {
+  if (!m.flag) return "";
+  const acked = isAcked(m);
+  return `<div class="flagcard ${acked ? "done" : ""}">
+    <span class="eyebrow">Safety flag${acked ? " · ticked off" : ""}</span>
+    <div class="q">${esc(m.flag.text)}</div>
+    <div class="r">
+      <span class="when">${acked ? `${esc(m.flag.by || GYM.coach)} · ${esc(fmtShort(m.flag.ackAt || TODAY))}` : esc(fmtShort(m.flag.at))}</span>
+      <span class="spacer"></span>
+      <button class="btn-inv" data-ack="${acked ? "0" : "1"}">${acked ? "Undo" : "Tick off"}</button>
+    </div>
+  </div>`;
+}
+
+function ring(pct, colour, track, r, sw) {
+  const c = 2 * Math.PI * r;
+  return `<circle cx="60" cy="60" r="${r}" fill="none" stroke="${track}" stroke-width="${sw}"/>
+    <circle cx="60" cy="60" r="${r}" fill="none" stroke="${colour}" stroke-width="${sw}" stroke-linecap="butt"
+      stroke-dasharray="${(c * pct / 100).toFixed(1)} ${c.toFixed(1)}" transform="rotate(-90 60 60)"/>`;
+}
+
+function adherence(m) {
+  const w = weeks(m);
+  const sched = w.reduce((a, x) => a + x.sched, 0);
+  const done = w.reduce((a, x) => a + x.done, 0);
+  const extra = w.reduce((a, x) => a + x.extra, 0);
+  const kept = sched ? Math.round((done / sched) * 100) : 0;
+  const extraPct = sched ? Math.round((extra / sched) * 100) : 0;
+  return `<section class="blk">
+    <h2>Adherence</h2>
+    <div class="adh">
+      <svg class="rings" width="120" height="120" viewBox="0 0 120 120" role="img" aria-label="${kept}% of scheduled days kept">
+        ${ring(kept, "var(--mint)", "var(--mint-tint)", 52, 9)}
+        ${ring(extraPct, "var(--purple)", "var(--purple-tint)", 38, 9)}
+      </svg>
+      <div class="pcts">
+        <div class="pct"><span class="eyebrow">Scheduled days kept</span><div class="n mint">${kept}%</div><div class="s">${done} of ${sched} in the last 4 weeks</div></div>
+        <div class="pct"><span class="eyebrow">Extra sessions</span><div class="n purple">${extraPct}%</div><div class="s">${extra} outside the plan</div></div>
+      </div>
+    </div>
+    <table class="weeks">
+      <thead><tr><th>Week</th><th>Scheduled</th><th>Extra</th></tr></thead>
+      <tbody>${w.map((x) => `<tr>
+        <td>${String(x.w).padStart(2, "0")}</td>
+        <td class="c-req ${x.sched && x.done >= x.sched ? "met" : ""}">${x.done} / ${x.sched}</td>
+        <td class="c-opt ${x.extra ? "met-opt" : ""}">${x.extra}</td>
+      </tr>`).join("")}</tbody>
+    </table>
+  </section>`;
+}
+
+function calendar(m) {
+  const first = dt(7, 1);
+  const lead = mIdx(first);
+  const cellsOut = [];
+  for (let i = 0; i < lead; i++) cellsOut.push({ d: addDays(first, i - lead), adj: true });
+  for (let i = 0; i < 31; i++) cellsOut.push({ d: dt(7, 1 + i), adj: false });
+  while (cellsOut.length % 7) cellsOut.push({ d: addDays(dt(7, 31), cellsOut.length % 7), adj: true });
+  return `<section class="blk">
+    <h2>July</h2>
+    <div class="cal">
+      ${WD.map((w) => `<span class="wd">${w}</span>`).join("")}
+      ${cellsOut.map((c) => {
+        const hit = !c.adj && m.trained.includes(key(c.d));
+        const missed = !c.adj && !hit && c.d < TODAY && m.schedule.includes(mIdx(c.d));
+        const today = c.d.getTime() === TODAY.getTime();
+        return `<span class="cell ${c.adj ? "adj" : ""} ${today ? "today" : ""}">
+          <span class="num">${c.d.getDate()}</span>
+          <span class="mark ${hit ? "hit" : missed ? "missed" : ""}"></span>
+        </span>`;
+      }).join("")}
+    </div>
+    <div class="legend">
+      <span><i class="hit"></i>Session</span>
+      <span><i class="missed"></i>Scheduled, missed</span>
+      <span><i></i>Rest day</span>
+    </div>
+  </section>`;
+}
+
+function notes() {
+  const active = DETAIL.notes.filter((n) => !n.retired).sort((a, b) => NOTE_ORDER[a.kind] - NOTE_ORDER[b.kind]);
+  const retired = DETAIL.notes.filter((n) => n.retired);
+  const row = (n) => `<div class="note">
+    <span class="k"><span class="eyebrow">${esc(n.kind)}</span></span>
+    <span class="txt">${esc(n.text)}</span>
+    <span class="when">${esc(fmtShort(n.at))}</span>
+  </div>`;
+  return `<section class="blk">
+    <h2>Notes</h2>
+    ${active.map(row).join("")}
+    ${retired.length ? `<details class="more"><summary>${retired.length} retired note${retired.length > 1 ? "s" : ""}</summary>${retired.map(row).join("")}</details>` : ""}
+  </section>`;
+}
+
+function routine() {
+  const r = DETAIL.routine;
+  return `<section class="blk">
+    <h2>Routine</h2>
+    <p style="color:var(--ink-2);font-size:13px;margin:-6px 0 14px">${esc(S.author)}-written<span class="dot"></span>active since ${esc(fmtShort(r.activeFrom))}</p>
+    ${r.days.map((day) => {
+      const done = DETAIL.lastDone[day.weekday];
+      return `<div class="daycard">
+        <div class="top">
+          <span class="eyebrow">${esc(WEEKDAY[day.weekday])}</span>
+          <div class="h"><b>${esc(day.name)}</b><span>${day.ex.length} exercises</span></div>
+          ${day.ex.map(([n, p]) => {
+            const ls = DETAIL.lastSet[n];
+            return `<div class="ex"><span><span class="n">${esc(n)}</span><br><span class="last">${ls ? `last logged ${esc(kgs(ls[0]))} × ${esc(ls[1])} · ${esc(fmtShort(ls[2]))}` : "never logged"}</span></span><span class="p">${esc(p)}</span></div>`;
+          }).join("")}
+        </div>
+        <div class="foot">${done ? `<span class="mint">Last done ${esc(fmtDay(done))}</span>` : "Not done in this window"}</div>
+      </div>`;
+    }).join("")}
+  </section>`;
+}
+
+function sessions(m) {
+  const one = (s, open) => `<details class="sess" ${open ? "open" : ""}>
+    <summary><span class="d">${esc(fmtDay(s.at))}</span>${s.workout ? `<span class="w">${esc(s.workout)}</span>` : ""}
+      <span class="c">${s.sets.length ? `${s.sets.length} exercises` : "no sets"}</span></summary>
+    <div class="inner">
+      ${s.sets.map(([n, w, r]) => `<div>${esc(n)} ${esc(kgs(w))} × ${esc(r)}</div>`).join("")}
+      ${s.said ? `<div class="said">“${esc(s.said)}”</div>` : ""}
+    </div>
+  </details>`;
+  const head = DETAIL.sessions.slice(0, 4), rest = DETAIL.sessions.slice(4);
+  return `<section class="blk">
+    <h2>Sessions</h2>
+    ${head.map((s, i) => one(s, i === 0)).join("")}
+    ${rest.length ? `<details class="more"><summary>${DETAIL.sessionCount - head.length} older sessions</summary>${rest.map((s) => one(s, false)).join("")}</details>` : ""}
+  </section>`;
+}
+
+function memberPage() {
+  const m = member(S.memberId);
+  const miss = missedDays(m);
+  return `<div class="pane">
+    <div class="backrow"><a href="#" data-nav="list">← All members</a></div>
+    <div class="mhero">
+      <span class="eyebrow">Member</span>
+      <h1>${esc(m.name)}</h1>
+      <div class="meta">Since ${esc(DETAIL.since)}<span class="dot"></span>${DETAIL.sessionCount} sessions<span class="dot"></span>${esc(gapText(m.gap))} away<span class="dot"></span>last ${esc(fmtDay(m.lastAt))} · ${esc(m.lastWorkout)}</div>
+    </div>
+    ${flagCard(m)}
+    ${notes()}
+    ${adherence(m)}
+    ${calendar(m)}
+    ${routine()}
+    ${sessions(m)}
+    <div class="cta"><button class="btn-primary" data-edit="1">Edit Routine</button></div>
+  </div>`;
+}
+
+function emptyPane() {
+  return `<div class="pane"><div class="emptystate">
+    <h2>Pick a member.</h2>
+    <p>${behind()} have missed a scheduled day. ${openFlags()} open safety flag.</p>
+  </div></div>`;
+}
+
+/* ---------------- render ---------------- */
+function render() {
+  document.body.dataset.screen = S.screen;
+  document.getElementById("app").innerHTML = `
+    <div class="nav">
+      <span class="title">${esc(GYM.name)}</span>
+      <span class="spacer"></span>
+      <span class="who">${esc(GYM.coach)}</span>
+    </div>
+    <div class="frame">${roster()}${S.memberId ? memberPage() : emptyPane()}</div>`;
+}
+
+document.getElementById("app").addEventListener("click", (e) => {
+  const f = e.target.closest("[data-f]");
+  if (f) { if (f.dataset.f === "flags") S.flagsOnly = !S.flagsOnly; else S.behindOnly = !S.behindOnly; return render(); }
+  if (e.target.closest("[data-nav=list]")) { e.preventDefault(); S.screen = "list"; return render(); }
+  const ack = e.target.closest("[data-ack]");
+  if (ack) { S.ack[S.memberId] = ack.dataset.ack === "1"; return render(); }
+  if (e.target.closest("[data-edit]")) return document.getElementById("dlg").showModal();
+  const row = e.target.closest(".row");
+  if (row) { S.memberId = Number(row.dataset.id); S.screen = "member"; return render(); }
+});
+
+const dlg = document.getElementById("dlg");
+dlg.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-dlg]");
+  if (!b) return;
+  if (b.dataset.dlg === "ok") S.author = "Coach";
+  dlg.close();
+  render();
+});
+
+document.querySelector(".bar").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-w]");
+  if (!b) return;
+  document.querySelectorAll(".bar [data-w]").forEach((x) => x.classList.toggle("on", x === b));
+  const w = Number(b.dataset.w);
+  const app = document.getElementById("app");
+  app.style.maxWidth = w ? w + "px" : "none";
+  app.style.borderLeft = app.style.borderRight = w ? "1px solid var(--line)" : "0";
+});
+
+render();
+</script>
+</body>
+</html>
