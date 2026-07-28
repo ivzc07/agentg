@@ -22,10 +22,10 @@ The Cards day grid is per **day**, not per week, because a Routine pins Workouts
 
 Two later prototypes were built and **parked, not adopted**:
 
-- [`coach-dashboard-v2.html`](coach-dashboard-v2.html) - a rebuild driven by three independent design reviews (`review-fable.md`, `review-codex-sol.md`, `review-codex.md`). It collapses the three views into one responsive roster and makes severity schedule-aware. Rejected for now: the owner wants the view switcher.
+- [`coach-dashboard-v2.html`](coach-dashboard-v2.html) - a rebuild driven by three independent design reviews, kept at [`docs/design/coach-dashboard-reviews/`](../design/coach-dashboard-reviews/). It collapses the three views into one responsive roster and makes severity schedule-aware. Rejected for now: the owner wants the view switcher.
 - [`coach-dashboard-v3-dark.html`](coach-dashboard-v3-dark.html) - the same information in a black, zero-radius, monospace-eyebrow visual language. **Kept for later**: the look is wanted, the timing is not.
 
-The reviews' substantive findings are recorded on the map rather than lost with the prototypes they came from.
+The reviews themselves live in [`docs/design/coach-dashboard-reviews/`](../design/coach-dashboard-reviews/), outside this throwaway directory; their substantive findings are also recorded as fog on the map, so nothing is lost when these files are deleted.
 
 ## Fixtures
 
