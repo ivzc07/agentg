@@ -142,7 +142,11 @@ def build_plan(records: list[DatasetRecord], videos: dict[str, Path]) -> Plan:
     for seed in SEED_EXERCISES:
         pick = SEED_DEMO_PICKS[seed]
         picked = by_name.get(pick)
-        if picked is None:
+        if picked is None or picked.id not in videos:
+            # No record, or a record whose GIF the dataset doesn't ship: leave
+            # the seed unwired rather than planning a transcode with no source.
+            if picked is not None:
+                skipped.append(Skipped(picked.id, picked.name, "no GIF in dataset videos/"))
             seed_wiring[seed] = None
             continue
         seed_wiring[seed] = f"{picked.name} ({picked.id})"
@@ -220,18 +224,37 @@ async def transcode_pending(
     return done, skipped, failures
 
 
-def write_manifest(items: list[PlanItem], out_dir: Path) -> Path:
+def write_manifest(items: list[PlanItem], out_dir: Path) -> tuple[Path, list[PlanItem]]:
+    """Write the manifest, listing only items whose MP4 is actually on disk.
+
+    Ingest wires a manifest entry onto the catalog without checking the file,
+    so an entry for a failed transcode would leave an Exercise pointing at an
+    absent artifact and every demo send for it failing. Returns the manifest
+    path and the items omitted."""
     manifest = out_dir / "manifest.json"
-    payload = [{"name": item.manifest_name, "slug": item.slug} for item in items]
+    present: list[PlanItem] = []
+    omitted: list[PlanItem] = []
+    for item in items:
+        mp4 = out_dir / item.slug
+        (present if mp4.exists() and mp4.stat().st_size > 0 else omitted).append(item)
+    payload = [{"name": item.manifest_name, "slug": item.slug} for item in present]
     manifest.write_text(json.dumps(payload, indent=1) + "\n", encoding="utf-8")
-    return manifest
+    return manifest, omitted
+
+
+def _positive_int(text: str) -> int:
+    """``--jobs 0`` would size the semaphore at zero and hang the whole run."""
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return value
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("dataset_dir", type=Path, help="clone of hasaneyldrm/exercises-dataset")
     parser.add_argument("output_dir", type=Path, help="media root for MP4s + manifest.json")
-    parser.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 8),
+    parser.add_argument("--jobs", type=_positive_int, default=min(8, os.cpu_count() or 8),
                         help="parallel ffmpeg processes")
     args = parser.parse_args(argv)
 
@@ -246,10 +269,15 @@ def main(argv: list[str] | None = None) -> None:
     done, skipped, failures = asyncio.run(
         transcode_pending(plan.items, videos, args.output_dir, args.jobs)
     )
-    manifest = write_manifest(plan.items, args.output_dir)
+    manifest, omitted = write_manifest(plan.items, args.output_dir)
 
     print(f"transcoded {done} MP4s ({skipped} already present), manifest: {manifest}")
-    print(f"manifest entries: {len(plan.items)}; dataset records skipped: {len(plan.skipped)}")
+    entries = len(plan.items) - len(omitted)
+    print(f"manifest entries: {entries}; dataset records skipped: {len(plan.skipped)}")
+    if omitted:
+        print(f"omitted from manifest (no MP4 on disk): {len(omitted)}", file=sys.stderr)
+        for item in omitted:
+            print(f"  {item.slug}", file=sys.stderr)
     print("seed wiring:")
     for seed, wiring in plan.seed_wiring.items():
         print(f"  {seed} -> {wiring or 'NO MATCH'}")

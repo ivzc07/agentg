@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agentg.demo_ingest import load_manifest
 from agentg.scripts.build_demo_media import (
     SEED_DEMO_PICKS,
@@ -53,7 +55,7 @@ def test_seed_picks_cover_exactly_the_seed_catalog():
 
 def test_seed_records_wire_onto_seed_names_not_dataset_names():
     records = _records(("0025", "barbell bench press"), ("9999", "zebra raise"))
-    plan = build_plan(records, {})
+    plan = build_plan(records, {"0025": Path("a.gif"), "9999": Path("b.gif")})
     bench = next(i for i in plan.items if i.record_id == "0025")
     assert bench.manifest_name == "bench press"  # the seed row, not a near-duplicate
     assert not any(i.manifest_name == "barbell bench press" for i in plan.items)
@@ -66,7 +68,7 @@ def test_seed_alias_collisions_are_not_emitted():
     # the dataset's "chin-up" is a seeded alias of pull-up; emitting it would
     # resolve onto the pull-up row at ingest and clobber its demo
     records = _records(("0652", "pull-up"), ("1326", "chin-up"))
-    plan = build_plan(records, {})
+    plan = build_plan(records, {"0652": Path("a.gif"), "1326": Path("b.gif")})
     names = [i.manifest_name for i in plan.items]
     assert "chin-up" not in names
     assert any(s.name == "chin-up" for s in plan.skipped)
@@ -85,6 +87,16 @@ def test_records_without_a_gif_are_skipped_not_planned():
     plan = build_plan(records, videos={})
     assert plan.items == []
     assert plan.skipped[0].reason == "no GIF in dataset videos/"
+
+
+def test_a_seed_pick_without_a_gif_is_left_unwired():
+    # the seed wiring must obey the same missing-GIF rule as every other
+    # record: planning it would queue a transcode with no source file
+    records = _records(("0025", "barbell bench press"))
+    plan = build_plan(records, videos={})
+    assert plan.items == []
+    assert plan.seed_wiring["bench press"] is None
+    assert any(s.record_id == "0025" and "no GIF" in s.reason for s in plan.skipped)
 
 
 async def test_transcode_skips_existing_and_renames_tmp_into_place(tmp_path):
@@ -132,9 +144,30 @@ async def test_transcode_reports_failures_without_aborting_the_run(tmp_path):
 
 def test_manifest_round_trips_through_the_ingest_loader(tmp_path):
     items = [PlanItem("0025", "bench press", "0025-barbell-bench-press.mp4")]
-    path = write_manifest(items, tmp_path)
+    (tmp_path / "0025-barbell-bench-press.mp4").write_bytes(b"mp4")
+    path, omitted = write_manifest(items, tmp_path)
     entries = load_manifest(path)
     assert [(e.name, e.slug) for e in entries] == [("bench press", "0025-barbell-bench-press.mp4")]
+    assert omitted == []
+
+
+def test_manifest_omits_items_whose_mp4_is_missing_or_empty(tmp_path):
+    # ingest wires an entry without checking the file, so a failed transcode
+    # must never reach the manifest — the Exercise would point at nothing
+    good = PlanItem("0025", "bench press", "good.mp4")
+    empty = PlanItem("0043", "squat", "empty.mp4")
+    absent = PlanItem("0652", "pull-up", "absent.mp4")
+    (tmp_path / "good.mp4").write_bytes(b"mp4")
+    (tmp_path / "empty.mp4").write_bytes(b"")
+    path, omitted = write_manifest([good, empty, absent], tmp_path)
+    assert [e.slug for e in load_manifest(path)] == ["good.mp4"]
+    assert sorted(i.slug for i in omitted) == ["absent.mp4", "empty.mp4"]
+
+
+def test_jobs_must_be_a_positive_integer():
+    # --jobs 0 sizes the semaphore at zero: every transcode waits forever
+    with pytest.raises(SystemExit):
+        main(["ds", "out", "--jobs", "0"])
 
 
 def test_main_end_to_end_with_a_stub_dataset(tmp_path, monkeypatch):
