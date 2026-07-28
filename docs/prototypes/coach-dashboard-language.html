@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE — Coach dashboard in two languages (#76)</title>
+<style>
+  /* PROTOTYPE for github.com/ivzc07/agentg/issues/76 — throwaway. No build step, no deps. */
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --ink: #14181f; --ink-2: #5a6472; --ink-3: #8a94a3;
+    --line: #e3e7ec; --line-2: #eef1f4;
+    --accent: #1f5fd0; --accent-soft: #eaf1fd;
+    --hot: #b3261e; --hot-soft: #fdeceb; --warm: #9a5b00; --cool: #1f7a4d;
+    --radius: 10px; --shadow: 0 1px 2px rgba(20,24,31,.05), 0 8px 24px rgba(20,24,31,.06);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased; padding-bottom: 88px;
+  }
+  h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  a { color: inherit; text-decoration: none; }
+  button { font: inherit; cursor: pointer; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+
+  .top {
+    display: flex; align-items: center; gap: 16px; padding: 0 24px; height: 56px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 20;
+  }
+  .brand { font-weight: 650; letter-spacing: -0.02em; }
+  .brand small { display: block; font-weight: 450; font-size: 11px; color: var(--ink-3); letter-spacing: 0; }
+  .top .spacer { flex: 1; }
+  .who { color: var(--ink-2); font-size: 13px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px; }
+
+  .seg { display: inline-flex; background: var(--line-2); border-radius: 8px; padding: 3px; gap: 2px; }
+  .seg button {
+    border: 0; background: transparent; color: var(--ink-2);
+    padding: 5px 12px; border-radius: 6px; font-size: 13px; font-weight: 550;
+  }
+  .seg button:hover { color: var(--ink); }
+  .seg button.on { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(20,24,31,.10); }
+  .seg.lang button { padding: 5px 10px; letter-spacing: .03em; }
+
+  .crumb { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); font-size: 13px; margin-bottom: 14px; }
+  .crumb:hover { color: var(--accent); }
+
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 550; line-height: 1.6; white-space: nowrap;
+  }
+  .chip-flag { background: var(--hot-soft); color: var(--hot); }
+  .chip-flag-ok { background: var(--line-2); color: var(--ink-3); }
+  .chip-new { background: var(--accent-soft); color: var(--accent); }
+  .chip-quiet { background: var(--line-2); color: var(--ink-2); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  .gap { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .gap.hot { color: var(--hot); } .gap.warm { color: var(--warm); } .gap.cool { color: var(--cool); }
+
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+  .card > header { display: flex; align-items: center; gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--line-2); }
+  .card > header h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); }
+  .card > header .spacer { flex: 1; }
+  .card .body { padding: 16px; }
+  .muted { color: var(--ink-3); } .sub { color: var(--ink-2); font-size: 13px; }
+
+  table.roster { width: 100%; border-collapse: collapse; }
+  table.roster th {
+    text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--ink-3); font-weight: 600; padding: 0 16px 10px; border-bottom: 1px solid var(--line);
+  }
+  table.roster th.sorted { color: var(--ink); }
+  table.roster td { padding: 11px 16px; border-bottom: 1px solid var(--line-2); }
+  table.roster tr { cursor: pointer; }
+  table.roster tbody tr:hover td { background: #fafbfc; }
+  table.roster .nm { font-weight: 550; }
+
+  .split { display: grid; grid-template-columns: 320px minmax(0,1fr); height: calc(100vh - 56px - 88px); }
+  .split > * { min-width: 0; }
+  .split .list { border-right: 1px solid var(--line); background: var(--panel); overflow: auto; }
+  .split .pane { overflow: auto; padding: 22px 24px; }
+  .listrow {
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
+    padding: 11px 16px; border-bottom: 1px solid var(--line-2); cursor: pointer;
+  }
+  .listrow:hover { background: #fafbfc; }
+  .listrow.on { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+  .listrow .nm { font-weight: 550; }
+  .listrow .meta { grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; }
+  .listhead {
+    position: sticky; top: 0; background: var(--panel); z-index: 2; padding: 12px 16px;
+    border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 8px;
+  }
+  .listhead h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); }
+
+  .band { margin-bottom: 26px; }
+  .band > h2 {
+    display: flex; align-items: center; gap: 9px; font-size: 12.5px; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--ink-2); margin-bottom: 11px;
+  }
+  .band .count { color: var(--ink-3); font-weight: 500; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(258px, 1fr)); gap: 12px; }
+  .mcard {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px 15px; cursor: pointer; box-shadow: var(--shadow);
+    display: flex; flex-direction: column; gap: 9px; transition: transform .08s ease, box-shadow .08s ease;
+  }
+  .mcard:hover { transform: translateY(-1px); box-shadow: 0 2px 4px rgba(20,24,31,.06), 0 12px 28px rgba(20,24,31,.09); }
+  .mcard .top-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .mcard .nm { font-weight: 600; font-size: 15px; }
+  /* 4 weeks, one square per day, Mon–Sun columns */
+  .daygrid { display: grid; grid-template-columns: repeat(7, 15px); gap: 3px; }
+  .daygrid i { height: 15px; border-radius: 3px; background: var(--line-2); border: 1px solid transparent; }
+  .daygrid i.hit { background: var(--cool); }
+  .daygrid i.future { background: transparent; border: 1px dashed var(--line); }
+  .daygrid .wd { font-size: 9px; line-height: 1; text-align: center; color: var(--ink-3); letter-spacing: -0.02em; }
+  .sparklab { font-size: 11px; color: var(--ink-3); }
+
+  .mhead { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
+  .mhead h1 { font-size: 22px; }
+  .mhead .stats { display: flex; gap: 22px; margin-left: auto; }
+  .stat .k { font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); }
+  .stat .v { font-size: 17px; font-weight: 600; }
+  .cols { display: grid; grid-template-columns: minmax(0,1.35fr) minmax(0,1fr); gap: 16px; align-items: start; }
+  .stack { display: grid; gap: 16px; }
+  .cols > *, .stack > * { min-width: 0; }
+  .lifts, .sess .empty, .note .txt { overflow-wrap: anywhere; }
+
+  .gapcall { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 16px; padding: 7px 12px; border-radius: 8px; font-size: 13px; font-weight: 550; }
+  .gapcall.hot { background: var(--hot-soft); color: var(--hot); }
+  .gapcall.warm { background: #fdf3e3; color: var(--warm); }
+  .gapcall.cool { background: #e9f6ef; color: var(--cool); }
+
+  .sess { border-bottom: 1px solid var(--line-2); padding: 12px 16px; }
+  .sess:last-child { border-bottom: 0; }
+  .sess .d { display: flex; align-items: baseline; gap: 8px; }
+  .sess .d b { font-weight: 600; }
+  .sess .lifts { color: var(--ink-2); margin-top: 3px; font-size: 13px; }
+  .sess .empty { color: var(--ink-3); font-style: italic; margin-top: 3px; font-size: 13px; }
+
+  .kv { display: grid; grid-template-columns: 1fr auto auto; gap: 4px 14px; align-items: baseline; }
+  .kv .w { font-weight: 600; } .kv .t { color: var(--ink-3); font-size: 12.5px; }
+
+  .day { padding: 11px 16px; border-bottom: 1px solid var(--line-2); }
+  .day:last-child { border-bottom: 0; }
+  .day .dn { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .day .dn b { font-weight: 600; }
+  .day .dn span { color: var(--ink-3); font-size: 12.5px; }
+  .day ul { margin: 0; padding-left: 18px; color: var(--ink-2); }
+  .day li { padding: 1px 0; }
+  .day li em { font-style: normal; color: var(--ink-3); }
+
+  .note { padding: 11px 16px; border-bottom: 1px solid var(--line-2); display: flex; gap: 10px; align-items: flex-start; }
+  .note:last-child { border-bottom: 0; }
+  .note .k { min-width: 92px; }
+  .note.retired { opacity: .5; }
+  .note .txt { flex: 1; }
+  .note .when { color: var(--ink-3); font-size: 12px; white-space: nowrap; }
+
+  .btn { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 7px; padding: 6px 11px; font-size: 13px; font-weight: 550; }
+  .btn:hover { border-color: var(--ink-3); }
+  .btn-p { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn-p:hover { filter: brightness(1.06); }
+
+  /* what the Member actually typed, left in their own words */
+  .verbatim { border-left: 2px solid var(--line); padding-left: 9px; }
+  .langtag {
+    display: inline-block; white-space: nowrap; font-size: 10.5px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--ink-3); margin-left: 6px;
+  }
+
+  .footnote {
+    margin-top: 18px; padding: 13px 15px; border-radius: var(--radius);
+    background: #fffdf3; border: 1px solid #f0e4bf; color: #6b5a20; font-size: 12.5px;
+  }
+  .footnote b { color: #4a3d12; }
+  .footnote ul { margin: 6px 0 0; padding-left: 18px; }
+  .footnote li { padding: 2px 0; }
+
+  .bar {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 6px; z-index: 50;
+    background: #14181f; color: #fff; padding: 7px; border-radius: 12px;
+    box-shadow: 0 10px 34px rgba(0,0,0,.28);
+  }
+  .bar .lab { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #97a1b0; padding: 0 8px 0 6px; }
+  .bar button { background: transparent; border: 0; color: #cdd4de; padding: 6px 12px; border-radius: 8px; font-size: 13px; font-weight: 550; }
+  .bar button:hover { background: #262c36; color: #fff; }
+  .bar button.on { background: #fff; color: #14181f; }
+  .bar .hint { font-size: 11px; color: #6e7885; padding: 0 8px; max-width: 200px; line-height: 1.35; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div class="bar">
+  <span class="lab">Screen</span>
+  <button data-s="list">Roster</button>
+  <button data-s="member">Member</button>
+  <span class="hint">Language + view live in the product (top bar).</span>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * PROTOTYPE — coach dashboard in two languages, issue #76. Throwaway.
+ *
+ * Question: what actually changes when the Coach flips EN/ES?
+ * The chrome translates. Three things deliberately do NOT, and the
+ * footnote on every screen says why — that is the thing to react to.
+ * ------------------------------------------------------------------ */
+
+const GYM = { name: "Iron Temple", unit: "kg", coach: "Ale" };
+
+const I18N = {
+  en: {
+    _name: "English", _short: "EN",
+    subtitle: "coach dashboard", coachTag: "(coach)",
+    rosterTitle: "Who needs me", pickMember: "Pick a member",
+    pickBody: (a, b) => `${a} members haven't trained in a week. ${b} open safety flag.`,
+    view: { table: "Table", cards: "Cards", split: "Split" },
+    stat: { training: "Training", stale: "Gap ≥ 7d", flags: "Open flags", gap: "Gap", byGap: "by gap" },
+    col: { member: "Member", gap: "Gap", last: "Last session", markers: "Markers" },
+    band: { hot: "Needs you now", warm: "Slipping", cool: "On track" },
+    mark: { flag: "safety flag", flagOk: "flag · ticked", new: "new" },
+    card: { routine: "Routine", sessions: "Sessions", weights: "Last weight per exercise", notes: "Notes" },
+    btn: { edit: "Edit", tick: "Tick off", back: "Who needs me" },
+    lbl: {
+      authored: (who) => `${who}-written`, agent: "Agent", coachAuthor: "Coach",
+      activeSince: (s) => `active ${s}`, lastOf: (a, b) => `last ${a} of ${b}`,
+      active: (n) => `${n} active`, retired: "retired",
+      since: (d) => `Member since ${d}`, sessions: (n) => `${n} sessions`, lastWas: (s) => `last ${s}`,
+      noSets: "visit logged, no sets", ago: (s) => `${s} ago`,
+      gapCall: (s) => `${s} with no session`, daysAgo: (n) => `${n} days ago`,
+      readOnly: "Read-only. Sorted by Gap; markers do not re-sort.",
+      bandsNote: "Bands are a reading of Gap, not a new field. Read-only.",
+      weeks: (n) => `last ${n} weeks`,
+    },
+    gapText: (g) => (g === 0 ? "today" : g === 1 ? "1 day" : `${g} days`),
+    noteKind: { safety: "safety", injury: "injury", goal: "goal", constraint: "constraint", preference: "preference" },
+    weekday: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+    mon: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+    dow: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    wdShort: ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"],
+    dec: ".",
+    verbatimTag: "as written",
+    foot: {
+      title: "Three things did not translate. On purpose.",
+      items: [
+        "<b>Exercise names.</b> The Catalog stores one name per Exercise (<code>exercises.name</code>, unique) — so \"Back squat\" is the row, not a translation of it. Showing \"Sentadilla\" means a second name per language, or aliases doing a job they were not built for.",
+        "<b>What the Member said.</b> Notes and set comments are the Member's own words, written by the Agent in the language they chat in. Translating them puts words in their mouth; leaving them shows a Spanish dashboard with English quotes (and vice versa).",
+        "<b>Workout names.</b> \"Legs\", \"Push\", \"Pull\" are free text on the Workout row, typed by whoever wrote the Routine.",
+      ],
+    },
+  },
+  es: {
+    _name: "Español", _short: "ES",
+    subtitle: "panel del entrenador", coachTag: "(entrenador)",
+    rosterTitle: "Quién me necesita", pickMember: "Elige un miembro",
+    pickBody: (a, b) => `${a} miembros llevan más de una semana sin entrenar. ${b} alerta de seguridad abierta.`,
+    view: { table: "Tabla", cards: "Tarjetas", split: "Dividida" },
+    stat: { training: "Entrenando", stale: "Sin venir ≥ 7d", flags: "Alertas abiertas", gap: "Sin venir", byGap: "por ausencia" },
+    col: { member: "Miembro", gap: "Sin venir", last: "Última sesión", markers: "Marcas" },
+    band: { hot: "Te necesitan ya", warm: "Aflojando", cool: "Al día" },
+    mark: { flag: "alerta de seguridad", flagOk: "alerta · revisada", new: "nuevo" },
+    card: { routine: "Rutina", sessions: "Sesiones", weights: "Último peso por ejercicio", notes: "Notas" },
+    btn: { edit: "Editar", tick: "Marcar revisada", back: "Quién me necesita" },
+    lbl: {
+      authored: (who) => `escrita por ${who}`, agent: "el Agente", coachAuthor: "el entrenador",
+      activeSince: (s) => `activa desde ${s}`, lastOf: (a, b) => `últimas ${a} de ${b}`,
+      active: (n) => `${n} activas`, retired: "retirada",
+      since: (d) => `Miembro desde ${d}`, sessions: (n) => `${n} sesiones`, lastWas: (s) => `última ${s}`,
+      noSets: "visita registrada, sin series", ago: (s) => `hace ${s}`,
+      gapCall: (s) => `${s} sin ninguna sesión`, daysAgo: (n) => `hace ${n} días`,
+      readOnly: "Solo lectura. Ordenado por ausencia; las marcas no reordenan.",
+      bandsNote: "Los grupos son una lectura de la ausencia, no un campo nuevo. Solo lectura.",
+      weeks: (n) => `últimas ${n} semanas`,
+    },
+    gapText: (g) => (g === 0 ? "hoy" : g === 1 ? "1 día" : `${g} días`),
+    noteKind: { safety: "seguridad", injury: "lesión", goal: "objetivo", constraint: "limitación", preference: "preferencia" },
+    weekday: ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"],
+    mon: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"],
+    dow: ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"],
+    wdShort: ["lu", "ma", "mi", "ju", "vi", "sá", "do"],
+    dec: ",",
+    verbatimTag: "textual",
+    foot: {
+      title: "Tres cosas no se traducen. A propósito.",
+      items: [
+        "<b>Los nombres de los ejercicios.</b> El Catálogo guarda un solo nombre por Ejercicio (<code>exercises.name</code>, único) — \"Back squat\" <em>es</em> la fila, no una traducción. Mostrar \"Sentadilla\" exige un segundo nombre por idioma, o usar los alias para algo que no fueron pensados.",
+        "<b>Lo que dijo el miembro.</b> Las Notas y los comentarios de las series son sus propias palabras, escritas por el Agente en el idioma en que chatea. Traducirlas es ponerle palabras en la boca; dejarlas produce un panel en español con citas en inglés (y al revés).",
+        "<b>Los nombres de los entrenamientos.</b> \"Legs\", \"Push\", \"Pull\" son texto libre en la fila del Workout, escrito por quien redactó la Rutina.",
+      ],
+    },
+  },
+};
+
+/* Fixture. Dates are real dates so each language formats its own way; the
+ * Member's own words carry the language they were said in. */
+const TODAY = new Date(2025, 6, 23); // Wed 23 Jul 2025
+const d = (m, day) => new Date(2025, m - 1, day);
+
+// The day grid runs Mon 30 Jun → Sun 27 Jul: four whole weeks, Mon–Sun
+// columns, the tail of the last one still in the future.
+// trained = the days inside that window carrying a Session ("M/D").
+const GRID_START = new Date(2025, 5, 30);
+
+const MEMBERS = [
+  { id: 1, name: "Marta Ruiz", gap: 12, lastAt: d(7, 11), lastWorkout: "Pull", flag: { text: "Sharp shoulder pain on overhead press — stopped mid-set", lang: "en", days: 3, acknowledged: false }, trained: ["6/30","7/2","7/4","7/7","7/9","7/11"] },
+  { id: 2, name: "Tom Beckett", gap: 9, lastAt: d(7, 14), lastWorkout: "Legs", flag: null, isNew: true, trained: ["7/14"] },
+  { id: 3, name: "Priya Nair", gap: 6, lastAt: d(7, 17), lastWorkout: "Push", flag: null, trained: ["6/30","7/3","7/8","7/10","7/15","7/17"] },
+  { id: 4, name: "Dani Osei", gap: 5, lastAt: d(7, 18), lastWorkout: "Pull", flag: { text: "Lower-back twinge deadlifting — eased off", lang: "en", days: 19, acknowledged: true }, trained: ["7/1","7/3","7/7","7/9","7/11","7/14","7/16","7/18"] },
+  { id: 5, name: "Luis Ferrer", gap: 3, lastAt: d(7, 20), lastWorkout: "Legs", flag: null, trained: ["7/2","7/6","7/9","7/13","7/16","7/20"] },
+  { id: 6, name: "Ana Vidal", gap: 2, lastAt: d(7, 21), lastWorkout: "Full body", flag: null, isNew: true, trained: ["7/21"] },
+  { id: 7, name: "Jonas Weiss", gap: 1, lastAt: d(7, 22), lastWorkout: "Push", flag: null, trained: ["6/30","7/2","7/4","7/7","7/9","7/11","7/14","7/16","7/18","7/21","7/22"] },
+  { id: 8, name: "Kim Ryder", gap: 1, lastAt: d(7, 22), lastWorkout: "Legs", flag: null, trained: ["7/1","7/3","7/8","7/10","7/15","7/17","7/22"] },
+  { id: 9, name: "Sofia Marino", gap: 0, lastAt: d(7, 23), lastWorkout: "Pull", flag: null, trained: ["7/1","7/2","7/4","7/7","7/8","7/11","7/14","7/15","7/18","7/21","7/22","7/23"] },
+];
+
+/** 28 slots, Mon-first, flagged trained / future. */
+function dayCells(m) {
+  const cells = [];
+  for (let i = 0; i < 28; i++) {
+    const dt = new Date(GRID_START.getFullYear(), GRID_START.getMonth(), GRID_START.getDate() + i);
+    const key = `${dt.getMonth() + 1}/${dt.getDate()}`;
+    cells.push({ dt, key, hit: m.trained.includes(key), future: dt > TODAY });
+  }
+  return cells;
+}
+
+const DETAIL = {
+  memberId: 1,
+  sinceMonth: 11, sinceYear: 2024, sessionCount: 41,
+  routine: {
+    author: "agent", activeFrom: d(6, 12),
+    days: [
+      { weekday: 0, name: "Legs", ex: [["Back squat", 4, "6-8"], ["Leg press", 3, "10"], ["Calf raise", 3, "12"]] },
+      { weekday: 2, name: "Push", ex: [["Bench press", 4, "6-8"], ["Overhead press", 3, "8"], ["Dips", 3, "AMRAP"]] },
+      { weekday: 4, name: "Pull", ex: [["Deadlift", 3, "5"], ["Barbell row", 4, "8"], ["Biceps curl", 3, "12"]] },
+    ],
+  },
+  sessions: [
+    { at: d(7, 11), ago: 12, workout: "Pull", lifts: [["Deadlift", 85, "5,5,4"], ["Barbell row", 40, "8,8,8"], ["Biceps curl", 12.5, "12,12,10"]] },
+    { at: d(7, 9), ago: 14, workout: "Push", lifts: [["Bench press", 45, "8,8,6"], ["Overhead press", 27.5, "8,5"]], said: { text: "stopped early — shoulder", lang: "en" } },
+    { at: d(7, 7), ago: 16, workout: "Legs", lifts: [["Back squat", 70, "8,8,7"], ["Leg press", 120, "10,10,10"], ["Calf raise", 40, "12,12,12"]] },
+    { at: d(7, 4), ago: 19, workout: "Pull", lifts: [["Deadlift", 82.5, "5,5,5"], ["Barbell row", 40, "8,8,7"]] },
+    { at: d(7, 2), ago: 21, workout: null, lifts: [] },
+    { at: d(6, 30), ago: 23, workout: "Legs", lifts: [["Back squat", 70, "8,7,7"], ["Leg press", 115, "10,10,10"]] },
+  ],
+  weights: [
+    ["Back squat", 70, d(7, 7)], ["Deadlift", 85, d(7, 11)], ["Leg press", 120, d(7, 7)],
+    ["Bench press", 45, d(7, 9)], ["Barbell row", 40, d(7, 11)], ["Calf raise", 40, d(7, 7)],
+    ["Overhead press", 27.5, d(7, 9)], ["Biceps curl", 12.5, d(7, 11)],
+  ],
+  notes: [
+    { kind: "safety", text: "Sharp shoulder pain on overhead press — stopped mid-set", lang: "en", at: d(7, 20), flag: true },
+    { kind: "injury", text: "Left knee ACL repair 2019 — no deep lunges", lang: "en", at: d(3, 4) },
+    { kind: "goal", text: "Quiere hacer press de banca con su propio peso antes de diciembre", lang: "es", at: d(4, 18) },
+    { kind: "constraint", text: "Solo puede entrenar por la mañana, antes de las 8", lang: "es", at: d(6, 2) },
+    { kind: "preference", text: "Hates burpees, will not do them", lang: "en", at: d(2, 9) },
+    { kind: "goal", text: "Training for a 10k in May", lang: "en", at: d(1, 15), retired: true },
+  ],
+};
+
+const VIEW_IDS = ["table", "cards", "split"];
+const LANGS = ["en", "es"];
+
+/* ---------------- helpers ---------------- */
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const heat = (g) => (g >= 7 ? "hot" : g >= 4 ? "warm" : "cool");
+const member = (id) => MEMBERS.find((m) => m.id === id);
+const byGap = () => [...MEMBERS].sort((a, b) => b.gap - a.gap);
+const openFlags = () => MEMBERS.filter((m) => m.flag && !m.flag.acknowledged).length;
+
+let T = I18N.en; // set per render
+
+const fmtDay = (dt) => `${T.dow[(dt.getDay() + 6) % 7]} ${dt.getDate()} ${T.mon[dt.getMonth()]}`;
+const fmtShort = (dt) => `${dt.getDate()} ${T.mon[dt.getMonth()]}`;
+const fmtMonthYear = (m, y) => `${T.mon[m]} ${y}`;
+const num = (n) => String(n).replace(".", T.dec);
+const kg = (n) => `${num(n)} ${GYM.unit}`;
+const lastLabel = (m) => `${fmtDay(m.lastAt)} · ${m.lastWorkout}`;
+
+/** The Member's own words, left alone, tagged when they are not in the
+ *  language the Coach is reading. */
+function verbatim(text, lang) {
+  const foreign = lang !== state().lang;
+  return `<span class="verbatim">${esc(text)}${foreign ? `<span class="langtag">${esc(I18N[lang]._short)} · ${esc(T.verbatimTag)}</span>` : ""}</span>`;
+}
+
+function markers(m, { quiet } = {}) {
+  let h = "";
+  if (m.flag && !m.flag.acknowledged) h += `<span class="chip chip-flag"><span class="dot"></span>${esc(T.mark.flag)}</span>`;
+  if (m.flag && m.flag.acknowledged && !quiet) h += `<span class="chip chip-flag-ok">${esc(T.mark.flagOk)}</span>`;
+  if (m.isNew) h += `<span class="chip chip-new">${esc(T.mark.new)}</span>`;
+  return h;
+}
+
+function topBar(view) {
+  const lang = state().lang;
+  return `<div class="top">
+    <div class="brand">${esc(GYM.name)}<small>${esc(T.subtitle)}</small></div>
+    ${view ? `<div class="seg">${VIEW_IDS.map((v) => `<button data-view="${v}" class="${v === view ? "on" : ""}">${esc(T.view[v])}</button>`).join("")}</div>` : ""}
+    <div class="spacer"></div>
+    <div class="seg lang">${LANGS.map((l) => `<button data-lang="${l}" class="${l === lang ? "on" : ""}" title="${esc(I18N[l]._name)}">${esc(I18N[l]._short)}</button>`).join("")}</div>
+    <div class="who">${esc(GYM.coach)} ${esc(T.coachTag)}</div>
+  </div>`;
+}
+
+function footnote() {
+  return `<div class="footnote">
+    <b>${esc(T.foot.title)}</b>
+    <ul>${T.foot.items.map((i) => `<li>${i}</li>`).join("")}</ul>
+  </div>`;
+}
+
+/* ---------------- the one Member page ---------------- */
+
+function flagBanner(m) {
+  if (!m.flag) return "";
+  const f = m.flag;
+  if (f.acknowledged)
+    return `<div class="card" style="margin-bottom:16px">
+      <div class="body" style="display:flex;gap:12px;align-items:center;padding:12px 16px;flex-wrap:wrap">
+        <span class="chip chip-flag-ok">${esc(T.mark.flagOk)}</span>
+        <span class="sub">${verbatim(f.text, f.lang)}</span>
+        <span class="muted" style="margin-left:auto;font-size:12.5px">${esc(T.lbl.daysAgo(f.days))}</span>
+      </div></div>`;
+  return `<div class="card" style="margin-bottom:16px;border-color:#f0c9c6;background:var(--hot-soft)">
+    <div class="body" style="display:flex;gap:12px;align-items:center;padding:12px 16px;flex-wrap:wrap">
+      <span class="chip chip-flag"><span class="dot"></span>${esc(T.mark.flag)}</span>
+      <span style="font-weight:550">${verbatim(f.text, f.lang)}</span>
+      <span class="muted" style="margin-left:auto;font-size:12.5px">${esc(T.lbl.daysAgo(f.days))}</span>
+      <button class="btn">${esc(T.btn.tick)}</button>
+    </div></div>`;
+}
+
+function routineCard() {
+  const r = DETAIL.routine;
+  const who = r.author === "agent" ? T.lbl.agent : T.lbl.coachAuthor;
+  return `<div class="card">
+    <header>
+      <h3>${esc(T.card.routine)}</h3>
+      <span class="chip chip-quiet">${esc(T.lbl.authored(who))}</span>
+      <div class="spacer"></div>
+      <span class="muted" style="font-size:12.5px">${esc(T.lbl.activeSince(fmtShort(r.activeFrom)))}</span>
+      <button class="btn btn-p">${esc(T.btn.edit)}</button>
+    </header>
+    ${r.days.map((day) => `<div class="day">
+      <div class="dn"><b>${esc(T.weekday[day.weekday])}</b><span>${esc(day.name)}</span></div>
+      <ul>${day.ex.map(([n, s, reps]) => `<li>${esc(n)} <em>${s} × ${esc(reps)}</em></li>`).join("")}</ul>
+    </div>`).join("")}
+  </div>`;
+}
+
+function sessionsCard() {
+  return `<div class="card">
+    <header><h3>${esc(T.card.sessions)}</h3><div class="spacer"></div>
+      <span class="muted" style="font-size:12.5px">${esc(T.lbl.lastOf(DETAIL.sessions.length, DETAIL.sessionCount))}</span></header>
+    ${DETAIL.sessions.map((s) => `<div class="sess">
+      <div class="d"><b>${esc(fmtDay(s.at))}</b><span class="muted">${esc(T.lbl.ago(T.gapText(s.ago)))}</span>${s.workout ? `<span class="chip chip-quiet">${esc(s.workout)}</span>` : ""}</div>
+      ${s.lifts.length
+        ? `<div class="lifts">${s.lifts.map(([n, w, reps]) => `${esc(n)} ${kg(w)} × ${esc(reps)}`).join(" · ")}</div>`
+        : `<div class="empty">${esc(T.lbl.noSets)}</div>`}
+      ${s.said ? `<div class="lifts" style="color:var(--hot)">“${verbatim(s.said.text, s.said.lang)}”</div>` : ""}
+    </div>`).join("")}
+  </div>`;
+}
+
+function weightsCard() {
+  return `<div class="card">
+    <header><h3>${esc(T.card.weights)}</h3></header>
+    <div class="body kv">
+      ${DETAIL.weights.map(([n, w, when]) => `<span class="n">${esc(n)}</span><span class="w mono">${esc(kg(w))}</span><span class="t">${esc(fmtShort(when))}</span>`).join("")}
+    </div>
+  </div>`;
+}
+
+function notesCard() {
+  return `<div class="card">
+    <header><h3>${esc(T.card.notes)}</h3><div class="spacer"></div>
+      <span class="muted" style="font-size:12.5px">${esc(T.lbl.active(DETAIL.notes.filter((n) => !n.retired).length))}</span></header>
+    ${DETAIL.notes.map((n) => `<div class="note ${n.retired ? "retired" : ""}">
+      <span class="k"><span class="chip ${n.flag ? "chip-flag" : "chip-quiet"}">${esc(T.noteKind[n.kind])}</span></span>
+      <span class="txt">${verbatim(n.text, n.lang)}</span>
+      <span class="when">${esc(fmtShort(n.at))}${n.retired ? " · " + esc(T.lbl.retired) : ""}</span>
+    </div>`).join("")}
+  </div>`;
+}
+
+function memberPage({ back }) {
+  const m = member(DETAIL.memberId);
+  return `
+    ${back ? `<a class="crumb" data-nav="list">← ${esc(back)}</a>` : ""}
+    <div class="mhead">
+      <div>
+        <h1>${esc(m.name)}</h1>
+        <div class="sub" style="margin-top:4px">${esc(T.lbl.since(fmtMonthYear(DETAIL.sinceMonth, DETAIL.sinceYear)))} · ${esc(T.lbl.sessions(DETAIL.sessionCount))} · ${esc(T.lbl.lastWas(lastLabel(m)))}</div>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="k">${esc(T.stat.gap)}</div><div class="v gap ${heat(m.gap)}">${esc(T.gapText(m.gap))}</div></div>
+      </div>
+    </div>
+    <div class="gapcall ${heat(m.gap)}">${esc(T.lbl.gapCall(T.gapText(m.gap)))}</div>
+    ${flagBanner(m)}
+    <div class="cols">
+      <div class="stack">${routineCard()}${sessionsCard()}</div>
+      <div class="stack">${weightsCard()}${notesCard()}</div>
+    </div>
+    ${footnote()}`;
+}
+
+/* ---------------- roster views ---------------- */
+
+function rosterStats() {
+  return `<div class="stats">
+    <div class="stat"><div class="k">${esc(T.stat.training)}</div><div class="v">${MEMBERS.length}</div></div>
+    <div class="stat"><div class="k">${esc(T.stat.stale)}</div><div class="v">${MEMBERS.filter((m) => m.gap >= 7).length}</div></div>
+    <div class="stat"><div class="k">${esc(T.stat.flags)}</div><div class="v">${openFlags()}</div></div>
+  </div>`;
+}
+
+function tableRoster() {
+  const rows = byGap().map((m) => `<tr data-id="${m.id}">
+    <td><span class="nm">${esc(m.name)}</span></td>
+    <td><span class="gap ${heat(m.gap)}">${esc(T.gapText(m.gap))}</span></td>
+    <td class="sub">${esc(lastLabel(m))}</td>
+    <td>${markers(m) || `<span class="muted">—</span>`}</td>
+  </tr>`).join("");
+  return `<div class="wrap">
+    <div class="mhead"><h1>${esc(T.rosterTitle)}</h1>${rosterStats()}</div>
+    <div class="card"><div style="padding-top:14px">
+      <table class="roster">
+        <thead><tr><th>${esc(T.col.member)}</th><th class="sorted">${esc(T.col.gap)} ↓</th><th>${esc(T.col.last)}</th><th>${esc(T.col.markers)}</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div></div>
+    <p class="muted" style="font-size:12.5px;margin-top:12px">${esc(T.lbl.readOnly)}</p>
+    ${footnote()}
+  </div>`;
+}
+
+function cardsRoster() {
+  const all = byGap();
+  const bands = [
+    { t: T.band.hot, c: "var(--hot)", f: (m) => m.gap >= 7 },
+    { t: T.band.warm, c: "var(--warm)", f: (m) => m.gap >= 4 && m.gap < 7 },
+    { t: T.band.cool, c: "var(--cool)", f: (m) => m.gap < 4 },
+  ];
+  const card = (m) => `<div class="mcard" data-id="${m.id}">
+    <div class="top-row"><span class="nm">${esc(m.name)}</span><span class="gap ${heat(m.gap)}">${esc(T.gapText(m.gap))}</span></div>
+    <div class="daygrid">
+      ${T.wdShort.map((w) => `<span class="wd">${esc(w)}</span>`).join("")}
+      ${dayCells(m).map((c) => `<i class="${c.future ? "future" : c.hit ? "hit" : ""}" title="${esc(fmtShort(c.dt))}"></i>`).join("")}
+    </div>
+    <div class="sparklab">${esc(T.lbl.weeks(4))} · ${esc(lastLabel(m))}</div>
+    ${markers(m) ? `<div style="display:flex;gap:6px;flex-wrap:wrap">${markers(m)}</div>` : ""}
+  </div>`;
+  return `<div class="wrap">
+    <div class="mhead"><h1>${esc(T.rosterTitle)}</h1>${rosterStats()}</div>
+    ${bands.map((b) => {
+      const list = all.filter(b.f);
+      if (!list.length) return "";
+      return `<div class="band">
+        <h2><span class="dot" style="color:${b.c}"></span>${esc(b.t)} <span class="count">${list.length}</span></h2>
+        <div class="grid">${list.map(card).join("")}</div>
+      </div>`;
+    }).join("")}
+    <p class="muted" style="font-size:12.5px">${esc(T.lbl.bandsNote)}</p>
+    ${footnote()}
+  </div>`;
+}
+
+function splitRoster(showMember) {
+  const rows = byGap().map((m) => `<div class="listrow ${showMember && m.id === DETAIL.memberId ? "on" : ""}" data-id="${m.id}">
+    <span class="nm">${esc(m.name)}</span>
+    <span class="gap ${heat(m.gap)}">${esc(T.gapText(m.gap))}</span>
+    <span class="meta">${markers(m, { quiet: true }) || `<span class="muted" style="font-size:12.5px">${esc(lastLabel(m))}</span>`}</span>
+  </div>`).join("");
+  const pane = showMember
+    ? `<div class="pane">${memberPage({ back: null })}</div>`
+    : `<div class="pane" style="display:grid;place-items:center;text-align:center">
+         <div style="max-width:340px">
+           <h2 style="margin-bottom:6px">${esc(T.pickMember)}</h2>
+           <p class="sub">${esc(T.pickBody(MEMBERS.filter((m) => m.gap >= 7).length, openFlags()))}</p>
+         </div></div>`;
+  return `<div class="split">
+    <div class="list">
+      <div class="listhead"><h3>${esc(T.rosterTitle)}</h3><span class="muted" style="font-size:12.5px">${esc(T.stat.byGap)}</span></div>
+      ${rows}
+    </div>
+    ${pane}
+  </div>`;
+}
+
+/* ---------------- router ---------------- */
+
+function state() {
+  const p = new URLSearchParams(location.search);
+  return {
+    lang: LANGS.includes(p.get("lang")) ? p.get("lang") : "en",
+    view: VIEW_IDS.includes(p.get("view")) ? p.get("view") : "table",
+    screen: p.get("screen") === "member" ? "member" : "list",
+  };
+}
+
+function go(next) {
+  const p = new URLSearchParams({ ...state(), ...next });
+  history.replaceState(null, "", "?" + p.toString());
+  render();
+}
+
+function render() {
+  const { lang, view, screen } = state();
+  T = I18N[lang];
+  document.documentElement.lang = lang;
+  let html;
+  if (view === "split") html = topBar(view) + splitRoster(screen === "member");
+  else if (screen === "member") html = topBar(null) + `<div class="wrap">${memberPage({ back: T.btn.back })}</div>`;
+  else html = topBar(view) + (view === "cards" ? cardsRoster() : tableRoster());
+  document.getElementById("app").innerHTML = html;
+  document.querySelectorAll(".bar [data-s]").forEach((b) => b.classList.toggle("on", b.dataset.s === screen));
+  document.title = `PROTOTYPE #76 — ${lang} · ${view} · ${screen}`;
+}
+
+document.querySelector(".bar").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (b) go({ screen: b.dataset.s });
+});
+
+document.getElementById("app").addEventListener("click", (e) => {
+  const l = e.target.closest("[data-lang]");
+  if (l) return go({ lang: l.dataset.lang });
+  const v = e.target.closest("[data-view]");
+  if (v) return go({ view: v.dataset.view });
+  if (e.target.closest("[data-nav=list]")) return go({ screen: "list" });
+  if (e.target.closest("[data-id]")) return go({ screen: "member" });
+});
+
+render();
+</script>
+</body>
+</html>
