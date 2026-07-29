@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE — Coach dashboard screens (#76)</title>
+<style>
+  /* PROTOTYPE for github.com/ivzc07/agentg/issues/76 — throwaway. No build step, no deps. */
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #14181f;
+    --ink-2: #5a6472;
+    --ink-3: #8a94a3;
+    --line: #e3e7ec;
+    --line-2: #eef1f4;
+    --accent: #1f5fd0;
+    --accent-soft: #eaf1fd;
+    --hot: #b3261e;
+    --hot-soft: #fdeceb;
+    --warm: #9a5b00;
+    --cool: #1f7a4d;
+    --radius: 10px;
+    --shadow: 0 1px 2px rgba(20,24,31,.05), 0 8px 24px rgba(20,24,31,.06);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding-bottom: 88px;
+  }
+  h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
+  a { color: inherit; text-decoration: none; }
+  button { font: inherit; cursor: pointer; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+
+  /* ---- shell ---- */
+  .top {
+    display: flex; align-items: center; gap: 16px;
+    padding: 0 24px; height: 56px;
+    background: var(--panel); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 20;
+  }
+  .brand { font-weight: 650; letter-spacing: -0.02em; }
+  .brand small { display: block; font-weight: 450; font-size: 11px; color: var(--ink-3); letter-spacing: 0; }
+  .top .spacer { flex: 1; }
+  .who { color: var(--ink-2); font-size: 13px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 24px; }
+
+  /* the real, in-product view switcher — roster only */
+  .seg { display: inline-flex; background: var(--line-2); border-radius: 8px; padding: 3px; gap: 2px; }
+  .seg button {
+    border: 0; background: transparent; color: var(--ink-2);
+    padding: 5px 12px; border-radius: 6px; font-size: 13px; font-weight: 550;
+  }
+  .seg button:hover { color: var(--ink); }
+  .seg button.on { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px rgba(20,24,31,.10); }
+
+  .crumb {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--ink-2); font-size: 13px; margin-bottom: 14px;
+  }
+  .crumb:hover { color: var(--accent); }
+
+  /* ---- chips / markers ---- */
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 550; line-height: 1.6;
+    white-space: nowrap;
+  }
+  .chip-flag { background: var(--hot-soft); color: var(--hot); }
+  .chip-flag-ok { background: var(--line-2); color: var(--ink-3); }
+  .chip-new { background: var(--accent-soft); color: var(--accent); }
+  .chip-quiet { background: var(--line-2); color: var(--ink-2); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  .gap { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .gap.hot { color: var(--hot); }
+  .gap.warm { color: var(--warm); }
+  .gap.cool { color: var(--cool); }
+
+  /* ---- panels ---- */
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+  }
+  .card > header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 13px 16px; border-bottom: 1px solid var(--line-2);
+  }
+  .card > header h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); }
+  .card > header .spacer { flex: 1; }
+  .card .body { padding: 16px; }
+
+  .muted { color: var(--ink-3); }
+  .sub { color: var(--ink-2); font-size: 13px; }
+
+  /* ---- roster view: table ---- */
+  table.roster { width: 100%; border-collapse: collapse; }
+  table.roster th {
+    text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--ink-3); font-weight: 600; padding: 0 16px 10px; border-bottom: 1px solid var(--line);
+  }
+  table.roster th.sorted { color: var(--ink); }
+  table.roster td { padding: 11px 16px; border-bottom: 1px solid var(--line-2); }
+  table.roster tr { cursor: pointer; }
+  table.roster tbody tr:hover td { background: #fafbfc; }
+  table.roster .nm { font-weight: 550; }
+
+  /* ---- roster view: split ---- */
+  .split { display: grid; grid-template-columns: 320px minmax(0,1fr); height: calc(100vh - 56px - 88px); }
+  .split > * { min-width: 0; }
+  .split .list { border-right: 1px solid var(--line); background: var(--panel); overflow: auto; }
+  .split .pane { overflow: auto; padding: 22px 24px; }
+  .listrow {
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
+    padding: 11px 16px; border-bottom: 1px solid var(--line-2); cursor: pointer;
+  }
+  .listrow:hover { background: #fafbfc; }
+  .listrow.on { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+  .listrow .nm { font-weight: 550; }
+  .listrow .meta { grid-column: 1 / -1; display: flex; gap: 6px; align-items: center; }
+  .listhead {
+    position: sticky; top: 0; background: var(--panel); z-index: 2;
+    padding: 12px 16px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .listhead h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-2); }
+
+  /* ---- roster view: cards ---- */
+  .band { margin-bottom: 26px; }
+  .band > h2 {
+    display: flex; align-items: center; gap: 9px;
+    font-size: 12.5px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--ink-2); margin-bottom: 11px;
+  }
+  .band .count { color: var(--ink-3); font-weight: 500; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(258px, 1fr)); gap: 12px; }
+  .mcard {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px 15px; cursor: pointer; box-shadow: var(--shadow);
+    display: flex; flex-direction: column; gap: 9px;
+    transition: transform .08s ease, box-shadow .08s ease;
+  }
+  .mcard:hover { transform: translateY(-1px); box-shadow: 0 2px 4px rgba(20,24,31,.06), 0 12px 28px rgba(20,24,31,.09); }
+  .mcard .top-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .mcard .nm { font-weight: 600; font-size: 15px; }
+  /* 4 weeks, one square per day, Mon–Sun columns */
+  .daygrid { display: grid; grid-template-columns: repeat(7, 15px); gap: 3px; }
+  .daygrid i { height: 15px; border-radius: 3px; background: var(--line-2); border: 1px solid transparent; }
+  .daygrid i.hit { background: var(--cool); }
+  .daygrid i.future { background: transparent; border: 1px dashed var(--line); }
+  .daygrid .wd { font-size: 9px; line-height: 1; text-align: center; color: var(--ink-3); letter-spacing: -0.02em; }
+  .sparklab { font-size: 11px; color: var(--ink-3); }
+
+  /* ---- the one Member page ---- */
+  .mhead { display: flex; align-items: flex-start; gap: 14px; margin-bottom: 16px; flex-wrap: wrap; }
+  .mhead h1 { font-size: 22px; }
+  .mhead .stats { display: flex; gap: 22px; margin-left: auto; }
+  .stat .k { font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); }
+  .stat .v { font-size: 17px; font-weight: 600; }
+  .cols { display: grid; grid-template-columns: minmax(0,1.35fr) minmax(0,1fr); gap: 16px; align-items: start; }
+  .stack { display: grid; gap: 16px; }
+  .cols > *, .stack > * { min-width: 0; }
+  .lifts, .sess .empty, .note .txt { overflow-wrap: anywhere; }
+
+  .gapcall {
+    display: inline-flex; align-items: center; gap: 8px;
+    margin-bottom: 16px; padding: 7px 12px; border-radius: 8px;
+    font-size: 13px; font-weight: 550;
+  }
+  .gapcall.hot { background: var(--hot-soft); color: var(--hot); }
+  .gapcall.warm { background: #fdf3e3; color: var(--warm); }
+  .gapcall.cool { background: #e9f6ef; color: var(--cool); }
+
+  .sess { border-bottom: 1px solid var(--line-2); padding: 12px 16px; }
+  .sess:last-child { border-bottom: 0; }
+  .sess .d { display: flex; align-items: baseline; gap: 8px; }
+  .sess .d b { font-weight: 600; }
+  .sess .lifts { color: var(--ink-2); margin-top: 3px; font-size: 13px; }
+  .sess .empty { color: var(--ink-3); font-style: italic; margin-top: 3px; font-size: 13px; }
+
+  .kv { display: grid; grid-template-columns: 1fr auto auto; gap: 4px 14px; align-items: baseline; }
+  .kv .w { font-weight: 600; }
+  .kv .t { color: var(--ink-3); font-size: 12.5px; }
+
+  .day { padding: 11px 16px; border-bottom: 1px solid var(--line-2); }
+  .day:last-child { border-bottom: 0; }
+  .day .dn { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .day .dn b { font-weight: 600; }
+  .day .dn span { color: var(--ink-3); font-size: 12.5px; }
+  .day ul { margin: 0; padding-left: 18px; color: var(--ink-2); }
+  .day li { padding: 1px 0; }
+  .day li em { font-style: normal; color: var(--ink-3); }
+
+  .note { padding: 11px 16px; border-bottom: 1px solid var(--line-2); display: flex; gap: 10px; align-items: flex-start; }
+  .note:last-child { border-bottom: 0; }
+  .note .k { min-width: 76px; }
+  .note.retired { opacity: .5; }
+  .note .txt { flex: 1; }
+  .note .when { color: var(--ink-3); font-size: 12px; white-space: nowrap; }
+
+  .btn {
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+    border-radius: 7px; padding: 6px 11px; font-size: 13px; font-weight: 550;
+  }
+  .btn:hover { border-color: var(--ink-3); }
+  .btn-p { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn-p:hover { filter: brightness(1.06); }
+
+  /* ---- prototype-only screen jumper ---- */
+  .bar {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 6px; z-index: 50;
+    background: #14181f; color: #fff; padding: 7px; border-radius: 12px;
+    box-shadow: 0 10px 34px rgba(0,0,0,.28);
+  }
+  .bar .lab { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: #97a1b0; padding: 0 8px 0 6px; }
+  .bar button {
+    background: transparent; border: 0; color: #cdd4de;
+    padding: 6px 12px; border-radius: 8px; font-size: 13px; font-weight: 550;
+  }
+  .bar button:hover { background: #262c36; color: #fff; }
+  .bar button.on { background: #fff; color: #14181f; }
+  .bar .note { font-size: 11px; color: #6e7885; padding: 0 8px; max-width: 190px; line-height: 1.35; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+
+<div class="bar">
+  <span class="lab">Screen</span>
+  <button data-s="list">Roster</button>
+  <button data-s="member">Member</button>
+  <span class="note">View switching moved into the product (top bar).</span>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * PROTOTYPE — coach dashboard, issue #76. Throwaway. Fixture data only.
+ * Three ROSTER views the Coach picks between; ONE Member page under all.
+ * ------------------------------------------------------------------ */
+
+const GYM = { name: "Iron Temple", unit: "kg", coach: "Ale (coach)" };
+
+// Today is Wed 23 Jul. The day grid runs Mon 30 Jun → Sun 27 Jul: four whole
+// weeks, Mon–Sun columns, the tail of the last one still in the future.
+const GRID_START = new Date(2025, 5, 30);
+const TODAY = new Date(2025, 6, 23);
+
+// gap = days since newest Session. joined = days ago. flag = safety-flag Note.
+// trained = the days inside the grid window that carry a Session ("M/D").
+const MEMBERS = [
+  { id: 1, name: "Marta Ruiz",   gap: 12, joined: 220, flag: { text: "Sharp shoulder pain on overhead press — stopped mid-set", days: 3, acknowledged: false }, last: "Fri 11 Jul · pull", trained: ["6/30","7/2","7/4","7/7","7/9","7/11"] },
+  { id: 2, name: "Tom Beckett",  gap: 9,  joined: 11,  flag: null, isNew: true, last: "Mon 14 Jul · legs", trained: ["7/14"] },
+  { id: 3, name: "Priya Nair",   gap: 6,  joined: 96,  flag: null, last: "Thu 17 Jul · push", trained: ["6/30","7/3","7/8","7/10","7/15","7/17"] },
+  { id: 4, name: "Dani Osei",    gap: 5,  joined: 340, flag: { text: "Lower-back twinge deadlifting — eased off", days: 19, acknowledged: true }, last: "Fri 18 Jul · pull", trained: ["7/1","7/3","7/7","7/9","7/11","7/14","7/16","7/18"] },
+  { id: 5, name: "Luis Ferrer",  gap: 3,  joined: 51,  flag: null, last: "Sun 20 Jul · legs", trained: ["7/2","7/6","7/9","7/13","7/16","7/20"] },
+  { id: 6, name: "Ana Vidal",    gap: 2,  joined: 5,   flag: null, isNew: true, last: "Mon 21 Jul · full body", trained: ["7/21"] },
+  { id: 7, name: "Jonas Weiss",  gap: 1,  joined: 410, flag: null, last: "Tue 22 Jul · push", trained: ["6/30","7/2","7/4","7/7","7/9","7/11","7/14","7/16","7/18","7/21","7/22"] },
+  { id: 8, name: "Kim Ryder",    gap: 1,  joined: 133, flag: null, last: "Tue 22 Jul · legs", trained: ["7/1","7/3","7/8","7/10","7/15","7/17","7/22"] },
+  { id: 9, name: "Sofia Marino", gap: 0,  joined: 74,  flag: null, last: "Today · pull", trained: ["7/1","7/2","7/4","7/7","7/8","7/11","7/14","7/15","7/18","7/21","7/22","7/23"] },
+];
+
+const WEEKDAY_INITIALS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+
+/** 28 slots, Mon-first, flagged trained / future. */
+function dayCells(m) {
+  const cells = [];
+  for (let i = 0; i < 28; i++) {
+    const dt = new Date(GRID_START.getFullYear(), GRID_START.getMonth(), GRID_START.getDate() + i);
+    const key = `${dt.getMonth() + 1}/${dt.getDate()}`;
+    cells.push({ key, hit: m.trained.includes(key), future: dt > TODAY });
+  }
+  return cells;
+}
+
+// The Member every roster view drills into.
+const DETAIL = {
+  memberId: 1,
+  since: "Dec 2024", sessionCount: 41,
+  routine: {
+    author: "Agent", active_since: "12 Jun (6 weeks)",
+    days: [
+      { day: "Monday",    name: "Legs", ex: [["Back squat","4 × 6-8"],["Leg press","3 × 10"],["Calf raise","3 × 12"]] },
+      { day: "Wednesday", name: "Push", ex: [["Bench press","4 × 6-8"],["Overhead press","3 × 8"],["Dips","3 × AMRAP"]] },
+      { day: "Friday",    name: "Pull", ex: [["Deadlift","3 × 5"],["Barbell row","4 × 8"],["Biceps curl","3 × 12"]] },
+    ],
+  },
+  sessions: [
+    { when: "Fri 11 Jul", ago: "12 days", label: "pull", lifts: "Deadlift 85 × 5,5,4 · Barbell row 40 × 8,8,8 · Biceps curl 12.5 × 12,12,10" },
+    { when: "Wed 9 Jul",  ago: "14 days", label: "push", lifts: "Bench 45 × 8,8,6 · Overhead press 27.5 × 8,5", note: "stopped early — shoulder" },
+    { when: "Mon 7 Jul",  ago: "16 days", label: "legs", lifts: "Back squat 70 × 8,8,7 · Leg press 120 × 10,10,10 · Calf raise 40 × 12,12,12" },
+    { when: "Fri 4 Jul",  ago: "19 days", label: "pull", lifts: "Deadlift 82.5 × 5,5,5 · Barbell row 40 × 8,8,7" },
+    { when: "Wed 2 Jul",  ago: "21 days", label: "—",    lifts: "" },
+    { when: "Mon 30 Jun", ago: "23 days", label: "legs", lifts: "Back squat 70 × 8,7,7 · Leg press 115 × 10,10,10" },
+  ],
+  weights: [
+    ["Back squat", "70 kg", "7 Jul"],
+    ["Deadlift", "85 kg", "11 Jul"],
+    ["Leg press", "120 kg", "7 Jul"],
+    ["Bench press", "45 kg", "9 Jul"],
+    ["Barbell row", "40 kg", "11 Jul"],
+    ["Calf raise", "40 kg", "7 Jul"],
+    ["Overhead press", "27.5 kg", "9 Jul"],
+    ["Biceps curl", "12.5 kg", "11 Jul"],
+  ],
+  notes: [
+    { kind: "safety",     text: "Sharp shoulder pain on overhead press — stopped mid-set", when: "3 days ago", flag: true },
+    { kind: "injury",     text: "Left knee ACL repair 2019 — no deep lunges", when: "Mar 2025" },
+    { kind: "goal",       text: "Wants to bench bodyweight by December", when: "Apr 2025" },
+    { kind: "constraint", text: "Can only train mornings before 8am", when: "Jun 2025" },
+    { kind: "preference", text: "Hates burpees, will not do them", when: "Feb 2025" },
+    { kind: "goal",       text: "Training for a 10k in May", when: "Jan 2025", retired: true },
+  ],
+};
+
+const VIEWS = [
+  { id: "table", label: "Table" },
+  { id: "cards", label: "Cards" },
+  { id: "split", label: "Split" },
+];
+
+/* ---------------- helpers ---------------- */
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const heat = (g) => (g >= 7 ? "hot" : g >= 4 ? "warm" : "cool");
+const gapText = (g) => (g === 0 ? "today" : g === 1 ? "1 day" : g + " days");
+const member = (id) => MEMBERS.find((m) => m.id === id);
+const byGap = () => [...MEMBERS].sort((a, b) => b.gap - a.gap);
+const openFlags = () => MEMBERS.filter((m) => m.flag && !m.flag.acknowledged).length;
+
+function markers(m, { quiet } = {}) {
+  let h = "";
+  if (m.flag && !m.flag.acknowledged) h += `<span class="chip chip-flag"><span class="dot"></span>safety flag</span>`;
+  if (m.flag && m.flag.acknowledged && !quiet) h += `<span class="chip chip-flag-ok">flag · ticked</span>`;
+  if (m.isNew) h += `<span class="chip chip-new">new</span>`;
+  return h;
+}
+
+function topBar(view) {
+  return `<div class="top">
+    <div class="brand">${esc(GYM.name)}<small>coach dashboard</small></div>
+    ${view ? `<div class="seg">${VIEWS.map((v) => `<button data-view="${v.id}" class="${v.id === view ? "on" : ""}">${esc(v.label)}</button>`).join("")}</div>` : ""}
+    <div class="spacer"></div>
+    <div class="who">${esc(GYM.coach)}</div>
+  </div>`;
+}
+
+/* ---------------- the one Member page ---------------- */
+
+function flagBanner(m) {
+  if (!m.flag) return "";
+  const f = m.flag;
+  if (f.acknowledged)
+    return `<div class="card" style="margin-bottom:16px">
+      <div class="body" style="display:flex;gap:12px;align-items:center;padding:12px 16px">
+        <span class="chip chip-flag-ok">flag · ticked</span>
+        <span class="sub">${esc(f.text)}</span>
+        <span class="muted" style="margin-left:auto;font-size:12.5px">${f.days} days ago</span>
+      </div></div>`;
+  return `<div class="card" style="margin-bottom:16px;border-color:#f0c9c6;background:var(--hot-soft)">
+    <div class="body" style="display:flex;gap:12px;align-items:center;padding:12px 16px;flex-wrap:wrap">
+      <span class="chip chip-flag"><span class="dot"></span>safety flag</span>
+      <span style="font-weight:550">${esc(f.text)}</span>
+      <span class="muted" style="margin-left:auto;font-size:12.5px">${f.days} days ago</span>
+      <button class="btn">Tick off</button>
+    </div></div>`;
+}
+
+function routineCard() {
+  const r = DETAIL.routine;
+  return `<div class="card">
+    <header>
+      <h3>Routine</h3>
+      <span class="chip chip-quiet">${esc(r.author)}-written</span>
+      <div class="spacer"></div>
+      <span class="muted" style="font-size:12.5px">active ${esc(r.active_since)}</span>
+      <button class="btn btn-p">Edit</button>
+    </header>
+    ${r.days.map((d) => `<div class="day">
+      <div class="dn"><b>${esc(d.day)}</b><span>${esc(d.name)}</span></div>
+      <ul>${d.ex.map(([n, s]) => `<li>${esc(n)} <em>${esc(s)}</em></li>`).join("")}</ul>
+    </div>`).join("")}
+  </div>`;
+}
+
+function sessionsCard() {
+  return `<div class="card">
+    <header><h3>Sessions</h3><div class="spacer"></div><span class="muted" style="font-size:12.5px">last ${DETAIL.sessions.length} of ${DETAIL.sessionCount}</span></header>
+    ${DETAIL.sessions.map((s) => `<div class="sess">
+      <div class="d"><b>${esc(s.when)}</b><span class="muted">${esc(s.ago)} ago</span>${s.label !== "—" ? `<span class="chip chip-quiet">${esc(s.label)}</span>` : ""}</div>
+      ${s.lifts ? `<div class="lifts">${esc(s.lifts)}</div>` : `<div class="empty">visit logged, no sets</div>`}
+      ${s.note ? `<div class="lifts" style="color:var(--hot)">“${esc(s.note)}”</div>` : ""}
+    </div>`).join("")}
+  </div>`;
+}
+
+function weightsCard() {
+  return `<div class="card">
+    <header><h3>Last weight per exercise</h3></header>
+    <div class="body kv">
+      ${DETAIL.weights.map(([n, w, t]) => `<span class="n">${esc(n)}</span><span class="w mono">${esc(w)}</span><span class="t">${esc(t)}</span>`).join("")}
+    </div>
+  </div>`;
+}
+
+function notesCard() {
+  return `<div class="card">
+    <header><h3>Notes</h3><div class="spacer"></div><span class="muted" style="font-size:12.5px">${DETAIL.notes.filter((n) => !n.retired).length} active</span></header>
+    ${DETAIL.notes.map((n) => `<div class="note ${n.retired ? "retired" : ""}">
+      <span class="k"><span class="chip ${n.flag ? "chip-flag" : "chip-quiet"}">${esc(n.kind)}</span></span>
+      <span class="txt">${esc(n.text)}</span>
+      <span class="when">${esc(n.when)}${n.retired ? " · retired" : ""}</span>
+    </div>`).join("")}
+  </div>`;
+}
+
+/** One shape, whatever roster view got here. `back` is the label of the way out
+ *  (the split view keeps its list on screen, so it needs none). */
+function memberPage({ back }) {
+  const m = member(DETAIL.memberId);
+  return `
+    ${back ? `<a class="crumb" data-nav="list">← ${esc(back)}</a>` : ""}
+    <div class="mhead">
+      <div>
+        <h1>${esc(m.name)}</h1>
+        <div class="sub" style="margin-top:4px">Member since ${esc(DETAIL.since)} · ${DETAIL.sessionCount} sessions · last ${esc(m.last)}</div>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="k">Gap</div><div class="v gap ${heat(m.gap)}">${gapText(m.gap)}</div></div>
+      </div>
+    </div>
+    <div class="gapcall ${heat(m.gap)}">${gapText(m.gap)} with no session</div>
+    ${flagBanner(m)}
+    <div class="cols">
+      <div class="stack">${routineCard()}${sessionsCard()}</div>
+      <div class="stack">${weightsCard()}${notesCard()}</div>
+    </div>`;
+}
+
+/* ---------------- roster views ---------------- */
+
+function rosterStats() {
+  return `<div class="stats">
+    <div class="stat"><div class="k">Training</div><div class="v">${MEMBERS.length}</div></div>
+    <div class="stat"><div class="k">Gap ≥ 7d</div><div class="v">${MEMBERS.filter((m) => m.gap >= 7).length}</div></div>
+    <div class="stat"><div class="k">Open flags</div><div class="v">${openFlags()}</div></div>
+  </div>`;
+}
+
+function tableRoster() {
+  const rows = byGap().map((m) => `<tr data-id="${m.id}">
+    <td><span class="nm">${esc(m.name)}</span></td>
+    <td><span class="gap ${heat(m.gap)}">${gapText(m.gap)}</span></td>
+    <td class="sub">${esc(m.last)}</td>
+    <td>${markers(m) || `<span class="muted">—</span>`}</td>
+  </tr>`).join("");
+  return `<div class="wrap">
+    <div class="mhead"><h1>Who needs me</h1>${rosterStats()}</div>
+    <div class="card"><div style="padding-top:14px">
+      <table class="roster">
+        <thead><tr><th>Member</th><th class="sorted">Gap ↓</th><th>Last session</th><th>Markers</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div></div>
+    <p class="muted" style="font-size:12.5px;margin-top:12px">Read-only. Sorted by Gap; markers do not re-sort.</p>
+  </div>`;
+}
+
+function cardsRoster() {
+  const all = byGap();
+  const bands = [
+    { t: "Needs you now", c: "var(--hot)", f: (m) => m.gap >= 7 },
+    { t: "Slipping", c: "var(--warm)", f: (m) => m.gap >= 4 && m.gap < 7 },
+    { t: "On track", c: "var(--cool)", f: (m) => m.gap < 4 },
+  ];
+  const card = (m) => `<div class="mcard" data-id="${m.id}">
+    <div class="top-row">
+      <span class="nm">${esc(m.name)}</span>
+      <span class="gap ${heat(m.gap)}">${gapText(m.gap)}</span>
+    </div>
+    <div class="daygrid">
+      ${WEEKDAY_INITIALS.map((w) => `<span class="wd">${esc(w)}</span>`).join("")}
+      ${dayCells(m).map((c) => `<i class="${c.future ? "future" : c.hit ? "hit" : ""}" title="${esc(c.key)}"></i>`).join("")}
+    </div>
+    <div class="sparklab">last 4 weeks · ${esc(m.last)}</div>
+    ${markers(m) ? `<div style="display:flex;gap:6px;flex-wrap:wrap">${markers(m)}</div>` : ""}
+  </div>`;
+  return `<div class="wrap">
+    <div class="mhead"><h1>Who needs me</h1>${rosterStats()}</div>
+    ${bands.map((b) => {
+      const list = all.filter(b.f);
+      if (!list.length) return "";
+      return `<div class="band">
+        <h2><span class="dot" style="color:${b.c}"></span>${esc(b.t)} <span class="count">${list.length}</span></h2>
+        <div class="grid">${list.map(card).join("")}</div>
+      </div>`;
+    }).join("")}
+    <p class="muted" style="font-size:12.5px">Bands are a view of Gap, not a new field. Read-only.</p>
+  </div>`;
+}
+
+function splitRoster(showMember) {
+  const rows = byGap().map((m) => `<div class="listrow ${showMember && m.id === DETAIL.memberId ? "on" : ""}" data-id="${m.id}">
+    <span class="nm">${esc(m.name)}</span>
+    <span class="gap ${heat(m.gap)}">${gapText(m.gap)}</span>
+    <span class="meta">${markers(m, { quiet: true }) || `<span class="muted" style="font-size:12.5px">${esc(m.last)}</span>`}</span>
+  </div>`).join("");
+  const pane = showMember
+    ? `<div class="pane">${memberPage({ back: null })}</div>`
+    : `<div class="pane" style="display:grid;place-items:center;text-align:center">
+         <div style="max-width:320px">
+           <h2 style="margin-bottom:6px">Pick a member</h2>
+           <p class="sub">${MEMBERS.filter((m) => m.gap >= 7).length} members haven't trained in a week. ${openFlags()} open safety flag.</p>
+         </div></div>`;
+  return `<div class="split">
+    <div class="list">
+      <div class="listhead"><h3>Who needs me</h3><span class="muted" style="font-size:12.5px">by gap</span></div>
+      ${rows}
+    </div>
+    ${pane}
+  </div>`;
+}
+
+/* ---------------- router ---------------- */
+
+function state() {
+  const p = new URLSearchParams(location.search);
+  const view = VIEWS.some((v) => v.id === p.get("view")) ? p.get("view") : "table";
+  const screen = p.get("screen") === "member" ? "member" : "list";
+  return { view, screen };
+}
+
+function go(next) {
+  const p = new URLSearchParams({ ...state(), ...next });
+  history.replaceState(null, "", "?" + p.toString());
+  render();
+}
+
+function render() {
+  const { view, screen } = state();
+  let html;
+  if (view === "split") {
+    // The split keeps the roster on screen, so it is one screen in both states.
+    html = topBar(view) + splitRoster(screen === "member");
+  } else if (screen === "member") {
+    html = topBar(null) + `<div class="wrap">${memberPage({ back: "Who needs me" })}</div>`;
+  } else {
+    html = topBar(view) + (view === "cards" ? cardsRoster() : tableRoster());
+  }
+  document.getElementById("app").innerHTML = html;
+  document.querySelectorAll(".bar [data-s]").forEach((b) => b.classList.toggle("on", b.dataset.s === screen));
+  document.title = `PROTOTYPE #76 — ${view} · ${screen}`;
+}
+
+document.querySelector(".bar").addEventListener("click", (e) => {
+  const b = e.target.closest("button");
+  if (b) go({ screen: b.dataset.s });
+});
+
+document.getElementById("app").addEventListener("click", (e) => {
+  if (e.target.closest("[data-view]")) return go({ view: e.target.closest("[data-view]").dataset.view });
+  if (e.target.closest("[data-nav=list]")) return go({ screen: "list" });
+  if (e.target.closest("[data-id]")) return go({ screen: "member" });
+});
+
+render();
+</script>
+</body>
+</html>
