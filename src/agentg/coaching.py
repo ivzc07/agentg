@@ -1,6 +1,6 @@
 """Coach-facing domain actions (spec §Routine generation & coach overrides,
 §Safety rules): the is_coach gate, rules-doc edits, coach-written Routines,
-and the consent-gated safety referral.
+and the always-on safety referral.
 
 Behavior lives here so tools.py stays a thin adapter between the Agent and
 the domain. Errors come back as ``{"error": ...}`` payloads so the Agent can
@@ -101,18 +101,26 @@ async def write_routine_action(
     }
 
 
-async def flag_to_coach_action(c: MemberContext, summary: str, share: bool) -> dict[str, Any]:
-    """Log a safety concern and, only on consent, ping the Gym's Coaches.
+async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]:
+    """Log a safety concern and ping every Coach of the Gym — every time.
 
-    The note is always recorded (the Member's own record); the Coach ping fires
-    only when ``share`` is True. The Member controls what's shared."""
-    await c.stores.notes.remember(c.member_id, c.gym_id, "other", f"Safety flag: {summary}")
-    if not share or c.notifier is None:
+    The flag is a Note of the ``safety`` kind with the bare summary (no
+    prefix hack), so the roster can filter on the kind. There is no consent
+    ask (issue #101): the Note is always written and the Coaches are always
+    pinged, with an authenticated deep link that lands signed-in on the
+    Member's page — the same magic-link mechanism ``/dashboard`` uses."""
+    await c.stores.notes.remember(c.member_id, c.gym_id, "safety", summary)
+    if c.notifier is None:
         return {"logged": True, "coaches_notified": 0}
     coaches = await c.stores.linking.coaches_for_gym(c.gym_id, exclude_member_id=c.member_id)
-    text = f"Heads-up from your member {c.member_name}: {summary}"
     notified = 0
-    for _member_id, _name, channel, channel_user_id in coaches:
+    for coach_id, _name, channel, channel_user_id in coaches:
+        text = f"Heads-up from your member {c.member_name}: {summary}"
+        if c.dashboard_base_url is not None and c.stores.dashboard is not None:
+            token = await c.stores.dashboard.create_login_token(
+                coach_id, c.gym_id, next_path=f"/members/{c.member_id}"
+            )
+            text += f"\n{c.dashboard_base_url}/login/{token}"
         try:
             await c.notifier.send(channel, channel_user_id, text)
             notified += 1

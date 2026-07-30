@@ -41,7 +41,7 @@ class AgentRuntime:
     # The channel's demo-animation sender; None disables demo delivery (tests
     # that don't exercise demos leave it unset).
     demo_sender: DemoSender | None = None
-    # Channel notifier for consented safety referrals (pinging a Gym's Coach).
+    # Channel notifier for safety-flag pings (the Gym's Coaches).
     notifier: Notifier | None = None
     # The dashboard door (`/dashboard` -> magic link); None in tests that
     # don't exercise the dashboard.
@@ -74,6 +74,7 @@ class AgentRuntime:
             weight_unit=linked.gym.weight_unit,
             timezone=linked.gym.timezone,
             is_coach=linked.member.is_coach,
+            dashboard_base_url=self.dashboard.base_url if self.dashboard else None,
         )
 
     async def handle_message(self, msg: IncomingMessage) -> Reply:

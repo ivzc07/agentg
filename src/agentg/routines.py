@@ -70,8 +70,9 @@ DEFAULT_RULES_DOC = """\
   professional support, and never coach toward the harmful goal.
 - Urgent symptoms (chest pain, fainting, severe or spreading pain): tell them
   to stop training now and seek emergency care.
-- On any of these, and on a new injury or new pain, offer to flag it to their
-  coach — share only if they say yes.
+- On any of these, and on a new injury or new pain, flag it to the coach
+  with flag_to_coach — every flag is logged and the coaches are pinged, no
+  consent ask.
 """
 
 Clock = Callable[[], datetime]
