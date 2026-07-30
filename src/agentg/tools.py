@@ -62,7 +62,7 @@ async def open_session_payload(c: MemberContext) -> dict[str, Any]:
         "resumed_existing": opened.reopened,
         "days_since_last_session": opened.days_since_last,
         "last_session": opened.last_session,
-        "todays_workout": await c.stores.routines.todays_workout(c.member_id),
+        "todays_workout": await c.stores.routines.todays_workout(c.member_id, c.timezone),
         "weight_unit": c.weight_unit,
     }
 
@@ -291,7 +291,7 @@ async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, An
     """
     c = ctx.context
     suggestions = await suggest_for_today(
-        c.stores.training, c.stores.routines, c.member_id, c.gym_id
+        c.stores.training, c.stores.routines, c.member_id, c.gym_id, c.timezone
     )
     return {
         "weight_unit": c.weight_unit,
@@ -380,7 +380,7 @@ async def snooze_checkins(ctx: RunContextWrapper[MemberContext], until: str) -> 
         return {
             "error": (
                 f"{until!r} isn't a YYYY-MM-DD date — pass an ISO date like "
-                f"{c.stores.training.today().isoformat()}"
+                f"{c.stores.training.today(c.timezone).isoformat()}"
             )
         }
     await c.stores.checkins.snooze_until(c.member_id, until_date)

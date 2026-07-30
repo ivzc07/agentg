@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.checkin import LAPSED, OFF, ON, SNOOZED, WEEKLY_CAP
 from agentg.models import Gym, Member, MemberChannel
+from agentg.timezones import local_date
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,9 @@ class CheckinStore:
                 last_nudge_on=member.last_nudge_on,
                 nudges_this_week=member.nudges_this_week,
                 ignored_nudges=member.ignored_nudges,
-                signup_date=member.created_at.date(),
+                # gym-local (issue #95): this anchors the fallback gap, which
+                # the decision layer measures against gym-local days
+                signup_date=local_date(member.created_at, timezone or "UTC"),
             )
             for member, timezone, channel, channel_user_id in rows
         ]

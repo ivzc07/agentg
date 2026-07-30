@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.catalog import find_exercise, normalize_exercise_name
 from agentg.models import Gym, Routine, Workout, WorkoutExercise
+from agentg.timezones import local_date
 
 # The rules doc that ships with the product. A Gym gets its own editable copy
 # only if it wants different rules; the Agent follows exactly one doc. Plain
@@ -210,13 +211,17 @@ class RoutineStore:
     async def workout_for_weekday(self, member_id: int, weekday: int) -> dict[str, Any] | None:
         return self._pick_weekday(await self.active_routine(member_id), weekday)
 
-    async def todays_workout(self, member_id: int) -> dict[str, Any] | None:
-        return await self.workout_for_weekday(member_id, self._today())
+    async def todays_workout(
+        self, member_id: int, timezone: str = "UTC"
+    ) -> dict[str, Any] | None:
+        return await self.workout_for_weekday(member_id, self._today(timezone))
 
-    def pick_todays_workout(self, routine: dict[str, Any] | None) -> dict[str, Any] | None:
+    def pick_todays_workout(
+        self, routine: dict[str, Any] | None, timezone: str = "UTC"
+    ) -> dict[str, Any] | None:
         """Today's Workout from an already-loaded Routine — saves a re-query
         for callers (e.g. the snapshot) that hold the Routine already."""
-        return self._pick_weekday(routine, self._today())
+        return self._pick_weekday(routine, self._today(timezone))
 
     async def weekday_workout_names(self, member_id: int) -> dict[int, str]:
         """Map each pinned weekday (0=Mon) to its Workout name — the pinned
@@ -226,9 +231,9 @@ class RoutineStore:
             return {}
         return {w["weekday"]: w["name"] for w in routine["workouts"]}
 
-    def _today(self) -> int:
-        # Weekday is UTC for now; gym-local day boundaries arrive with #31.
-        return self._clock().weekday()
+    def _today(self, timezone: str = "UTC") -> int:
+        # Weekday on the Gym's local day (issue #95), never the UTC day.
+        return local_date(self._clock(), timezone).weekday()
 
     @staticmethod
     def _pick_weekday(routine: dict[str, Any] | None, weekday: int) -> dict[str, Any] | None:

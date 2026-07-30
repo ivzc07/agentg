@@ -157,6 +157,25 @@ class DemoFileId(Base):
     file_unique_id: Mapped[str | None] = mapped_column(String(64), default=None)
 
 
+class DashboardLoginToken(Base):
+    """A one-time magic link the bot hands a Coach for `/dashboard`.
+
+    The raw token goes only into the URL; the row stores its SHA-256 hash,
+    so a database read never yields a redeemable link (spec-dashboard
+    §Access & identity).
+    """
+
+    __tablename__ = "dashboard_login_tokens"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime())
+    # NULL until redeemed; single-use is "used_at is NULL" at redeem time.
+    used_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+
+
 class Session(Base):
     """One real gym visit — the record of what actually happened."""
 

@@ -41,11 +41,15 @@ def _completed(
 
 
 async def suggest_for_today(
-    training: TrainingStore, routines: RoutineStore, member_id: int, gym_id: int
+    training: TrainingStore,
+    routines: RoutineStore,
+    member_id: int,
+    gym_id: int,
+    timezone: str = "UTC",
 ) -> list[ExerciseSuggestion]:
     """Weight suggestions for each Exercise in today's Workout (empty on a
     rest day or with no Routine)."""
-    workout = await routines.todays_workout(member_id)
+    workout = await routines.todays_workout(member_id, timezone)
     if workout is None:
         return []
     rules = parse_progression_rules(await routines.effective_rules_doc(gym_id))
