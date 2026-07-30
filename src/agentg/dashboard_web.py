@@ -6,6 +6,9 @@ is three routes:
 - ``GET /`` — the signed-in landing: the Table roster, a dense read-only
   list of the Gym's Members Gap-sorted, gated on the session cookie *and* a
   per-request ``is_coach`` re-check.
+- ``GET /members/<id>`` — the Member's page: the read-only training record
+  (issue #99). A departed, forgotten, or mistyped id lands on one shared
+  bare 404 — no tombstone, no "this member left" wording.
 - ``GET /login/<token>`` — an interstitial that never spends the token, so
   a link-preview fetch (Telegram builds one unless the bot disables it)
   can't burn the one-time link; the browser auto-submits…
@@ -32,7 +35,7 @@ import hashlib
 import hmac
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import lru_cache
 from html import escape
 
@@ -40,7 +43,8 @@ import qrcode
 import qrcode.image.svg
 from aiohttp import web
 
-from agentg.dashboard_store import DashboardStore, RosterRow
+from agentg.checkin import WEEKDAY_NAMES
+from agentg.dashboard_store import DashboardStore, MemberPage, NoteView, RosterRow
 from agentg.linking_store import GYM_NAME_MAX_LENGTH, LinkingStore
 from agentg.models import Gym, Member
 
@@ -223,12 +227,16 @@ NEW_TAG = "nuevo"
 NO_SESSIONS_YET = "Aún sin sesiones"
 
 
-def _away_text(row: RosterRow) -> str:
-    if not row.has_sessions:
+def _away_text(has_sessions: bool, gap_days: int) -> str:
+    """The shared Gap wording for the roster row and the Member page header —
+    one helper so the two surfaces never disagree."""
+    if not has_sessions:
         return NO_SESSIONS_YET
-    if row.gap_days == 1:
+    if gap_days == 0:
+        return "entrenó hoy"
+    if gap_days == 1:
         return "1 día sin venir"
-    return f"{row.gap_days} días sin venir"
+    return f"{gap_days} días sin venir"
 
 
 def _roster_row(row: RosterRow) -> str:
@@ -239,11 +247,10 @@ def _roster_row(row: RosterRow) -> str:
         until = row.snoozed_until.strftime("%d/%m/%Y")
         tags += f' <span class="tag">en pausa hasta el {until}</span>'
     severity = f" sev-{row.severity}" if row.severity else ""
-    # Read-only: the click-through to the Member's page is a later ticket.
     return (
         f'<li class="row" data-name="{escape(row.name)}">'
-        f'<span class="name">{escape(row.name)}</span>{tags}'
-        f'<span class="away{severity}">{_away_text(row)}</span></li>'
+        f'<a class="name" href="/members/{row.member_id}">{escape(row.name)}</a>{tags}'
+        f'<span class="away{severity}">{_away_text(row.has_sessions, row.gap_days)}</span></li>'
     )
 
 
@@ -272,7 +279,7 @@ header .count {{ color: #666; }}
 #search {{ margin-left: auto; font-size: 1rem; padding: 0.3rem 0.6rem; }}
 ul {{ list-style: none; padding: 0; margin: 1rem 0; }}
 .row {{ display: flex; align-items: baseline; gap: 0.6rem; padding: 0.45rem 0.2rem; border-bottom: 1px solid #eee; }}
-.row .name {{ font-weight: 600; }}
+.row a.name {{ font-weight: 600; color: inherit; }}
 .row .away {{ margin-left: auto; color: #666; font-size: 0.9rem; white-space: nowrap; }}
 .row .away.sev-amber {{ color: #9a5b00; font-weight: 600; }}
 .row .away.sev-red {{ color: #b3261e; font-weight: 600; }}
@@ -306,6 +313,215 @@ box.addEventListener("input", () => {{
   if (lapsed) lapsed.open = lapsedHit;
 }});
 </script>
+</body>
+</html>"""
+
+
+# --- The Member page (issue #99, spec-dashboard §The Member page) ---
+#
+# Read-only: the Routine Edit entry point is a later ticket. Copy follows the
+# adopted screens (docs/prototypes/coach-dashboard-v2.html), Spanish — the
+# product's no-signal default.
+
+NOTE_KIND_LABELS = {
+    "injury": "lesión",
+    "preference": "preferencia",
+    "goal": "objetivo",
+    "constraint": "limitación",
+    "safety": "seguridad",
+    "other": "otro",
+}
+
+
+def _fmt_date(d: date) -> str:
+    return d.strftime("%d/%m/%Y")
+
+
+def _not_found() -> web.Response:
+    """The shared dead end: a departed, forgotten, or mistyped Member id all
+    get the same bare 404 — no tombstone, no "this member left" wording, so
+    the two exits stay indistinguishable (spec-dashboard §What a Coach sees)."""
+    return web.Response(status=404, text="404", content_type="text/plain")
+
+
+def _fmt_load(weight: float | None, unit: str) -> str:
+    """One wording for a set's load — Sessions and Últimos pesos never drift."""
+    return f"{weight:g} {unit}" if weight is not None else "peso corporal"
+
+
+def _scheme(sets: int | None, reps: str | None) -> str:
+    if sets is not None and reps is not None:
+        return f" — {sets} × {escape(reps)}"
+    if reps is not None:
+        return f" — {escape(reps)}"
+    if sets is not None:
+        return f" — {sets}"
+    return ""
+
+
+def _set_lines(sets: list[tuple[str, float | None, int]], unit: str) -> str:
+    """Collapse a Session's sets into one line per (Exercise, weight):
+    ``bench press 60 kg × 8,8,8`` — warm-ups at another weight stay separate."""
+    lines = []
+    grouped: dict[tuple[str, float | None], list[int]] = {}
+    for name, weight, reps in sets:
+        grouped.setdefault((name, weight), []).append(reps)
+    for (name, weight), reps_list in grouped.items():
+        lines.append(
+            f'<div class="set">{escape(name)} {_fmt_load(weight, unit)} × {",".join(str(r) for r in reps_list)}</div>'
+        )
+    return "".join(lines)
+
+
+def _routine_card(view: MemberPage) -> str:
+    if not view.routine:
+        body = '<p class="muted">Sin rutina activa</p>'
+    else:
+        days = []
+        for day in view.routine:
+            exercises = "".join(
+                f"<li>{escape(name)}{_scheme(sets, reps)}</li>"
+                for name, sets, reps in day.exercises
+            )
+            days.append(
+                f'<div class="day"><b>{WEEKDAY_NAMES[day.weekday]}</b> '
+                f"{escape(day.name)}<ul>{exercises}</ul></div>"
+            )
+        body = "".join(days)
+    return f'<section class="card"><h2>Rutina</h2>{body}</section>'
+
+
+def _sessions_card(view: MemberPage) -> str:
+    items = []
+    for session in view.sessions:
+        count = len(session.sets)
+        if count == 0:
+            headline = "visita registrada, sin series"
+        elif count == 1:
+            headline = "1 serie"
+        else:
+            headline = f"{count} series"
+        items.append(
+            f'<div class="sess"><b>{_fmt_date(session.on)}</b> '
+            f'<span class="muted">{headline}</span>'
+            f"{_set_lines(session.sets, view.weight_unit)}</div>"
+        )
+    if not items:
+        items.append(f'<p class="muted">{NO_SESSIONS_YET}</p>')
+    nav = ""
+    if view.pages > 1:
+        newer = (
+            f'<a href="/members/{view.member_id}?page={view.page - 1}">‹ más recientes</a>'
+            if view.page > 1
+            else ""
+        )
+        older = (
+            f'<a href="/members/{view.member_id}?page={view.page + 1}">más antiguas ›</a>'
+            if view.page < view.pages
+            else ""
+        )
+        nav = (
+            f'<nav class="pages">{newer}'
+            f'<span class="muted">página {view.page} de {view.pages}</span>{older}</nav>'
+        )
+    return f'<section class="card"><h2>Sesiones</h2>{"".join(items)}{nav}</section>'
+
+
+def _weights_card(view: MemberPage) -> str:
+    if not view.weights:
+        rows = '<p class="muted">Nada registrado aún</p>'
+    else:
+        rows = "".join(
+            f'<li><b>{escape(w.exercise)}</b> '
+            f'{_fmt_load(w.weight, view.weight_unit)}'
+            f' × {",".join(str(r) for r in w.reps)}'
+            f' <span class="muted">· {_fmt_date(w.on)}</span></li>'
+            for w in view.weights
+        )
+        rows = f"<ul>{rows}</ul>"
+    return f'<section class="card"><h2>Últimos pesos</h2>{rows}</section>'
+
+
+def _note_row(note: NoteView) -> str:
+    label = NOTE_KIND_LABELS.get(note.kind, note.kind)
+    retired = (
+        f' <span class="muted">· retirada el {_fmt_date(note.retired_on)}</span>'
+        if note.retired_on is not None
+        else ""
+    )
+    return (
+        f'<div class="note"><span class="tag">{escape(label)}</span> '
+        f"{escape(note.text)}"
+        f' <span class="muted">· {_fmt_date(note.on)}</span>{retired}</div>'
+    )
+
+
+def _notes_card(view: MemberPage) -> str:
+    body = "".join(_note_row(note) for note in view.notes) or (
+        '<p class="muted">Sin notas</p>'
+    )
+    if view.retired_notes:
+        retired = "".join(_note_row(note) for note in view.retired_notes)
+        body += f"""<details class="tail">
+<summary>Retiradas ({len(view.retired_notes)})</summary>
+{retired}
+</details>"""
+    return f'<section class="card"><h2>Notas</h2>{body}</section>'
+
+
+def _member_page(gym_name: str, view: MemberPage) -> str:
+    tags = ""
+    if view.lapsed:
+        tags += ' <span class="tag">se perdió</span>'
+    if view.snoozed_until is not None:
+        tags += f' <span class="tag">en pausa hasta el {_fmt_date(view.snoozed_until)}</span>'
+    count = "1 sesión" if view.session_count == 1 else f"{view.session_count} sesiones"
+    facts = f"Miembro desde {_fmt_date(view.member_since)} · {count} · {_away_text(view.has_sessions, view.gap_days)}"
+    if view.last_session_on is not None:
+        facts += f" · última sesión {_fmt_date(view.last_session_on)}"
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{escape(view.name)} — {escape(gym_name)}</title>
+<style>
+body {{ font-family: system-ui, sans-serif; max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }}
+a.back {{ color: #666; text-decoration: none; }}
+header h1 {{ font-size: 1.4rem; margin: 0.5rem 0 0.2rem; }}
+header .facts {{ color: #666; }}
+.columns {{ display: flex; gap: 2rem; flex-wrap: wrap; align-items: flex-start; }}
+.col {{ flex: 1; min-width: 18rem; }}
+.card {{ margin: 1rem 0; }}
+.card h2 {{ font-size: 1rem; margin: 0 0 0.5rem; }}
+.card ul {{ margin: 0.2rem 0 0.6rem; padding-left: 1.2rem; }}
+.day b {{ text-transform: capitalize; }}
+.sess {{ padding: 0.4rem 0; border-bottom: 1px solid #eee; }}
+.sess .set {{ color: #333; font-size: 0.9rem; }}
+.note {{ padding: 0.3rem 0; }}
+.muted {{ color: #666; font-size: 0.9rem; }}
+.tag {{ font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 1rem; background: #eee; color: #555; white-space: nowrap; }}
+.pages {{ display: flex; gap: 1rem; margin-top: 0.6rem; }}
+.pages .muted {{ margin: 0 auto; }}
+.tail summary {{ cursor: pointer; color: #666; }}
+</style>
+</head>
+<body>
+<a class="back" href="/">← Todos los miembros</a>
+<header>
+<h1>{escape(view.name)}{tags}</h1>
+<div class="facts">{facts}</div>
+</header>
+<div class="columns">
+<div class="col">
+{_routine_card(view)}
+{_sessions_card(view)}
+</div>
+<div class="col">
+{_weights_card(view)}
+{_notes_card(view)}
+</div>
+</div>
 </body>
 </html>"""
 
@@ -377,6 +593,28 @@ def build_app(
         rows, lapsed = await store.roster(gym.id)
         response = web.Response(
             text=_roster_page(gym.name, rows, lapsed), content_type="text/html"
+        )
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def member_page(request: web.Request) -> web.Response:
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        member, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+        except ValueError:
+            return _not_found()
+        try:
+            page = int(request.query.get("page", "1"))
+        except ValueError:
+            page = 1
+        view = await store.member_page(gym.id, member_id, page=page)
+        if view is None:  # departed, forgotten, or another Gym's: the shared 404
+            return _not_found()
+        response = web.Response(
+            text=_member_page(gym.name, view), content_type="text/html"
         )
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
@@ -458,6 +696,7 @@ def build_app(
 
     app = web.Application()
     app.router.add_get("/", home)
+    app.router.add_get("/members/{member_id}", member_page)
     app.router.add_get("/settings", settings)
     app.router.add_post("/settings/regenerate-invite", regenerate_invite)
     app.router.add_post("/settings/regenerate-coach", regenerate_coach)

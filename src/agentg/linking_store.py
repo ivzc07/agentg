@@ -44,9 +44,10 @@ def normalize_invite_code(text: str) -> str:
 
 def _add_missing_columns(conn: Connection) -> None:
     """Schema evolution for deployed databases: ``create_all`` never alters
-    existing tables, so columns added after first deploy are applied here,
-    idempotently. (No migration framework — the repo's mechanism is this
-    list; add one entry per new column on an existing table.)"""
+    existing tables, so columns and indexes added after first deploy are
+    applied here, idempotently. (No migration framework — the repo's
+    mechanism is this list; add one entry per new column or index on an
+    existing table.)"""
     gym_columns = {c["name"] for c in inspect(conn).get_columns("gyms")}
     if "coach_invite_code" not in gym_columns:
         conn.execute(text("ALTER TABLE gyms ADD COLUMN coach_invite_code VARCHAR(64)"))
@@ -55,6 +56,11 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text("CREATE UNIQUE INDEX ix_gyms_coach_invite_code ON gyms (coach_invite_code)")
         )
+    # Per-Exercise weight reads (issue #99) must not keep scanning on
+    # databases that already have a sets table.
+    sets_indexes = {i["name"] for i in inspect(conn).get_indexes("sets")}
+    if "ix_sets_exercise_id" not in sets_indexes:
+        conn.execute(text("CREATE INDEX ix_sets_exercise_id ON sets (exercise_id)"))
 
 
 @dataclass(frozen=True)
