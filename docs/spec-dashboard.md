@@ -107,6 +107,7 @@ The dashboard answers "did they follow the plan" at the **day level only, inferr
 
 - A scheduled Workout day with no Session is a miss - a pure date comparison. No `workout_id` on Session; no schema or chat-path change.
 - Each day is judged against the **Routine active on that date**, reconstructed as the most recent Routine created on or before it (superseded Routines survive deactivated with their Workouts).
+- Reconstruction is **day-grained**: a Routine created mid-day governs that entire day. This is an accepted approximation - [#74](https://github.com/ivzc07/agentg/issues/74) already classed per-date reconstruction as approximate, and [#85](https://github.com/ivzc07/agentg/issues/85)'s today-never-counts-until-it-is-over rule keeps a same-day plan change from flagging a miss while the day still runs.
 - **Content-level adherence is never claimed** - the Agent deliberately deviates around injuries, so "wrong exercises" would flag the Agent doing its job as the Member slacking.
 - Extra unscheduled Sessions show as trained but never cancel a miss.
 
@@ -132,7 +133,7 @@ The dashboard answers "did they follow the plan" at the **day level only, inferr
 
 - Applying or editing a Preset stamps each linked Member a fresh Routine copy through the existing `save_routine` supersession machinery, so per-Member past-date reconstruction (§Attendance) works unchanged.
 - New table `RoutinePreset` (`gym_id`, per-Gym-unique `name`, retirement marker) - identity only.
-- The Preset's master structure is a **Member-less Routine row** (`member_id` nullable, `preset_id` set) reusing the existing Workout tables and save path; the master keeps its own superseded versions. Accepted cost: "every Routine has a Member" stops being an invariant.
+- The Preset's master structure is a **Member-less Routine row** (`member_id` nullable, `preset_id` set) reusing the existing Workout tables and save path; the master keeps its own superseded versions. Supersession for a master scopes by `preset_id` - a new master version supersedes only prior versions of that same Preset, never other masters sharing the NULL `member_id`. Accepted cost: "every Routine has a Member" stops being an invariant.
 - The live link is a nullable `preset_id` on `Routine`; a direct edit forks by writing a stamp-less row. No provenance column - history carries the lineage.
 - Gym default: `default_preset_id` on `Gym`, cleared when that Preset retires.
 - Presets **retire, never delete** - Members keep their copies; copies are `coach_authored`, so the Agent never rewrites them.
