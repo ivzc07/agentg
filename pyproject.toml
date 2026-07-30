@@ -12,7 +12,6 @@ dependencies = [
     "openai-agents[litellm,sqlalchemy]>=0.2.9",
     "aiogram>=3.13",
     "aiohttp>=3.10",  # the dashboard's embedded HTTP server (spec-dashboard §Stack)
-    "qrcode>=7.4",  # invite-link QR on the Settings screen (spec-dashboard §Settings)
     "asyncpg>=0.29",
     "apscheduler>=3.10",
     "tzdata>=2024.1",  # IANA timezone data for zoneinfo (gym-local check-in times)
