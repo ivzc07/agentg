@@ -238,3 +238,24 @@ async def test_the_page_colours_rows_and_keeps_the_counters(env):
     assert f"en pausa hasta el {until.strftime('%d/%m/%Y')}" in text
     # The counter still just counts Members — the lapsed tail stays out.
     assert "Miembros (4)" in text
+
+
+async def test_the_colour_never_moves_the_gap_sort(env):
+    red = await env.add_member("Roja")  # red, but the smaller Gap
+    await env.give_routine(red, [SATURDAY, MONDAY, TUESDAY], days_ago=10)
+    await env.train(red, days_ago=5)
+    amber = await env.add_member("Ambar")  # amber, but the larger Gap
+    await env.give_routine(amber, [MONDAY], days_ago=12)
+    await env.train(amber, days_ago=10)
+
+    rows, _ = await env.store.roster(env.gym.id)
+
+    # Gap order holds even though the trailing row is the redder one.
+    assert [(row.name, row.severity) for row in rows] == [
+        ("Ambar", "amber"),
+        ("Roja", "red"),
+    ]
+
+    text = await env.page()
+    main = text.split('<details id="lapsed">')[0]
+    assert main.index("Ambar") < main.index("Roja")
