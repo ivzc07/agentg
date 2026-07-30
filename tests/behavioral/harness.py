@@ -26,6 +26,7 @@ from agentg.models import Exercise, Set
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 from agentg.tools import build_tools
+from agentg.training import Clock
 from behavioral.scripted_model import MessageStep, ScriptedModel, Step, message, tool
 from conftest import identity_phraser
 
@@ -71,10 +72,12 @@ class ConversationHarness:
 
     @classmethod
     @asynccontextmanager
-    async def create(cls, tmp_path: Path) -> AsyncIterator["ConversationHarness"]:
+    async def create(
+        cls, tmp_path: Path, clock: Clock | None = None
+    ) -> AsyncIterator["ConversationHarness"]:
         set_tracing_disabled(True)
         engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'behavioral.db'}")
-        stores = Stores.from_engine(engine)
+        stores = Stores.from_engine(engine, clock=clock)
         model = ScriptedModel()
         notifier = FakeNotifier()
         agent = Agent(
@@ -122,8 +125,9 @@ class ConversationHarness:
         gym_name: str = "Iron Temple",
         channel_user_id: str = "42",
         is_coach: bool = False,
+        timezone: str = "UTC",
     ) -> None:
-        gym = await self.stores.linking.create_gym(gym_name)
+        gym = await self.stores.linking.create_gym(gym_name, timezone=timezone)
         member = await self.stores.linking.link_member(
             gym.id, name, self.channel, channel_user_id
         )
