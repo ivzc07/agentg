@@ -28,6 +28,14 @@ def test_the_instructions_keep_lift_shorthand_language_neutral():
     assert "bench 60 8,8,8" in INSTRUCTIONS  # the worked example lives in the rule
 
 
+def test_the_catalog_carve_out_is_scoped_to_exercise_names_only():
+    # #67: "muscle" leaked into a Spanish intake because the carve-out read as
+    # blanket permission for English; it covers Exercise catalog names only
+    text = INSTRUCTIONS.lower()
+    assert "exercise names are the only exception" in text
+    assert "masa muscular" in text  # the Spanish for the observed leak, pinned as the example
+
+
 # --- disclosure: never announce being an AI; deflect if asked ---
 
 
