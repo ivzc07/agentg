@@ -74,11 +74,16 @@ async def test_a_coach_sees_both_links_and_exactly_one_qr(env):
     assert "<svg" not in coach_section
 
     # Both regenerates sit behind the typed confirm, and the gym name is
-    # editable — nothing else is on the screen.
+    # editable — nothing else is on the screen: exactly three forms, whose
+    # only inputs are the two confirms and the name. (A raw substring check
+    # for "UTC"/"kg" would be flaky — random invite codes can contain them.)
     assert page.count(f'data-confirm="{REGENERATE_CONFIRM}"') == 2
     assert 'value="Iron Temple"' in page
-    assert env.gym.timezone not in page
-    assert env.gym.weight_unit not in page
+    assert page.count("<form") == 3
+    assert page.count('name="confirm"') == 2
+    assert page.count('name="name"') == 1
+    assert 'name="timezone"' not in page
+    assert 'name="weight_unit"' not in page
 
 
 async def test_the_shell_links_to_settings(env):
