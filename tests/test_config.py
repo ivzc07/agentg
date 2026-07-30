@@ -49,3 +49,24 @@ def test_non_postgres_urls_pass_through_unchanged():
     url = "sqlite+aiosqlite:///tmp/x.db"
     settings = Settings.from_env({**FULL_ENV, "DATABASE_URL": url})
     assert settings.database_url == url
+
+
+def test_dashboard_settings_default_to_a_local_server():
+    settings = Settings.from_env({"TELEGRAM_BOT_TOKEN": "123:abc", "MODEL_API_KEY": "sk-test"})
+    assert settings.dashboard_base_url == "http://localhost:8080"
+    assert settings.dashboard_port == 8080
+    assert settings.dashboard_session_secret is None  # falls back to the bot token
+
+
+def test_dashboard_settings_read_their_env_vars():
+    settings = Settings.from_env(
+        {
+            **FULL_ENV,
+            "DASHBOARD_BASE_URL": "https://dash.example.com/",
+            "DASHBOARD_PORT": "9090",
+            "DASHBOARD_SESSION_SECRET": "s3cret",
+        }
+    )
+    assert settings.dashboard_base_url == "https://dash.example.com"  # no trailing slash
+    assert settings.dashboard_port == 9090
+    assert settings.dashboard_session_secret == "s3cret"

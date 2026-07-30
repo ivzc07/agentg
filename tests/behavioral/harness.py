@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -19,10 +19,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agentg.agent import dynamic_instructions
+from agentg.dashboard import DashboardDoor
+from agentg.dashboard_store import Clock as DashboardClock
+from agentg.dashboard_store import DashboardStore
 from agentg.db import create_engine
 from agentg.linking import Linking
 from agentg.messages import IncomingMessage
-from agentg.models import Exercise, Set
+from agentg.models import DashboardLoginToken, Exercise, Set
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 from agentg.tools import build_tools
@@ -73,11 +76,26 @@ class ConversationHarness:
     @classmethod
     @asynccontextmanager
     async def create(
-        cls, tmp_path: Path, clock: Clock | None = None
+        cls,
+        tmp_path: Path,
+        clock: Clock | None = None,
+        *,
+        dashboard_base_url: str | None = None,
+        dashboard_clock: DashboardClock | None = None,
     ) -> AsyncIterator["ConversationHarness"]:
+        """Build the harness; with ``dashboard_base_url`` the runtime also
+        gets the dashboard door (``/dashboard`` -> magic link), minting and
+        redeeming tokens on ``dashboard_clock`` when one is given."""
         set_tracing_disabled(True)
         engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'behavioral.db'}")
         stores = Stores.from_engine(engine, clock=clock)
+        dashboard = None
+        if dashboard_base_url is not None:
+            if dashboard_clock is not None:
+                stores = replace(
+                    stores, dashboard=DashboardStore(engine, clock=dashboard_clock)
+                )
+            dashboard = DashboardDoor(stores.dashboard, dashboard_base_url)
         model = ScriptedModel()
         notifier = FakeNotifier()
         agent = Agent(
@@ -93,6 +111,7 @@ class ConversationHarness:
             linking=Linking(stores.linking, identity_phraser),
             summarizer=_null_summarizer,
             notifier=notifier,
+            dashboard=dashboard,
         )
         await runtime.ensure_schema()
         harness = cls(
@@ -173,6 +192,11 @@ class ConversationHarness:
             )
         return grouped
 
+    async def login_tokens(self) -> list[DashboardLoginToken]:
+        """End-state helper: every dashboard login token row."""
+        async with async_sessionmaker(self._engine)() as db:
+            return list(await db.scalars(select(DashboardLoginToken)))
+
     async def say(
         self,
         text: str,
@@ -181,11 +205,13 @@ class ConversationHarness:
         link_code: str | None = None,
         channel_user_id: str | None = None,
         display_name: str | None = None,
+        is_group: bool = False,
     ) -> str:
         """Send one member message. ``steps`` scripts the model for this turn.
 
         Linking turns (invite codes, name confirms) need no steps — the Agent
         does not run. Agent turns must supply steps ending in a ``message``.
+        ``is_group`` reports the message as arriving in a shared chat.
         """
         if steps:
             self.model.enqueue(steps)
@@ -196,6 +222,7 @@ class ConversationHarness:
                 text=text,
                 display_name=display_name if display_name is not None else self.display_name,
                 link_code=link_code,
+                is_group=is_group,
             )
         )
         return str(reply)

@@ -15,12 +15,19 @@ class Reply(str):
     """
 
     after_send: Callable[[], Awaitable[None]] | None
+    # Suppress the channel's link preview (magic links: a preview fetch could
+    # spend a one-time token before the human taps it).
+    disable_preview: bool
 
     def __new__(
-        cls, text: str, after_send: Callable[[], Awaitable[None]] | None = None
+        cls,
+        text: str,
+        after_send: Callable[[], Awaitable[None]] | None = None,
+        disable_preview: bool = False,
     ) -> "Reply":
         obj = super().__new__(cls, text)
         obj.after_send = after_send
+        obj.disable_preview = disable_preview
         return obj
 
 
@@ -32,6 +39,8 @@ class IncomingMessage:
     Telegram: the numeric user id, never the mutable ``@username``).
     ``link_code`` is a deep-link payload when the channel carries one:
     ``None`` for an ordinary message, ``""`` for a link tap with no code.
+    ``is_group`` marks a shared chat (a Telegram group): anything secret —
+    a dashboard magic link — must never be replied there.
     """
 
     channel: str
@@ -39,3 +48,4 @@ class IncomingMessage:
     text: str
     display_name: str = ""
     link_code: str | None = None
+    is_group: bool = False

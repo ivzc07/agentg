@@ -18,6 +18,8 @@ from agentg.channels.telegram import (
 from agentg.checkin_sweep import run_sweep
 from agentg.compaction import build_summarizer
 from agentg.config import Settings
+from agentg.dashboard import DashboardDoor
+from agentg.dashboard_web import build_app, start_server
 from agentg.db import create_engine
 from agentg.linking import Linking, build_phraser
 from agentg.runtime import AgentRuntime
@@ -46,8 +48,22 @@ async def run() -> None:
         summarizer=build_summarizer(settings),
         demo_sender=demo_sender,
         notifier=notifier,
+        dashboard=DashboardDoor(stores.dashboard, settings.dashboard_base_url),
     )
     await runtime.ensure_schema()
+
+    # The dashboard's HTTP server shares this event loop with the long
+    # poller (spec-dashboard §Stack).
+    web_runner = await start_server(
+        build_app(
+            stores.dashboard,
+            session_secret=settings.dashboard_session_secret
+            or settings.telegram_bot_token,
+            secure_cookies=settings.dashboard_base_url.startswith("https://"),
+        ),
+        host="0.0.0.0",
+        port=settings.dashboard_port,
+    )
 
     # In-process proactive check-in sweep. Runs on the hour; the decision layer
     # only fires each Member at 09:00 in their gym's timezone.
@@ -66,7 +82,10 @@ async def run() -> None:
     scheduler.add_job(sweep, "cron", minute=0, id="checkin-sweep")
     scheduler.start()
 
-    await run_polling(bot, runtime.handle_message)
+    try:
+        await run_polling(bot, runtime.handle_message)
+    finally:
+        await web_runner.cleanup()
 
 
 def main() -> None:

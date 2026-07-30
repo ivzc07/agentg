@@ -45,6 +45,7 @@ async def env(tmp_path):
                 checkins=None,  # not used by the safety tool
                 demos=None,
                 forget=None,
+                dashboard=None,
             ),
             notifier=notifier,
             member_id=member_id or member.id,
@@ -161,6 +162,7 @@ async def test_consent_with_no_coach_set_up_still_logs(env):
             checkins=None,
             demos=None,
             forget=None,
+            dashboard=None,
         ),
         notifier=env.notifier,
         member_id=m.id,
