@@ -18,6 +18,7 @@ from agentg.models import Member
 from agentg.linking import (
     COACH_PROMOTED_INSTRUCTION,
     COACH_WELCOME_INSTRUCTION,
+    CODE_NOT_FOUND_INSTRUCTION,
     DEAD_END_INSTRUCTION,
     Linking,
 )
@@ -228,6 +229,48 @@ async def test_invalid_code_is_a_polite_dead_end(runtime):
         reply = await runtime.handle_message(message)
         assert reply == DEAD_END_INSTRUCTION
         assert "Iron Temple" not in reply
+    assert await member_count(runtime.stores.linking) == 0
+
+
+# --- AC: a mistyped invite code is told so, not handed the generic dead end ---
+
+
+async def test_a_near_miss_invite_code_is_told_the_code_did_not_work(runtime):
+    await runtime.stores.linking.create_gym("Iron Temple")
+
+    reply = await runtime.handle_message(incoming("8lrf8m6ee"))  # one char too many
+
+    assert reply == CODE_NOT_FOUND_INSTRUCTION
+    assert reply != DEAD_END_INSTRUCTION
+    assert "Iron Temple" not in reply  # gyms are never listed
+    assert await member_count(runtime.stores.linking) == 0
+
+
+async def test_a_near_miss_coach_code_is_told_the_code_did_not_work(runtime):
+    await runtime.stores.linking.create_gym("Iron Temple")
+
+    reply = await runtime.handle_message(incoming("coach-8lrf8m6"))  # one char short
+
+    assert reply == CODE_NOT_FOUND_INSTRUCTION
+    assert await member_count(runtime.stores.linking) == 0
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Hola",  # a greeting
+        "gracias",  # a short courtesy
+        "perfecto",  # 8 alphabet chars — code length, but an ordinary word
+        "quiero entrenar",  # a plain request
+        "mi codigo no funciona",  # talking *about* a code, not typing one
+    ],
+)
+async def test_ordinary_short_messages_still_get_the_generic_dead_end(runtime, text):
+    await runtime.stores.linking.create_gym("Iron Temple")
+
+    reply = await runtime.handle_message(incoming(text))
+
+    assert reply == DEAD_END_INSTRUCTION
     assert await member_count(runtime.stores.linking) == 0
 
 
