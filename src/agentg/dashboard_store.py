@@ -141,6 +141,26 @@ class MemberPage:
     retired_notes: list[NoteView]
 
 
+def _gap_days(today: date, last_started: datetime | None, member_created: datetime, timezone: str) -> int:
+    """Gym-local days since the newest Session — the signup date for a
+    Session-less Member. One formula shared by the roster and the Member
+    page header, so the two surfaces can never disagree."""
+    return (today - local_date(last_started or member_created, timezone)).days
+
+
+def _active_snooze(member: Member, today: date) -> date | None:
+    """The snooze date only while a snooze is still running — an
+    expired-but-unswept snooze renders plain. Shared by the roster and the
+    Member page header."""
+    if (
+        member.checkin_state == SNOOZED
+        and member.snoozed_until is not None
+        and member.snoozed_until > today
+    ):
+        return member.snoozed_until
+    return None
+
+
 class DashboardStore:
     def __init__(self, engine: AsyncEngine, clock: Clock = _utcnow) -> None:
         self._sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -258,16 +278,10 @@ class DashboardStore:
             row = RosterRow(
                 member_id=member.id,
                 name=member.name,
-                gap_days=(today - local_date(last_started or member.created_at, timezone)).days,
+                gap_days=_gap_days(today, last_started, member.created_at, timezone),
                 has_sessions=last_started is not None,
                 is_new=member.id not in with_routines,
-                snoozed_until=(
-                    member.snoozed_until
-                    if member.checkin_state == SNOOZED
-                    and member.snoozed_until is not None
-                    and member.snoozed_until > today
-                    else None
-                ),
+                snoozed_until=_active_snooze(member, today),
             )
             (lapsed_rows if member.checkin_state == LAPSED else roster_rows).append(row)
         roster_rows.sort(key=lambda r: (-r.gap_days, r.name.lower()))
@@ -308,7 +322,7 @@ class DashboardStore:
             )
             today = local_date(self._clock(), timezone)
             last_started = session_rows[0].started_at if session_rows else None
-            gap_days = (today - local_date(last_started or member.created_at, timezone)).days
+            gap_days = _gap_days(today, last_started, member.created_at, timezone)
 
             weights = await self._last_weights(db, member_id, timezone)
             notes = list(
@@ -354,13 +368,7 @@ class DashboardStore:
             has_sessions=last_started is not None,
             last_session_on=local_date(last_started, timezone) if last_started else None,
             lapsed=member.checkin_state == LAPSED,
-            snoozed_until=(
-                member.snoozed_until
-                if member.checkin_state == SNOOZED
-                and member.snoozed_until is not None
-                and member.snoozed_until > today
-                else None
-            ),
+            snoozed_until=_active_snooze(member, today),
             routine=routine,
             sessions=sessions,
             page=page,

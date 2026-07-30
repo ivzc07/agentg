@@ -43,7 +43,14 @@ async def env(tmp_path):
     gym = await linking.create_gym("Iron Temple")
     coach = await linking.link_member(gym.id, "Coach Ana", "telegram", "1")
     await linking.set_coach(coach.id, True)
-    app = build_app(store, session_secret=SECRET, secure_cookies=False, clock=clock)
+    app = build_app(
+        store,
+        linking,
+        session_secret=SECRET,
+        bot_username="testbot",
+        secure_cookies=False,
+        clock=clock,
+    )
     async with TestClient(TestServer(app)) as client:
         yield Env(clock, engine, linking, store, client, gym, coach)
     await engine.dispose()
@@ -257,3 +264,18 @@ async def test_the_gap_wording_matches_the_roster(env):
     assert "entrenó hoy" in member_text
     assert "entrenó hoy" in roster_text
     assert "0 días sin venir" not in roster_text
+
+
+async def test_a_sets_only_prescription_renders_its_set_count(env):
+    member = await env.add_member("Fuerza")
+    await env.training.ensure_seeded()
+    await env.routines.save_routine(
+        member.id,
+        env.gym.id,
+        [WorkoutSpec(weekday=0, name="Pesado", exercises=[ExerciseSpec("squat", 5, None)])],
+    )
+
+    status, text = await env.page(member.id)
+
+    assert status == 200
+    assert "squat — 5" in text

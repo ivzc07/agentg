@@ -53,12 +53,16 @@ async def run() -> None:
     await runtime.ensure_schema()
 
     # The dashboard's HTTP server shares this event loop with the long
-    # poller (spec-dashboard §Stack).
+    # poller (spec-dashboard §Stack). The bot username builds the t.me
+    # invite links the Settings screen shows.
+    bot_username = (await bot.get_me()).username or ""
     web_runner = await start_server(
         build_app(
             stores.dashboard,
+            stores.linking,
             session_secret=settings.dashboard_session_secret
             or settings.telegram_bot_token,
+            bot_username=bot_username,
             secure_cookies=settings.dashboard_base_url.startswith("https://"),
         ),
         host="0.0.0.0",

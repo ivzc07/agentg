@@ -33,7 +33,12 @@ def link_token(reply: str) -> str:
 
 def web_client(h: ConversationHarness, clock: FakeClock) -> TestClient:
     app = build_app(
-        h.stores.dashboard, session_secret=SECRET, secure_cookies=False, clock=clock
+        h.stores.dashboard,
+        h.stores.linking,
+        session_secret=SECRET,
+        bot_username="testbot",
+        secure_cookies=False,
+        clock=clock,
     )
     return TestClient(TestServer(app))
 
