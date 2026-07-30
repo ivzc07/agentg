@@ -52,6 +52,11 @@ SESSIONS_PER_PAGE = 10
 # grid, ending with the current week.
 GRID_WEEKS = 4
 
+# A safety flag clears from the roster 30 days after creation, computed at
+# read time — no job (spec-dashboard §Safety flags). An expired
+# unacknowledged flag stays on the Member page labelled "expired, never seen".
+FLAG_EXPIRY = timedelta(days=30)
+
 Clock = Callable[[], datetime]
 
 
@@ -137,6 +142,10 @@ class RosterRow:
     is_new: bool  # no active Routine
     snoozed_until: date | None
     missed_days: int
+    # An unacknowledged safety flag younger than FLAG_EXPIRY — a marker on
+    # the row, never a re-sort: it plays no part in the Gap ordering, and an
+    # injury Note never sets it (spec-dashboard §Safety flags).
+    has_safety_flag: bool = False
 
     @property
     def severity(self) -> str | None:
@@ -213,6 +222,22 @@ class NoteView:
 
 
 @dataclass(frozen=True)
+class SafetyFlagView:
+    """One live safety flag as the Member page's banner shows it.
+
+    ``status`` is computed at read time: ``"open"`` until a Coach ticks it
+    or it ages past FLAG_EXPIRY; an expired unacknowledged flag stays on the
+    page labelled "expired, never seen" (spec-dashboard §Safety flags)."""
+
+    note_id: int
+    text: str
+    on: date
+    status: str  # "open" | "acknowledged" | "expired"
+    acknowledged_on: date | None
+    acknowledged_by: str | None  # the ticking Coach's name
+
+
+@dataclass(frozen=True)
 class MemberPage:
     """Everything the read-only Member page renders (issue #99).
 
@@ -247,6 +272,7 @@ class MemberPage:
     weights: list[LastWeight]
     notes: list[NoteView]
     retired_notes: list[NoteView]
+    safety_flags: list[SafetyFlagView]
 
 
 def _gap_days(today: date, last_started: datetime | None, member_created: datetime, timezone: str) -> int:
@@ -277,8 +303,13 @@ class DashboardStore:
         # the Agent's tools use, so the two never diverge.
         self._routines = RoutineStore(engine, clock)
 
-    async def create_login_token(self, member_id: int, gym_id: int) -> str:
-        """Mint a one-time token; returns the raw value for the magic link."""
+    async def create_login_token(
+        self, member_id: int, gym_id: int, next_path: str | None = None
+    ) -> str:
+        """Mint a one-time token; returns the raw value for the magic link.
+
+        ``next_path`` is where redemption lands (the roster when NULL) — a
+        safety-flag ping points it at the Member's page."""
         raw = secrets.token_urlsafe(TOKEN_BYTES)
         async with self._sessions() as db:
             db.add(
@@ -287,6 +318,7 @@ class DashboardStore:
                     member_id=member_id,
                     gym_id=gym_id,
                     expires_at=self._clock() + TOKEN_TTL,
+                    next_path=next_path,
                 )
             )
             await db.commit()
@@ -448,6 +480,22 @@ class DashboardStore:
                     .where(ranked.c.rn == 1)
                 )
                 history.extend((await db.execute(union_all(recent, governing))).all())
+            # Live safety flags mark the row: unacknowledged, unretired, and
+            # younger than FLAG_EXPIRY (the clear is computed here, at read
+            # time — no job). Injury Notes never enter this read.
+            flagged: set[int] = set()
+            if member_ids:
+                flagged = set(
+                    await db.scalars(
+                        select(MemberNote.member_id).where(
+                            MemberNote.gym_id == gym_id,
+                            MemberNote.kind == "safety",
+                            MemberNote.retired_at.is_(None),
+                            MemberNote.acknowledged_at.is_(None),
+                            MemberNote.created_at > self._clock() - FLAG_EXPIRY,
+                        )
+                    )
+                )
         history.sort(key=lambda r: (r.member_id, r.created_at, r.id))
         spans_by_member: dict[int, list[tuple[date, set[int]]]] = {}
         with_routines: set[int] = set()
@@ -483,6 +531,7 @@ class DashboardStore:
                 is_new=member.id not in with_routines,
                 snoozed_until=_active_snooze(member, today),
                 missed_days=missed_planned_days(spans, since, yesterday),
+                has_safety_flag=member.id in flagged,
             )
             (lapsed_rows if member.checkin_state == LAPSED else roster_rows).append(row)
         roster_rows.sort(key=lambda r: (-r.gap_days, r.name.lower()))
@@ -615,6 +664,7 @@ class DashboardStore:
                     .order_by(MemberNote.created_at, MemberNote.id)
                 )
             )
+            safety_flags = await self._safety_flags(db, notes, timezone)
 
             count = len(session_rows)
             pages = max(1, -(-count // SESSIONS_PER_PAGE))
@@ -675,8 +725,10 @@ class DashboardStore:
                 for n in notes
                 if n.retired_at is not None
             ],
+            safety_flags=safety_flags,
         )
 
+<<<<<<< HEAD
     async def roster_member(self, gym_id: int, member_id: int) -> Member | None:
         """The roster-scoped Member the Routine editor may write to, or
         ``None`` — the same rule as ``member_page``: another Gym's Member, a
@@ -730,6 +782,84 @@ class DashboardStore:
         (a web save draws from the catalog, it does not extend it)."""
         async with self._sessions() as db:
             return list(await db.scalars(select(Exercise.name).order_by(Exercise.name)))
+=======
+    async def _safety_flags(
+        self, db, notes: list[MemberNote], timezone: str
+    ) -> list[SafetyFlagView]:
+        """The Member page's live safety flags, status computed at read time.
+
+        Acknowledged wins over expired (a Coach saw it, whenever); expired is
+        an unacknowledged flag past FLAG_EXPIRY — it stays on the page
+        labelled "expired, never seen". Retired flags drop out of the banner
+        entirely."""
+        live = [n for n in notes if n.kind == "safety" and n.retired_at is None]
+        if not live:
+            return []
+        coach_ids = {n.acknowledged_by_member_id for n in live} - {None}
+        names: dict[int, str] = {}
+        if coach_ids:
+            rows = await db.execute(
+                select(Member.id, Member.name).where(Member.id.in_(coach_ids))
+            )
+            names = {member_id: name for member_id, name in rows}
+        cutoff = self._clock() - FLAG_EXPIRY
+        views = []
+        for n in live:
+            if n.acknowledged_at is not None:
+                status = "acknowledged"
+            elif n.created_at <= cutoff:
+                status = "expired"
+            else:
+                status = "open"
+            views.append(
+                SafetyFlagView(
+                    note_id=n.id,
+                    text=n.text,
+                    on=local_date(n.created_at, timezone),
+                    status=status,
+                    acknowledged_on=(
+                        local_date(n.acknowledged_at, timezone)
+                        if n.acknowledged_at is not None
+                        else None
+                    ),
+                    acknowledged_by=(
+                        names.get(n.acknowledged_by_member_id)
+                        if n.acknowledged_by_member_id is not None
+                        else None
+                    ),
+                )
+            )
+        return views
+
+    async def acknowledge_flag(
+        self, gym_id: int, member_id: int, note_id: int, by_member_id: int
+    ) -> MemberNote | None:
+        """Tick a safety flag off: stamp who and when, idempotently.
+
+        Acknowledging is not retiring — the Note stays live in the Agent's
+        recall. ``None`` for anything the Coach must not reach: an unknown
+        id, another Gym's or Member's note, a non-safety kind, or a retired
+        flag — the web layer turns all of them into the shared 404."""
+        async with self._sessions() as db:
+            note = await db.scalar(
+                select(MemberNote)
+                .join(Member, MemberNote.member_id == Member.id)
+                .where(
+                    MemberNote.id == note_id,
+                    MemberNote.member_id == member_id,
+                    Member.gym_id == gym_id,
+                    MemberNote.kind == "safety",
+                    MemberNote.retired_at.is_(None),
+                )
+            )
+            if note is None:
+                return None
+            if note.acknowledged_at is None:
+                note.acknowledged_at = self._clock()
+                note.acknowledged_by_member_id = by_member_id
+                await db.commit()
+            return note
+>>>>>>> 4c8459f (Dashboard: roster flag marker, member-page banner and tick-off)
 
     async def _sessions_sets(
         self, db, session_ids: list[int]

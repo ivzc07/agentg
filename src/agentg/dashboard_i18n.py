@@ -108,6 +108,7 @@ STRINGS = {
         "retired_tail": "Retiradas ({n})",
         "retired_on": "retirada el {date}",
         "verbatim_tag": "textual",
+<<<<<<< HEAD
         # The Routine editor (issue #100).
         "edit": "Editar",
         "chip_agent": "Gestionada por el agente",
@@ -151,6 +152,14 @@ STRINGS = {
         "save_routine": "Guardar Rutina",
         "pick_day": "— día —",
         "workout_name_placeholder": "Nombre (p. ej. Piernas)",
+=======
+        # The safety-flag banner and roster marker (issue #101).
+        "flag_tag": "⚑ seguridad",
+        "safety_section": "⚑ Seguridad",
+        "tick_off": "Marcar como vista",
+        "flag_seen_by": "Vista por {who} el {date}",
+        "flag_expired_unseen": "caducada, nunca vista",
+>>>>>>> 4c8459f (Dashboard: roster flag marker, member-page banner and tick-off)
         # Settings screen.
         "settings_title": "Ajustes",
         "invite_section": "Enlace de invitación",
@@ -220,6 +229,7 @@ STRINGS = {
         "retired_tail": "Retired ({n})",
         "retired_on": "retired {date}",
         "verbatim_tag": "as written",
+<<<<<<< HEAD
         # The Routine editor (issue #100).
         "edit": "Edit",
         "chip_agent": "Agent-managed",
@@ -257,6 +267,14 @@ STRINGS = {
         "save_routine": "Save routine",
         "pick_day": "— day —",
         "workout_name_placeholder": "Name (e.g. Legs)",
+=======
+        # The safety-flag banner and roster marker (issue #101).
+        "flag_tag": "⚑ safety",
+        "safety_section": "⚑ Safety",
+        "tick_off": "Mark as seen",
+        "flag_seen_by": "Seen by {who} on {date}",
+        "flag_expired_unseen": "expired, never seen",
+>>>>>>> 4c8459f (Dashboard: roster flag marker, member-page banner and tick-off)
         # Settings screen.
         "settings_title": "Settings",
         "invite_section": "Invite link",
