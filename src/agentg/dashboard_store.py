@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import ColumnElement, Row, func, or_, select, update
+from sqlalchemy import Row, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.checkin import LAPSED, SNOOZED
@@ -228,22 +228,24 @@ class DashboardStore:
             # Per-date reconstruction input: each roster Member's Routines
             # (superseded ones keep their Workouts) with their planned
             # weekdays, oldest first. Severity only scores the window since
-            # the last Session, so the read is pruned: every Routine created
-            # after the oldest anchor (plus all of a Session-less Member's —
-            # their count starts at the first Routine), and per Member the
-            # single latest Routine created on or before it, which governs
-            # the window's first dates. The newest Routine per Member is
-            # always in the read, so the active-Routine flags come along free.
+            # the Member's own last Session, so the read is pruned per
+            # Member: every Routine created after their anchor (all of a
+            # Session-less Member's — their count starts at the first
+            # Routine), plus the single latest Routine created on or before
+            # it, which governs the window's first dates. The newest Routine
+            # per Member is always in the read, so the active-Routine flags
+            # come along free.
             member_ids = [member.id for member, _ in rows]
-            anchors = {member.id: started for member, started in rows if started is not None}
             history: list[Row[Any]] = []
             if member_ids:
-                oldest_anchor = min(anchors.values()) if anchors else None
-                in_window: ColumnElement[bool] = Routine.member_id.in_(
-                    [member.id for member, started in rows if started is None]
+                last_sess = (
+                    select(
+                        Session.member_id.label("member_id"),
+                        func.max(Session.started_at).label("anchor"),
+                    )
+                    .group_by(Session.member_id)
+                    .subquery()
                 )
-                if oldest_anchor is not None:
-                    in_window = or_(in_window, Routine.created_at > oldest_anchor)
                 history.extend(
                     (
                         await db.execute(
@@ -254,51 +256,58 @@ class DashboardStore:
                                 Routine.is_active,
                                 Workout.weekday,
                             )
+                            .outerjoin(last_sess, last_sess.c.member_id == Routine.member_id)
                             .outerjoin(Workout, Workout.routine_id == Routine.id)
                             .where(
                                 Routine.gym_id == gym_id,
                                 Routine.member_id.in_(member_ids),
-                                in_window,
+                                or_(
+                                    last_sess.c.anchor.is_(None),
+                                    Routine.created_at > last_sess.c.anchor,
+                                ),
                             )
                         )
                     ).all()
                 )
-                if oldest_anchor is not None:
-                    ranked = (
-                        select(
-                            Routine.id,
-                            Routine.member_id,
-                            Routine.created_at,
-                            Routine.is_active,
-                            func.row_number()
-                            .over(
-                                partition_by=Routine.member_id,
-                                order_by=Routine.created_at.desc(),
-                            )
-                            .label("rn"),
+                # The pre-anchor governing Routine per Member. The id
+                # tie-break matters: same-instant saves (one clock tick, two
+                # Routines) must pick the newest row — the active one.
+                ranked = (
+                    select(
+                        Routine.id,
+                        Routine.member_id,
+                        Routine.created_at,
+                        Routine.is_active,
+                        func.row_number()
+                        .over(
+                            partition_by=Routine.member_id,
+                            order_by=(Routine.created_at.desc(), Routine.id.desc()),
                         )
-                        .where(
-                            Routine.gym_id == gym_id,
-                            Routine.member_id.in_(list(anchors)),
-                            Routine.created_at <= oldest_anchor,
-                        )
-                        .subquery()
+                        .label("rn"),
                     )
-                    history.extend(
-                        (
-                            await db.execute(
-                                select(
-                                    ranked.c.id,
-                                    ranked.c.member_id,
-                                    ranked.c.created_at,
-                                    ranked.c.is_active,
-                                    Workout.weekday,
-                                )
-                                .outerjoin(Workout, Workout.routine_id == ranked.c.id)
-                                .where(ranked.c.rn == 1)
+                    .join(last_sess, last_sess.c.member_id == Routine.member_id)
+                    .where(
+                        Routine.gym_id == gym_id,
+                        Routine.member_id.in_(member_ids),
+                        Routine.created_at <= last_sess.c.anchor,
+                    )
+                    .subquery()
+                )
+                history.extend(
+                    (
+                        await db.execute(
+                            select(
+                                ranked.c.id,
+                                ranked.c.member_id,
+                                ranked.c.created_at,
+                                ranked.c.is_active,
+                                Workout.weekday,
                             )
-                        ).all()
-                    )
+                            .outerjoin(Workout, Workout.routine_id == ranked.c.id)
+                            .where(ranked.c.rn == 1)
+                        )
+                    ).all()
+                )
         history.sort(key=lambda r: (r.member_id, r.created_at, r.id))
         spans_by_member: dict[int, list[tuple[date, set[int]]]] = {}
         with_routines: set[int] = set()
