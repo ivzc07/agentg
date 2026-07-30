@@ -157,6 +157,18 @@ async def test_a_snoozed_member_keeps_their_place_with_the_date(env):
     assert lapsed == []
 
 
+async def test_an_expired_unswept_snooze_renders_as_a_normal_row(env):
+    member = await env.add_member("Pausado")
+    await env.train(member, days_ago=3)
+    # Snoozed until yesterday; the sweep hasn't woken the row yet.
+    yesterday = env.clock.now.date() - timedelta(days=1)
+    await env.checkins.snooze_until(member.id, yesterday)
+
+    rows, _ = await env.store.roster(env.gym.id)
+
+    assert rows[0].snoozed_until is None
+
+
 async def test_lapsed_members_fold_into_a_most_recently_active_tail(env):
     for name, days in [("Activo", 2), ("Perdido A", 10), ("Perdido B", 20)]:
         member = await env.add_member(name)

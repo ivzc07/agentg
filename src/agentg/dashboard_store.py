@@ -42,8 +42,10 @@ class RosterRow:
 
     ``gap_days`` is gym-local days since the newest Session — the signup
     date for a Session-less Member, the same fallback the check-in sweep
-    uses. ``snoozed_until`` is set only while the Member is snoozed; lapsed
-    Members are returned in the separate tail, never here with a marker.
+    uses. ``snoozed_until`` is set only while a snooze is still running — an
+    expired-but-unswept snooze renders as a normal row, never with a past
+    date; lapsed Members are returned in the separate tail, never here with
+    a marker.
     """
 
     member_id: int
@@ -172,7 +174,11 @@ class DashboardStore:
                 has_sessions=last_started is not None,
                 is_new=member.id not in with_routines,
                 snoozed_until=(
-                    member.snoozed_until if member.checkin_state == SNOOZED else None
+                    member.snoozed_until
+                    if member.checkin_state == SNOOZED
+                    and member.snoozed_until is not None
+                    and member.snoozed_until > today
+                    else None
                 ),
             )
             (lapsed_rows if member.checkin_state == LAPSED else roster_rows).append(row)
