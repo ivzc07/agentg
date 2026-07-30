@@ -199,7 +199,9 @@ class Set(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
     session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id"), index=True)
-    exercise_id: Mapped[int] = mapped_column(ForeignKey("exercises.id"))
+    # Indexed: per-Exercise weight history (the dashboard's Member page and
+    # the weight suggester) reads sets by exercise — without it they scan.
+    exercise_id: Mapped[int] = mapped_column(ForeignKey("exercises.id"), index=True)
     weight: Mapped[float | None] = mapped_column(Float, default=None)
     reps: Mapped[int]
     rpe: Mapped[float | None] = mapped_column(Float, default=None)
