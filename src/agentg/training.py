@@ -16,8 +16,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from agentg.catalog import find_exercise, find_or_create_exercise, normalize_exercise_name
-from agentg.models import Exercise, Gym, Session, Set
+from agentg.models import Exercise, Gym, Member, Session, Set
 from agentg.parsing import parse_set_line
+from agentg.timezones import local_date
 
 # Build-time choice (#26): a Session abandoned without "done" closes itself
 # this long after its last activity, as of that activity.
@@ -168,13 +169,15 @@ class TrainingStore:
             await db.commit()  # persist any auto-close the open-session check did
             return info
 
-    def today(self) -> date:
-        """The process clock's current date (UTC; gym-local lands with #31's
-        successors) — lets the Agent compute snooze dates from the snapshot."""
-        return self._clock().date()
+    def today(self, timezone: str = "UTC") -> date:
+        """The current date in the Gym's timezone (issue #95) — the Agent
+        computes snooze dates from it, and the sweep compares those against
+        gym-local days."""
+        return local_date(self._clock(), timezone)
 
     async def newest_session_date(self, member_id: int) -> date | None:
-        """The date of the Member's most recent Session (open or closed).
+        """The gym-local date of the Member's most recent Session (open or
+        closed).
 
         Any visit counts as activity for the check-in gap, so unlike
         ``latest_session_info`` this includes today's open Session.
@@ -186,7 +189,10 @@ class TrainingStore:
                 .order_by(Session.started_at.desc())
                 .limit(1)
             )
-            return started.date() if started is not None else None
+            if started is None:
+                return None
+            timezone = await self._member_timezone(db, member_id)
+            return local_date(started, timezone)
 
     async def get_session(self, session_id: int) -> Session:
         async with self._sessions() as db:
@@ -482,11 +488,21 @@ class TrainingStore:
         previous = await db.scalar(query)
         if previous is None:
             return None, None
-        days = (now.date() - previous.started_at.date()).days
+        timezone = await self._member_timezone(db, member_id)
+        # Day boundaries are gym-local (issue #95): an evening visit can fall
+        # after UTC midnight and must still count on the local day.
+        last_on = local_date(previous.started_at, timezone)
+        days = (local_date(now, timezone) - last_on).days
         lines = await self._session_exercises(db, previous.id)
         for line in lines:
             line.pop("exercise_id")
-        return days, {"date": previous.started_at.date().isoformat(), "exercises": lines}
+        return days, {"date": last_on.isoformat(), "exercises": lines}
+
+    async def _member_timezone(self, db: AsyncSession, member_id: int) -> str:
+        timezone = await db.scalar(
+            select(Gym.timezone).join(Member, Member.gym_id == Gym.id).where(Member.id == member_id)
+        )
+        return timezone or "UTC"
 
     async def _session_exercises(self, db: AsyncSession, session_id: int) -> list[dict[str, Any]]:
         rows = (

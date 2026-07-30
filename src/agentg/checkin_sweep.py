@@ -9,13 +9,13 @@ Telegram adapter supplies the notifier (ADR 0001).
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Protocol
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from agentg.checkin import CheckinData, decide_checkin
 from agentg.checkin_store import CheckinStore, SweepRow
 from agentg.routines import RoutineStore
+from agentg.timezones import gym_zone
 from agentg.training import TrainingStore
 
 logger = logging.getLogger(__name__)
@@ -56,11 +56,10 @@ async def _build_data(
 
 
 def _gym_now(row: SweepRow, now_utc: datetime) -> datetime:
-    try:
-        return now_utc.astimezone(ZoneInfo(row.timezone))
-    except (ZoneInfoNotFoundError, ValueError):  # a bad tz falls back to UTC
+    tz = gym_zone(row.timezone)
+    if tz is UTC and row.timezone != "UTC":  # a bad tz falls back to UTC
         logger.warning("member %s has unknown timezone %r; using UTC", row.member_id, row.timezone)
-        return now_utc.astimezone(ZoneInfo("UTC"))
+    return now_utc.astimezone(tz)
 
 
 async def run_sweep(
