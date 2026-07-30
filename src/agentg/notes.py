@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.models import MemberNote
 
-NOTE_KINDS = frozenset({"injury", "preference", "goal", "constraint", "other"})
+NOTE_KINDS = frozenset({"injury", "preference", "goal", "constraint", "safety", "other"})
 MAX_NOTE_LENGTH = 400
 
 Clock = Callable[[], datetime]
