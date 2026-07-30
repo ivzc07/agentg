@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agentg.db import create_engine
 from agentg.models import Member, MemberChannel
-from agentg.linking_store import INVITE_CODE_LENGTH, LinkingStore, new_invite_code
+from agentg.linking_store import COACH_CODE_PREFIX, INVITE_CODE_LENGTH, LinkingStore, new_invite_code
 
 
 @pytest.fixture
@@ -111,6 +111,59 @@ async def test_a_member_can_be_flagged_as_coach(store):
     member = await store.link_member(gym.id, "Sam", "telegram", "7")
 
     await store.set_coach(member.id)
+
+    linked = await store.identity_for("telegram", "7")
+    assert linked is not None and linked.member.is_coach is True
+
+
+# --- the coach invite code (issue #104) ---
+
+
+async def test_provisioning_creates_a_coach_code_alongside_the_member_code(store):
+    gym = await store.create_gym("Iron Temple")
+
+    assert gym.coach_invite_code is not None
+    assert gym.coach_invite_code.startswith(COACH_CODE_PREFIX)
+    assert gym.coach_invite_code != gym.invite_code
+
+    found = await store.gym_by_coach_invite_code(gym.coach_invite_code)
+    assert found is not None and found.id == gym.id
+
+
+async def test_coach_code_lookup_forgives_case_and_whitespace(store):
+    gym = await store.create_gym("Iron Temple")
+    assert (await store.gym_by_coach_invite_code(f"  {gym.coach_invite_code.upper()} ")) is not None
+    assert (await store.gym_by_coach_invite_code("coach-nope")) is None
+    assert (await store.gym_by_coach_invite_code("   ")) is None
+
+
+async def test_the_two_code_namespaces_never_cross_match(store):
+    gym = await store.create_gym("Iron Temple")
+    assert (await store.gym_by_coach_invite_code(gym.invite_code)) is None
+    assert (await store.gym_by_invite_code(gym.coach_invite_code)) is None
+
+
+async def test_regenerating_the_coach_code_stops_the_old_one_matching(store):
+    gym = await store.create_gym("Iron Temple")
+    old_code = gym.coach_invite_code
+
+    new_code = await store.regenerate_coach_invite_code(gym.id)
+
+    assert new_code != old_code
+    assert await store.gym_by_coach_invite_code(old_code) is None
+    found = await store.gym_by_coach_invite_code(new_code)
+    assert found is not None and found.id == gym.id
+    # the member Invite code is untouched
+    found = await store.gym_by_invite_code(gym.invite_code)
+    assert found is not None and found.id == gym.id
+
+
+async def test_regenerating_the_coach_code_never_unflags_a_coach(store):
+    gym = await store.create_gym("Iron Temple")
+    member = await store.link_member(gym.id, "Sam", "telegram", "7")
+    await store.set_coach(member.id)
+
+    await store.regenerate_coach_invite_code(gym.id)
 
     linked = await store.identity_for("telegram", "7")
     assert linked is not None and linked.member.is_coach is True

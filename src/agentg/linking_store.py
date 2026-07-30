@@ -1,8 +1,9 @@
 """Data access for gym linking (docs/spec.md §Onboarding & gym linking).
 
-Gym provisioning, invite-code regeneration, and coach flagging are
-operational updates in v1 — no admin UI calls these besides ops scripts
-and tests.
+Gym provisioning and invite-code regeneration are operational updates in
+v1 — no admin UI calls them besides ops scripts and tests. Coach flagging
+has one production caller: the coach invite link
+(docs/spec-dashboard.md §Access & identity).
 """
 
 from __future__ import annotations
@@ -18,11 +19,20 @@ from agentg.models import Base, Gym, Member, MemberChannel
 
 INVITE_CODE_ALPHABET = string.ascii_lowercase + string.digits
 INVITE_CODE_LENGTH = 8
+COACH_CODE_PREFIX = "coach-"
 
 
 def new_invite_code() -> str:
     """A short random slug, safe inside a t.me deep link and easy to type."""
     return "".join(secrets.choice(INVITE_CODE_ALPHABET) for _ in range(INVITE_CODE_LENGTH))
+
+
+def new_coach_invite_code() -> str:
+    """The coach invite code: a visibly-prefixed slug of its own namespace.
+
+    Member codes never contain "-", so the two namespaces can't collide.
+    """
+    return COACH_CODE_PREFIX + new_invite_code()
 
 
 def normalize_invite_code(text: str) -> str:
@@ -53,6 +63,7 @@ class LinkingStore:
             gym = Gym(
                 name=name,
                 invite_code=new_invite_code(),
+                coach_invite_code=new_coach_invite_code(),
                 timezone=timezone,
                 weight_unit=weight_unit,
             )
@@ -66,6 +77,13 @@ class LinkingStore:
             return None
         async with self._sessions() as db:
             return await db.scalar(select(Gym).where(Gym.invite_code == code))
+
+    async def gym_by_coach_invite_code(self, text: str) -> Gym | None:
+        code = normalize_invite_code(text)
+        if not code:
+            return None
+        async with self._sessions() as db:
+            return await db.scalar(select(Gym).where(Gym.coach_invite_code == code))
 
     async def identity_for(self, channel: str, channel_user_id: str) -> LinkedIdentity | None:
         async with self._sessions() as db:
@@ -176,5 +194,14 @@ class LinkingStore:
         code = new_invite_code()
         async with self._sessions() as db:
             await db.execute(update(Gym).where(Gym.id == gym_id).values(invite_code=code))
+            await db.commit()
+        return code
+
+    async def regenerate_coach_invite_code(self, gym_id: int) -> str:
+        """The old code stops matching the moment this commits. Coach flags
+        live on Members, so regenerating never unflags anyone."""
+        code = new_coach_invite_code()
+        async with self._sessions() as db:
+            await db.execute(update(Gym).where(Gym.id == gym_id).values(coach_invite_code=code))
             await db.commit()
         return code

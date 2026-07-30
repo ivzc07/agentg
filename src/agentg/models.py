@@ -50,6 +50,13 @@ class Gym(Base):
     name: Mapped[str] = mapped_column(String(200))
     # One active, regenerable Invite code per Gym; stored lowercase.
     invite_code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # The coach invite code: a second regenerable code with a visible
+    # "coach-" prefix, created at provisioning (docs/spec-dashboard.md
+    # §Access & identity). Redeeming it coach-flags the joiner; regenerating
+    # it never unflags anyone. NULL only on rows that predate the column.
+    coach_invite_code: Mapped[str | None] = mapped_column(
+        String(64), unique=True, index=True, default=None
+    )
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     weight_unit: Mapped[str] = mapped_column(String(8), default="kg")
     # The Gym's own plain-text rules doc, or NULL to follow the shipped
