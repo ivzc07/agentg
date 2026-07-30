@@ -1,9 +1,10 @@
 """Data access for gym linking (docs/spec.md §Onboarding & gym linking).
 
-Gym provisioning and invite-code regeneration are operational updates in
-v1 — no admin UI calls them besides ops scripts and tests. Coach flagging
-has one production caller: the coach invite link
-(docs/spec-dashboard.md §Access & identity).
+Gym provisioning is an operational update in v1 — no admin UI calls it
+besides ops scripts and tests. Invite-code regeneration and the gym rename
+have their first production caller in the tenant Settings screen
+(docs/spec-dashboard.md §Settings); coach flagging has its own: the coach
+invite link (docs/spec-dashboard.md §Access & identity).
 """
 
 from __future__ import annotations
@@ -298,3 +299,15 @@ class LinkingStore:
             await db.execute(update(Gym).where(Gym.id == gym_id).values(coach_invite_code=code))
             await db.commit()
         return code
+
+    async def rename_gym(self, gym_id: int, name: str) -> str:
+        """Rename a Gym; the new name is what Members see when they join.
+
+        Every reader resolves the Gym row fresh, so the rename takes effect
+        everywhere on commit — no cache to invalidate.
+        """
+        name = " ".join(name.split())
+        async with self._sessions() as db:
+            await db.execute(update(Gym).where(Gym.id == gym_id).values(name=name))
+            await db.commit()
+        return name

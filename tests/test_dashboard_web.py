@@ -31,7 +31,14 @@ async def env(tmp_path):
     gym = await linking.create_gym("Iron Temple")
     member = await linking.link_member(gym.id, "Ana", "telegram", "42")
     await linking.set_coach(member.id, True)
-    app = build_app(store, session_secret=SECRET, secure_cookies=False, clock=clock)
+    app = build_app(
+        store,
+        linking,
+        session_secret=SECRET,
+        bot_username="testbot",
+        secure_cookies=False,
+        clock=clock,
+    )
     async with TestClient(TestServer(app)) as client:
         yield SimpleEnv(clock, linking, store, client, gym, member)
     await engine.dispose()
