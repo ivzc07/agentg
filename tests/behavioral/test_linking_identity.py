@@ -70,6 +70,49 @@ def test_a_later_sentence_drifting_is_flagged():
     assert drift is not None and "asistente" in drift
 
 
+# --- the anchor must name the claimed role, not appear anywhere later ---
+
+
+def test_an_anchor_appearing_later_does_not_excuse_a_drifted_role():
+    # "coaches" contains "coach", and the word even appears in the reply —
+    # but the claimed role is "link", so this is drift.
+    reply = "I'm a link for partner gym coaches. Ask your gym for its invite."
+    drift = identity_drift(reply)
+    assert drift is not None and "link" in drift
+
+
+def test_an_adjective_before_the_role_still_passes():
+    reply = "I'm your personal trainer — ask your gym for the invite link."
+    assert identity_drift(reply) is None
+
+
+# --- Unicode apostrophes are still claims ---
+
+
+def test_a_curly_apostrophe_claim_is_detected():
+    reply = "Hi! I’m your link — I only work with partner gyms."
+    drift = identity_drift(reply)
+    assert drift is not None and "link" in drift
+
+
+# --- only actual role claims are judged ---
+
+
+def test_a_denial_then_the_coach_identity_passes():
+    reply = "No soy un bot. Soy tu entrenador — pide el enlace de invitación a tu gimnasio."
+    assert identity_drift(reply) is None
+
+
+def test_a_denied_coach_role_is_not_a_claim():
+    reply = "I'm not a coach yet — get your gym's invite link first."
+    assert identity_drift(reply) is None
+
+
+def test_non_role_first_person_passes():
+    assert identity_drift("I'm at the gym already, send the invite link when you have it.") is None
+    assert identity_drift("Soy nuevo por aquí, ¿cómo empiezo?") is None
+
+
 # --- the prompt pins the one identity ---
 
 
