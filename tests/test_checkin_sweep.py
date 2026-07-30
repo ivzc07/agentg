@@ -120,6 +120,19 @@ async def test_a_reply_resets_the_rhythm_and_revives_a_lapsed_member(env):
 # --- routine member: missed pinned day ---
 
 
+async def test_a_session_after_utc_midnight_counts_on_the_local_day(env):
+    gym, member = await make_member(env, tz="America/Chicago")  # UTC-5 in July
+    # 02:00 UTC Jul 14 is Jul 13, 21:00 at the gym — the visit lands on the local day.
+    env.clock.now = datetime(2026, 7, 14, 2, 0, tzinfo=UTC)
+    await env.training.log_sets(member.id, gym.id, "bench 60 5,5,5")
+
+    # 14:00 UTC Jul 16 is 09:00 local: a 3-day local gap, due for the fallback nudge.
+    count, notifier = await sweep(env, datetime(2026, 7, 16, 14, 0, tzinfo=UTC))
+
+    assert count == 1
+    assert "3 días" in notifier.sent[0][2]
+
+
 async def test_a_routine_member_is_nudged_on_the_next_pinned_day(env):
     gym, member = await make_member(env, tz="UTC")
     # pin Wed (2); today 2026-07-15 is Wed. No sessions since signup → missed.

@@ -18,7 +18,7 @@ from agentg.forget import ForgetStore
 from agentg.notes import NotesStore
 from agentg.routines import RoutineStore
 from agentg.linking_store import LinkingStore
-from agentg.training import TrainingStore
+from agentg.training import Clock, TrainingStore
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,19 @@ class Stores:
     forget: ForgetStore
 
     @classmethod
-    def from_engine(cls, engine: AsyncEngine) -> "Stores":
+    def from_engine(cls, engine: AsyncEngine, clock: Clock | None = None) -> "Stores":
+        """Build every store over one engine. ``clock`` overrides the wall
+        clock the time-aware stores use (tests inject it; prod leaves it)."""
+        if clock is not None:
+            return cls(
+                linking=LinkingStore(engine),
+                training=TrainingStore(engine, clock=clock),
+                notes=NotesStore(engine, clock=clock),
+                routines=RoutineStore(engine, clock=clock),
+                checkins=CheckinStore(engine),
+                demos=DemoStore(engine),
+                forget=ForgetStore(engine),
+            )
         return cls(
             linking=LinkingStore(engine),
             training=TrainingStore(engine),

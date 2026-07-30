@@ -4,7 +4,7 @@ Facts flow only through these methods (the Agent's tools are thin wrappers);
 the clock is injected so gaps and the auto-close timeout are testable.
 """
 
-from datetime import timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -422,3 +422,48 @@ async def test_seeding_is_idempotent_and_matches_aliases(env):
     exercise = await env.training.match_or_create_exercise("ohp")
     assert exercise.name == "overhead press"
     assert len(SEED_EXERCISES) >= 8
+
+
+# --- timezone-aware day boundaries (issue #95) ---
+
+CHICAGO = "America/Chicago"  # UTC-5 in July
+
+
+@pytest.fixture
+async def chicago_env(tmp_path):
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'tz.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+    # 02:00 UTC Jul 16 is still Jul 15, 21:00 at the gym.
+    clock = FakeClock(datetime(2026, 7, 16, 2, 0, tzinfo=UTC))
+    training = TrainingStore(engine, clock=clock)
+    await training.ensure_seeded()
+    gym = await linking.create_gym("Iron Temple", timezone=CHICAGO)
+    member = await linking.link_member(gym.id, "Dani", "telegram", "42")
+    yield SimpleEnv(training=training, clock=clock, member_id=member.id, gym_id=gym.id)
+    await engine.dispose()
+
+
+async def test_a_session_after_utc_midnight_counts_on_the_local_day(chicago_env):
+    env = chicago_env
+    # logged at 02:00 UTC — UTC math would put the visit on Jul 16
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+    await env.training.close_session(env.member_id)
+
+    env.clock.now = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)  # Jul 16, 07:00 local
+    days_since, last = await env.training.latest_session_info(env.member_id)
+
+    assert days_since == 1  # not 0 — the visit was on the local Jul 15
+    assert last is not None and last["date"] == "2026-07-15"
+
+
+async def test_newest_session_date_uses_the_gyms_timezone(chicago_env):
+    env = chicago_env
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+    assert await env.training.newest_session_date(env.member_id) == date(2026, 7, 15)
+
+
+async def test_today_uses_the_gyms_timezone(chicago_env):
+    env = chicago_env
+    assert env.training.today(CHICAGO) == date(2026, 7, 15)
+    assert env.training.today() == date(2026, 7, 16)  # UTC stays the default
