@@ -121,9 +121,11 @@ class RosterEnv:
         rows, _ = await self.store.roster(self.gym.id)
         return next(row for row in rows if row.member_id == member.id)
 
-    async def page(self) -> str:
+    async def page(self, path: str = "/", headers: dict | None = None) -> str:
         cookie = sign_session(self.coach.id, self.gym.id, ROSTER_SECRET, self.clock())
-        response = await self.client.get("/", cookies={SESSION_COOKIE: cookie})
+        response = await self.client.get(
+            path, cookies={SESSION_COOKIE: cookie}, headers=headers or {}
+        )
         assert response.status == 200
         return await response.text()
 

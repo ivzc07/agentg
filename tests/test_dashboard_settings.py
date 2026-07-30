@@ -180,13 +180,17 @@ async def test_the_copy_button_handles_clipboard_failures(env):
     """navigator.clipboard is undefined on plain-HTTP origins and writeText
     can reject; the success label must only appear after the promise
     resolves, with a visible failure state otherwise."""
-    script = (await env.settings_page()).split("<script>", 1)[1]
+    page = await env.settings_page()
+    script = page.split("<script>", 1)[1]
 
     assert "if (!navigator.clipboard)" in script  # plain-HTTP guard
-    assert "No se pudo copiar" in script  # visible failure state
-    # "Copiado" is assigned only inside the writeText().then() success path.
+    # The labels ride on the button as data attributes (the page language
+    # decides them); the success label is assigned only inside the
+    # writeText().then() success path.
+    assert 'data-failed="No se pudo copiar"' in page
+    assert 'data-done="Copiado"' in page
     then_at = script.index("writeText(button.dataset.copy).then(")
-    assert script.index('"Copiado"') > then_at
+    assert script.index("button.dataset.done") > then_at
 
 
 async def test_the_settings_screen_is_coach_only(env):

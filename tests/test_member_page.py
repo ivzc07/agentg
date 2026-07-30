@@ -12,6 +12,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from agentg.checkin_store import CheckinStore
+from agentg.dashboard_i18n import fmt_date
 from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
 from agentg.db import create_engine
@@ -126,7 +127,7 @@ async def test_the_page_shows_header_routine_sessions_weights_and_notes(env):
     assert status == 200
     # Header: name, member-since, Session count, Gap, last Session.
     assert "Luis" in text
-    assert f"Miembro desde {member.created_at.strftime('%d/%m/%Y')}" in text
+    assert f"Miembro desde {fmt_date(member.created_at.date(), 'es')}" in text
     assert "2 sesiones" in text
     assert "2 días sin venir" in text
     assert "última sesión" in text
@@ -160,7 +161,7 @@ async def test_the_header_tags_lapsed_and_snoozed_members(env):
     _, snoozed_text = await env.page(snoozed.id)
 
     assert "se perdió" in lapsed_text
-    assert f"en pausa hasta el {until.strftime('%d/%m/%Y')}" in snoozed_text
+    assert f"en pausa hasta el {fmt_date(until, 'es')}" in snoozed_text
 
 
 async def test_sessions_paginate_ten_at_a_time(env):
@@ -179,7 +180,9 @@ async def test_sessions_paginate_ten_at_a_time(env):
     assert "página 2 de 2" in second
     assert "‹ más recientes" in second
     # The two pages show different Sessions (the oldest only on page 2).
-    oldest = (env.clock.now.date() - timedelta(days=11)).strftime("%d/%m/%Y")
+    # Anchored to the markup: a bare "4 jul 2026" would also match the
+    # "14 jul 2026" that legitimately sits on page 1.
+    oldest = f"<b>{fmt_date(env.clock.now.date() - timedelta(days=11), 'es')}</b>"
     assert oldest in second and oldest not in first
 
 
@@ -248,7 +251,7 @@ async def test_roster_rows_link_to_the_member_page(env):
     response = await env.client.get("/", cookies={SESSION_COOKIE: cookie})
     text = await response.text()
 
-    assert f'href="/members/{member.id}"' in text
+    assert f'href="/members/{member.id}?view=table"' in text
 
 
 async def test_the_gap_wording_matches_the_roster(env):

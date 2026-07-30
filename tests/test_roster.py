@@ -11,6 +11,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from agentg.dashboard_i18n import fmt_date
 from agentg.models import Member
 
 
@@ -141,7 +142,7 @@ async def test_the_page_renders_rows_tags_and_the_collapsed_tail(env):
     assert "Miembros (3)" in text
     # Tags and row text.
     assert "nuevo" in text
-    assert f"en pausa hasta el {until.strftime('%d/%m/%Y')}" in text
+    assert f"en pausa hasta el {fmt_date(until, 'es')}" in text
     assert "5 días sin venir" in text
     assert "Aún sin sesiones" in text
     # The tail is collapsed by default and labelled with its size.

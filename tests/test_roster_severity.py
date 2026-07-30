@@ -17,6 +17,7 @@ from datetime import timedelta
 
 import pytest
 
+from agentg.dashboard_i18n import fmt_date
 
 @pytest.fixture
 async def env(roster_env):
@@ -173,7 +174,7 @@ async def test_the_page_colours_rows_and_keeps_the_counters(env):
     assert "sev-red" in row_html(text, "Roja")
     assert "sev-" not in row_html(text, "Novata")
     assert "sev-" not in row_html(text, "Pausado")
-    assert f"en pausa hasta el {until.strftime('%d/%m/%Y')}" in text
+    assert f"en pausa hasta el {fmt_date(until, 'es')}" in text
     # The counter still just counts Members — the lapsed tail stays out.
     assert "Miembros (4)" in text
 
