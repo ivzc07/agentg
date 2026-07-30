@@ -100,12 +100,16 @@ NEW_TAG = "nuevo"
 NO_SESSIONS_YET = "Aún sin sesiones"
 
 
-def _away_text(row: RosterRow) -> str:
-    if not row.has_sessions:
+def _away_text(has_sessions: bool, gap_days: int) -> str:
+    """The shared Gap wording for the roster row and the Member page header —
+    one helper so the two surfaces never disagree."""
+    if not has_sessions:
         return NO_SESSIONS_YET
-    if row.gap_days == 1:
+    if gap_days == 0:
+        return "entrenó hoy"
+    if gap_days == 1:
         return "1 día sin venir"
-    return f"{row.gap_days} días sin venir"
+    return f"{gap_days} días sin venir"
 
 
 def _roster_row(row: RosterRow) -> str:
@@ -118,7 +122,7 @@ def _roster_row(row: RosterRow) -> str:
     return (
         f'<li class="row" data-name="{escape(row.name)}">'
         f'<a class="name" href="/members/{row.member_id}">{escape(row.name)}</a>{tags}'
-        f'<span class="away">{_away_text(row)}</span></li>'
+        f'<span class="away">{_away_text(row.has_sessions, row.gap_days)}</span></li>'
     )
 
 
@@ -207,16 +211,6 @@ def _not_found() -> web.Response:
     get the same bare 404 — no tombstone, no "this member left" wording, so
     the two exits stay indistinguishable (spec-dashboard §What a Coach sees)."""
     return web.Response(status=404, text="404", content_type="text/plain")
-
-
-def _gap_text(view: MemberPage) -> str:
-    if not view.has_sessions:
-        return NO_SESSIONS_YET
-    if view.gap_days == 0:
-        return "entrenó hoy"
-    if view.gap_days == 1:
-        return "1 día sin venir"
-    return f"{view.gap_days} días sin venir"
 
 
 def _scheme(sets: int | None, reps: str | None) -> str:
@@ -345,7 +339,7 @@ def _member_page(gym_name: str, view: MemberPage) -> str:
     if view.snoozed_until is not None:
         tags += f' <span class="tag">en pausa hasta el {_fmt_date(view.snoozed_until)}</span>'
     count = "1 sesión" if view.session_count == 1 else f"{view.session_count} sesiones"
-    facts = f"Miembro desde {_fmt_date(view.member_since)} · {count} · {_gap_text(view)}"
+    facts = f"Miembro desde {_fmt_date(view.member_since)} · {count} · {_away_text(view.has_sessions, view.gap_days)}"
     if view.last_session_on is not None:
         facts += f" · última sesión {_fmt_date(view.last_session_on)}"
     return f"""<!DOCTYPE html>

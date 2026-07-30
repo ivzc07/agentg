@@ -29,9 +29,8 @@ from agentg.models import (
     Routine,
     Session,
     Set,
-    Workout,
-    WorkoutExercise,
 )
+from agentg.routines import RoutineStore
 from agentg.timezones import local_date
 
 TOKEN_TTL = timedelta(minutes=10)
@@ -146,6 +145,9 @@ class DashboardStore:
     def __init__(self, engine: AsyncEngine, clock: Clock = _utcnow) -> None:
         self._sessions = async_sessionmaker(engine, expire_on_commit=False)
         self._clock = clock
+        # The Member page renders the active Routine through the same loader
+        # the Agent's tools use, so the two never diverge.
+        self._routines = RoutineStore(engine, clock)
 
     async def create_login_token(self, member_id: int, gym_id: int) -> str:
         """Mint a one-time token; returns the raw value for the magic link."""
@@ -308,7 +310,6 @@ class DashboardStore:
             last_started = session_rows[0].started_at if session_rows else None
             gap_days = (today - local_date(last_started or member.created_at, timezone)).days
 
-            routine = await self._active_routine_days(db, member_id)
             weights = await self._last_weights(db, member_id, timezone)
             notes = list(
                 await db.scalars(
@@ -322,13 +323,26 @@ class DashboardStore:
             pages = max(1, -(-count // SESSIONS_PER_PAGE))
             page = min(max(page, 1), pages)
             page_sessions = session_rows[(page - 1) * SESSIONS_PER_PAGE : page * SESSIONS_PER_PAGE]
+            sets_by_session = await self._sessions_sets(
+                db, [session.id for session in page_sessions]
+            )
             sessions = [
                 SessionView(
                     on=local_date(session.started_at, timezone),
-                    sets=await self._session_sets(db, session.id),
+                    sets=sets_by_session[session.id],
                 )
                 for session in page_sessions
             ]
+
+        routine_dict = await self._routines.active_routine(member_id)
+        routine = [
+            RoutineDayView(
+                workout["weekday"],
+                workout["name"],
+                [(e["exercise"], e["sets"], e["reps"]) for e in workout["exercises"]],
+            )
+            for workout in (routine_dict["workouts"] if routine_dict else [])
+        ]
 
         return MemberPage(
             member_id=member.id,
@@ -369,45 +383,27 @@ class DashboardStore:
             ],
         )
 
-    async def _active_routine_days(self, db, member_id: int) -> list[RoutineDayView]:
-        routine = await db.scalar(
-            select(Routine).where(
-                Routine.member_id == member_id, Routine.is_active.is_(True)
-            )
-        )
-        if routine is None:
-            return []
+    async def _sessions_sets(
+        self, db, session_ids: list[int]
+    ) -> dict[int, list[tuple[str, float | None, int]]]:
+        """One page's sets in a single query (no per-Session round-trips),
+        grouped by Session in logging order."""
+        sets: dict[int, list[tuple[str, float | None, int]]] = {
+            session_id: [] for session_id in session_ids
+        }
+        if not session_ids:
+            return sets
         rows = (
             await db.execute(
-                select(Workout, WorkoutExercise, Exercise.name)
-                .join(WorkoutExercise, WorkoutExercise.workout_id == Workout.id, isouter=True)
-                .join(Exercise, WorkoutExercise.exercise_id == Exercise.id, isouter=True)
-                .where(Workout.routine_id == routine.id)
-                .order_by(Workout.weekday, WorkoutExercise.position)
-            )
-        ).all()
-        days: dict[int, RoutineDayView] = {}
-        for workout, workout_exercise, exercise_name in rows:
-            if workout.id not in days:
-                days[workout.id] = RoutineDayView(workout.weekday, workout.name, [])
-            if workout_exercise is not None:
-                days[workout.id].exercises.append(
-                    (exercise_name, workout_exercise.sets, workout_exercise.reps)
-                )
-        return sorted(days.values(), key=lambda d: d.weekday)
-
-    async def _session_sets(
-        self, db, session_id: int
-    ) -> list[tuple[str, float | None, int]]:
-        rows = (
-            await db.execute(
-                select(Exercise.name, Set.weight, Set.reps)
+                select(Set.session_id, Exercise.name, Set.weight, Set.reps)
                 .join(Exercise, Set.exercise_id == Exercise.id)
-                .where(Set.session_id == session_id)
+                .where(Set.session_id.in_(session_ids))
                 .order_by(Set.id)
             )
         ).all()
-        return [(name, weight, reps) for name, weight, reps in rows]
+        for session_id, name, weight, reps in rows:
+            sets[session_id].append((name, weight, reps))
+        return sets
 
     async def _last_weights(self, db, member_id: int, timezone: str) -> list[LastWeight]:
         """Last weight per Exercise, read off the sets table directly

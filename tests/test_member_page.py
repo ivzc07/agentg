@@ -242,3 +242,18 @@ async def test_roster_rows_link_to_the_member_page(env):
     text = await response.text()
 
     assert f'href="/members/{member.id}"' in text
+
+
+async def test_the_gap_wording_matches_the_roster(env):
+    member = await env.add_member("Hoy")
+    await env.train(member, 0, "squat 60 8")
+
+    _, member_text = await env.page(member.id)
+    cookie = sign_session(env.coach.id, env.gym.id, SECRET, env.clock())
+    roster_text = await (
+        await env.client.get("/", cookies={SESSION_COOKIE: cookie})
+    ).text()
+
+    assert "entrenó hoy" in member_text
+    assert "entrenó hoy" in roster_text
+    assert "0 días sin venir" not in roster_text
