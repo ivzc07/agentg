@@ -13,7 +13,7 @@ import hashlib
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 from sqlalchemy import Row, func, or_, select, union_all, update
@@ -48,11 +48,20 @@ SEVERITY_RED_AT = 3
 # renders in one page (spec-dashboard §The Member page).
 SESSIONS_PER_PAGE = 10
 
+# The Cards attendance grid (issue #106): 4 weeks as a 7-column Mon–Sun day
+# grid, ending with the current week.
+GRID_WEEKS = 4
+
 Clock = Callable[[], datetime]
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _utc_day(d: date) -> datetime:
+    """Midnight UTC at the start of ``d`` — a query bound for a date window."""
+    return datetime.combine(d, time.min, tzinfo=UTC)
 
 
 def _weekday_hits(start: date, end: date, weekdays: set[int]) -> int:
@@ -67,6 +76,17 @@ def _weekday_hits(start: date, end: date, weekdays: set[int]) -> int:
         if (tail_start + timedelta(days=i)).weekday() in weekdays:
             hits += 1
     return hits
+
+
+def planned_weekdays_on(spans: list[tuple[date, set[int]]], day: date) -> set[int]:
+    """The weekdays planned for ``day`` under the Routine governing it —
+    the most recent span created on or before it (empty before the first)."""
+    planned: set[int] = set()
+    for span_start, weekdays in spans:
+        if span_start > day:
+            break
+        planned = weekdays
+    return planned
 
 
 def missed_planned_days(
@@ -135,6 +155,21 @@ class RosterRow:
 
 
 @dataclass(frozen=True)
+class DayCell:
+    """One square of the Cards attendance grid.
+
+    ``state`` is ``"hit"`` (a Session landed that day, planned or not),
+    ``"miss"`` (a planned Workout day per the Routine governing that date,
+    no Session), ``"future"`` (the day has not happened), or ``"plain"``
+    (a past day that was neither). Today never counts as a miss until it is
+    over — the severity engine's own rule.
+    """
+
+    on: date
+    state: str
+
+
+@dataclass(frozen=True)
 class RoutineDayView:
     """One pinned day of the active Routine: weekday (0=Mon), name, and the
     ordered exercises with their optional set/rep scheme."""
@@ -150,8 +185,9 @@ class SessionView:
     sets grouped by Exercise (top weight first in the page's rendering)."""
 
     on: date
-    # (exercise name, weight, reps) per logged set, in logging order.
-    sets: list[tuple[str, float | None, int]]
+    # (exercise name, weight, reps, set comment) per logged set, in logging
+    # order. The comment is the Member's own words, shown verbatim.
+    sets: list[tuple[str, float | None, int, str | None]]
 
 
 @dataclass(frozen=True)
@@ -444,6 +480,88 @@ class DashboardStore:
         lapsed_rows.sort(key=lambda r: (r.gap_days, r.name.lower()))
         return roster_rows, lapsed_rows
 
+    async def attendance(self, gym_id: int, member_ids: list[int]) -> dict[int, list[DayCell]]:
+        """The Cards day grid per Member: 4 weeks, Mon–Sun, one cell per day
+        (issue #106, spec-dashboard §The roster / §Attendance).
+
+        Each day is judged against the Routine active on that date — the
+        same day-grained reconstruction as the severity engine: a scheduled
+        Workout day with no Session is a miss, a Session on an unplanned day
+        shows trained but never cancels a miss, and today never counts until
+        it is over. The window is the current week plus the three before it,
+        so the tail of the grid can hold future days.
+        """
+        async with self._sessions() as db:
+            gym = await db.get(Gym, gym_id)
+            timezone = (gym.timezone if gym else None) or "UTC"
+            today = local_date(self._clock(), timezone)
+            start = today - timedelta(days=today.weekday() + 7 * (GRID_WEEKS - 1))
+            end = start + timedelta(days=7 * GRID_WEEKS - 1)
+            grids: dict[int, list[DayCell]] = {member_id: [] for member_id in member_ids}
+            if not member_ids:
+                return grids
+            # Sessions and Routines in a generous UTC window around the
+            # gym-local grid; exact per-date judgement happens below in
+            # gym-local dates.
+            session_rows = (
+                await db.execute(
+                    select(Session.member_id, Session.started_at).where(
+                        Session.gym_id == gym_id,
+                        Session.member_id.in_(member_ids),
+                        Session.started_at >= _utc_day(start - timedelta(days=2)),
+                        Session.started_at <= _utc_day(end + timedelta(days=2)),
+                    )
+                )
+            ).all()
+            routine_rows = (
+                await db.execute(
+                    select(Routine.id, Routine.member_id, Routine.created_at, Workout.weekday)
+                    .outerjoin(Workout, Workout.routine_id == Routine.id)
+                    .where(
+                        Routine.gym_id == gym_id,
+                        Routine.member_id.in_(member_ids),
+                        Routine.created_at <= _utc_day(end + timedelta(days=2)),
+                    )
+                    .order_by(Routine.member_id, Routine.created_at, Routine.id)
+                )
+            ).all()
+        trained: dict[int, set[date]] = {}
+        for member_id, started_at in session_rows:
+            on = local_date(started_at, timezone)
+            if start <= on <= today:
+                trained.setdefault(member_id, set()).add(on)
+        spans_by_member: dict[int, list[tuple[date, set[int]]]] = {}
+        last_routine_id: int | None = None
+        for routine_id, member_id, created_at, weekday in routine_rows:
+            created_on = local_date(created_at, timezone)
+            if created_on > end:
+                continue
+            spans = spans_by_member.setdefault(member_id, [])
+            if routine_id != last_routine_id:
+                spans.append((created_on, set()))
+                last_routine_id = routine_id
+            if weekday is not None:
+                spans[-1][1].add(weekday)
+        for member_id in member_ids:
+            spans = spans_by_member.get(member_id, [])
+            hits = trained.get(member_id, set())
+            grids[member_id] = [
+                DayCell(
+                    day,
+                    (
+                        "future"
+                        if day > today
+                        else "hit"
+                        if day in hits
+                        else "miss"
+                        if day < today and day.weekday() in planned_weekdays_on(spans, day)
+                        else "plain"
+                    ),
+                )
+                for day in (start + timedelta(days=i) for i in range(7 * GRID_WEEKS))
+            ]
+        return grids
+
     async def member_page(self, gym_id: int, member_id: int, page: int = 1) -> MemberPage | None:
         """The read-only training record for one roster Member.
 
@@ -549,24 +667,24 @@ class DashboardStore:
 
     async def _sessions_sets(
         self, db, session_ids: list[int]
-    ) -> dict[int, list[tuple[str, float | None, int]]]:
+    ) -> dict[int, list[tuple[str, float | None, int, str | None]]]:
         """One page's sets in a single query (no per-Session round-trips),
         grouped by Session in logging order."""
-        sets: dict[int, list[tuple[str, float | None, int]]] = {
+        sets: dict[int, list[tuple[str, float | None, int, str | None]]] = {
             session_id: [] for session_id in session_ids
         }
         if not session_ids:
             return sets
         rows = (
             await db.execute(
-                select(Set.session_id, Exercise.name, Set.weight, Set.reps)
+                select(Set.session_id, Exercise.name, Set.weight, Set.reps, Set.note)
                 .join(Exercise, Set.exercise_id == Exercise.id)
                 .where(Set.session_id.in_(session_ids))
                 .order_by(Set.id)
             )
         ).all()
-        for session_id, name, weight, reps in rows:
-            sets[session_id].append((name, weight, reps))
+        for session_id, name, weight, reps, note in rows:
+            sets[session_id].append((name, weight, reps, note))
         return sets
 
     async def _last_weights(self, db, member_id: int, timezone: str) -> list[LastWeight]:
