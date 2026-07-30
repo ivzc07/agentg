@@ -121,6 +121,7 @@ _Avoid_: Account deletion, deactivation
 
 **Note**:
 A durable fact a Member volunteered - an injury, preference, goal, or constraint - written by the Agent and readable by a Coach.
+A safety flag is a Note of its own kind: the Agent logs it and pings the Gym's Coaches without asking, and a Coach's tick-off acknowledges it (who and when) without retiring it.
 Never elicited; an outdated Note is retired (kept and dated, out of the Agent's recall), not deleted.
 _Avoid_: Memory, annotation
 
