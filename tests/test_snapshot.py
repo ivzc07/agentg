@@ -1,6 +1,7 @@
 """The per-turn member snapshot injected via dynamic instructions."""
 
-from datetime import timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -13,7 +14,7 @@ from agentg.checkin_store import CheckinStore
 from agentg.dashboard_store import DashboardStore
 from agentg.demos import DemoStore
 from agentg.forget import ForgetStore
-from agentg.routines import RoutineStore
+from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.snapshot import member_snapshot
 from agentg.linking_store import LinkingStore
 from agentg.context import MemberContext
@@ -88,6 +89,25 @@ async def test_snapshot_before_any_session_or_note(env):
     assert "Dani" in snapshot
     assert "no sessions" in snapshot.lower()
     assert "no active notes" in snapshot.lower()
+
+
+async def test_snapshot_today_honours_the_gyms_timezone(env):
+    env.clock.now = datetime(2026, 7, 14, 2, 0, tzinfo=UTC)  # Jul 13, 21:00 in Chicago
+    await env.context.stores.routines.save_routine(
+        env.member_id,
+        env.gym_id,
+        [
+            WorkoutSpec(weekday=0, name="Piernas", exercises=[ExerciseSpec("squat", sets=3, reps="5")]),
+            WorkoutSpec(weekday=1, name="Push", exercises=[ExerciseSpec("bench press", sets=3, reps="5")]),
+        ],
+    )
+    context = replace(env.context, timezone="America/Chicago")  # UTC-5 in July
+
+    snapshot = await member_snapshot(context)
+
+    assert "Today is 2026-07-13." in snapshot  # not the UTC Jul 14
+    assert "Piernas" in snapshot  # Monday's Workout locally, though UTC says Tuesday
+    assert "Push" not in snapshot
 
 
 async def test_retired_notes_leave_the_snapshot(env):

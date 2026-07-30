@@ -22,6 +22,8 @@ class MemberContext:
     member_name: str
     gym_name: str
     weight_unit: str
+    # The Gym's IANA timezone — day boundaries (today, Gap) honour it (#95).
+    timezone: str = "UTC"
     is_coach: bool = False
     # Channel notifier for pinging a Gym's Coach on a consented safety referral.
     notifier: Notifier | None = None

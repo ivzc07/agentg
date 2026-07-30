@@ -29,6 +29,7 @@ from agentg.models import DashboardLoginToken, Exercise, Set
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 from agentg.tools import build_tools
+from agentg.training import Clock
 from behavioral.scripted_model import MessageStep, ScriptedModel, Step, message, tool
 from conftest import identity_phraser
 
@@ -77,6 +78,7 @@ class ConversationHarness:
     async def create(
         cls,
         tmp_path: Path,
+        clock: Clock | None = None,
         *,
         dashboard_base_url: str | None = None,
         dashboard_clock: DashboardClock | None = None,
@@ -86,7 +88,7 @@ class ConversationHarness:
         redeeming tokens on ``dashboard_clock`` when one is given."""
         set_tracing_disabled(True)
         engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'behavioral.db'}")
-        stores = Stores.from_engine(engine)
+        stores = Stores.from_engine(engine, clock=clock)
         dashboard = None
         if dashboard_base_url is not None:
             if dashboard_clock is not None:
@@ -142,8 +144,9 @@ class ConversationHarness:
         gym_name: str = "Iron Temple",
         channel_user_id: str = "42",
         is_coach: bool = False,
+        timezone: str = "UTC",
     ) -> None:
-        gym = await self.stores.linking.create_gym(gym_name)
+        gym = await self.stores.linking.create_gym(gym_name, timezone=timezone)
         member = await self.stores.linking.link_member(
             gym.id, name, self.channel, channel_user_id
         )

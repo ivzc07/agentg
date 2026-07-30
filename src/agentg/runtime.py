@@ -72,6 +72,7 @@ class AgentRuntime:
             member_name=linked.member.name,
             gym_name=linked.gym.name,
             weight_unit=linked.gym.weight_unit,
+            timezone=linked.gym.timezone,
             is_coach=linked.member.is_coach,
         )
 
