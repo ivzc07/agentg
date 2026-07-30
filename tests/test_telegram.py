@@ -17,10 +17,11 @@ from agentg.messages import Reply
 
 
 class FakeMessage:
-    def __init__(self, user_id=42, text="hi", full_name="Ana García"):
+    def __init__(self, user_id=42, text="hi", full_name="Ana García", chat_type="private"):
         self.from_user = (
             SimpleNamespace(id=user_id, full_name=full_name) if user_id is not None else None
         )
+        self.chat = SimpleNamespace(type=chat_type)
         self.text = text
         self.answer = AsyncMock()
 
@@ -56,7 +57,20 @@ async def test_handler_passes_the_incoming_message_and_sends_the_reply():
     assert msg.text == "I'm here"
     assert msg.display_name == "Ana García"
     assert msg.link_code is None
+    assert msg.is_group is False
     message.answer.assert_awaited_once_with("welcome back!")
+
+
+async def test_handler_marks_group_messages_so_secrets_stay_out():
+    calls = {}
+
+    async def reply_fn(msg):
+        calls["msg"] = msg
+        return Reply("ok")
+
+    await make_message_handler(reply_fn)(FakeMessage(text="/dashboard", chat_type="supergroup"))
+
+    assert calls["msg"].is_group is True
 
 
 async def test_handler_sends_model_markdown_as_plain_text():

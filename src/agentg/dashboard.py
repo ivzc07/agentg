@@ -4,6 +4,8 @@ Deterministic like the rest of the pre-Agent surface — the decision (coach
 or not) is a row lookup, and the reply embeds a URL that must survive
 verbatim, so it is a fixed string rather than a phrased one. Spanish, the
 product's no-signal default: a slash command carries no language to mirror.
+In a shared chat the link is never posted — anyone there could redeem it
+first — so the reply points to the bot's DM instead.
 """
 
 from __future__ import annotations
@@ -24,6 +26,10 @@ REFUSAL_REPLY = (
     "El dashboard web es solo para coaches. Si crees que deberías tener "
     "acceso, habla con quien administra {gym}."
 )
+GROUP_REPLY = (
+    "El enlace al dashboard es privado 🔒 — mándame /dashboard por chat "
+    "directo y te lo paso."
+)
 
 
 def is_dashboard_command(text: str) -> bool:
@@ -39,9 +45,16 @@ class DashboardDoor:
     # trailing slash.
     base_url: str
 
-    async def handle(self, linked: LinkedIdentity) -> Reply:
+    async def handle(self, linked: LinkedIdentity, *, is_group: bool = False) -> Reply:
         """Reply to a linked Member's ``/dashboard``: a one-time magic link
-        for a Coach, a polite refusal for anyone else."""
+        for a Coach, a polite refusal for anyone else.
+
+        In a shared chat nobody gets a link — the bearer URL would be
+        redeemable by whoever taps it first. Everyone (coach or not) gets
+        the same "ask me in private" reply, which also avoids revealing
+        who carries the coach flag."""
+        if is_group:
+            return Reply(GROUP_REPLY)
         if not linked.member.is_coach:
             return Reply(REFUSAL_REPLY.format(gym=linked.gym.name))
         token = await self.store.create_login_token(linked.member.id, linked.gym.id)

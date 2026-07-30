@@ -39,6 +39,8 @@ class IncomingMessage:
     Telegram: the numeric user id, never the mutable ``@username``).
     ``link_code`` is a deep-link payload when the channel carries one:
     ``None`` for an ordinary message, ``""`` for a link tap with no code.
+    ``is_group`` marks a shared chat (a Telegram group): anything secret —
+    a dashboard magic link — must never be replied there.
     """
 
     channel: str
@@ -46,3 +48,4 @@ class IncomingMessage:
     text: str
     display_name: str = ""
     link_code: str | None = None
+    is_group: bool = False

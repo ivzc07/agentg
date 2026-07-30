@@ -71,6 +71,7 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
             text=message.text,
             display_name=message.from_user.full_name or "",
             link_code=parse_start_payload(message.text),
+            is_group=message.chat.type != "private",
         )
         try:
             reply = await reply_fn(incoming)

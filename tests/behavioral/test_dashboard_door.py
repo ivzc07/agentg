@@ -134,6 +134,23 @@ async def test_a_non_coach_is_refused_in_chat_and_no_link_is_issued(tmp_path):
         assert await h.login_tokens() == []
 
 
+async def test_a_dashboard_command_in_a_group_never_yields_a_link(tmp_path):
+    """The bearer URL must not land where anyone can tap it first: a group
+    /dashboard gets a "come to DM" reply — even from a coach — and no token
+    is minted."""
+    async with ConversationHarness.create(tmp_path, dashboard_base_url=BASE_URL) as h:
+        await h.linked_member(is_coach=True)
+
+        reply = await h.say("/dashboard", is_group=True)
+
+        assert "/login/" not in reply
+        assert await h.login_tokens() == []
+
+        # The same coach in the DM gets the real link immediately after.
+        reply = await h.say("/dashboard")
+        assert f"{BASE_URL}/login/" in reply
+
+
 async def test_the_http_door_enforces_the_session(tmp_path):
     clock = FakeClock()
     async with ConversationHarness.create(

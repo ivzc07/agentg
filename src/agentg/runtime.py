@@ -86,7 +86,7 @@ class AgentRuntime:
             # `/dashboard` is a deterministic door, not Agent chat: it never
             # touches the check-in rhythm, compaction, or history.
             if self.dashboard is not None and is_dashboard_command(msg.text):
-                return await self.dashboard.handle(linked)
+                return await self.dashboard.handle(linked, is_group=msg.is_group)
             # Any reply resets the check-in rhythm and revives a lapsed Member.
             await self.stores.checkins.reset_rhythm(linked.member.id)
             session = self.session_for_member(linked.member.id)
