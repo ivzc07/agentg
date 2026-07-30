@@ -137,6 +137,28 @@ def test_modifiers_between_the_determiner_and_the_head_still_reach_it():
     assert identity_drift("Soy un entrenador personal.") is None
 
 
+# --- the guard only catches forbidden identities; everything else passes ---
+
+
+def test_a_link_beyond_the_claim_window_does_not_flag():
+    # "link" belongs to the ask, not to the self-description.
+    assert identity_drift("I'm a coach: ask for the invite link.") is None
+    assert identity_drift("Soy un entrenador: pide el enlace de invitación.") is None
+
+
+def test_a_bare_no_does_not_negate_an_english_claim():
+    # English negation is "I'm not"; a fronted "No" answers something else.
+    drift = identity_drift("No I'm your link")
+    assert drift is not None and "link" in drift
+
+
+def test_coach_claims_need_no_particular_phrasing():
+    # No coach-anchor validation: any non-forbidden phrasing passes.
+    assert identity_drift("I'm your coach today.") is None
+    assert identity_drift("Soy un gran entrenador.") is None
+    assert identity_drift("I'm a strength and conditioning coach.") is None
+
+
 # --- the prompt pins the one identity ---
 
 
