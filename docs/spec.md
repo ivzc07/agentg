@@ -38,7 +38,7 @@ Every design keeps the chat channel swappable:
 - Identity lives in a **`member_channels` table** (`member_id`, `channel`, `channel_user_id`), unique on `('telegram', <numeric user id>)` — never the mutable `@username`. WhatsApp later = a new row, not a schema migration.
 - Conversation memory is keyed **by member** (`member:{id}`), not by channel chat id — history survives a channel switch.
 - Gym linking uses Telegram deep links, conceptually portable to WhatsApp (`wa.me/…?text=`).
-- **Delivery: long polling** — no public endpoint, domain, or webhook secret; dev and prod run identically. aiogram keeps webhook as a one-line switch later. Constraint: exactly one instance may poll → single replica.
+- **Delivery: long polling** — no public endpoint, domain, or webhook secret; dev and prod run identically. aiogram keeps webhook as a one-line switch later. Constraint: exactly one instance may poll → single replica. *(The "no public endpoint" property retires with the coach dashboard — [docs/spec-dashboard.md](spec-dashboard.md) adds a public HTTPS origin; delivery itself stays long polling.)*
 
 WhatsApp migration details (provider, costs, message templates) are deliberately unspecified — they sharpen when the switch gets near.
 
@@ -193,7 +193,7 @@ The bar is **good practice, not a legal regime** — no timelines committed to a
 
 ## Multi-gym boundaries
 
-Every record knows which gym it belongs to (`gym_id` on every row), and **nothing more**: no gym onboarding flow, no admin panel, no billing, no coach dashboard. Invite-code regeneration and per-gym rules-doc creation are operational updates, not product surfaces.
+Every record knows which gym it belongs to (`gym_id` on every row), and **nothing more**: no gym onboarding flow, no admin panel, no billing, ~~no coach dashboard~~. Per-gym rules-doc creation is an operational update, not a product surface. **Superseded in part by map [#70](https://github.com/ivzc07/agentg/issues/70):** a coach dashboard is now specified in [docs/spec-dashboard.md](spec-dashboard.md), and invite-code regeneration moves onto its settings screen.
 
 ## Out of scope
 
@@ -201,7 +201,7 @@ Consciously excluded from this effort (map [#1](https://github.com/ivzc07/agentg
 
 - Gym onboarding, admin panels, billing.
 - Nutrition advice (declined for v1; refusal script ships in the default rules doc).
-- Coach view / dashboard over all members (the `lapsed` flag is queryable data only).
+- ~~Coach view / dashboard over all members (the `lapsed` flag is queryable data only).~~ **Superseded by map [#70](https://github.com/ivzc07/agentg/issues/70):** now specified in [docs/spec-dashboard.md](spec-dashboard.md).
 - Building the agent itself — starts as a new effort, not on this map.
 
 ## Deferred build-time details
