@@ -24,8 +24,9 @@ BOUNCE_MARKER = "/dashboard"  # the bounce page tells you to send /dashboard
 @pytest.fixture
 async def env(tmp_path):
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'domain.db'}")
+    clock = FakeClock()  # one shared clock, like test_dashboard_web.py
     linking = LinkingStore(engine)
-    store = DashboardStore(engine, clock=FakeClock())
+    store = DashboardStore(engine, clock=clock)
     await linking.ensure_schema()
     gym = await linking.create_gym("Iron Temple")
     member = await linking.link_member(gym.id, "Ana", "telegram", "42")
@@ -36,7 +37,7 @@ async def env(tmp_path):
         session_secret=SECRET,
         bot_username=BOT_USERNAME,
         secure_cookies=False,
-        clock=FakeClock(),
+        clock=clock,
     )
     async with TestClient(TestServer(app)) as client:
         token = await store.create_login_token(member.id, gym.id)
@@ -165,6 +166,27 @@ async def test_an_empty_gym_name_is_refused(env):
     assert "vacío" in await response.text()
     gym = await env.linking.gym_by_invite_code(env.gym.invite_code)
     assert gym.name == "Iron Temple"
+
+
+async def test_an_overlong_gym_name_is_capped_at_the_column_width(env):
+    """The form's maxlength is client-side only; the store caps at 200."""
+    await env.client.post("/settings/gym-name", data={"name": "Gimnasio " + "x" * 300})
+    gym = await env.linking.gym_by_invite_code(env.gym.invite_code)
+    assert gym.name == ("Gimnasio " + "x" * 300)[:200]
+    assert len(gym.name) == 200
+
+
+async def test_the_copy_button_handles_clipboard_failures(env):
+    """navigator.clipboard is undefined on plain-HTTP origins and writeText
+    can reject; the success label must only appear after the promise
+    resolves, with a visible failure state otherwise."""
+    script = (await env.settings_page()).split("<script>", 1)[1]
+
+    assert "if (!navigator.clipboard)" in script  # plain-HTTP guard
+    assert "No se pudo copiar" in script  # visible failure state
+    # "Copiado" is assigned only inside the writeText().then() success path.
+    then_at = script.index("writeText(button.dataset.copy).then(")
+    assert script.index('"Copiado"') > then_at
 
 
 async def test_the_settings_screen_is_coach_only(env):

@@ -22,6 +22,7 @@ from agentg.models import Base, Gym, Member, MemberChannel
 INVITE_CODE_ALPHABET = string.ascii_lowercase + string.digits
 INVITE_CODE_LENGTH = 8
 COACH_CODE_PREFIX = "coach-"
+GYM_NAME_MAX_LENGTH = 200  # Gym.name is String(200)
 
 
 def new_invite_code() -> str:
@@ -303,10 +304,13 @@ class LinkingStore:
     async def rename_gym(self, gym_id: int, name: str) -> str:
         """Rename a Gym; the new name is what Members see when they join.
 
-        Every reader resolves the Gym row fresh, so the rename takes effect
-        everywhere on commit — no cache to invalidate.
+        Whitespace is collapsed and the result capped at the column's
+        ``String(200)`` — the form's ``maxlength`` is client-side only, so
+        the cap has to hold here. Every reader resolves the Gym row fresh,
+        so the rename takes effect everywhere on commit — no cache to
+        invalidate.
         """
-        name = " ".join(name.split())
+        name = " ".join(name.split())[:GYM_NAME_MAX_LENGTH]
         async with self._sessions() as db:
             await db.execute(update(Gym).where(Gym.id == gym_id).values(name=name))
             await db.commit()

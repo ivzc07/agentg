@@ -148,8 +148,16 @@ def _regenerate_form(action: str, warning: str) -> str:
 SETTINGS_SCRIPT = """<script>
 document.querySelectorAll("button.copy").forEach(function (button) {
   button.addEventListener("click", function () {
-    navigator.clipboard.writeText(button.dataset.copy);
-    button.textContent = "Copiado";
+    // navigator.clipboard needs a secure context — plain-HTTP origins leave
+    // it undefined — and writeText itself can reject (denied permission).
+    if (!navigator.clipboard) {
+      button.textContent = "No se pudo copiar";
+      return;
+    }
+    navigator.clipboard.writeText(button.dataset.copy).then(
+      function () { button.textContent = "Copiado"; },
+      function () { button.textContent = "No se pudo copiar"; }
+    );
   });
 });
 document.querySelectorAll("form[data-confirm]").forEach(function (form) {
@@ -349,9 +357,6 @@ def build_app(
             return None
         return await store.coach_identity(*identity)
 
-    def signed_in(response: web.StreamResponse, member_id: int, gym_id: int) -> None:
-        set_session(response, member_id, gym_id)  # sliding 90-day refresh
-
     async def home(request: web.Request) -> web.Response:
         coach = await require_coach(request)
         if coach is None:
@@ -361,7 +366,7 @@ def build_app(
         response = web.Response(
             text=_roster_page(gym.name, rows, lapsed), content_type="text/html"
         )
-        signed_in(response, member.id, gym.id)
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
     async def settings(request: web.Request) -> web.Response:
@@ -372,7 +377,7 @@ def build_app(
         response = web.Response(
             text=_settings_page(gym, bot_username), content_type="text/html"
         )
-        signed_in(response, member.id, gym.id)
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
     async def _regenerate(request: web.Request, which: str) -> web.Response:
@@ -390,14 +395,14 @@ def build_app(
                 text=_settings_page(gym, bot_username, error=CONFIRM_MISMATCH_ERROR),
                 content_type="text/html",
             )
-            signed_in(response, member.id, gym.id)
+            set_session(response, member.id, gym.id)  # sliding 90-day refresh
             return response
         if which == "invite":
             await linking.regenerate_invite_code(gym.id)
         else:
             await linking.regenerate_coach_invite_code(gym.id)
         response = web.HTTPFound("/settings")
-        signed_in(response, member.id, gym.id)
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
         raise response
 
     async def regenerate_invite(request: web.Request) -> web.Response:
@@ -418,11 +423,11 @@ def build_app(
                 text=_settings_page(gym, bot_username, error=GYM_NAME_EMPTY_ERROR),
                 content_type="text/html",
             )
-            signed_in(response, member.id, gym.id)
+            set_session(response, member.id, gym.id)  # sliding 90-day refresh
             return response
         await linking.rename_gym(gym.id, name)
         response = web.HTTPFound("/settings")
-        signed_in(response, member.id, gym.id)
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
         raise response
 
     async def login_form(request: web.Request) -> web.Response:
