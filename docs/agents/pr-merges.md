@@ -12,10 +12,11 @@ The script runs a headless multi-agent review workflow and posts `[P1]`/`[P2]`/`
 
 ## Before merging
 
-1. Fetch the review comments.
+1. Confirm the review actually ran: the PR must carry at least one comment signed `- pi code-review` (there is no status check for it; a missing review blocks the merge exactly like a red pytest).
+2. Fetch the review comments.
    Pi posts PR-level comments: `gh api --paginate repos/ivzc07/agentg/issues/<N>/comments`.
    Older PRs may also carry Greptile inline comments: `gh api --paginate repos/ivzc07/agentg/pulls/<N>/comments`.
-2. Read the checks: `gh pr checks <N> --repo ivzc07/agentg`.
+3. Read the checks: `gh pr checks <N> --repo ivzc07/agentg`.
 
 ## Handling P1/P2 findings
 
