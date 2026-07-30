@@ -44,11 +44,20 @@ comment_count() {
 if [ "${HERDR_ENV:-}" = 1 ]; then
     H="$(resolve_herdr)"
     # Reuse the live 'pi-review' agent, or create its pane + agent on first use.
+    # herdr's own launcher (agent start) cannot exec npm's `pi` shim on
+    # Windows, so type `pi` into the pane's shell and wait for detection.
     if ! "$H" agent get pi-review >/dev/null 2>&1; then
         PANE=$("$H" pane split --current --direction right --cwd "$PWD" --no-focus |
             sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -1)
         [ -n "$PANE" ] || { echo "pi-review: could not create a pane" >&2; exit 1; }
-        "$H" agent start pi-review --kind pi --pane "$PANE" --timeout 120000 >/dev/null
+        "$H" pane run "$PANE" "pi" >/dev/null
+        i=0
+        until "$H" agent get "$PANE" 2>/dev/null | grep -q '"agent":"pi"'; do
+            i=$((i + 1))
+            [ $i -lt 24 ] || { echo "pi-review: pi did not start in pane $PANE" >&2; exit 1; }
+            sleep 5
+        done
+        "$H" agent rename "$PANE" pi-review >/dev/null
     fi
     # Serialize: wait for any in-flight review to settle before prompting.
     "$H" agent wait pi-review --until idle --until done --until blocked --timeout 1800000 >/dev/null
