@@ -8,7 +8,8 @@ Two gates protect `main`: an automated review (Pi, formerly Greptile) and the py
 Greptile's trial credits are exhausted, so the working reviewer is the Pi coding agent.
 The review does not trigger itself: the agent that opens a PR must run `scripts/pi-review <N>` (from Git Bash) right after opening it.
 Unlike Greptile, Pi does not re-review on new commits either - run `scripts/pi-review <N>` again after pushing substantive fixes.
-The script runs a headless multi-agent review workflow and posts `[P1]`/`[P2]`/`[P3]` comments on the PR, signed `- pi code-review`.
+The script runs the multi-agent review workflow and posts `[P1]`/`[P2]`/`[P3]` comments on the PR, signed `- pi code-review`.
+Inside Herdr it runs in a visible Pi pane named `pi-review` (created on first use, serialized across callers); outside Herdr it runs headless.
 
 ## Before merging
 
