@@ -276,3 +276,26 @@ async def test_ensure_schema_adds_the_coach_code_column_to_a_legacy_db(tmp_path)
     again = await store.gym_by_invite_code("legacy1")
     assert again is not None and again.coach_invite_code == gym.coach_invite_code
     await engine.dispose()
+
+
+async def test_ensure_schema_adds_the_sets_exercise_index_to_a_legacy_db(tmp_path):
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'legacy.db'}")
+    store = LinkingStore(engine)
+    await store.ensure_schema()
+    # Simulate a database that predates the index (issue #99).
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP INDEX ix_sets_exercise_id"))
+
+    await store.ensure_schema()
+
+    async with engine.begin() as conn:
+        index = (
+            await conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                    " AND name = 'ix_sets_exercise_id'"
+                )
+            )
+        ).first()
+    assert index is not None
+    await engine.dispose()
