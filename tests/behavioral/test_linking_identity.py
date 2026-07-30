@@ -159,6 +159,38 @@ def test_coach_claims_need_no_particular_phrasing():
     assert identity_drift("I'm a strength and conditioning coach.") is None
 
 
+# --- one coherent rule: clause segments, first role token, compound heads ---
+
+
+def test_a_no_closed_by_any_clause_boundary_negates_nothing():
+    for reply in ("No: soy tu enlace.", "No - soy tu enlace.", "No\nsoy tu enlace."):
+        drift = identity_drift(reply)
+        assert drift is not None and "enlace" in drift
+
+
+def test_a_hyphenated_compound_is_judged_by_its_head():
+    drift = identity_drift("I'm a coach-bot.")
+    assert drift is not None and "coach-bot" in drift
+    drift = identity_drift("I'm the ai-assistant.")
+    assert drift is not None and "ai-assistant" in drift
+
+
+def test_not_anywhere_before_the_role_is_a_denial():
+    assert identity_drift("I'm really not a bot.") is None
+    assert identity_drift("I'm honestly not an assistant.") is None
+
+
+def test_the_whole_clause_is_scanned_not_a_fixed_window():
+    drift = identity_drift("I'm your very own personal link to partner gyms.")
+    assert drift is not None and "link" in drift
+    drift = identity_drift("Soy tu único y verdadero enlace con el gimnasio.")
+    assert drift is not None and "enlace" in drift
+
+
+def test_a_coach_role_coming_first_makes_the_clause_clean():
+    assert identity_drift("Soy el coach del enlace de invitación.") is None
+
+
 # --- the prompt pins the one identity ---
 
 
