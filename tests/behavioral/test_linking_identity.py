@@ -113,6 +113,30 @@ def test_non_role_first_person_passes():
     assert identity_drift("Soy nuevo por aquí, ¿cómo empiezo?") is None
 
 
+# --- the claim is parsed as verb + noun phrase; the head noun is judged ---
+
+
+def test_a_punctuated_no_does_not_negate_the_next_clause():
+    # "No" closed by punctuation answers something else; the claim stands.
+    for reply in ("No, soy tu enlace.", "No. Soy tu enlace."):
+        drift = identity_drift(reply)
+        assert drift is not None and "enlace" in drift
+
+
+def test_a_compound_role_carrying_a_drift_word_is_flagged():
+    drift = identity_drift("I'm a link coach.")
+    assert drift is not None and "link" in drift
+    drift = identity_drift("Soy un enlace entrenador.")
+    assert drift is not None and "enlace" in drift
+
+
+def test_modifiers_between_the_determiner_and_the_head_still_reach_it():
+    assert identity_drift("I'm a partner gym coach.") is None
+    assert identity_drift("I'm a certified personal trainer.") is None
+    # Spanish adjectives trail the head noun.
+    assert identity_drift("Soy un entrenador personal.") is None
+
+
 # --- the prompt pins the one identity ---
 
 
