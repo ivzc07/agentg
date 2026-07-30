@@ -50,6 +50,20 @@ def test_multi_word_terms_match_hyphen_and_loose_whitespace():
     assert find_english_leaks("levantar mucho weight es mi loss") == set()
 
 
+def test_lexicon_hits_inside_compound_exercise_names_are_not_leaks():
+    # The carve-out covers compound exercise-style names too — hyphenated or
+    # attached to a hyphenated compound — whatever the seed catalog contains.
+    assert find_english_leaks("Muscle-up") == set()
+    assert find_english_leaks("strength band pull-apart") == set()
+
+
+def test_the_compound_exemption_still_flags_standalone_leaks():
+    # A genuine leak across a Spanish connector from a compound stays flagged…
+    assert find_english_leaks("¿Quieres ganar muscle y hacer pull-ups?") == {"muscle"}
+    # …and a lexicon phrase spelled as a compound is still the phrase.
+    assert find_english_leaks("tu objetivo es weight-loss") == {"weight loss"}
+
+
 # --- what actually guards the behavior: the Agent's language rule ---
 
 
