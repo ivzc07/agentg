@@ -35,10 +35,13 @@ resolve_herdr() {
     printf '%s' herdr
 }
 
+# Total '- pi code-review' comments on the PR (issue + inline). --paginate
+# emits one count per page, so sum the lines. Prints ERR on API failure so
+# callers never mistake an outage for zero comments.
 comment_count() {
-    a=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '[.[] | select(.body | test("pi code-review"))] | length' 2>/dev/null || echo 0)
-    b=$(gh api --paginate "repos/${REPO}/pulls/${PR}/comments" --jq '[.[] | select(.body | test("pi code-review"))] | length' 2>/dev/null || echo 0)
-    echo $((a + b))
+    a=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '[.[] | select(.body | test("pi code-review"))] | length' 2>/dev/null) || { echo ERR; return; }
+    b=$(gh api --paginate "repos/${REPO}/pulls/${PR}/comments" --jq '[.[] | select(.body | test("pi code-review"))] | length' 2>/dev/null) || { echo ERR; return; }
+    printf '%s\n%s\n' "$a" "$b" | awk '{s += $1} END {print s + 0}'
 }
 
 if [ "${HERDR_ENV:-}" = 1 ]; then
@@ -59,23 +62,22 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
         done
         "$H" agent rename "$PANE" pi-review >/dev/null
     fi
-    # Serialize: wait for any in-flight review to settle before prompting.
-    "$H" agent wait pi-review --until idle --until done --until blocked --timeout 1800000 >/dev/null
+    # Serialize: wait for any in-flight review to finish before prompting.
+    # blocked is deliberately not a ready state - a pi waiting on approval
+    # needs an operator, not another queued review.
+    "$H" agent wait pi-review --until idle --until done --timeout 1800000 >/dev/null
     BEFORE=$(comment_count)
-    "$H" agent prompt pi-review "$PROMPT" >/dev/null
-    # The pane shows the live run; block until the review lands on the PR
-    # (comment count moves) so callers keep run-then-check semantics.
-    i=0
-    while [ $i -lt 60 ]; do
-        sleep 30
-        NOW=$(comment_count)
-        if [ "$NOW" -gt "$BEFORE" ]; then
-            echo $((NOW - BEFORE))
-            exit 0
-        fi
-        i=$((i + 1))
-    done
-    echo "pi-review: timed out waiting for review comments on PR ${PR}" >&2
+    [ "$BEFORE" != ERR ] || { echo "pi-review: cannot read PR ${PR} comments" >&2; exit 1; }
+    # --wait blocks until the agent settles again, i.e. the review ran and
+    # every comment was posted; the count afterwards is the full delta.
+    "$H" agent prompt pi-review "$PROMPT" --wait --timeout 3000000 >/dev/null
+    NOW=$(comment_count)
+    [ "$NOW" != ERR ] || { echo "pi-review: review ran but comment check failed on PR ${PR}" >&2; exit 1; }
+    if [ "$NOW" -gt "$BEFORE" ]; then
+        echo $((NOW - BEFORE))
+        exit 0
+    fi
+    echo "pi-review: review settled without posting comments on PR ${PR}" >&2
     exit 1
 fi
 
