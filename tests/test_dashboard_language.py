@@ -255,6 +255,22 @@ async def test_set_comments_render_verbatim_with_the_same_tag(env):
     assert "EN · as written" not in en
 
 
+async def test_a_set_comment_renders_once_no_matter_the_rep_count(env):
+    """log_sets stamps the same note on every rep Set; the collapsed
+    (Exercise, weight) line must still quote it exactly once."""
+    member = await env.add_member("Luis")
+    await env.training.ensure_seeded()
+    await env.training.open_session(member.id, env.gym.id)
+    await env.training.log_sets(
+        member.id, env.gym.id, "squat 60 8,8,8", note="my shoulder hurt, stopped early"
+    )
+    await env.training.close_session(member.id)
+
+    text = await env.page(f"/members/{member.id}")
+
+    assert text.count("my shoulder hurt, stopped early") == 1
+
+
 async def test_the_language_toggle_sits_in_the_chrome_of_every_screen(env):
     member = await env.add_member("Luis")
 

@@ -512,8 +512,10 @@ def _set_lines(sets: list[tuple[str, float | None, int, str | None]], unit: str,
     comments: dict[tuple[str, float | None], list[str]] = {}
     for name, weight, reps, note in sets:
         grouped.setdefault((name, weight), []).append(reps)
-        if note:
-            comments.setdefault((name, weight), []).append(note)
+        # log_sets stamps the same comment on every rep Set of the line —
+        # quote it once per collapsed line, not once per rep.
+        if note and note not in comments.setdefault((name, weight), []):
+            comments[(name, weight)].append(note)
     for (name, weight), reps_list in grouped.items():
         lines.append(
             f'<div class="set">{escape(name)} {_fmt_load(weight, unit, lang)} × {",".join(str(r) for r in reps_list)}</div>'

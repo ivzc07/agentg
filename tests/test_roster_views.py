@@ -75,6 +75,31 @@ async def test_the_grid_marks_hits_misses_and_today_against_the_governing_routin
     assert TODAY.weekday() == 2
 
 
+async def test_a_session_on_a_planned_day_is_a_hit_not_a_miss(env):
+    member = await env.add_member("Luis")
+    # Mon/Wed plan from 2026-07-05; the Member trains Mon 07-06 as planned.
+    await env.give_planned_routine(member, weekdays=[0, 2], days_ago=10)
+    await env.train(member, days_ago=9)
+
+    grid = await env.store.attendance(env.gym.id, [member.id])
+
+    states = cells_by_date(grid[member.id])
+    assert states[date(2026, 7, 6)] == "hit"  # planned Monday, trained
+    assert states[date(2026, 7, 8)] == "miss"  # planned Wednesday, not
+
+
+async def test_a_session_today_renders_as_a_hit(env):
+    member = await env.add_member("Luis")
+    await env.give_planned_routine(member, weekdays=[TODAY.weekday()], days_ago=10)
+    await env.train(member, days_ago=0)
+
+    grid = await env.store.attendance(env.gym.id, [member.id])
+
+    # Today never counts as a miss while it runs — and a Session already
+    # logged today is a hit like any other day.
+    assert cells_by_date(grid[member.id])[TODAY] == "hit"
+
+
 async def test_a_mid_window_routine_change_rejudges_the_days_it_governs(env):
     member = await env.add_member("Luis")
     # Mondays only from 2026-06-25, then Fridays only from 2026-07-10.
