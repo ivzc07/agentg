@@ -10,9 +10,13 @@ Coolify — nothing secret is in this repo.
 
 - **Application `agentg`** (uuid `c13aisi5hlhwh48dzy8xvk62`) — Dockerfile build
   from `git@github.com:ivzc07/agentg.git`, branch `main`, cloned with a read-only
-  deploy key (`agentg-deploy-key`). No domain and no exposed ports: the app only
-  long-polls Telegram. Health checks are off (no HTTP surface). Single replica —
-  exactly one instance may poll a given bot token; do not scale this app.
+  deploy key (`agentg-deploy-key`). No domain attached yet. The app long-polls
+  Telegram and now also serves the coach dashboard's embedded HTTP server
+  (spec-dashboard §Stack) on `DASHBOARD_PORT` (8080) inside the container —
+  attaching a flowstate subdomain to that port and setting `DASHBOARD_BASE_URL`
+  is deploy-day work; until then magic links point at the localhost default.
+  Single replica — exactly one instance may poll a given bot token; do not
+  scale this app.
 - **Database `agentg-postgres`** (uuid `t5hwnbn31qoamtdr74vggj9k`) — a standalone
   Coolify Postgres 16 resource (not compose-managed, so Coolify's scheduled
   backups can cover it). Not publicly exposed; the app reaches it over the shared
@@ -42,6 +46,9 @@ Application → agentg → Webhooks.
 | `MODEL` | LiteLLM model string (`openai/gpt-4o-mini`) |
 | `MODEL_API_KEY` | API key matching `MODEL` |
 | `DATABASE_URL` | `postgresql+asyncpg://…@t5hwnbn31qoamtdr74vggj9k:5432/agentg` |
+| `DASHBOARD_BASE_URL` | public origin for `/dashboard` magic links — set when the subdomain is attached (defaults to `http://localhost:8080`) |
+| `DASHBOARD_PORT` | embedded HTTP server port (defaults to `8080`) |
+| `DASHBOARD_SESSION_SECRET` | optional session-cookie HMAC key (defaults to the bot token) |
 
 `DATABASE_URL` is already set. `TELEGRAM_BOT_TOKEN` and `MODEL_API_KEY` hold
 `CHANGE_ME…` placeholders until the owner sets the real values in Coolify

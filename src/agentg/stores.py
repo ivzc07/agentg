@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from agentg.checkin_store import CheckinStore
+from agentg.dashboard_store import DashboardStore
 from agentg.demos import DemoStore
 from agentg.forget import ForgetStore
 from agentg.notes import NotesStore
@@ -30,6 +31,7 @@ class Stores:
     checkins: CheckinStore
     demos: DemoStore
     forget: ForgetStore
+    dashboard: DashboardStore
 
     @classmethod
     def from_engine(cls, engine: AsyncEngine) -> "Stores":
@@ -41,4 +43,5 @@ class Stores:
             checkins=CheckinStore(engine),
             demos=DemoStore(engine),
             forget=ForgetStore(engine),
+            dashboard=DashboardStore(engine),
         )

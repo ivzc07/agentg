@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
+from agentg.dashboard import DashboardDoor, is_dashboard_command
 from agentg.demo_media import DemoSender, serve_demo
 from agentg.messages import IncomingMessage, Reply
 from agentg.linking import Linking
@@ -42,6 +43,9 @@ class AgentRuntime:
     demo_sender: DemoSender | None = None
     # Channel notifier for consented safety referrals (pinging a Gym's Coach).
     notifier: Notifier | None = None
+    # The dashboard door (`/dashboard` -> magic link); None in tests that
+    # don't exercise the dashboard.
+    dashboard: DashboardDoor | None = None
     # One lock per channel identity so a rapid double message can't interleave
     # turns (or linking steps). Unbounded, but one entry per person who
     # ever messaged this process — fine at this scale.
@@ -79,6 +83,10 @@ class AgentRuntime:
                 return Reply(reply)
             if linked is None:  # linking always replies for unlinked identities
                 raise RuntimeError("unlinked message reached the agent loop")
+            # `/dashboard` is a deterministic door, not Agent chat: it never
+            # touches the check-in rhythm, compaction, or history.
+            if self.dashboard is not None and is_dashboard_command(msg.text):
+                return await self.dashboard.handle(linked)
             # Any reply resets the check-in rhythm and revives a lapsed Member.
             await self.stores.checkins.reset_rhythm(linked.member.id)
             session = self.session_for_member(linked.member.id)

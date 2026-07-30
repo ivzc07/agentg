@@ -15,12 +15,19 @@ class Reply(str):
     """
 
     after_send: Callable[[], Awaitable[None]] | None
+    # Suppress the channel's link preview (magic links: a preview fetch could
+    # spend a one-time token before the human taps it).
+    disable_preview: bool
 
     def __new__(
-        cls, text: str, after_send: Callable[[], Awaitable[None]] | None = None
+        cls,
+        text: str,
+        after_send: Callable[[], Awaitable[None]] | None = None,
+        disable_preview: bool = False,
     ) -> "Reply":
         obj = super().__new__(cls, text)
         obj.after_send = after_send
+        obj.disable_preview = disable_preview
         return obj
 
 

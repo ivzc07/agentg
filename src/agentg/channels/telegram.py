@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import FSInputFile, Message
+from aiogram.types import FSInputFile, LinkPreviewOptions, Message
 
 from agentg.demo_media import SentAnimation
 from agentg.messages import IncomingMessage, Reply
@@ -79,7 +79,12 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
             await message.answer(ERROR_REPLY)
             return
         for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
-            await message.answer(chunk)
+            if reply.disable_preview:  # keep the call shape unchanged otherwise
+                await message.answer(
+                    chunk, link_preview_options=LinkPreviewOptions(is_disabled=True)
+                )
+            else:
+                await message.answer(chunk)
         # Follow-up media (demo animations) lands beneath the reply text.
         if reply.after_send is not None:
             try:

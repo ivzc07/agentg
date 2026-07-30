@@ -105,6 +105,17 @@ async def test_empty_reply_still_sends_something():
     assert message.answer.await_count == 1
 
 
+async def test_disable_preview_reply_sends_with_preview_off():
+    async def reply_fn(msg):
+        return Reply("https://dash.example.com/login/abc", disable_preview=True)
+
+    message = FakeMessage()
+    await make_message_handler(reply_fn)(message)
+
+    _, kwargs = message.answer.await_args
+    assert kwargs["link_preview_options"].is_disabled is True
+
+
 async def test_after_send_runs_only_once_the_reply_text_is_out():
     order = []
 

@@ -9,6 +9,7 @@ from agentg.config import Settings
 from agentg.db import create_engine
 from agentg.notes import NotesStore
 from agentg.checkin_store import CheckinStore
+from agentg.dashboard_store import DashboardStore
 from agentg.demos import DemoStore
 from agentg.forget import ForgetStore
 from agentg.routines import DEFAULT_RULES_DOC, ExerciseSpec, RoutineStore, WorkoutSpec
@@ -44,6 +45,7 @@ async def env(tmp_path):
             checkins=CheckinStore(engine),
             demos=DemoStore(engine),
             forget=ForgetStore(engine),
+            dashboard=DashboardStore(engine),
         ),
         member_id=member.id,
         gym_id=gym.id,

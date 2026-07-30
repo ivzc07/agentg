@@ -13,6 +13,10 @@ services:
       MODEL: ${MODEL:-}  # empty falls back to the app's default model
       MODEL_API_KEY: ${MODEL_API_KEY:?set the model API key in .env}
       DATABASE_URL: postgresql+asyncpg://agentg:agentg@db:5432/agentg
+      DASHBOARD_BASE_URL: ${DASHBOARD_BASE_URL:-http://localhost:8080}
+      DASHBOARD_SESSION_SECRET: ${DASHBOARD_SESSION_SECRET:-}  # empty falls back to the bot token
+    ports:
+      - "8080:8080"  # the dashboard's embedded HTTP server
 
   db:
     image: postgres:16
