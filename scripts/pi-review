@@ -62,16 +62,28 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
         done
         "$H" agent rename "$PANE" pi-review >/dev/null
     fi
+    agent_status() {
+        "$H" agent get pi-review 2>/dev/null | sed -n 's/.*"agent_status":"\([a-z]*\)".*/\1/p' | head -1
+    }
+    # A blocked pi needs an operator, not another queued review - fail fast
+    # instead of hanging out the full serialize timeout.
+    [ "$(agent_status)" != blocked ] || { echo "pi-review: the pi-review pane is blocked awaiting input - resolve it first" >&2; exit 1; }
     # Serialize: wait for any in-flight review to finish before prompting.
-    # blocked is deliberately not a ready state - a pi waiting on approval
-    # needs an operator, not another queued review.
     "$H" agent wait pi-review --until idle --until done --timeout 1800000 >/dev/null
     BEFORE=$(comment_count)
     [ "$BEFORE" != ERR ] || { echo "pi-review: cannot read PR ${PR} comments" >&2; exit 1; }
     # --wait blocks until the agent settles again, i.e. the review ran and
     # every comment was posted; the count afterwards is the full delta.
     "$H" agent prompt pi-review "$PROMPT" --wait --timeout 3000000 >/dev/null
+    # --wait also releases on blocked; that is an operator situation, not a
+    # finished review.
+    [ "$(agent_status)" != blocked ] || { echo "pi-review: pi blocked mid-review on PR ${PR} - check the pane" >&2; exit 1; }
     NOW=$(comment_count)
+    if [ "$NOW" = ERR ] || [ "$NOW" -le "$BEFORE" ]; then
+        # GitHub's list API can lag right after posting - give it one retry.
+        sleep 20
+        NOW=$(comment_count)
+    fi
     [ "$NOW" != ERR ] || { echo "pi-review: review ran but comment check failed on PR ${PR}" >&2; exit 1; }
     if [ "$NOW" -gt "$BEFORE" ]; then
         echo $((NOW - BEFORE))
