@@ -210,3 +210,44 @@ async def test_a_magic_link_without_a_next_path_lands_on_the_roster(env):
     response = await env.client.post(f"/login/{raw}", allow_redirects=False)
     assert response.status == 302
     assert response.headers["Location"] == "/"
+
+
+async def test_tick_off_rejects_a_non_safety_note(env):
+    member = await env.add_member("Ana")
+    injury = await _notes(env).remember(member.id, env.gym.id, "injury", "bad knee")
+
+    response = await env.client.post(
+        f"/members/{member.id}/flags/{injury.id}/tick-off",
+        cookies=_cookie(env),
+        allow_redirects=False,
+    )
+
+    assert response.status == 404
+    note = (await _notes(env).active(member.id))[0]
+    assert note.acknowledged_at is None and note.acknowledged_by_member_id is None
+
+
+async def test_tick_off_rejects_a_retired_flag(env):
+    member = await env.add_member("Ana")
+    note = await _flag(env, member)
+    await _notes(env).retire(member.id, note.id)
+
+    response = await env.client.post(
+        f"/members/{member.id}/flags/{note.id}/tick-off",
+        cookies=_cookie(env),
+        allow_redirects=False,
+    )
+
+    assert response.status == 404
+
+
+async def test_tick_off_rejects_an_unknown_note_id(env):
+    member = await env.add_member("Ana")
+
+    response = await env.client.post(
+        f"/members/{member.id}/flags/999999/tick-off",
+        cookies=_cookie(env),
+        allow_redirects=False,
+    )
+
+    assert response.status == 404

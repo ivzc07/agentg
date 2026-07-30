@@ -307,3 +307,27 @@ async def test_ensure_schema_adds_the_sets_exercise_index_to_a_legacy_db(tmp_pat
         ).first()
     assert index is not None
     await engine.dispose()
+
+
+def test_the_safety_flag_migration_columns_compile_on_postgres():
+    """The hand-written ALTER TABLEs must use types Postgres accepts.
+
+    SQLite happily takes DATETIME; Postgres has no such type — on deploy the
+    whole ensure_schema transaction would roll back and the process would
+    fail to boot (review on PR #120). Pin the DDL against the model's column
+    type as the PostgreSQL dialect compiles it."""
+    from sqlalchemy.dialects import postgresql
+
+    from agentg.linking_store import (
+        ADD_ACKNOWLEDGED_AT_DDL,
+        ADD_ACKNOWLEDGED_BY_DDL,
+        ADD_NEXT_PATH_DDL,
+    )
+    from agentg.models import MemberNote
+
+    dialect = postgresql.dialect()
+    model_type = MemberNote.__table__.c.acknowledged_at.type.compile(dialect=dialect)
+    assert model_type.startswith("TIMESTAMP")
+    assert model_type.split()[0] in ADD_ACKNOWLEDGED_AT_DDL
+    for ddl in (ADD_ACKNOWLEDGED_AT_DDL, ADD_ACKNOWLEDGED_BY_DDL, ADD_NEXT_PATH_DDL):
+        assert "DATETIME" not in ddl

@@ -122,3 +122,26 @@ async def test_a_forged_cookie_does_not_open_the_door(env):
     forged = sign_session(env.member.id, env.gym.id, "wrong-secret", env.clock())
     response = await env.client.get("/", cookies={SESSION_COOKIE: forged})
     assert BOUNCE_MARKER in await response.text()
+
+
+@pytest.mark.parametrize("next_path", ["//evil.com", "https://evil.example/x", "evil"])
+async def test_a_foreign_next_path_redirects_to_the_roster(env, next_path):
+    """The deep-link landing is local-only: anything that isn't a plain path
+    on our own origin falls back to the roster (review on PR #120)."""
+    raw = await env.store.create_login_token(env.member.id, env.gym.id, next_path=next_path)
+
+    response = await env.client.post(f"/login/{raw}", allow_redirects=False)
+
+    assert response.status == 302
+    assert response.headers["Location"] == "/"
+
+
+async def test_a_local_next_path_is_honoured(env):
+    raw = await env.store.create_login_token(
+        env.member.id, env.gym.id, next_path="/members/1"
+    )
+
+    response = await env.client.post(f"/login/{raw}", allow_redirects=False)
+
+    assert response.status == 302
+    assert response.headers["Location"] == "/members/1"
