@@ -33,6 +33,7 @@ class FakeClock:
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agentg.checkin_store import CheckinStore
@@ -70,12 +71,20 @@ class RosterEnv:
     def last_uid(self) -> str:
         return str(self._uid)
 
+    @asynccontextmanager
+    async def _rewind(self, days: int):
+        """The clock ``days`` back, restored on the way out even on failure."""
+        now = self.clock.now
+        self.clock.now = now - timedelta(days=days)
+        try:
+            yield
+        finally:
+            self.clock.now = now
+
     async def train(self, member: Member, days_ago: int) -> None:
         """A Session ending ``days_ago`` before the clock's now."""
-        now = self.clock.now
-        self.clock.now = now - timedelta(days=days_ago)
-        await self.training.open_session(member.id, self.gym.id)
-        self.clock.now = now
+        async with self._rewind(days_ago):
+            await self.training.open_session(member.id, self.gym.id)
 
     async def give_routine(self, member: Member) -> None:
         """A bare active Routine row — marks the Member as not-new."""
@@ -94,21 +103,19 @@ class RosterEnv:
         self, member: Member, weekdays: list[int], days_ago: int
     ) -> None:
         """A Routine created ``days_ago`` ago with a Workout on each weekday."""
-        now = self.clock.now
-        self.clock.now = now - timedelta(days=days_ago)
-        await self.routines.save_routine(
-            member.id,
-            self.gym.id,
-            [
-                WorkoutSpec(
-                    weekday=weekday,
-                    name=f"Día {weekday}",
-                    exercises=[ExerciseSpec("squat", sets=3, reps="5")],
-                )
-                for weekday in weekdays
-            ],
-        )
-        self.clock.now = now
+        async with self._rewind(days_ago):
+            await self.routines.save_routine(
+                member.id,
+                self.gym.id,
+                [
+                    WorkoutSpec(
+                        weekday=weekday,
+                        name=f"Día {weekday}",
+                        exercises=[ExerciseSpec("squat", sets=3, reps="5")],
+                    )
+                    for weekday in weekdays
+                ],
+            )
 
     async def roster_row(self, member: Member) -> RosterRow:
         rows, _ = await self.store.roster(self.gym.id)

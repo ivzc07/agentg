@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Row, func, or_, select, update
+from sqlalchemy import Row, func, or_, select, union_all, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.checkin import LAPSED, SNOOZED
@@ -234,7 +234,7 @@ class DashboardStore:
             # Routine), plus the single latest Routine created on or before
             # it, which governs the window's first dates. The newest Routine
             # per Member is always in the read, so the active-Routine flags
-            # come along free.
+            # come along free. Both slices go out as one UNION ALL round-trip.
             member_ids = [member.id for member, _ in rows]
             history: list[Row[Any]] = []
             if member_ids:
@@ -243,31 +243,28 @@ class DashboardStore:
                         Session.member_id.label("member_id"),
                         func.max(Session.started_at).label("anchor"),
                     )
+                    .where(Session.member_id.in_(member_ids))
                     .group_by(Session.member_id)
                     .subquery()
                 )
-                history.extend(
-                    (
-                        await db.execute(
-                            select(
-                                Routine.id,
-                                Routine.member_id,
-                                Routine.created_at,
-                                Routine.is_active,
-                                Workout.weekday,
-                            )
-                            .outerjoin(last_sess, last_sess.c.member_id == Routine.member_id)
-                            .outerjoin(Workout, Workout.routine_id == Routine.id)
-                            .where(
-                                Routine.gym_id == gym_id,
-                                Routine.member_id.in_(member_ids),
-                                or_(
-                                    last_sess.c.anchor.is_(None),
-                                    Routine.created_at > last_sess.c.anchor,
-                                ),
-                            )
-                        )
-                    ).all()
+                recent = (
+                    select(
+                        Routine.id,
+                        Routine.member_id,
+                        Routine.created_at,
+                        Routine.is_active,
+                        Workout.weekday,
+                    )
+                    .outerjoin(last_sess, last_sess.c.member_id == Routine.member_id)
+                    .outerjoin(Workout, Workout.routine_id == Routine.id)
+                    .where(
+                        Routine.gym_id == gym_id,
+                        Routine.member_id.in_(member_ids),
+                        or_(
+                            last_sess.c.anchor.is_(None),
+                            Routine.created_at > last_sess.c.anchor,
+                        ),
+                    )
                 )
                 # The pre-anchor governing Routine per Member. The id
                 # tie-break matters: same-instant saves (one clock tick, two
@@ -293,21 +290,18 @@ class DashboardStore:
                     )
                     .subquery()
                 )
-                history.extend(
-                    (
-                        await db.execute(
-                            select(
-                                ranked.c.id,
-                                ranked.c.member_id,
-                                ranked.c.created_at,
-                                ranked.c.is_active,
-                                Workout.weekday,
-                            )
-                            .outerjoin(Workout, Workout.routine_id == ranked.c.id)
-                            .where(ranked.c.rn == 1)
-                        )
-                    ).all()
+                governing = (
+                    select(
+                        ranked.c.id,
+                        ranked.c.member_id,
+                        ranked.c.created_at,
+                        ranked.c.is_active,
+                        Workout.weekday,
+                    )
+                    .outerjoin(Workout, Workout.routine_id == ranked.c.id)
+                    .where(ranked.c.rn == 1)
                 )
+                history.extend((await db.execute(union_all(recent, governing))).all())
         history.sort(key=lambda r: (r.member_id, r.created_at, r.id))
         spans_by_member: dict[int, list[tuple[date, set[int]]]] = {}
         with_routines: set[int] = set()
