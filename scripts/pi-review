@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+# Post an automated code review on a GitHub PR using the Pi coding agent
+# (pi-dynamic-workflows extension). Greptile-style severity comments.
+#
+# Usage: scripts/pi-review <pr-number>
+# Requires: pi (with @quintinshaw/pi-dynamic-workflows installed), gh (authenticated).
+set -eu
+
+PR="${1:?usage: scripts/pi-review <pr-number>}"
+REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+
+exec pi -p "Run the code-review workflow on GitHub PR ${PR} of repo ${REPO}. \
+Fetch the PR diff and description with gh. Run the workflow in the foreground and wait for its complete result before doing anything else. \
+Prioritize correctness bugs, broken imports, security problems, and test-coverage gaps; ignore pure style and wording preferences. \
+Then act like the Greptile review bot: for each verified finding, post one comment on PR ${PR} via 'gh pr comment' with a severity prefix [P1] (bug or correctness issue, must fix), [P2] (should fix), or [P3] (optional), naming the file and line. \
+Only post findings the workflow verified as real; do not pad. Post at most 3 [P3] comments - keep only the most valuable ones. \
+If there are no real findings, post a single comment saying the automated review found no issues. \
+Sign every comment with '- pi code-review'. \
+When done, reply with just the number of findings posted."
