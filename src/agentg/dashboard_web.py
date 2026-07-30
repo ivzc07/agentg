@@ -3,7 +3,8 @@
 aiohttp on the bot's existing event loop, next to the long poller. Three
 routes are the whole door:
 
-- ``GET /`` — the signed-in shell, gated on the session cookie *and* a
+- ``GET /`` — the signed-in landing: the Table roster, a dense read-only
+  list of the Gym's Members Gap-sorted, gated on the session cookie *and* a
   per-request ``is_coach`` re-check.
 - ``GET /login/<token>`` — an interstitial that never spends the token, so
   a link-preview fetch (Telegram builds one unless the bot disables it)
@@ -30,7 +31,7 @@ from html import escape
 
 from aiohttp import web
 
-from agentg.dashboard_store import DashboardStore
+from agentg.dashboard_store import DashboardStore, RosterRow
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +86,97 @@ def _interstitial_page(token: str) -> str:
     return _page(INTERSTITIAL_TITLE, "", form)
 
 
-def _shell_page(gym_name: str) -> str:
-    body = f"Has iniciado sesión como coach de <b>{escape(gym_name)}</b>."
-    return _page("Dashboard", body)
+# --- The Table roster (spec-dashboard §The roster) ---
+#
+# Copy follows the adopted screens (docs/prototypes/coach-dashboard-v2.html),
+# Spanish — the product's no-signal default. Severity colouring is a later
+# ticket: the list ships uncoloured.
+
+NEW_TAG = "nuevo"
+NO_SESSIONS_YET = "Aún sin sesiones"
+
+
+def _away_text(row: RosterRow) -> str:
+    if not row.has_sessions:
+        return NO_SESSIONS_YET
+    if row.gap_days == 1:
+        return "1 día sin venir"
+    return f"{row.gap_days} días sin venir"
+
+
+def _roster_row(row: RosterRow) -> str:
+    tags = ""
+    if row.is_new:
+        tags += f' <span class="tag tag-new">{NEW_TAG}</span>'
+    if row.snoozed_until is not None:
+        until = row.snoozed_until.strftime("%d/%m/%Y")
+        tags += f' <span class="tag">en pausa hasta el {until}</span>'
+    # Read-only: the click-through to the Member's page is a later ticket.
+    return (
+        f'<li class="row" data-name="{escape(row.name)}">'
+        f'<span class="name">{escape(row.name)}</span>{tags}'
+        f'<span class="away">{_away_text(row)}</span></li>'
+    )
+
+
+def _roster_page(
+    gym_name: str, rows: list[RosterRow], lapsed: list[RosterRow]
+) -> str:
+    lapsed_section = ""
+    if lapsed:
+        items = "".join(_roster_row(row) for row in lapsed)
+        lapsed_section = f"""<details id="lapsed">
+<summary>Se perdieron ({len(lapsed)})</summary>
+<ul>{items}</ul>
+</details>"""
+    items = "".join(_roster_row(row) for row in rows)
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{escape(gym_name)} — Dashboard</title>
+<style>
+body {{ font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }}
+header {{ display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; }}
+header h1 {{ font-size: 1.25rem; margin: 0; }}
+header .count {{ color: #666; }}
+#search {{ margin-left: auto; font-size: 1rem; padding: 0.3rem 0.6rem; }}
+ul {{ list-style: none; padding: 0; margin: 1rem 0; }}
+.row {{ display: flex; align-items: baseline; gap: 0.6rem; padding: 0.45rem 0.2rem; border-bottom: 1px solid #eee; }}
+.row .name {{ font-weight: 600; }}
+.row .away {{ margin-left: auto; color: #666; font-size: 0.9rem; white-space: nowrap; }}
+.tag {{ font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 1rem; background: #eee; color: #555; white-space: nowrap; }}
+#lapsed summary {{ cursor: pointer; color: #666; }}
+</style>
+</head>
+<body>
+<header>
+<h1>{escape(gym_name)}</h1>
+<span class="count">Miembros ({len(rows)})</span>
+<input id="search" type="search" placeholder="Buscar por nombre" autocomplete="off">
+</header>
+<ul id="roster">{items}</ul>
+{lapsed_section}
+<script>
+// Live, name-only, accent-insensitive filter. It only hides rows — the Gap
+// sort never moves — and a lapsed match auto-expands the tail.
+const box = document.getElementById("search");
+const lapsed = document.getElementById("lapsed");
+const norm = (s) => s.normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").toLowerCase();
+box.addEventListener("input", () => {{
+  const q = norm(box.value.trim());
+  let lapsedHit = false;
+  document.querySelectorAll("[data-name]").forEach((row) => {{
+    const hit = !q || norm(row.dataset.name).includes(q);
+    row.hidden = !hit;
+    if (hit && q && lapsed && lapsed.contains(row)) lapsedHit = true;
+  }});
+  if (lapsed) lapsed.open = lapsedHit;
+}});
+</script>
+</body>
+</html>"""
 
 
 def sign_session(member_id: int, gym_id: int, secret: str, now: datetime) -> str:
@@ -146,7 +235,10 @@ def build_app(
         if coach is None:  # demoted or forgotten: out on the next click
             return web.Response(text=_bounce_page(), content_type="text/html")
         _, gym = coach
-        response = web.Response(text=_shell_page(gym.name), content_type="text/html")
+        rows, lapsed = await store.roster(gym.id)
+        response = web.Response(
+            text=_roster_page(gym.name, rows, lapsed), content_type="text/html"
+        )
         set_session(response, *identity)  # sliding 90-day refresh on every visit
         return response
 
