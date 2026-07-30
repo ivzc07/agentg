@@ -15,7 +15,12 @@ import agentg.runtime as runtime_module
 from agentg.db import create_engine
 from agentg.messages import IncomingMessage
 from agentg.models import Member
-from agentg.linking import DEAD_END_INSTRUCTION, Linking
+from agentg.linking import (
+    COACH_PROMOTED_INSTRUCTION,
+    COACH_WELCOME_INSTRUCTION,
+    DEAD_END_INSTRUCTION,
+    Linking,
+)
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 from conftest import identity_phraser
@@ -341,3 +346,143 @@ async def test_linked_member_tapping_an_inactive_link_stays_linked(runtime):
     assert "Iron Temple" in reply  # reassured, not dead-ended
     linked = await runtime.stores.linking.identity_for("telegram", "42")
     assert linked is not None and linked.gym.id == gym.id
+
+
+# --- AC: the coach invite link (issue #104) ---
+
+
+async def test_coach_deep_link_links_a_newcomer_coach_flagged(runtime):
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+
+    ask = await runtime.handle_message(incoming("/start x", link_code=gym.coach_invite_code))
+    assert "Iron Temple" in ask and "Ana García" in ask
+    assert await member_count(runtime.stores.linking) == 0  # name confirmed first
+
+    greet = await runtime.handle_message(incoming("yes"))
+
+    assert greet == COACH_WELCOME_INSTRUCTION.format(name="Ana García", gym="Iron Temple")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+    assert linked.gym.id == gym.id and linked.member.is_coach is True
+
+
+async def test_the_coach_welcome_does_not_start_intake(runtime):
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.handle_message(incoming("/start x", link_code=gym.coach_invite_code))
+
+    instruction = await runtime.handle_message(incoming("yes"))
+
+    # coach-aware: the rules doc, routines, /dashboard — and Intake waits for
+    # an explicit ask instead of starting
+    assert "/dashboard" in instruction
+    assert "intake" in instruction.lower()
+
+
+async def test_coach_code_typed_as_plain_text_links_prefix_included(runtime):
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+
+    ask = await runtime.handle_message(incoming(f"  {gym.coach_invite_code.upper()} "))
+    assert "Iron Temple" in ask
+
+    await runtime.handle_message(incoming("yes"))
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+    assert linked.gym.id == gym.id and linked.member.is_coach is True
+
+
+async def test_an_existing_member_is_promoted_in_place(runtime):
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    member = await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    reply = await runtime.handle_message(incoming("/start x", link_code=gym.coach_invite_code))
+
+    assert reply == COACH_PROMOTED_INSTRUCTION.format(name="Ana", gym="Iron Temple")
+    assert await member_count(runtime.stores.linking) == 1  # no new Member row
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+    assert linked.member.id == member.id and linked.member.is_coach is True
+
+
+async def test_an_existing_coach_retapping_the_link_is_reassured(runtime):
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    member = await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    await runtime.stores.linking.set_coach(member.id)
+
+    reply = await runtime.handle_message(incoming("/start x", link_code=gym.coach_invite_code))
+
+    assert "Iron Temple" in reply and "Ana" in reply
+    assert await member_count(runtime.stores.linking) == 1
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None and linked.member.is_coach is True
+
+
+async def test_another_gyms_coach_link_is_the_normal_switch_arriving_coach_flagged(runtime):
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    old_member = await runtime.stores.linking.link_member(old_gym.id, "Ana", "telegram", "42")
+
+    confirm = await runtime.handle_message(incoming("/start x", link_code=new_gym.coach_invite_code))
+    assert "Steel Yard" in confirm and "Iron Temple" in confirm
+    assert await member_count(runtime.stores.linking) == 1  # nothing switched yet
+
+    await runtime.handle_message(incoming("yes"))
+
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+    assert linked.gym.id == new_gym.id
+    assert linked.member.id != old_member.id and linked.member.is_coach is True
+    assert await member_count(runtime.stores.linking) == 2  # old Member row untouched
+
+
+async def test_declining_a_coach_switch_keeps_the_old_gym_unflagged(runtime):
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    old_member = await runtime.stores.linking.link_member(old_gym.id, "Ana", "telegram", "42")
+
+    await runtime.handle_message(incoming("/start x", link_code=new_gym.coach_invite_code))
+    await runtime.handle_message(incoming("no"))
+
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+    assert linked.member.id == old_member.id and linked.member.is_coach is False
+
+
+async def test_regenerating_the_coach_code_invalidates_a_pending_name_confirm(runtime):
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.handle_message(incoming("/start x", link_code=gym.coach_invite_code))
+    await runtime.stores.linking.regenerate_coach_invite_code(gym.id)
+
+    reply = await runtime.handle_message(incoming("yes"))
+
+    assert await member_count(runtime.stores.linking) == 0
+    assert "Iron Temple" not in reply  # expired invite, and gyms are not named
+
+
+async def test_regenerating_the_coach_code_invalidates_a_pending_switch(runtime):
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    old_member = await runtime.stores.linking.link_member(old_gym.id, "Ana", "telegram", "42")
+    await runtime.handle_message(incoming("/start x", link_code=new_gym.coach_invite_code))
+    await runtime.stores.linking.regenerate_coach_invite_code(new_gym.id)
+
+    reply = await runtime.handle_message(incoming("yes"))
+
+    assert "Iron Temple" in reply  # still with the old Gym
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+    assert linked.member.id == old_member.id and linked.member.is_coach is False
+    assert await member_count(runtime.stores.linking) == 1
+
+
+async def test_pasting_a_coach_code_mid_name_flow_restarts_linking(runtime):
+    gym_a = await runtime.stores.linking.create_gym("Iron Temple")
+    gym_b = await runtime.stores.linking.create_gym("Steel Yard")
+    await runtime.handle_message(incoming("/start x", link_code=gym_a.invite_code))
+
+    ask = await runtime.handle_message(incoming(gym_b.coach_invite_code))
+    assert "Steel Yard" in ask  # linking restarted, code not taken as a name
+
+    await runtime.handle_message(incoming("yes"))
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+    assert linked.gym.id == gym_b.id and linked.member.is_coach is True

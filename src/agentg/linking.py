@@ -73,6 +73,36 @@ LINK_EXPIRED_INSTRUCTION = (
     "regenerated). Apologize briefly and ask them to get their gym's "
     "current invite link or QR code and tap it to get set up."
 )
+COACH_WELCOME_INSTRUCTION = (
+    "Their name is now set as {name} at {gym} — they linked via the gym's "
+    "coach invite, so they're a Coach, not just a Member. Welcome them "
+    "warmly to {gym} as its coach: they can shape the gym's rules doc, "
+    "write routines for their members, and send /dashboard anytime to open "
+    "their coach dashboard. Do not start a member intake or build them a "
+    "training plan — but mention that if they'd like a plan for their own "
+    "training too, they only have to ask."
+)
+COACH_PROMOTED_INSTRUCTION = (
+    "{name} is already a Member of {gym} and just tapped the gym's coach "
+    "invite link — they're now a Coach as well. Congratulate them warmly: "
+    "they can now shape the gym's rules doc, write routines for their "
+    "members, and send /dashboard to open the coach dashboard. Nothing "
+    "about their own training changes — no intake, no new plan unless they "
+    "ask for one."
+)
+COACH_SWITCHED_INSTRUCTION = (
+    "They just confirmed switching gyms via a coach invite link. They're "
+    "now linked to {new_gym} as {name}, coach-flagged, with a fresh start "
+    "there; their training history stayed with their old gym. Confirm this "
+    "warmly and welcome them as a coach of {new_gym}: the rules doc, "
+    "writing routines for members, and /dashboard. Do not start a member "
+    "intake — if they'd like a plan of their own too, they can ask."
+)
+ALREADY_COACH_INSTRUCTION = (
+    "{name} is already a Coach of {gym} and just tapped the gym's coach "
+    "invite link again — nothing to change. Reassure them warmly and ask "
+    "what's on for today."
+)
 
 Phraser = Callable[[str, str], Awaitable[str]]
 
@@ -136,6 +166,7 @@ class _AwaitingName:
     gym_name: str
     invite_code: str
     prefilled: str
+    as_coach: bool = False
 
 
 @dataclass
@@ -143,6 +174,7 @@ class _AwaitingSwitch:
     gym_id: int
     gym_name: str
     invite_code: str
+    as_coach: bool = False
 
 
 _Pending = _AwaitingName | _AwaitingSwitch
@@ -169,20 +201,33 @@ class Linking:
         if isinstance(pending, _AwaitingSwitch):
             return await self._confirm_switch(identity, msg, linked, pending)
 
-        # A typed Invite code links too; any other unlinked text dead-ends.
-        gym = await self.store.gym_by_invite_code(msg.text)
-        if gym is not None:
-            return await self._start_link(identity, msg, linked, gym)
+        # A typed Invite or coach code links too; any other unlinked text
+        # dead-ends.
+        resolved = await self._gym_for_code(msg.text)
+        if resolved is not None:
+            gym, as_coach = resolved
+            return await self._start_link(identity, msg, linked, gym, as_coach)
         if linked is None:
             return await self.phraser(DEAD_END_INSTRUCTION, msg.text)
+        return None
+
+    async def _gym_for_code(self, text: str) -> tuple[Gym, bool] | None:
+        """Resolve a code from either namespace: ``(gym, as_coach)``."""
+        gym = await self.store.gym_by_invite_code(text)
+        if gym is not None:
+            return gym, False
+        gym = await self.store.gym_by_coach_invite_code(text)
+        if gym is not None:
+            return gym, True
         return None
 
     async def _handle_code(
         self, identity: _Identity, msg: IncomingMessage, linked: LinkedIdentity | None, code: str
     ) -> str:
-        gym = await self.store.gym_by_invite_code(code) if code else None
-        if gym is not None:
-            return await self._start_link(identity, msg, linked, gym)
+        resolved = await self._gym_for_code(code) if code else None
+        if resolved is not None:
+            gym, as_coach = resolved
+            return await self._start_link(identity, msg, linked, gym, as_coach)
         if linked is not None:
             if not code:  # a bare /start from a linked Member
                 instruction = SAME_GYM_INSTRUCTION.format(gym=linked.gym.name, name=linked.member.name)
@@ -192,21 +237,51 @@ class Linking:
         return await self.phraser(DEAD_END_INSTRUCTION, msg.text)
 
     async def _start_link(
-        self, identity: _Identity, msg: IncomingMessage, linked: LinkedIdentity | None, gym: Gym
+        self,
+        identity: _Identity,
+        msg: IncomingMessage,
+        linked: LinkedIdentity | None,
+        gym: Gym,
+        as_coach: bool,
     ) -> str:
         if linked is not None:
             if linked.gym.id == gym.id:
-                instruction = SAME_GYM_INSTRUCTION.format(gym=gym.name, name=linked.member.name)
+                if as_coach and not linked.member.is_coach:
+                    # An existing Member of this Gym tapping its coach link is
+                    # promoted in place — no new row, no confirm. Atomic with
+                    # the code check: a code regenerated since the tap revokes
+                    # the promotion instead of racing through.
+                    promoted = await self.store.promote_to_coach(
+                        gym.id, linked.member.id, gym.coach_invite_code or ""
+                    )
+                    if promoted:
+                        instruction = COACH_PROMOTED_INSTRUCTION.format(
+                            gym=gym.name, name=linked.member.name
+                        )
+                    else:
+                        instruction = LINK_INACTIVE_INSTRUCTION.format(gym=gym.name)
+                elif as_coach:
+                    instruction = ALREADY_COACH_INSTRUCTION.format(
+                        gym=gym.name, name=linked.member.name
+                    )
+                else:
+                    instruction = SAME_GYM_INSTRUCTION.format(gym=gym.name, name=linked.member.name)
                 return await self.phraser(instruction, msg.text)
+            code = gym.coach_invite_code if as_coach else gym.invite_code
             self._pending[identity] = _AwaitingSwitch(
-                gym_id=gym.id, gym_name=gym.name, invite_code=gym.invite_code
+                gym_id=gym.id, gym_name=gym.name, invite_code=code or "", as_coach=as_coach
             )
             instruction = SWITCH_CONFIRM_INSTRUCTION.format(new_gym=gym.name, old_gym=linked.gym.name)
             return await self.phraser(instruction, msg.text)
 
         prefilled = _clean_name(msg.display_name)
+        code = gym.coach_invite_code if as_coach else gym.invite_code
         self._pending[identity] = _AwaitingName(
-            gym_id=gym.id, gym_name=gym.name, invite_code=gym.invite_code, prefilled=prefilled
+            gym_id=gym.id,
+            gym_name=gym.name,
+            invite_code=code or "",
+            prefilled=prefilled,
+            as_coach=as_coach,
         )
         if prefilled:
             instruction = NAME_CONFIRM_INSTRUCTION.format(gym=gym.name, name=prefilled)
@@ -217,11 +292,13 @@ class Linking:
     async def _confirm_name(
         self, identity: _Identity, msg: IncomingMessage, pending: _AwaitingName
     ) -> str:
-        # A pasted Invite code mid-flow restarts linking, not a name change.
-        typed_gym = await self.store.gym_by_invite_code(msg.text)
-        if typed_gym is not None:
+        # A pasted Invite or coach code mid-flow restarts linking, not a
+        # name change.
+        resolved = await self._gym_for_code(msg.text)
+        if resolved is not None:
+            typed_gym, as_coach = resolved
             del self._pending[identity]
-            return await self._start_link(identity, msg, None, typed_gym)
+            return await self._start_link(identity, msg, None, typed_gym, as_coach)
         if pending.prefilled and _is_affirmative(msg.text):
             name = pending.prefilled
         elif _is_negative(msg.text):
@@ -232,13 +309,24 @@ class Linking:
             name = candidate if _looks_like_a_name(candidate) else ""
         if not name:
             return await self.phraser(NAME_ASK_INSTRUCTION.format(gym=pending.gym_name), msg.text)
-        if not await self._code_still_active(pending.gym_id, pending.invite_code):
-            del self._pending[identity]
-            return await self.phraser(LINK_EXPIRED_INSTRUCTION, msg.text)
-        await self.store.link_member(pending.gym_id, name, *identity)
+        if pending.as_coach:
+            # Atomic redemption: a code regenerated mid-flow revokes the whole
+            # link — no plain-member partial state, no duplicate on retry.
+            member = await self.store.link_member_as_coach(
+                pending.gym_id, name, *identity, pending.invite_code
+            )
+            if member is None:
+                del self._pending[identity]
+                return await self.phraser(LINK_EXPIRED_INSTRUCTION, msg.text)
+        else:
+            if not await self._code_still_active(pending.gym_id, pending.invite_code):
+                del self._pending[identity]
+                return await self.phraser(LINK_EXPIRED_INSTRUCTION, msg.text)
+            await self.store.link_member(pending.gym_id, name, *identity)
         # Cleared only after the write: a store error keeps the step retryable.
         del self._pending[identity]
-        instruction = WELCOME_INSTRUCTION.format(name=name, gym=pending.gym_name)
+        template = COACH_WELCOME_INSTRUCTION if pending.as_coach else WELCOME_INSTRUCTION
+        instruction = template.format(name=name, gym=pending.gym_name)
         return await self.phraser(instruction, msg.text)
 
     async def _confirm_switch(
@@ -255,18 +343,36 @@ class Linking:
             del self._pending[identity]
             instruction = SWITCH_CANCELLED_INSTRUCTION.format(gym=linked.gym.name)
             return await self.phraser(instruction, msg.text)
-        if not await self._code_still_active(pending.gym_id, pending.invite_code):
-            del self._pending[identity]
-            return await self.phraser(LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name), msg.text)
         # Fresh start at the new Gym: new Member row (same person, same name),
-        # old row untouched, channel identity re-pointed.
-        await self.store.link_member(pending.gym_id, linked.member.name, *identity)
+        # old row untouched, channel identity re-pointed. The coach path
+        # redeems atomically — a code regenerated mid-flow revokes the switch.
+        if pending.as_coach:
+            member = await self.store.link_member_as_coach(
+                pending.gym_id, linked.member.name, *identity, pending.invite_code
+            )
+            if member is None:
+                del self._pending[identity]
+                return await self.phraser(
+                    LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name), msg.text
+                )
+        else:
+            if not await self._code_still_active(pending.gym_id, pending.invite_code):
+                del self._pending[identity]
+                return await self.phraser(
+                    LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name), msg.text
+                )
+            await self.store.link_member(pending.gym_id, linked.member.name, *identity)
         # Cleared only after the write: a store error keeps the step retryable.
         del self._pending[identity]
-        instruction = SWITCHED_INSTRUCTION.format(new_gym=pending.gym_name, name=linked.member.name)
+        template = COACH_SWITCHED_INSTRUCTION if pending.as_coach else SWITCHED_INSTRUCTION
+        instruction = template.format(new_gym=pending.gym_name, name=linked.member.name)
         return await self.phraser(instruction, msg.text)
 
     async def _code_still_active(self, gym_id: int, invite_code: str) -> bool:
-        """Regenerating an Invite code invalidates flows the old code started."""
+        """Regenerating an Invite code invalidates flows the old code started.
+
+        Coach codes need no pre-check here: they redeem atomically in the
+        store (``link_member_as_coach`` / ``promote_to_coach``).
+        """
         gym = await self.store.gym_by_invite_code(invite_code)
         return gym is not None and gym.id == gym_id
