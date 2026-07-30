@@ -109,20 +109,25 @@ async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]
     ask (issue #101): the Note is always written and the Coaches are always
     pinged, with an authenticated deep link that lands signed-in on the
     Member's page — the same magic-link mechanism ``/dashboard`` uses."""
-    await c.stores.notes.remember(c.member_id, c.gym_id, "safety", summary)
+    note = await c.stores.notes.remember(c.member_id, c.gym_id, "safety", summary)
     if c.notifier is None:
         return {"logged": True, "coaches_notified": 0}
     coaches = await c.stores.linking.coaches_for_gym(c.gym_id, exclude_member_id=c.member_id)
     notified = 0
     for coach_id, _name, channel, channel_user_id in coaches:
-        text = f"Heads-up from your member {c.member_name}: {summary}"
+        # The stored text, not the raw summary: whitespace-collapsed like every
+        # Note, so a member-influenced summary can't smuggle a phishing URL
+        # onto its own line above the real magic link.
+        text = f"Heads-up from your member {c.member_name}: {note.text}"
         if c.dashboard_base_url is not None and c.stores.dashboard is not None:
             token = await c.stores.dashboard.create_login_token(
                 coach_id, c.gym_id, next_path=f"/members/{c.member_id}"
             )
             text += f"\n{c.dashboard_base_url}/login/{token}"
         try:
-            await c.notifier.send(channel, channel_user_id, text)
+            # No link preview: Telegram's fetcher would GET the one-time link
+            # before the coach does (and the token would land in its logs).
+            await c.notifier.send(channel, channel_user_id, text, disable_preview=True)
             notified += 1
         except Exception:
             logger.exception("failed to ping coach %s", channel_user_id)

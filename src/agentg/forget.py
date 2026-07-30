@@ -12,6 +12,7 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.models import (
+    DashboardLoginToken,
     Member,
     MemberChannel,
     MemberNote,
@@ -66,6 +67,17 @@ class ForgetStore:
                 update(Routine)
                 .where(Routine.created_by_member_id == member_id)
                 .values(created_by_member_id=None)
+            )
+            # Same for the safety-flag tick-offs: they stay acknowledged but
+            # by nobody (NULL), and the Member's dashboard login tokens die
+            # with them — residue-free.
+            await db.execute(
+                update(MemberNote)
+                .where(MemberNote.acknowledged_by_member_id == member_id)
+                .values(acknowledged_by_member_id=None)
+            )
+            await db.execute(
+                delete(DashboardLoginToken).where(DashboardLoginToken.member_id == member_id)
             )
             await db.execute(delete(MemberChannel).where(MemberChannel.member_id == member_id))
             await db.execute(delete(Member).where(Member.id == member_id))

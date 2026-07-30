@@ -22,7 +22,9 @@ logger = logging.getLogger(__name__)
 
 
 class Notifier(Protocol):
-    async def send(self, channel: str, channel_user_id: str, text: str) -> None: ...
+    async def send(
+        self, channel: str, channel_user_id: str, text: str, disable_preview: bool = False
+    ) -> None: ...
 
 
 def _previous_pinned_weekday(today: date, pinned: frozenset[int]) -> int | None:

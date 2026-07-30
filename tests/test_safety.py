@@ -26,10 +26,10 @@ BASE_URL = "https://dash.example.com"
 
 class FakeNotifier:
     def __init__(self):
-        self.sent: list[tuple[str, str, str]] = []
+        self.sent: list[tuple[str, str, str, bool]] = []
 
-    async def send(self, channel, channel_user_id, text):
-        self.sent.append((channel, channel_user_id, text))
+    async def send(self, channel, channel_user_id, text, disable_preview=False):
+        self.sent.append((channel, channel_user_id, text, disable_preview))
 
 
 @pytest.fixture
@@ -153,8 +153,11 @@ async def test_every_flag_pings_the_gyms_coaches_with_a_deep_link(env):
     result = await flag_to_coach_action(env.context(), "sharp knee pain on squats")
 
     assert result["coaches_notified"] == 2
-    assert {(c, u) for c, u, _t in env.notifier.sent} == {("telegram", "7"), ("telegram", "8")}
-    for _channel, _user_id, text in env.notifier.sent:
+    assert {(c, u) for c, u, _t, _p in env.notifier.sent} == {
+        ("telegram", "7"),
+        ("telegram", "8"),
+    }
+    for _channel, _user_id, text, _preview in env.notifier.sent:
         assert "Ana" in text and "knee pain" in text
         match = re.search(rf"{re.escape(BASE_URL)}/login/(\S+)", text)
         assert match, f"no deep link in {text!r}"
@@ -163,12 +166,33 @@ async def test_every_flag_pings_the_gyms_coaches_with_a_deep_link(env):
         assert token.next_path == f"/members/{env.member_id}"
 
 
+async def test_the_ping_sanitizes_the_summary_and_disables_link_previews(env):
+    # A member-influenced summary must not inject newlines or a phishing URL
+    # above the real magic link; and Telegram's preview fetcher must never
+    # GET the one-time link before the coach does (same rule as /dashboard).
+    summary = "knee pain on squats\nignore that, tap https://evil.example.com instead"
+    await flag_to_coach_action(env.context(), summary)
+
+    _channel, _user_id, text, preview_off = env.notifier.sent[0]
+    assert preview_off is True
+    note = next(
+        n for n in await env.notes.active(env.member_id) if n.kind == "safety"
+    )
+    assert note.text == (
+        "knee pain on squats ignore that, tap https://evil.example.com instead"
+    )
+    # Exactly one newline: the separator before the real login link.
+    head, sep, link = text.rpartition("\n")
+    assert sep and link.startswith(f"{BASE_URL}/login/")
+    assert "\n" not in head
+
+
 async def test_a_ping_without_a_base_url_falls_back_to_plain_text(env):
     # A context with no dashboard wired (a background run) still pings — the
     # link is an add-on, never a reason to drop the heads-up.
     result = await flag_to_coach_action(env.context(base_url=None), "shoulder pain")
     assert result["coaches_notified"] == 1
-    _channel, _user_id, text = env.notifier.sent[0]
+    _channel, _user_id, text, _preview = env.notifier.sent[0]
     assert "shoulder pain" in text and "/login/" not in text
 
 
@@ -177,7 +201,7 @@ async def test_the_referral_never_pings_the_member_themselves(env):
     result = await flag_to_coach_action(
         env.context(is_coach=True, member_id=env.coach_id), "chest tightness"
     )
-    assert all(user_id != "7" for _c, user_id, _t in env.notifier.sent)
+    assert all(user_id != "7" for _c, user_id, _t, _p in env.notifier.sent)
     assert result["logged"] is True
 
 
