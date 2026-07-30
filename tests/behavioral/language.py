@@ -29,10 +29,16 @@ ENGLISH_TRAINING_VOCAB: tuple[str, ...] = (
     "lean",
 )
 
-_PATTERNS = {
-    term: re.compile(rf"\b{re.escape(term)}\b", re.IGNORECASE)
-    for term in ENGLISH_TRAINING_VOCAB
-}
+def _compile(term: str) -> re.Pattern[str]:
+    # Multi-word terms match any run of whitespace or hyphens between words,
+    # so "weight loss" catches "weight-loss", doubled spaces, tabs, newlines.
+    return re.compile(
+        r"\b" + r"[\s-]+".join(re.escape(part) for part in term.split()) + r"\b",
+        re.IGNORECASE,
+    )
+
+
+_PATTERNS = {term: _compile(term) for term in ENGLISH_TRAINING_VOCAB}
 
 
 def find_english_leaks(reply: str) -> set[str]:
