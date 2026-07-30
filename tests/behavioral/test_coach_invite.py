@@ -196,3 +196,47 @@ async def test_member_retapping_the_member_link_stays_a_plain_member(tmp_path):
         assert await _count(h._engine, Member) == 1
         linked = await h.stores.linking.identity_for("telegram", "42")
         assert linked is not None and linked.member.is_coach is False
+
+
+# --- a revoked code can never grant (PR #109 findings) ---
+
+
+async def test_a_revoked_coach_code_cannot_promote_a_member(tmp_path):
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member(name="Dani", gym_name="Iron Temple")
+        gym = await _gym(h)
+        stale_code = gym.coach_invite_code
+        await h.stores.linking.regenerate_coach_invite_code(h.gym_id)
+
+        reply = await h.say("/start x", link_code=stale_code)
+
+        assert "Iron Temple" in reply  # reassured, not promoted
+        assert await _count(h._engine, Member) == 1
+        linked = await h.stores.linking.identity_for("telegram", "42")
+        assert linked is not None and linked.member.is_coach is False
+
+
+async def test_a_revoked_coach_link_retries_cleanly_without_duplicates(tmp_path):
+    async with ConversationHarness.create(tmp_path) as h:
+        gym = await h.create_gym("Iron Temple")
+
+        # Mid-link when ops regenerates: the confirm redeems nothing.
+        await h.say(
+            "/start x",
+            link_code=gym.coach_invite_code,
+            channel_user_id="99",
+            display_name="Sam",
+        )
+        new_code = await h.stores.linking.regenerate_coach_invite_code(gym.id)
+        reply = await h.say("yes", channel_user_id="99", display_name="Sam")
+        assert "Iron Temple" not in reply  # expired code, gyms are not named
+        assert await _count(h._engine, Member) == 0
+
+        # Retrying with the current code links exactly one coach-flagged Member.
+        await h.say("/start x", link_code=new_code, channel_user_id="99", display_name="Sam")
+        await h.say("yes", channel_user_id="99", display_name="Sam")
+
+        assert await _count(h._engine, Member) == 1
+        linked = await h.stores.linking.identity_for("telegram", "99")
+        assert linked is not None
+        assert linked.gym.id == gym.id and linked.member.is_coach is True

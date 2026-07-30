@@ -248,11 +248,18 @@ class Linking:
             if linked.gym.id == gym.id:
                 if as_coach and not linked.member.is_coach:
                     # An existing Member of this Gym tapping its coach link is
-                    # promoted in place — no new row, no confirm.
-                    await self.store.set_coach(linked.member.id)
-                    instruction = COACH_PROMOTED_INSTRUCTION.format(
-                        gym=gym.name, name=linked.member.name
+                    # promoted in place — no new row, no confirm. Atomic with
+                    # the code check: a code regenerated since the tap revokes
+                    # the promotion instead of racing through.
+                    promoted = await self.store.promote_to_coach(
+                        gym.id, linked.member.id, gym.coach_invite_code or ""
                     )
+                    if promoted:
+                        instruction = COACH_PROMOTED_INSTRUCTION.format(
+                            gym=gym.name, name=linked.member.name
+                        )
+                    else:
+                        instruction = LINK_INACTIVE_INSTRUCTION.format(gym=gym.name)
                 elif as_coach:
                     instruction = ALREADY_COACH_INSTRUCTION.format(
                         gym=gym.name, name=linked.member.name
@@ -302,12 +309,20 @@ class Linking:
             name = candidate if _looks_like_a_name(candidate) else ""
         if not name:
             return await self.phraser(NAME_ASK_INSTRUCTION.format(gym=pending.gym_name), msg.text)
-        if not await self._code_still_active(pending.gym_id, pending.invite_code, pending.as_coach):
-            del self._pending[identity]
-            return await self.phraser(LINK_EXPIRED_INSTRUCTION, msg.text)
-        member = await self.store.link_member(pending.gym_id, name, *identity)
         if pending.as_coach:
-            await self.store.set_coach(member.id)
+            # Atomic redemption: a code regenerated mid-flow revokes the whole
+            # link — no plain-member partial state, no duplicate on retry.
+            member = await self.store.link_member_as_coach(
+                pending.gym_id, name, *identity, pending.invite_code
+            )
+            if member is None:
+                del self._pending[identity]
+                return await self.phraser(LINK_EXPIRED_INSTRUCTION, msg.text)
+        else:
+            if not await self._code_still_active(pending.gym_id, pending.invite_code):
+                del self._pending[identity]
+                return await self.phraser(LINK_EXPIRED_INSTRUCTION, msg.text)
+            await self.store.link_member(pending.gym_id, name, *identity)
         # Cleared only after the write: a store error keeps the step retryable.
         del self._pending[identity]
         template = COACH_WELCOME_INSTRUCTION if pending.as_coach else WELCOME_INSTRUCTION
@@ -328,24 +343,36 @@ class Linking:
             del self._pending[identity]
             instruction = SWITCH_CANCELLED_INSTRUCTION.format(gym=linked.gym.name)
             return await self.phraser(instruction, msg.text)
-        if not await self._code_still_active(pending.gym_id, pending.invite_code, pending.as_coach):
-            del self._pending[identity]
-            return await self.phraser(LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name), msg.text)
         # Fresh start at the new Gym: new Member row (same person, same name),
-        # old row untouched, channel identity re-pointed.
-        member = await self.store.link_member(pending.gym_id, linked.member.name, *identity)
+        # old row untouched, channel identity re-pointed. The coach path
+        # redeems atomically — a code regenerated mid-flow revokes the switch.
         if pending.as_coach:
-            await self.store.set_coach(member.id)
+            member = await self.store.link_member_as_coach(
+                pending.gym_id, linked.member.name, *identity, pending.invite_code
+            )
+            if member is None:
+                del self._pending[identity]
+                return await self.phraser(
+                    LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name), msg.text
+                )
+        else:
+            if not await self._code_still_active(pending.gym_id, pending.invite_code):
+                del self._pending[identity]
+                return await self.phraser(
+                    LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name), msg.text
+                )
+            await self.store.link_member(pending.gym_id, linked.member.name, *identity)
         # Cleared only after the write: a store error keeps the step retryable.
         del self._pending[identity]
         template = COACH_SWITCHED_INSTRUCTION if pending.as_coach else SWITCHED_INSTRUCTION
         instruction = template.format(new_gym=pending.gym_name, name=linked.member.name)
         return await self.phraser(instruction, msg.text)
 
-    async def _code_still_active(self, gym_id: int, invite_code: str, as_coach: bool) -> bool:
-        """Regenerating a code invalidates flows the old code started."""
-        if as_coach:
-            gym = await self.store.gym_by_coach_invite_code(invite_code)
-        else:
-            gym = await self.store.gym_by_invite_code(invite_code)
+    async def _code_still_active(self, gym_id: int, invite_code: str) -> bool:
+        """Regenerating an Invite code invalidates flows the old code started.
+
+        Coach codes need no pre-check here: they redeem atomically in the
+        store (``link_member_as_coach`` / ``promote_to_coach``).
+        """
+        gym = await self.store.gym_by_invite_code(invite_code)
         return gym is not None and gym.id == gym_id

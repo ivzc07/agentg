@@ -12,7 +12,8 @@ import secrets
 import string
 from dataclasses import dataclass
 
-from sqlalchemy import select, update
+from sqlalchemy import inspect, select, text, update
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.models import Base, Gym, Member, MemberChannel
@@ -39,12 +40,74 @@ def normalize_invite_code(text: str) -> str:
     return text.strip().lower()
 
 
+def _add_missing_columns(conn: Connection) -> None:
+    """Schema evolution for deployed databases: ``create_all`` never alters
+    existing tables, so columns added after first deploy are applied here,
+    idempotently. (No migration framework — the repo's mechanism is this
+    list; add one entry per new column on an existing table.)"""
+    gym_columns = {c["name"] for c in inspect(conn).get_columns("gyms")}
+    if "coach_invite_code" not in gym_columns:
+        conn.execute(text("ALTER TABLE gyms ADD COLUMN coach_invite_code VARCHAR(64)"))
+    gym_indexes = {i["name"] for i in inspect(conn).get_indexes("gyms")}
+    if "ix_gyms_coach_invite_code" not in gym_indexes:
+        conn.execute(
+            text("CREATE UNIQUE INDEX ix_gyms_coach_invite_code ON gyms (coach_invite_code)")
+        )
+
+
 @dataclass(frozen=True)
 class LinkedIdentity:
     """A resolved channel identity: the Member it points at, and their Gym."""
 
     member: Member
     gym: Gym
+
+
+async def _link_member_in_session(
+    db, gym_id: int, name: str, channel: str, channel_user_id: str, *, is_coach: bool = False
+) -> Member:
+    """The writes of ``link_member`` inside an already-open transaction."""
+    member = Member(gym_id=gym_id, name=name, is_coach=is_coach)
+    db.add(member)
+    await db.flush()
+    pointer = await db.scalar(
+        select(MemberChannel).where(
+            MemberChannel.channel == channel,
+            MemberChannel.channel_user_id == channel_user_id,
+        )
+    )
+    if pointer is None:
+        db.add(
+            MemberChannel(
+                gym_id=gym_id,
+                member_id=member.id,
+                channel=channel,
+                channel_user_id=channel_user_id,
+            )
+        )
+    else:
+        pointer.member_id = member.id
+        pointer.gym_id = gym_id
+    return member
+
+
+async def _redeem_coach_code(db, gym_id: int, coach_code: str) -> bool:
+    """Confirm the coach code is still active while locking the Gym row.
+
+    The no-op UPDATE takes the Gym row's write lock until commit, so a
+    concurrent ``regenerate_coach_invite_code`` either landed first (this
+    returns ``False``) or waits for this transaction — a revoked code can
+    never slip a grant through between check and commit.
+    """
+    code = normalize_invite_code(coach_code)
+    if not code:
+        return False
+    result = await db.execute(
+        update(Gym)
+        .where(Gym.id == gym_id, Gym.coach_invite_code == code)
+        .values(coach_invite_code=code)
+    )
+    return result.rowcount > 0
 
 
 class LinkingStore:
@@ -55,6 +118,16 @@ class LinkingStore:
     async def ensure_schema(self) -> None:
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(_add_missing_columns)
+        # Gyms provisioned before the coach link get their code at startup;
+        # fresh schemas have no NULL codes, so this is a no-op there.
+        async with self._sessions() as db:
+            legacy = (
+                await db.scalars(select(Gym).where(Gym.coach_invite_code.is_(None)))
+            ).all()
+            for gym in legacy:
+                gym.coach_invite_code = new_coach_invite_code()
+            await db.commit()
 
     async def create_gym(
         self, name: str, *, timezone: str = "UTC", weight_unit: str = "kg"
@@ -113,29 +186,49 @@ class LinkingStore:
         §Hosting) and the runtime serializes turns per identity.
         """
         async with self._sessions() as db:
-            member = Member(gym_id=gym_id, name=name)
-            db.add(member)
-            await db.flush()
-            pointer = await db.scalar(
-                select(MemberChannel).where(
-                    MemberChannel.channel == channel,
-                    MemberChannel.channel_user_id == channel_user_id,
-                )
-            )
-            if pointer is None:
-                db.add(
-                    MemberChannel(
-                        gym_id=gym_id,
-                        member_id=member.id,
-                        channel=channel,
-                        channel_user_id=channel_user_id,
-                    )
-                )
-            else:
-                pointer.member_id = member.id
-                pointer.gym_id = gym_id
+            member = await _link_member_in_session(db, gym_id, name, channel, channel_user_id)
             await db.commit()
             return member
+
+    async def link_member_as_coach(
+        self, gym_id: int, name: str, channel: str, channel_user_id: str, coach_code: str
+    ) -> Member | None:
+        """Redeem a coach code: link the joiner already coach-flagged.
+
+        One transaction: the Member row is born coach-flagged (no partial
+        plain-member state a retry could duplicate), and the grant is
+        conditional on the code still being active — a code regenerated
+        mid-flow revokes the whole link. Returns ``None`` when the code is
+        no longer active; nothing is written then.
+        """
+        async with self._sessions() as db:
+            if not await _redeem_coach_code(db, gym_id, coach_code):
+                await db.rollback()
+                return None
+            member = await _link_member_in_session(
+                db, gym_id, name, channel, channel_user_id, is_coach=True
+            )
+            await db.commit()
+            return member
+
+    async def promote_to_coach(self, gym_id: int, member_id: int, coach_code: str) -> bool:
+        """Redeem a coach code: flag an existing Member of the Gym as Coach.
+
+        Atomic with the code check, so a code regenerated first revokes the
+        promotion instead of racing through. Returns ``False`` when the code
+        is no longer active.
+        """
+        async with self._sessions() as db:
+            if not await _redeem_coach_code(db, gym_id, coach_code):
+                await db.rollback()
+                return False
+            await db.execute(
+                update(Member)
+                .where(Member.id == member_id, Member.gym_id == gym_id)
+                .values(is_coach=True)
+            )
+            await db.commit()
+            return True
 
     async def set_coach(self, member_id: int, is_coach: bool = True) -> None:
         async with self._sessions() as db:
