@@ -26,8 +26,16 @@ GYM_NAME_MAX_LENGTH = 200  # Gym.name is String(200)
 
 
 def new_invite_code() -> str:
-    """A short random slug, safe inside a t.me deep link and easy to type."""
-    return "".join(secrets.choice(INVITE_CODE_ALPHABET) for _ in range(INVITE_CODE_LENGTH))
+    """A short random slug, safe inside a t.me deep link and easy to type.
+
+    Always carries at least one digit: the near-miss shape test in linking
+    (``_looks_like_invite_code``) uses a digit to tell typed codes from
+    ordinary short words, so a digitless code would dead-end its own typos.
+    """
+    while True:
+        code = "".join(secrets.choice(INVITE_CODE_ALPHABET) for _ in range(INVITE_CODE_LENGTH))
+        if any(ch.isdigit() for ch in code):
+            return code
 
 
 def new_coach_invite_code() -> str:

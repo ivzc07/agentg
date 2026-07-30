@@ -255,6 +255,17 @@ async def test_a_near_miss_coach_code_is_told_the_code_did_not_work(runtime):
     assert await member_count(runtime.stores.linking) == 0
 
 
+async def test_a_near_miss_code_arriving_as_a_deep_link_is_also_told(runtime):
+    await runtime.stores.linking.create_gym("Iron Temple")
+
+    reply = await runtime.handle_message(
+        incoming("/start 8lrf8m6ee", link_code="8lrf8m6ee")
+    )
+
+    assert reply == CODE_NOT_FOUND_INSTRUCTION
+    assert await member_count(runtime.stores.linking) == 0
+
+
 @pytest.mark.parametrize(
     "text",
     [

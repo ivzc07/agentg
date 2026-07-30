@@ -181,8 +181,8 @@ def _looks_like_invite_code(text: str) -> bool:
 
     Shape only — a single word from the code alphabet, one character off
     the real length at most (a dropped or doubled char). Requiring a digit
-    keeps ordinary short messages ("gracias", "perfecto") out: real codes
-    are random slugs and almost always carry one, Spanish words don't.
+    keeps ordinary short messages ("gracias", "perfecto") out: generation
+    guarantees every real code carries one, Spanish words don't.
     """
     word = normalize_invite_code(text)
     if word.startswith(COACH_CODE_PREFIX):
@@ -244,9 +244,7 @@ class Linking:
             gym, as_coach = resolved
             return await self._start_link(identity, msg, linked, gym, as_coach)
         if linked is None:
-            if _looks_like_invite_code(msg.text):
-                return await self.phraser(CODE_NOT_FOUND_INSTRUCTION, msg.text)
-            return await self.phraser(DEAD_END_INSTRUCTION, msg.text)
+            return await self._reply_unlinked_unknown(msg, msg.text)
         return None
 
     async def _gym_for_code(self, text: str) -> tuple[Gym, bool] | None:
@@ -272,6 +270,13 @@ class Linking:
             else:
                 instruction = LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name)
             return await self.phraser(instruction, msg.text)
+        return await self._reply_unlinked_unknown(msg, code)
+
+    async def _reply_unlinked_unknown(self, msg: IncomingMessage, candidate: str) -> str:
+        """Unlinked and nothing matched: a near-miss code (typed or tapped)
+        is told the code didn't work; anything else dead-ends."""
+        if _looks_like_invite_code(candidate):
+            return await self.phraser(CODE_NOT_FOUND_INSTRUCTION, msg.text)
         return await self.phraser(DEAD_END_INSTRUCTION, msg.text)
 
     async def _start_link(
