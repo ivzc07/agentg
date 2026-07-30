@@ -64,6 +64,23 @@ def test_the_compound_exemption_still_flags_standalone_leaks():
     assert find_english_leaks("tu objetivo es weight-loss") == {"weight loss"}
 
 
+def test_space_separated_leaks_next_to_compounds_are_still_flagged():
+    # Round-3: the exemption must not swallow real leaks near a compound.
+    assert find_english_leaks("vamos a hacer muscle pull-ups hoy") == {"muscle"}
+    assert find_english_leaks("para ganar strength haz Muscle-up") == {"strength"}
+    assert find_english_leaks("tu muscle es weight-loss") == {"muscle", "weight loss"}
+    assert find_english_leaks("haz pull-ups strength por favor") == {"strength"}
+
+
+def test_a_hit_spanning_hyphens_is_a_leak_unless_in_a_particle_compound():
+    # "weight loss" spelled with hyphens is still the phrase…
+    assert find_english_leaks("weight-loss-plan") == {"weight loss"}
+    assert find_english_leaks("pre-weight-loss") == {"weight loss"}
+    # …and a lexicon word plus a generic suffix is a leak, not a name shape.
+    assert find_english_leaks("muscle-building") == {"muscle"}
+    assert find_english_leaks("strength-focus") == {"strength"}
+
+
 # --- what actually guards the behavior: the Agent's language rule ---
 
 
