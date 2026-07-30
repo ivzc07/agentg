@@ -2,6 +2,10 @@
 # Post an automated code review on a GitHub PR using the Pi coding agent
 # (pi-dynamic-workflows extension). Greptile-style severity comments.
 #
+# Inside Herdr (HERDR_ENV=1) the review runs in a visible Pi TUI pane named
+# 'pi-review' (created on first use, reused and serialized afterwards).
+# Outside Herdr it falls back to a headless `pi -p` run.
+#
 # Usage: scripts/pi-review <pr-number>
 # Requires: pi (with @quintinshaw/pi-dynamic-workflows installed), gh (authenticated).
 set -eu
@@ -9,7 +13,7 @@ set -eu
 PR="${1:?usage: scripts/pi-review <pr-number>}"
 REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 
-exec pi -p "Run the code-review workflow on GitHub PR ${PR} of repo ${REPO}. \
+PROMPT="Run the code-review workflow on GitHub PR ${PR} of repo ${REPO}. \
 Fetch the PR diff and description with gh. Run the workflow in the foreground and wait for its complete result before doing anything else. \
 Prioritize correctness bugs, broken imports, security problems, and test-coverage gaps; ignore pure style and wording preferences. \
 Then act like the Greptile review bot: for each verified finding, post one comment on PR ${PR} via 'gh pr comment' with a severity prefix [P1] (bug or correctness issue, must fix), [P2] (should fix), or [P3] (optional), naming the file and line. \
@@ -17,3 +21,53 @@ Only post findings the workflow verified as real; do not pad. Post at most 3 [P3
 If there are no real findings, post a single comment saying the automated review found no issues. \
 Sign every comment with '- pi code-review'. \
 When done, reply with just the number of findings posted."
+
+# Herdr client binary: PATH may hold a stale copy that cannot talk to a newer
+# server, so prefer the installed one when present.
+resolve_herdr() {
+    if [ -n "${LOCALAPPDATA:-}" ]; then
+        installed="$(cygpath "$LOCALAPPDATA" 2>/dev/null)/Programs/Herdr/bin/herdr"
+        if [ -x "$installed" ]; then
+            printf '%s' "$installed"
+            return
+        fi
+    fi
+    printf '%s' herdr
+}
+
+comment_count() {
+    a=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '[.[] | select(.body | test("pi code-review"))] | length' 2>/dev/null || echo 0)
+    b=$(gh api --paginate "repos/${REPO}/pulls/${PR}/comments" --jq '[.[] | select(.body | test("pi code-review"))] | length' 2>/dev/null || echo 0)
+    echo $((a + b))
+}
+
+if [ "${HERDR_ENV:-}" = 1 ]; then
+    H="$(resolve_herdr)"
+    # Reuse the live 'pi-review' agent, or create its pane + agent on first use.
+    if ! "$H" agent get pi-review >/dev/null 2>&1; then
+        PANE=$("$H" pane split --current --direction right --cwd "$PWD" --no-focus |
+            sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -1)
+        [ -n "$PANE" ] || { echo "pi-review: could not create a pane" >&2; exit 1; }
+        "$H" agent start pi-review --kind pi --pane "$PANE" --timeout 120000 >/dev/null
+    fi
+    # Serialize: wait for any in-flight review to settle before prompting.
+    "$H" agent wait pi-review --until idle --until done --until blocked --timeout 1800000 >/dev/null
+    BEFORE=$(comment_count)
+    "$H" agent prompt pi-review "$PROMPT" >/dev/null
+    # The pane shows the live run; block until the review lands on the PR
+    # (comment count moves) so callers keep run-then-check semantics.
+    i=0
+    while [ $i -lt 60 ]; do
+        sleep 30
+        NOW=$(comment_count)
+        if [ "$NOW" -gt "$BEFORE" ]; then
+            echo $((NOW - BEFORE))
+            exit 0
+        fi
+        i=$((i + 1))
+    done
+    echo "pi-review: timed out waiting for review comments on PR ${PR}" >&2
+    exit 1
+fi
+
+exec pi -p "$PROMPT"
