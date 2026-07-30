@@ -11,7 +11,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from agentg.dashboard_store import DashboardStore
-from agentg.dashboard_web import REGENERATE_CONFIRM, build_app
+from agentg.dashboard_web import REGENERATE_CONFIRM, _qr_svg, build_app
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
 from conftest import FakeClock
@@ -224,3 +224,16 @@ async def test_anonymous_visits_to_settings_bounce(tmp_path):
         ).text()
         assert BOUNCE_MARKER in page
     await engine.dispose()
+
+
+def test_the_qr_svg_is_memoized_per_invite_url():
+    """The encode runs on the bot's shared event loop, so a URL's SVG is
+    computed once; regenerating the code changes the URL, which is a cache
+    miss — the stale entry never serves again."""
+    _qr_svg.cache_clear()
+    url = f"https://t.me/{BOT_USERNAME}?start=cachetest"
+    assert _qr_svg(url) == _qr_svg(url)
+    assert _qr_svg.cache_info().hits == 1
+    assert _qr_svg.cache_info().misses == 1
+    _qr_svg(f"https://t.me/{BOT_USERNAME}?start=newcode99")  # a "regenerated" URL
+    assert _qr_svg.cache_info().misses == 2

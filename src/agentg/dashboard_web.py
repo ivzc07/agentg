@@ -33,6 +33,7 @@ import hmac
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from html import escape
 
 import qrcode
@@ -40,7 +41,7 @@ import qrcode.image.svg
 from aiohttp import web
 
 from agentg.dashboard_store import DashboardStore, RosterRow
-from agentg.linking_store import LinkingStore
+from agentg.linking_store import GYM_NAME_MAX_LENGTH, LinkingStore
 from agentg.models import Gym, Member
 
 logger = logging.getLogger(__name__)
@@ -120,9 +121,17 @@ def _invite_url(bot_username: str, code: str) -> str:
     return f"https://t.me/{bot_username}?start={code}"
 
 
+@lru_cache(maxsize=32)
 def _qr_svg(data: str) -> str:
     """An inline SVG QR for the member invite link — a poster the Coach can
-    print. The coach link gets none: it is forwarded privately, not posted."""
+    print. The coach link gets none: it is forwarded privately, not posted.
+
+    Memoized on the URL: the encode runs on the event loop the bot shares
+    with Telegram long-polling, so after the first render of a link every
+    Settings render is a dict lookup. Regeneration changes the URL, so the
+    stale entry never serves again; the small cap bounds churn across
+    regenerations.
+    """
     image = qrcode.make(data, image_factory=qrcode.image.svg.SvgPathImage, box_size=8)
     return image.to_string(encoding="unicode")
 
@@ -195,7 +204,7 @@ def _settings_page(gym: Gym, bot_username: str, error: str = "") -> str:
 <p>{SETTINGS_GYM_NAME_HELP}</p>
 <form method="post" action="/settings/gym-name">
 <p><input type="text" name="name" value="{escape(gym.name, quote=True)}"
-maxlength="200" required>
+maxlength="{GYM_NAME_MAX_LENGTH}" required>
 <button type="submit">Guardar</button></p>
 </form>
 </section>
