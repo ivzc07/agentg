@@ -4,11 +4,10 @@ The live judge scores language consistency; this offline lexicon is the CI
 gate: English training vocabulary with an everyday Spanish equivalent must
 never surface in a Spanish reply. Exercise catalog names are English by
 design and deliberately absent from the lexicon — the carve-out in the
-Agent's language rule covers them and nothing else. Exercise-name shapes are
-exempt too: a lexicon hit inside a hyphenated particle compound
-("Muscle-up", "strength band pull-apart") is part of the name, not a leak —
-but a hit next to one ("muscle pull-ups") or spelled with hyphens
-("weight-loss") still flags.
+Agent's language rule covers them and nothing else. Allowlisted exercise-name
+shapes are exempt too ("Muscle-up", "strength band pull-apart"), but a hit
+next to one ("muscle pull-ups") or spelled with hyphens ("weight-loss")
+still flags.
 """
 
 from __future__ import annotations
@@ -47,54 +46,60 @@ _PATTERNS = {term: _compile(term) for term in ENGLISH_TRAINING_VOCAB}
 _LETTER = r"A-Za-zÀ-ÖØ-öø-ÿ"
 _TOKEN_RE = re.compile(rf"[{_LETTER}]+(?:-[{_LETTER}]+)*")
 
-# Direction particles that mark an exercise-name shape ("Muscle-up",
-# "pull-apart"). Deliberately singular: "pull-ups" is the catalog plural of
-# pull-up, not a compound, and must not carve out neighboring leaks.
-_PARTICLES = frozenset({"up", "down", "apart", "over", "out", "through"})
-
-# Common Spanish words. They break an exercise-name span, so a leak on the
-# other side of one ("strength haz Muscle-up") stays flagged.
-_SPANISH_WORDS = frozenset(
-    "a al con de del e el en haz la las los ni o para pero por que sin u un una unas unos y".split()
+# Hyphenated exercise-name shapes the catalog carve-out covers
+# (case-insensitive, optional plural "s" on the final particle). Anything
+# particle-bearing but not listed here ("lean-out", "bulking-up") is NOT a
+# name — its lexicon parts flag normally. Adding a catalog name is one line.
+EXERCISE_NAME_CORES: frozenset[str] = frozenset(
+    {
+        "pull-up",
+        "push-up",
+        "chin-up",
+        "sit-up",
+        "step-up",
+        "muscle-up",
+        "pull-apart",
+        "pull-over",
+        "pull-through",
+    }
 )
+
+# Equipment modifiers that may immediately precede a core ("band
+# pull-apart"). "strength" counts only directly before one of these
+# ("strength band pull-apart") — never alone next to a core.
+_EQUIPMENT_MODIFIERS = frozenset({"band", "bar", "ring", "cable"})
+
+
+def _is_name_core(token: str) -> bool:
+    lowered = token.lower()
+    return lowered in EXERCISE_NAME_CORES or (
+        lowered.endswith("s") and lowered[:-1] in EXERCISE_NAME_CORES
+    )
 
 
 def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
-    """Spans shaped like exercise names the catalog carve-out covers.
-
-    The core is a hyphenated token carrying a direction particle
-    ("Muscle-up", "pull-apart") — never "weight-loss" or "muscle-building",
-    whose other parts are ordinary words. It extends over single-space-joined
-    neighbors that are not Spanish words ("strength band pull-apart"), and
-    nowhere else: "muscle pull-ups" is a leak next to a catalog name, not a
-    compound. Shape-based only — no dependence on the seed catalog list.
-    """
+    """Spans the catalog carve-out covers: an allowlisted name core plus at
+    most two immediately preceding equipment-modifier tokens. No right-side
+    absorption, no generic neighbor walking."""
     tokens = list(_TOKEN_RE.finditer(text))
     spans = []
     for i, tok in enumerate(tokens):
-        parts = tok.group().split("-")
-        if len(parts) < 2 or not any(p.lower() in _PARTICLES for p in parts):
+        if not _is_name_core(tok.group()):
             continue
-        start, end = tok.start(), tok.end()
+        start = tok.start()
+        absorbed = 0
         k = i - 1
-        while (
-            k >= 0
-            and text[tokens[k].end() : start] == " "
-            and "-" not in tokens[k].group()
-            and tokens[k].group().lower() not in _SPANISH_WORDS
-        ):
+        while k >= 0 and absorbed < 2 and text[tokens[k].end() : start] == " ":
+            word = tokens[k].group().lower()
+            following = tokens[k + 1].group().lower()
+            if word not in _EQUIPMENT_MODIFIERS and not (
+                word == "strength" and following in _EQUIPMENT_MODIFIERS
+            ):
+                break
             start = tokens[k].start()
+            absorbed += 1
             k -= 1
-        k = i + 1
-        while (
-            k < len(tokens)
-            and text[end : tokens[k].start()] == " "
-            and "-" not in tokens[k].group()
-            and tokens[k].group().lower() not in _SPANISH_WORDS
-        ):
-            end = tokens[k].end()
-            k += 1
-        spans.append((start, end))
+        spans.append((start, tok.end()))
     return spans
 
 

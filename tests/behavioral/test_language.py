@@ -81,6 +81,35 @@ def test_a_hit_spanning_hyphens_is_a_leak_unless_in_a_particle_compound():
     assert find_english_leaks("strength-focus") == {"strength"}
 
 
+def test_allowlisted_name_cores_stay_clean_including_plurals():
+    # Round-4: cores come from an explicit allowlist, plural particle ok.
+    assert find_english_leaks("muscle-ups") == set()
+    assert find_english_leaks("Muscle-ups") == set()
+    assert find_english_leaks("strength band pull-aparts") == set()
+    assert find_english_leaks("Hoy toca muscle-ups y dips") == set()
+
+
+def test_only_equipment_modifiers_extend_a_name_core_backwards():
+    # "strength" counts only as part of "strength band/bar/…" before a core;
+    # anything else next to a core — before or after — is a leak.
+    assert find_english_leaks("strength Muscle-up") == {"strength"}
+    assert find_english_leaks("Muscle-up strength") == {"strength"}
+    assert find_english_leaks("muscle pull-apart") == {"muscle"}
+    assert find_english_leaks("vamos a hacer strength Muscle-up hoy") == {"strength"}
+    assert find_english_leaks("haz pull-up strength por favor") == {"strength"}
+    assert find_english_leaks("pull-up for strength") == {"strength"}
+    assert find_english_leaks("muscle pull-ups") == {"muscle"}
+
+
+def test_other_hyphenated_tokens_are_not_name_cores():
+    # Particle-bearing, but not on the allowlist: lexicon parts flag normally.
+    assert find_english_leaks("lean-out") == {"lean"}
+    assert find_english_leaks("cutting-down") == {"cutting"}
+    assert find_english_leaks("bulking-up") == {"bulking"}
+    assert find_english_leaks("fat-over") == {"fat"}
+    assert find_english_leaks("strength-through-progress") == {"strength"}
+
+
 # --- what actually guards the behavior: the Agent's language rule ---
 
 
