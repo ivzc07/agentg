@@ -19,17 +19,64 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.checkin import LAPSED, SNOOZED
-from agentg.models import DashboardLoginToken, Gym, Member, MemberChannel, Routine, Session
+from agentg.models import (
+    DashboardLoginToken,
+    Gym,
+    Member,
+    MemberChannel,
+    Routine,
+    Session,
+    Workout,
+)
 from agentg.timezones import local_date
 
 TOKEN_TTL = timedelta(minutes=10)
 TOKEN_BYTES = 32
+
+# Severity colouring (issue #98, spec-dashboard §The roster): consecutive
+# missed planned Workout days since the last Session — amber at one, red at
+# three, never a fixed day-count threshold.
+SEVERITY_AMBER_AT = 1
+SEVERITY_RED_AT = 3
 
 Clock = Callable[[], datetime]
 
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _weekday_hits(start: date, end: date, weekdays: set[int]) -> int:
+    """How many dates in the inclusive ``[start, end]`` fall on a planned weekday."""
+    if start > end or not weekdays:
+        return 0
+    days = (end - start).days + 1
+    full_weeks, extra = divmod(days, 7)
+    hits = full_weeks * len(weekdays)
+    tail_start = start + timedelta(weeks=full_weeks)
+    for i in range(extra):
+        if (tail_start + timedelta(days=i)).weekday() in weekdays:
+            hits += 1
+    return hits
+
+
+def missed_planned_days(
+    spans: list[tuple[date, set[int]]], since: date, yesterday: date
+) -> int:
+    """Missed planned Workout days in the inclusive ``[since, yesterday]``.
+
+    ``spans`` is the Member's Routine history as ``(first gym-local date the
+    Routine governs, its planned weekdays)``, oldest first — the per-date
+    reconstruction of spec-dashboard §Attendance: the most recent Routine
+    created on or before a date judges it, day-grained, so a Routine created
+    mid-day governs that whole day. Today is excluded by the caller passing
+    ``yesterday``; a day with no Routine yet is never a miss.
+    """
+    missed = 0
+    for i, (span_start, weekdays) in enumerate(spans):
+        span_end = spans[i + 1][0] - timedelta(days=1) if i + 1 < len(spans) else yesterday
+        missed += _weekday_hits(max(span_start, since), min(span_end, yesterday), weekdays)
+    return missed
 
 
 def hash_token(raw_token: str) -> str:
@@ -46,6 +93,12 @@ class RosterRow:
     expired-but-unswept snooze renders as a normal row, never with a past
     date; lapsed Members are returned in the separate tail, never here with
     a marker.
+
+    ``missed_days`` feeds the severity colour (issue #98): consecutive
+    missed planned Workout days since the last Session, each date judged
+    against the Routine active on it; a Session-less Member counts from the
+    moment their first Routine exists. Gap stays the sort key and row text —
+    the colour never re-sorts.
     """
 
     member_id: int
@@ -54,6 +107,22 @@ class RosterRow:
     has_sessions: bool
     is_new: bool  # no active Routine
     snoozed_until: date | None
+    missed_days: int
+
+    @property
+    def severity(self) -> str | None:
+        """``"amber"`` at one missed planned day, ``"red"`` at three, else
+        ``None``. No active Routine means no colour (the grey "new" tag
+        stands), and a running snooze shows no colour while it runs
+        (spec-dashboard §The roster).
+        """
+        if self.is_new or self.snoozed_until is not None:
+            return None
+        if self.missed_days >= SEVERITY_RED_AT:
+            return "red"
+        if self.missed_days >= SEVERITY_AMBER_AT:
+            return "amber"
+        return None
 
 
 class DashboardStore:
@@ -164,9 +233,39 @@ class DashboardStore:
                     )
                 ).all()
             )
+            # Per-date reconstruction input: every Routine (superseded ones
+            # keep their Workouts) with its planned weekdays, oldest first.
+            history = (
+                await db.execute(
+                    select(Routine.id, Routine.member_id, Routine.created_at, Workout.weekday)
+                    .outerjoin(Workout, Workout.routine_id == Routine.id)
+                    .where(Routine.gym_id == gym_id)
+                    .order_by(Routine.member_id, Routine.created_at, Routine.id)
+                )
+            ).all()
+        spans_by_member: dict[int, list[tuple[date, set[int]]]] = {}
+        last_routine_id: int | None = None
+        for routine_id, member_id, created_at, weekday in history:
+            spans = spans_by_member.setdefault(member_id, [])
+            if routine_id != last_routine_id:
+                spans.append((local_date(created_at, timezone), set()))
+                last_routine_id = routine_id
+            if weekday is not None:
+                spans[-1][1].add(weekday)
         today = local_date(self._clock(), timezone)
-        roster_rows, lapsed_rows = [], []
+        yesterday = today - timedelta(days=1)
+        roster_rows: list[RosterRow] = []
+        lapsed_rows: list[RosterRow] = []
         for member, last_started in rows:
+            spans = spans_by_member.get(member.id, [])
+            if last_started is not None:
+                # Any Session resets the count, even on an unplanned day.
+                since = local_date(last_started, timezone) + timedelta(days=1)
+            elif spans:
+                # No grace period: counting starts the moment a Routine exists.
+                since = spans[0][0]
+            else:
+                since = today  # no Routine, no Sessions: nothing to count
             row = RosterRow(
                 member_id=member.id,
                 name=member.name,
@@ -180,6 +279,7 @@ class DashboardStore:
                     and member.snoozed_until > today
                     else None
                 ),
+                missed_days=missed_planned_days(spans, since, yesterday),
             )
             (lapsed_rows if member.checkin_state == LAPSED else roster_rows).append(row)
         roster_rows.sort(key=lambda r: (-r.gap_days, r.name.lower()))

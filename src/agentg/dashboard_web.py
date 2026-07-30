@@ -89,8 +89,8 @@ def _interstitial_page(token: str) -> str:
 # --- The Table roster (spec-dashboard §The roster) ---
 #
 # Copy follows the adopted screens (docs/prototypes/coach-dashboard-v2.html),
-# Spanish — the product's no-signal default. Severity colouring is a later
-# ticket: the list ships uncoloured.
+# Spanish — the product's no-signal default. Severity colouring (issue #98)
+# follows each Member's own schedule; the palette is the prototype's.
 
 NEW_TAG = "nuevo"
 NO_SESSIONS_YET = "Aún sin sesiones"
@@ -111,11 +111,12 @@ def _roster_row(row: RosterRow) -> str:
     if row.snoozed_until is not None:
         until = row.snoozed_until.strftime("%d/%m/%Y")
         tags += f' <span class="tag">en pausa hasta el {until}</span>'
+    severity = f" sev-{row.severity}" if row.severity else ""
     # Read-only: the click-through to the Member's page is a later ticket.
     return (
         f'<li class="row" data-name="{escape(row.name)}">'
         f'<span class="name">{escape(row.name)}</span>{tags}'
-        f'<span class="away">{_away_text(row)}</span></li>'
+        f'<span class="away{severity}">{_away_text(row)}</span></li>'
     )
 
 
@@ -146,6 +147,8 @@ ul {{ list-style: none; padding: 0; margin: 1rem 0; }}
 .row {{ display: flex; align-items: baseline; gap: 0.6rem; padding: 0.45rem 0.2rem; border-bottom: 1px solid #eee; }}
 .row .name {{ font-weight: 600; }}
 .row .away {{ margin-left: auto; color: #666; font-size: 0.9rem; white-space: nowrap; }}
+.row .away.sev-amber {{ color: #9a5b00; font-weight: 600; }}
+.row .away.sev-red {{ color: #b3261e; font-weight: 600; }}
 .tag {{ font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 1rem; background: #eee; color: #555; white-space: nowrap; }}
 #lapsed summary {{ cursor: pointer; color: #666; }}
 </style>
