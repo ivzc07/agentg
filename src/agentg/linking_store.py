@@ -75,6 +75,13 @@ def _add_missing_columns(conn: Connection) -> None:
     gym_columns = {c["name"] for c in inspect(conn).get_columns("gyms")}
     if "coach_invite_code" not in gym_columns:
         conn.execute(text("ALTER TABLE gyms ADD COLUMN coach_invite_code VARCHAR(64)"))
+    if "default_preset_id" not in gym_columns:
+        conn.execute(
+            text(
+                "ALTER TABLE gyms ADD COLUMN default_preset_id "
+                "INTEGER REFERENCES routine_presets(id)"
+            )
+        )
     gym_indexes = {i["name"] for i in inspect(conn).get_indexes("gyms")}
     if "ix_gyms_coach_invite_code" not in gym_indexes:
         conn.execute(

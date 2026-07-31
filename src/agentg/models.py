@@ -63,6 +63,11 @@ class Gym(Base):
     # The Gym's own plain-text rules doc, or NULL to follow the shipped
     # default. Exactly one doc governs generation (spec §Routine generation).
     rules_doc: Mapped[str | None] = mapped_column(Text, default=None)
+    # One live Preset may seed a brand-new Member at the end of Intake
+    # (spec-dashboard §Routines & Presets, issue #103).
+    default_preset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("routine_presets.id"), default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

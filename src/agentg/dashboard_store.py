@@ -33,7 +33,7 @@ from agentg.models import (
     Set,
     Workout,
 )
-from agentg.routines import RoutineStore
+from agentg.routines import AppliedCopy, RoutineStore
 from agentg.timezones import local_date
 
 TOKEN_TTL = timedelta(minutes=10)
@@ -807,14 +807,26 @@ class DashboardStore:
         coach_member_id: int,
         base_routine_id: int | None,
         workouts: list[Any],
-    ) -> Routine:
-        return await self._routines.save_preset_master(
+    ) -> list[AppliedCopy]:
+        await self._routines.save_preset_master(
             preset_id,
             gym_id,
             coach_member_id,
             workouts,
             base_routine_id=base_routine_id,
         )
+        return await self._routines.preset_linked_copies(preset_id, gym_id)
+
+    async def default_preset_id(self, gym_id: int) -> int | None:
+        async with self._sessions() as db:
+            gym = await db.get(Gym, gym_id)
+            return gym.default_preset_id if gym is not None else None
+
+    async def set_default_preset(self, gym_id: int, preset_id: int | None) -> None:
+        await self._routines.set_default_preset(gym_id, preset_id)
+
+    async def retire_preset(self, gym_id: int, preset_id: int) -> None:
+        await self._routines.retire_preset(gym_id, preset_id)
 
     async def apply_preset(
         self, gym_id: int, preset_id: int, coach_member_id: int, member_ids: list[int]

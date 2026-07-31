@@ -202,6 +202,10 @@ STRINGS = {
         "no_members_to_apply": "No hay miembros disponibles.",
         "preset_no_master": "Escribe el plan del Preset antes de aplicarlo.",
         "preset_no_selection": "Elige al menos un miembro.",
+        "preset_default": "Predeterminado",
+        "set_default_preset": "Usar como predeterminado",
+        "clear_default_preset": "Quitar predeterminado",
+        "retire_preset": "Retirar Preset",
     },
     "en": {
         "settings": "Settings",
@@ -333,6 +337,10 @@ STRINGS = {
         "no_members_to_apply": "There are no members to apply it to.",
         "preset_no_master": "Write the preset's plan before applying it.",
         "preset_no_selection": "Pick at least one member.",
+        "preset_default": "Default",
+        "set_default_preset": "Use as default",
+        "clear_default_preset": "Clear default",
+        "retire_preset": "Retire preset",
     },
 }
 

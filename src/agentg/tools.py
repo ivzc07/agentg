@@ -239,7 +239,9 @@ async def save_routine(
     never include a target weight. Prescribe only exercises from
     list_exercises, pin each Workout to a weekday the Member named, and
     respect the rules doc and their injuries. Deliver directly after saving;
-    for a requested structural change, save again only once they agree.
+    for a requested structural change, save again only once they agree. If the
+    Gym has a default Preset for a brand-new Member, that Preset is applied
+    instead; the result names it in ``applied_preset``.
     """
     c = ctx.context
     if not workouts:
@@ -266,7 +268,13 @@ async def save_routine(
         # e.g. an exercise not in the catalog — the Agent should pick from
         # list_exercises and try again.
         return {"error": str(error)}
-    return {"routine_id": routine.id, "workouts_saved": len(specs)}
+    saved = await c.stores.routines.active_routine(c.member_id)
+    return {
+        "routine_id": routine.id,
+        "workouts_saved": len(saved["workouts"]) if saved is not None else len(specs),
+        "routine": saved,
+        "applied_preset": saved["preset_name"] if saved is not None else None,
+    }
 
 
 @function_tool

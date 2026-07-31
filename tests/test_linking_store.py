@@ -422,7 +422,6 @@ async def test_ensure_schema_rebuilds_legacy_routines_for_memberless_masters(tmp
     gym = await store.create_gym("Iron Temple")
     member = await store.link_member(gym.id, "Luis", "telegram", "2")
     await engine.dispose()
-
     raw = sqlite3.connect(str(db_path))
     raw.execute("DROP TABLE routines")
     raw.execute(
@@ -471,4 +470,46 @@ async def test_ensure_schema_rebuilds_legacy_routines_for_memberless_masters(tmp
         )
         await db.flush()
     await store.ensure_schema()
+    await engine.dispose()
+
+
+async def test_ensure_schema_adds_default_preset_to_a_legacy_gym(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "legacy-gym.db"
+    engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+    store = LinkingStore(engine)
+    await store.ensure_schema()
+    await engine.dispose()
+    raw = sqlite3.connect(str(db_path))
+    raw.execute("PRAGMA foreign_keys=OFF")
+    raw.execute("DROP INDEX ix_gyms_coach_invite_code")
+    raw.execute("ALTER TABLE gyms RENAME TO gyms_legacy")
+    raw.execute(
+        """CREATE TABLE gyms (
+            id INTEGER NOT NULL PRIMARY KEY,
+            name VARCHAR(200) NOT NULL,
+            invite_code VARCHAR(64) NOT NULL,
+            coach_invite_code VARCHAR(64),
+            timezone VARCHAR(64) NOT NULL,
+            weight_unit VARCHAR(8) NOT NULL,
+            rules_doc TEXT,
+            created_at DATETIME NOT NULL
+        )"""
+    )
+    raw.execute(
+        "INSERT INTO gyms SELECT id, name, invite_code, coach_invite_code, timezone, "
+        "weight_unit, rules_doc, created_at FROM gyms_legacy"
+    )
+    raw.execute("DROP TABLE gyms_legacy")
+    raw.commit()
+    raw.close()
+
+    engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+    store = LinkingStore(engine)
+    await store.ensure_schema()
+
+    async with engine.begin() as conn:
+        columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(gyms)"))}
+    assert "default_preset_id" in columns
     await engine.dispose()

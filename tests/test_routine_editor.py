@@ -277,8 +277,41 @@ async def test_a_web_save_replaces_the_routine_stamps_it_and_notifies_the_member
     _, editor = await env.get(f"/members/{member.id}/routine")
     assert "Escrita por Coach Ana" in editor
     assert AGENT_CHIP not in editor
+    assert CONSEQUENCE_LINE not in editor
     _, page = await env.get(f"/members/{member.id}")
     assert "Escrita por Coach Ana" in page
+
+
+async def test_editing_a_linked_member_silently_forks_and_shows_the_consequence_before_save(env):
+    await env.training.ensure_seeded()
+    preset = await env.routines.create_preset(env.gym.id, "Beginner")
+    await env.routines.save_preset_master(
+        preset.id,
+        env.gym.id,
+        env.coach.id,
+        [WorkoutSpec(weekday=0, name="Preset day", exercises=[ExerciseSpec("squat")])],
+        base_routine_id=None,
+    )
+    member = await env.add_member("Luis")
+    await env.routines.apply_preset(preset.id, env.gym.id, env.coach.id, [member.id])
+    old = await env.routines.active_routine(member.id)
+
+    status, editor = await env.get(f"/members/{member.id}/routine")
+    assert status == 200
+    assert "Preset: Beginner" in editor
+    assert CONSEQUENCE_LINE in editor
+
+    response = await env.save_via_web(
+        member.id, old["routine_id"], ("1", "Forked day", "bench press, 3, 8")
+    )
+
+    assert response.status == 302
+    active = await env.routines.active_routine(member.id)
+    assert active["preset_id"] is None
+    assert active["created_by_name"] == "Coach Ana"
+    _, editor = await env.get(f"/members/{member.id}/routine")
+    assert "Escrita por Coach Ana" in editor
+    assert CONSEQUENCE_LINE not in editor
 
 
 async def test_a_stale_web_save_is_refused_and_shows_the_fresh_version(env):
