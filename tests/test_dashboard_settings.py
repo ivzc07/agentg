@@ -193,6 +193,24 @@ async def test_the_copy_button_handles_clipboard_failures(env):
     assert script.index("button.dataset.done") > then_at
 
 
+async def test_the_language_toggle_round_trips_from_a_validation_error_page(env):
+    """A validation-error render of Settings must point the EN/ES toggle
+    back at /settings — not at the POST-only action the error came from,
+    where a GET would 405."""
+    import re
+
+    for post in (
+        env.client.post("/settings/regenerate-invite", data={"confirm": "no"}),
+        env.client.post("/settings/gym-name", data={"name": "  "}),
+    ):
+        page = await (await post).text()
+        href = re.search(r'href="(/lang/en\?next=[^"]+)"', page).group(1)
+        toggle = await env.client.get(href, allow_redirects=False)
+        assert toggle.status == 302
+        assert toggle.headers["Location"] == "/settings"
+        assert (await env.client.get(toggle.headers["Location"])).status == 200
+
+
 async def test_the_settings_screen_is_coach_only(env):
     await env.linking.set_coach(env.member.id, False)  # demoted in chat
 

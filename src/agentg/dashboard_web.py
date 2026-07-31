@@ -926,12 +926,14 @@ def build_app(
         form = await request.post()
         confirm = form.get("confirm", "")
         if not isinstance(confirm, str) or confirm.strip().lower() != t["confirm_word"]:
+            # The error re-render points the language toggle at /settings —
+            # this POST-only path would 405 a GET.
             response = web.Response(
                 text=_settings_page(
                     gym,
                     bot_username,
                     lang,
-                    request.rel_url.path_qs,
+                    "/settings",
                     error=t["confirm_mismatch"].format(word=t["confirm_word"]),
                 ),
                 content_type="text/html",
@@ -962,9 +964,11 @@ def build_app(
         form = await request.post()
         name = form.get("name", "")
         if not isinstance(name, str) or not name.strip():
+            # Same as the confirm mismatch above: the toggle must not point
+            # at this POST-only path.
             response = web.Response(
                 text=_settings_page(
-                    gym, bot_username, lang, request.rel_url.path_qs, error=t["gym_name_empty"]
+                    gym, bot_username, lang, "/settings", error=t["gym_name_empty"]
                 ),
                 content_type="text/html",
             )

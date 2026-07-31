@@ -268,7 +268,7 @@ _EN_WORDS = frozenset(
     "the and to of in is it i me i'm my can want only before with for on at "
     "not hates will them train pain week but also have has am are was were "
     "would could should this that these those from after when what who "
-    "help".split()
+    "help i'll i've i'd im".split()
 )
 _ES_ACCENTS = re.compile(r"[áéíóúñ¿¡]")
 _WORDS = re.compile(r"[a-záéíóúñü]+(?:'[a-z]+)?")

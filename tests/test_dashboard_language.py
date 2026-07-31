@@ -280,6 +280,10 @@ def test_first_person_english_detects_as_english():
         "help me",
         "I hate burpees",
         "I'm sore today",
+        "I've been sick",
+        "I'll try tomorrow",
+        "I'd go",
+        "Im tired",
     ):
         assert detect_language(phrase) == "en", phrase
 
