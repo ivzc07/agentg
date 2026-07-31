@@ -412,22 +412,29 @@ def test_unicode_space_invariance(base: str, space: str):
     assert find_english_leaks(base.replace(" ", space)) == find_english_leaks(base)
 
 
-@pytest.mark.parametrize("breaker", ("­", "​"))
-def test_soft_hyphen_and_zwsp_take_hyphen_glue(breaker: str):
-    # Both mark an intra-word break, so they behave like a hyphen: they
-    # cannot hide a goal-vocab compound, and they keep a name's carve-out.
+# Soft hyphen, ZWSP, joiners, word joiner, BOM, directional embedding:
+# each is judged under BOTH the glued and the split reading.
+_BREAKERS = ("­", "​", "‌", "‍", "⁠", "﻿", "‪")
+
+
+@pytest.mark.parametrize("breaker", _BREAKERS)
+def test_a_break_point_cannot_hide_a_leak(breaker: str):
+    # Split reading: a compound leak stays a leak.
     assert find_english_leaks(f"weight{breaker}loss") == {"weight loss"}
     assert find_english_leaks(f"non{breaker}strength band pull-apart") == {"strength"}
+    # Glued reading: a mid-morpheme break point cannot hide a single word.
+    assert find_english_leaks(f"mus{breaker}cle") == {"muscle"}
+    assert find_english_leaks(f"wei{breaker}ght loss") == {"weight loss"}
+
+
+@pytest.mark.parametrize("breaker", _BREAKERS)
+def test_a_break_point_cannot_shatter_a_name(breaker: str):
+    # Neither reading may split an allowlisted core into flagging parts.
     assert find_english_leaks(f"Muscle{breaker}up") == set()
+    assert find_english_leaks(f"Muscle{breaker}-up") == set()
+    assert find_english_leaks(f"Muscle-{breaker}up") == set()
     assert find_english_leaks(f"strength{breaker}band pull-apart") == set()
-
-
-@pytest.mark.parametrize("invisible", ("‌", "‍", "⁠", "﻿", "‪"))
-def test_format_controls_cannot_split_a_leak(invisible: str):
-    # Joiners, word joiner, BOM, and directional embeddings are stripped,
-    # so smuggling one into a term never hides it.
-    assert find_english_leaks(f"wei{invisible}ght loss") == {"weight loss"}
-    assert find_english_leaks(f"{invisible}muscle") == {"muscle"}
+    assert find_english_leaks(f"strength{breaker}-band-pull-apart") == set()
 
 
 def test_hypertrophy_is_a_leak():

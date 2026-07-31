@@ -76,19 +76,27 @@ _DASH_GAP = ""
 # The complete Zs category: NBSP, ogham mark, the U+2000 block, NNBSP,
 # math space, ideographic space.
 _ZS_SPACES = tuple(map(chr, (0x00A0, 0x1680, *range(0x2000, 0x200B), 0x202F, 0x205F, 0x3000)))
-# Cf-class invisibles with no break semantics: joiners, directional
-# marks and embeddings, word joiner and friends, BOM.
-_STRIPPED_FORMAT = tuple(
-    map(chr, (*range(0x200C, 0x2010), *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A), 0xFEFF))
+# Invisible break-point characters: soft hyphen, ZWSP, the joiners and
+# directional marks, word joiner and friends, BOM. Whether one glues its
+# neighbors ("mus­cle" is muscle) or separates them ("weight­loss" is
+# weight loss) is undecidable per character, so the leak scan runs the
+# full pipeline over BOTH readings and unions the results — a leak found
+# under either reading is a leak.
+_BREAK_POINTS = tuple(
+    map(chr, (0x00AD, *range(0x200B, 0x2010), *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A), 0xFEFF))
 )
 
-_NORMALIZE = str.maketrans(
-    {cp: "-" for cp in "‐‑‒−­​"}
+_BASE_TABLE = (
+    {cp: "-" for cp in "‐‑‒−"}
     | {cp: _DASH_GAP for cp in "–—―"}
     | {cp: " " for cp in _ZS_SPACES}
-    | {cp: None for cp in _STRIPPED_FORMAT}
     | {"_": " "}
 )
+_NORMALIZE = str.maketrans(_BASE_TABLE | {cp: None for cp in _BREAK_POINTS})
+_NORMALIZE_SPLIT = str.maketrans(_BASE_TABLE | {cp: "-" for cp in _BREAK_POINTS})
+# Break points folded to "-" next to a real hyphen would forge "--" and
+# shatter allowlisted cores; collapse the runs before matching.
+_HYPHEN_RUN = re.compile(r"-{2,}")
 
 _PATTERNS = {term: _compile(term) for term in ENGLISH_TRAINING_VOCAB}
 
@@ -360,9 +368,7 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
     return [(entry["start"], entry["end"]) for entry in entries]
 
 
-def find_english_leaks(reply: str) -> set[str]:
-    """English training vocabulary found in a reply — empty means clean."""
-    text = reply.translate(_NORMALIZE)  # all matching runs on this text
+def _leaks_in(text: str) -> set[str]:
     hits = [
         (term, match.start(), match.end())
         for term, pattern in _PATTERNS.items()
@@ -374,3 +380,12 @@ def find_english_leaks(reply: str) -> set[str]:
         for term, start, end in hits
         if not any(span_start <= start and end <= span_end for span_start, span_end in names)
     }
+
+
+def find_english_leaks(reply: str) -> set[str]:
+    """English training vocabulary found in a reply — empty means clean."""
+    leaks = _leaks_in(reply.translate(_NORMALIZE))
+    if any(cp in reply for cp in _BREAK_POINTS):
+        split = _HYPHEN_RUN.sub("-", reply.translate(_NORMALIZE_SPLIT))
+        leaks |= _leaks_in(split)
+    return leaks
