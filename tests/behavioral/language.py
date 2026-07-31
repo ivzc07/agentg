@@ -17,9 +17,11 @@ pull-apart") or by lexicon goal vocabulary ("stamina strength band
 pull-apart"), it is mid-chain vocabulary and flags. A non-modifier word
 glued INSIDE a hyphen chain ("toca-strength-band-pull-apart") breaks the
 name shape, so the chain's lexicon parts are adjacent-outside and flag.
-Unicode dashes (U+2010-U+2015, U+2212) and NBSP are normalized to their
-ASCII twins before any matching, so typographic spellings behave exactly
-like ASCII.
+True hyphens (U+2010-U+2012, U+2212) and NBSP are normalized to their ASCII
+twins before any matching; en/em/horizontal-bar dashes (U+2013-U+2015) are
+separators, never chain links — they split tokens and block absorption,
+with one exception: an allowlisted name core may be recognized across the
+gap ("Muscle–up" == "Muscle-up").
 """
 
 from __future__ import annotations
@@ -46,24 +48,31 @@ ENGLISH_TRAINING_VOCAB: tuple[str, ...] = (
 )
 
 def _compile(term: str) -> re.Pattern[str]:
-    # Multi-word terms match any run of whitespace or hyphens between words,
-    # so "weight loss" catches "weight-loss", doubled spaces, tabs, newlines.
-    # Typographic dashes are handled once, by _NORMALIZE below.
+    # Multi-word terms match any run of whitespace, hyphens, or dash-derived
+    # gaps between words, so "weight loss" catches "weight-loss" and
+    # "weight–loss", doubled spaces, tabs, newlines.
     return re.compile(
-        r"\b" + r"[\s-]+".join(re.escape(part) for part in term.split()) + r"\b",
+        r"\b" + rf"[\s\-{_DASH_GAP}]+".join(re.escape(part) for part in term.split()) + r"\b",
         re.IGNORECASE,
     )
 
 
-_PATTERNS = {term: _compile(term) for term in ENGLISH_TRAINING_VOCAB}
+# Dash polarity (round-16): TRUE hyphens (U+2010, U+2011, U+2012, U+2212)
+# map to ASCII "-" and glue like it. EN/EM/HORIZONTAL-BAR dashes
+# (U+2013/U+2014/U+2015) are SEPARATORS, never chain links: they map to a
+# private placeholder that splits tokens and blocks chain absorption, with
+# one exception -- an allowlisted name core may be recognized across the
+# gap ("Muscle–up" == "Muscle-up"). NBSP maps to a plain space. All
+# one-code-point-for-one, so offsets are unchanged.
+_DASH_GAP = ""
 
-# Unicode hyphen/dash variants (U+2010-U+2015, U+2212) and NBSP map onto
-# their ASCII twins before ANY matching, one code point for one, so offsets
-# are unchanged and typographic spellings behave exactly like ASCII:
-# "Muscle–up" == "Muscle-up", "strength band pull-apart" == spaced.
 _NORMALIZE = str.maketrans(
-    {cp: "-" for cp in "‐‑‒–—―−"} | {" ": " "}
+    {cp: "-" for cp in "‐‑‒−"}
+    | {cp: _DASH_GAP for cp in "–—―"}
+    | {" ": " "}
 )
+
+_PATTERNS = {term: _compile(term) for term in ENGLISH_TRAINING_VOCAB}
 
 _LETTER = r"A-Za-zÀ-ÖØ-öø-ÿ"
 _TOKEN_RE = re.compile(rf"[{_LETTER}]+(?:-[{_LETTER}]+)*")
@@ -169,6 +178,42 @@ def _hyphen_parts(start: int, token_text: str) -> list[tuple[int, int, str]]:
     return parts
 
 
+def _build_units(text: str) -> list[tuple[int, int, str, list[tuple[int, int, str]]]]:
+    """Matchable units: tokens, plus token pairs joined across ONE
+    dash-derived gap when — and only when — the joined form is an exact
+    allowlisted core ("Muscle–up"). Chain links never cross the gap:
+    "strength—band" is not a core, so it stays two units and absorption
+    stops there; prose never merges ("toca—Muscle-up" is not a core).
+    """
+    tokens = list(_TOKEN_RE.finditer(text))
+    units = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if (
+            i + 1 < len(tokens)
+            and text[tok.end() : tokens[i + 1].start()] == _DASH_GAP
+            and _match_name_core(tok.group() + "-" + tokens[i + 1].group()) is not None
+        ):
+            nxt = tokens[i + 1]
+            units.append(
+                (
+                    tok.start(),
+                    nxt.end(),
+                    tok.group() + "-" + nxt.group(),
+                    _hyphen_parts(tok.start(), tok.group())
+                    + _hyphen_parts(nxt.start(), nxt.group()),
+                )
+            )
+            i += 2
+        else:
+            units.append(
+                (tok.start(), tok.end(), tok.group(), _hyphen_parts(tok.start(), tok.group()))
+            )
+            i += 1
+    return units
+
+
 def _lexicon_hit_overlaps(
     hits: list[tuple[str, int, int]], start: int, end: int
 ) -> list[tuple[str, int, int]]:
@@ -192,33 +237,33 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
     nothing, prose, or punctuation; any preceding chain content — modifier
     parts or an adjacent lexicon hit — makes it mid-chain, and the span
     starts after it."""
-    tokens = list(_TOKEN_RE.finditer(text))
+    units = _build_units(text)
     # Pass 1: chains and mid-chain-strength cuts (position only).
     entries: list[dict] = []
-    for i, tok in enumerate(tokens):
-        matched = _match_name_core(tok.group())
+    for i, (unit_start, unit_end, match_text, unit_parts) in enumerate(units):
+        matched = _match_name_core(match_text)
         if matched is None:
             continue
         form, core = matched
-        start = tok.start()
-        first = i  # token index where the modifier chain starts
+        start = unit_start
+        first = i  # unit index where the modifier chain starts
         k = i - 1
-        while k >= 0 and _HORIZONTAL_GAP_RE.fullmatch(text[tokens[k].end() : start]):
-            word = tokens[k].group().lower()
-            following = tokens[k + 1].group().lower()
+        while k >= 0 and _HORIZONTAL_GAP_RE.fullmatch(text[units[k][1] : start]):
+            word = units[k][2].lower()
+            following = units[k + 1][2].lower()
             if not _absorbable(word, following):
                 break
-            start = tokens[k].start()
+            start = units[k][0]
             first = k
             k -= 1
-        # One uniform part sequence: absorbed tokens' hyphen parts, then the
-        # core token's own glued prefix parts.
+        # One uniform part sequence: absorbed units' hyphen parts, then the
+        # core unit's own glued prefix parts (all but the core's own parts).
         parts: list[tuple[int, int, str]] = []
         for j in range(first, i):
-            parts.extend(_hyphen_parts(tokens[j].start(), tokens[j].group()))
+            parts.extend(units[j][3])
         if form != core:
-            prefix = tok.group()[: len(form) - len(core) - 1]
-            parts.extend(_hyphen_parts(tok.start(), prefix))
+            core_part_count = core.count("-") + 1
+            parts.extend(unit_parts[: len(unit_parts) - core_part_count])
         # Strength is clean only as the FIRST chain part; cut the span after
         # the last mid-chain strength (preceded by modifier parts).
         leading_strength = bool(parts) and parts[0][2] == "strength"
@@ -232,7 +277,7 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
         entries.append(
             {
                 "start": start,
-                "end": tok.end(),
+                "end": unit_end,
                 "first": first,
                 "parts": parts,
                 "leading_strength": leading_strength,
@@ -240,16 +285,16 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
         )
     base_spans = [(entry["start"], entry["end"]) for entry in entries]
     # Pass 2: a chain-leading strength preceded by a SURVIVING lexicon hit —
-    # one no name span exempts — overlapping the previous token is mid-chain
+    # one no name span exempts — overlapping the previous unit is mid-chain
     # too ("stamina", "weight loss", "muscle-gain"). A name-internal hit
     # ("muscle" inside "muscle-up") is not goal vocab and marks nothing.
     for entry in entries:
         if not entry["leading_strength"] or entry["first"] == 0:
             continue
-        prev = tokens[entry["first"] - 1]
-        if not _HORIZONTAL_GAP_RE.fullmatch(text[prev.end() : tokens[entry["first"]].start()]):
+        prev_start, prev_end = units[entry["first"] - 1][0], units[entry["first"] - 1][1]
+        if not _HORIZONTAL_GAP_RE.fullmatch(text[prev_end : units[entry["first"]][0]]):
             continue
-        overlapping = _lexicon_hit_overlaps(hits, prev.start(), prev.end())
+        overlapping = _lexicon_hit_overlaps(hits, prev_start, prev_end)
         survives = [
             hit
             for hit in overlapping

@@ -235,23 +235,42 @@ def test_multi_word_terms_match_typographic_dashes():
     assert find_english_leaks("weight–loss strength band pull-apart") == {"weight loss", "strength"}
 
 
-def test_dashed_prose_prefixes_flag_strength_like_ascii():
-    # Round-15 P1: "non-strength band pull-apart" flags strength today;
-    # every dash variant must behave identically.
+def test_dashed_prose_prefixes_separate_like_spaces():
+    # Round-16: en/em dashes are SEPARATORS -- "non–strength" is prose +
+    # chain start, exactly like "non strength" with a space.
+    assert find_english_leaks("non strength band pull-apart") == set()
+    assert find_english_leaks("non–strength band pull-apart") == set()
+    assert find_english_leaks("super—strength band pull-apart") == set()
+    # ...while TRUE hyphen variants (U+2010/2011/2212) glue like ASCII.
     assert find_english_leaks("non-strength band pull-apart") == {"strength"}
-    assert find_english_leaks("non–strength band pull-apart") == {"strength"}
-    assert find_english_leaks("super—strength band pull-apart") == {"strength"}
+    assert find_english_leaks("non‐strength band pull-apart") == {"strength"}
+    assert find_english_leaks("non‑strength band pull-apart") == {"strength"}
+    assert find_english_leaks("non−strength band pull-apart") == {"strength"}
 
 
 def test_dash_and_nbsp_name_shapes_stay_clean_like_ascii():
-    # Round-15 P2: same names, typographic spelling.
+    # Round-15 P2 / round-16: same names, typographic spelling -- an
+    # allowlisted core is recognized across a dash-derived gap.
     assert find_english_leaks("Muscle–up") == set()
     assert find_english_leaks("Muscle—up") == set()
     assert find_english_leaks("Muscle‐up") == set()
-    assert find_english_leaks("strength band pull-apart") == set()
+    assert find_english_leaks("strength band pull-apart") == set()
 
 
-_DASH_VARIANTS = ("-", "‐", "‑", "‒", "–", "—", "―", "−")
+def test_en_em_dashes_never_link_a_modifier_chain():
+    # Round-16: chain absorption and strength-before-equipment never cross
+    # a dash-derived gap, so strength flags...
+    assert find_english_leaks("strength—band pull-apart") == {"strength"}
+    assert find_english_leaks("El foco es strength–band pull-apart") == {"strength"}
+    # ...prose glued by dashes stays separate from names...
+    assert find_english_leaks("toca—Muscle-up") == set()
+    assert find_english_leaks("pull-apart—luego") == set()
+    # ...and multi-word lexicon still matches across the gap.
+    assert find_english_leaks("weight–loss") == {"weight loss"}
+
+
+_HYPHEN_VARIANTS = ("-", "‐", "‑", "‒", "−")  # true hyphens
+_SEPARATOR_DASHES = ("–", "—", "―")  # en/em/horizontal bar
 _INVARIANT_BASES = (
     "strength band pull-apart",
     "Muscle-up",
@@ -265,15 +284,33 @@ _INVARIANT_BASES = (
     "strength band strength band pull-apart",
 )
 
+# Documented differences from ASCII when en/em dashes replace "-": they are
+# separators, never chain links, so an ASCII hyphen that was GLUING prose
+# to strength no longer makes it a glued leak -- "non–strength" is
+# prose + chain start (clean), exactly like a space; and a glued lexicon
+# compound splits, so the word immediately before the chain is no longer
+# goal vocab -- "muscle–gain strength ..." == "muscle gain strength ...".
+_SEPARATOR_EXPECTED_DIFFS = {
+    "non-strength band pull-apart": set(),
+    "muscle-gain strength band pull-apart": {"muscle"},
+}
+
 
 @pytest.mark.parametrize("base", _INVARIANT_BASES)
-@pytest.mark.parametrize("dash", _DASH_VARIANTS)
-def test_dash_and_nbsp_invariance(base: str, dash: str):
-    # The invariant: swapping any ASCII hyphen for a Unicode dash variant,
-    # or any space for NBSP, never changes the result.
+@pytest.mark.parametrize("dash", _HYPHEN_VARIANTS)
+def test_hyphen_and_nbsp_invariance(base: str, dash: str):
+    # True hyphens and NBSP: swapping never changes the result.
     expected = find_english_leaks(base)
     assert find_english_leaks(base.replace("-", dash)) == expected
     assert find_english_leaks(base.replace(" ", " ")) == expected
+
+
+@pytest.mark.parametrize("base", _INVARIANT_BASES)
+@pytest.mark.parametrize("dash", _SEPARATOR_DASHES)
+def test_separator_dash_behavior(base: str, dash: str):
+    # En/em/bar dashes: same as ASCII except the documented differences.
+    expected = _SEPARATOR_EXPECTED_DIFFS.get(base, find_english_leaks(base))
+    assert find_english_leaks(base.replace("-", dash)) == expected
 
 
 def test_hypertrophy_is_a_leak():
