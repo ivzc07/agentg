@@ -45,6 +45,10 @@ _DETERMINERS = {
     "a", "an", "the", "your", "my",
 }
 _NEGATIONS = {"no", "not"}
+_TRAILING_WORD = re.compile(r"(\w+)([^\w]*)$")
+# A negation only denies the claim it is glued to: sentence-ending
+# punctuation between it and the verb means it answered something else.
+_SENTENCE_END = re.compile(r"[.!?]")
 
 # Curly/typographic apostrophes read as ASCII so "I’m" is still a claim.
 _APOSTROPHES = str.maketrans("’‘ʼ", "'''")
@@ -53,13 +57,18 @@ _APOSTROPHES = str.maketrans("’‘ʼ", "'''")
 def identity_drift(reply: str) -> str | None:
     """The drifting self-description in ``reply``, or ``None`` — but ONLY
     the exact pinned shape: claim verb + optional determiner + forbidden
-    role ("Soy tu enlace", "I'm a bot"). Denials immediately adjacent to
-    the verb ("No soy un bot", "I'm not a bot") are not claims. Anything
-    more elaborate is the live judge's job, by design."""
+    role ("Soy tu enlace", "I'm a bot"). Denials adjacent to the verb are
+    not claims — but a "No" closed by sentence-ending punctuation negates
+    nothing ("No. Soy tu enlace." flags). Anything more elaborate is the
+    live judge's job, by design."""
     reply = reply.translate(_APOSTROPHES)
     for match in _CLAIM.finditer(reply):
-        before = _WORD.findall(reply[: match.start()].lower())
-        if before and before[-1] in _NEGATIONS:
+        trailing = _TRAILING_WORD.search(reply[: match.start()])
+        if (
+            trailing is not None
+            and trailing.group(1).lower() in _NEGATIONS
+            and not _SENTENCE_END.search(trailing.group(2))
+        ):
             continue
         words = _WORD.findall(reply[match.end() :].lower())
         if words and words[0] in _NEGATIONS:
@@ -74,8 +83,8 @@ def identity_drift(reply: str) -> str | None:
 # The one question the live judge answers for every linking reply.
 IDENTITY_QUESTION = (
     "Does the reply describe the SPEAKER ITSELF as a link, enlace, bot, "
-    "assistant, or asistente instead of a coach? (Mentioning an invite "
-    "link as an object is fine.)"
+    "assistant, asistente, or asistenta instead of a coach? (Mentioning "
+    "an invite link as an object is fine.)"
 )
 
 IDENTITY_THRESHOLD = 4.0  # 1-5 scale: 1 = drifted identity, 5 = anchored
@@ -89,7 +98,7 @@ def build_identity_prompt(reply: str) -> tuple[str, str]:
         f"Answer this question about the reply: {IDENTITY_QUESTION}\n"
         "Cite evidence from the reply FIRST, then give a 1-5 identity score:\n"
         "1 = the reply describes the speaker itself as a link/enlace/bot/"
-        "assistant/asistente,\n"
+        "assistant/asistente/asistenta,\n"
         "5 = the speaker is a coach, or has no self-description at all.\n"
         "Respond with JSON only, no markdown fences, shaped as:\n"
         '{"identity": {"evidence": "...", "score": 1}}'

@@ -86,6 +86,23 @@ def test_the_offline_pin_is_deliberately_narrow():
     assert identity_drift("I'm a coach and the link is below.") is None
 
 
+def test_a_punctuated_no_does_not_negate_the_claim():
+    # A sentence boundary between the "No" and the verb means the "No"
+    # answered something else — the claim stands and must flag.
+    drift = identity_drift("No. Soy tu enlace.")
+    assert drift is not None and "enlace" in drift
+    drift = identity_drift("No! Soy tu enlace.")
+    assert drift is not None and "enlace" in drift
+    # …while a "No" glued to the verb still denies.
+    assert identity_drift("No soy un bot.") is None
+
+
+def test_the_identity_question_covers_the_gendered_role():
+    # The live rubric must name every role the offline pin bans.
+    assert "asistenta" in IDENTITY_QUESTION
+    assert "asistente" in IDENTITY_QUESTION
+
+
 # --- the prompt pins the one identity ---
 
 
@@ -192,6 +209,8 @@ async def test_live_phraser_holds_one_identity_across_calls_and_instructions():
         # The near-miss invite-code path lacks the built-in coach-identity
         # wording — the likeliest drift path.
         (linking.CODE_NOT_FOUND_INSTRUCTION, "XM7K29"),
+        # The expired-code path from _confirm_name.
+        (linking.LINK_EXPIRED_INSTRUCTION, "yes"),
         # The fix must hold for the other linking instructions too.
         (
             linking.NAME_CONFIRM_INSTRUCTION.format(gym="Iron Temple", name="Ana García"),
