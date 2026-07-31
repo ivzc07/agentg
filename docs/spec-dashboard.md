@@ -215,6 +215,18 @@ Removed: `share_with_coach` on `flag_to_coach` ([#80](https://github.com/ivzc07/
 - **Public origin**: a subdomain of the flowstate domain attached in Coolify (automatic TLS). The exact hostname is a deploy-time detail behind a `DASHBOARD_BASE_URL` env var that `/dashboard` magic links point at.
 - Delivery stays **long polling**, single replica; only the "no public endpoint" property of [docs/spec.md](spec.md) `§Channel plan` retires.
 
+## In-place interactions (ADR 0003 cluster)
+
+*Issues [#127](https://github.com/ivzc07/agentg/issues/127), [#128](https://github.com/ivzc07/agentg/issues/128), [#129](https://github.com/ivzc07/agentg/issues/129).*
+
+The interaction upgrades the redesign deferred, inside ADR 0003's hard cap (HTML fragments from the same renderers - no client templating, no JSON endpoints, no build step):
+
+- **Live roster numbers** (#127): while a search query filters, the chrome's "Members (N)" reads "X de N" (localized), back to the resting label on an empty box. Client-only - the vanilla search snippet, no htmx.
+- **In-place Routine editor saves** (#128): the editor (Member and Preset master) posts through vendored htmx; with the `HX-Request` header the server returns the re-rendered editor - a success line naming the save and the notified Member, or today's exact refusals - so scroll and typed work survive. Without JS the POST/redirect flow stands unchanged.
+- **Confirmation notices on the redirect writes** (#129): tick-off, preset create/apply/default/retire, and the Settings saves redirect with `?done=<key>`; the landing renderer turns a known key into a one-line notice, anything else renders nothing.
+
+htmx ships vendored in `/static/` beside the stylesheet, on the same content-hash URL scheme.
+
 ## Out of scope for v1
 
 - Editing the Rules doc from the web - stays a chat action until v2 ([#71](https://github.com/ivzc07/agentg/issues/71)).

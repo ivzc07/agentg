@@ -96,6 +96,7 @@ STRINGS = {
         "nav_views": "Vistas",
         "nav_sections": "Secciones",
         "no_matches": "Ningún miembro coincide con la búsqueda.",
+        "match_count": "{shown} de {total}",
         "empty_roster_title": "Aún no hay miembros",
         "empty_roster_body": (
             "Comparte el enlace de invitación desde Ajustes para sumar al primero."
@@ -264,6 +265,7 @@ STRINGS = {
         "nav_views": "Views",
         "nav_sections": "Sections",
         "no_matches": "No member matches the search.",
+        "match_count": "{shown} of {total}",
         "empty_roster_title": "No members yet",
         "empty_roster_body": "Share the invite link from Settings to add the first one.",
         "pick_a_member": "Pick a member",
