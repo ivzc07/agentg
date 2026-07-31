@@ -128,6 +128,19 @@ def test_spanish_denial_markers_beyond_no():
     assert drift is not None and "bot" in drift
 
 
+def test_the_full_spanish_preverbal_negator_class():
+    # The closed class of standard pre-verbal negators of "ser": no,
+    # nunca, jamás (accented or not), tampoco, ni, ni siquiera. ("nada
+    # de" takes a noun, not a verb — it is not one.)
+    assert identity_drift("Nunca soy un bot") is None
+    assert identity_drift("Yo nunca soy un bot") is None
+    assert identity_drift("Jamás soy un enlace") is None
+    assert identity_drift("Jamas soy un enlace") is None
+    assert identity_drift("Ni siquiera soy un bot") is None
+    drift = identity_drift("Soy un bot")
+    assert drift is not None and "bot" in drift
+
+
 def test_a_fronted_no_never_negates_an_english_claim():
     # English negation is post-verbal ("I am not"); a bare fronted "No"
     # with no punctuation is a discourse marker, not a denial.

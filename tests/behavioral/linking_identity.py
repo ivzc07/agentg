@@ -44,7 +44,10 @@ _DETERMINERS = {
     "un", "una", "tu", "tus", "su", "sus", "mi", "mis", "el", "la",
     "a", "an", "the", "your", "my",
 }
-_NEGATIONS = {"no", "not", "tampoco", "ni"}
+# Spanish pre-verbal negators of "ser" form a closed class — no, nunca,
+# jamás (accented or not), tampoco, ni, and ni siquiera (whose token
+# before the verb is "siquiera") — plus English "not".
+_NEGATIONS = {"no", "not", "nunca", "jamás", "jamas", "tampoco", "ni", "siquiera"}
 _TRAILING_WORD = re.compile(r"(\w+)([^\w]*)$")
 # A negation only denies the claim it is glued to: any clause break
 # (sentence punctuation, comma, colon, dash, newline) between it and the
