@@ -1,8 +1,7 @@
 # Coach dashboard UX/UI redesign - brief, research, plan
 
-Status: **awaiting owner approval**.
-This document is phases 1-3 of the redesign effort on `feat/UXUI`.
-No code has been touched.
+Status: **implemented** on `feat/UXUI` (commits `2e87d4a..6ec648e`); see §Phase 5 verification at the end.
+This document is phases 1-3 of the redesign effort, kept as the design record.
 Research method: full read of `src/agentg/dashboard_web.py` plus four parallel code/design audits and four Mobbin research sweeps (26 captured references).
 
 ---
@@ -260,3 +259,34 @@ Per the task rules these are **not** in the cosmetic scope above; each is small 
 ### Out of scope, unchanged
 
 The three-view switcher, severity thresholds, day-grid shape, ownership chip semantics, typed confirms, EN/ES rules, the bare 404, all routes, all handler logic, all STRINGS copy (except where a new state needs a new string, added to both languages), and everything spec-dashboard §Out of scope already parks.
+
+---
+
+## Phase 5 - Verification record (2026-07-31)
+
+### What ran
+
+- Full suite: **1127 passed, 2 skipped**; `mypy` clean on `dashboard_web.py` and `dashboard_i18n.py` (the file's eight pre-existing errors were fixed en route).
+- Three test contracts were updated to the approved behavior changes: the editor link/redirect carrying `?view`, and the stale-save keeping the typed form (the new test also asserts the stamp re-arms on the fresh Routine).
+- A seeded demo server (Iron Temple fixtures mirroring the prototype world) served the real app; every screen was screenshotted at desktop width and at 375px (same-origin 375px iframes, since the OS window would not shrink below ~500px - the media queries evaluate per-iframe viewport, so this is a faithful check).
+- Live interactive checks: search filtering with accent folding, the zero-match state, the lapsed tail auto-expanding on a match and never being slammed shut; the stale-save flow end-to-end (409, typed work kept, fresh version shown, stamp re-armed); EN/ES toggle with the active language marked; the Spanish bounce page.
+- An adversarial review workflow (four lenses, every claim independently refuted-or-confirmed) found **8 unique real defects**, all fixed in `6ec648e`: submit-guard vs cancelled confirm, bfcache re-arm, `[hidden]` losing to `.mcard{display:flex}`, the split rail's 47px sticky top vs a wrapping chrome, an invisible focus ring on the white banner, `--ink-3` at 4.05:1 on surfaces, two missing CSS rules, unlabeled nav landmarks.
+Two review claims were refuted and not acted on (the editor chip in its h1 is the settled ownership-chip placement; the day grid's future/plain squares are decorative, not state-bearing - state is mint fill vs coral ring, which passes non-text contrast).
+
+### Where the result matches the references
+
+Linear's row anatomy and grouped sections with counts (roster rows, bands, lapsed tail), Attio's named sort ("Ordenado por días sin venir"), the v3-dark grammar throughout (black, white accent, zero radius, mono eyebrows, white safety block), Hevy/Apple Fitness day-card anatomy (routine cards and the editor's labeled day blocks), Wise's banner anatomy (flag banner: claim, date, one action inside the block), Resend/Hume's typed-confirm shape, Steep/Going empty states, Notion's chip consistency across views.
+
+### Deliberate divergences
+
+- Severity hues are amber `#f2b84b` / coral `#f58060` rather than v3's single coral, because the settled ramp has two steps; mint stays "Session happened".
+- v3's ownership confirm dialog and single-roster IA were not adopted (both overruled by settled decisions).
+- The row severity cue is a text sentence ("N días planificados sin sesión") rather than v3's strip-on-every-row - the Table stays denser and the words carry the count colorblind-safely.
+
+### Left undone, knowingly
+
+- The Member hero's away text carries no severity color: `MemberPage` does not expose `missed_days`, and the store was out of scope. Follow-up: add it to the `member_page` query and color the fact.
+- The Split placeholder shows no live counts (v3's emptyPane had them) - same reason, kept simple.
+- No light theme: dark is the product's one look per the owner's call; a light variant is an optional follow-up.
+- v3's adherence rings and month calendar belong to v2's rejected IA and were not built.
+- True OS-window 375px screenshots were not capturable on this machine; the iframe technique above stands in.
