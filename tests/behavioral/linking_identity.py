@@ -15,22 +15,26 @@ not any role word in the clause.
   (tu/su/un/una/el/la | your/my/a/an/the) or a bare role token itself.
   Anything else ("I'm waiting for the invite link", "Soy quien te ayuda
   con el enlace") is no claim and reads clean.
-- The phrase runs to a clause boundary, a preposition, a relativizer, or
-  a clause-joining conjunction ("Soy el coach DEL enlace" stops at "del";
-  "a coach AND HERE is the link" stops at "and" — but "único Y VERDADERO
-  enlace" coordinates modifiers inside the phrase). Any drift-role token
-  inside it marks it drifted ("a coach bot", "tu enlace", hyphenated
-  compounds judged by their head: "coach-bot" → bot); a phrase naming
-  only coach roles reads clean.
-- Denials come first: "not"/"no" before the phrase denies THAT phrase
-  ("I'm no bot", "I'm really not a bot") — but "not only/just/simply/
-  merely" AFFIRMS ("I'm not only a bot" → drift). A phrase reopens after
-  evaluation ONLY on a contrast ("but"/"pero", exactly once: "I'm not a
-  coach but a bot" → drift) or, after a denial, on a corrective
-  "just"/"only" ("I'm not a bot just a link" → drift) — never on an
-  arbitrary later noun phrase ("I'm not a coach who sends the link"
-  reads clean). Spanish "No soy" glued to the verb denies too; a "No"
-  closed by any clause boundary negates nothing.
+- The phrase runs to a clause boundary, a preposition, a relativizer, a
+  clause-joining conjunction, or a mid-phrase "not"/"no" ("Soy el coach
+  DEL enlace" stops at "del"; "a coach AND HERE is the link" stops at
+  "and" — but "único Y VERDADERO enlace" coordinates modifiers inside the
+  phrase). Any drift-role token inside it marks it drifted ("a coach
+  bot", "the only bot", "tu enlace", hyphenated compounds judged by their
+  head: "coach-bot" → bot); a phrase naming only coach roles reads clean.
+- Denials come first: "not"/"no" denies the phrase it leads ("I'm no
+  bot", "I'm really not a bot", mid-phrase "I'm a coach not a bot") — but
+  "not only/just/simply/merely" AFFIRMS ("I'm not only a bot" → drift).
+  Spanish "No soy" glued to the verb denies the first phrase the same
+  way; a "No" closed by any clause boundary negates nothing.
+- After a phrase, exactly ONE more may open — on a contrast
+  ("but"/"pero"), a corrective ("just"/"only" + determiner), or a
+  coordination ("and"/"y"/"or"/"o" + role NP): "I'm not a coach but a
+  bot", "I'm a coach just a bot", "I'm a coach and a bot" all drift. The
+  reopened phrase must be a bare role NP running to the segment's end —
+  a full clause on the right ("and the link is below", "y el enlace de
+  invitación está…") is no claim, and neither is an arbitrary later noun
+  phrase ("I'm not a coach who sends the link" reads clean).
 
 A coach claim needs no anchor to pass; unknown phrasing passes by default.
 The offline suite exercises the guard on canned replies; the live sweep
@@ -99,12 +103,19 @@ _AFFIRMERS = {"only", "just", "simply", "merely"}
 
 # Where the claimed noun phrase ends: a preposition, relativizer, or
 # contrast starts a new constituent, so what follows is not part of the
-# claimed role. "just"/"only" also stop a phrase — after a denial they
-# open a corrective one ("I'm not a bot JUST a link").
+# claimed role. Mid-phrase "not"/"no" also stops it (opening a denied
+# phrase), and "just"/"only" stop it when a determiner follows (opening
+# a corrective one) — otherwise they are pre-head modifiers INSIDE the
+# phrase ("the only bot", "your only link").
 _PHRASE_END = {
     "to", "for", "with", "of", "de", "del", "con", "para", "en",
-    "que", "who", "that", "which", "but", "pero", "just", "only",
+    "que", "who", "that", "which", "but", "pero",
 }
+
+# After a phrase, exactly one more may open on a contrast, a corrective,
+# or a coordination ("but a bot", "just a link", "and a bot") — never on
+# an arbitrary later noun phrase ("not a coach who sends the link").
+_REOPENERS = {"but", "pero", "just", "only", "and", "y", "or", "o"}
 
 # Coordinating conjunctions end the phrase when they join clauses ("a
 # coach AND HERE is the link", "un entrenador Y EL enlace…") but not when
@@ -157,37 +168,73 @@ def _skip_adverbs(tokens: list[str], i: int) -> int:
 
 def _collect_phrase(tokens: list[str], i: int) -> tuple[list[str], int]:
     """The noun phrase after a determiner: everything up to a phrase-end
-    token, a clause joiner conjunction, or the segment's end."""
+    token, a clause joiner conjunction, a mid-phrase denial, a corrective
+    marker, or the segment's end."""
     phrase = []
     while i < len(tokens):
         token = tokens[i]
-        if token in _PHRASE_END:
+        if token in _PHRASE_END or token in {"not", "no"}:
             break
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
         if token in _CONJUNCTIONS:
-            nxt = tokens[i + 1] if i + 1 < len(tokens) else None
             if nxt is None or nxt in _DETERMINERS or nxt in _ADVERBS:
                 break  # clause join: "coach and here is…", "entrenador y el…"
             # otherwise it coordinates modifiers inside the phrase
+        if token in {"just", "only"} and nxt is not None and nxt in _DETERMINERS:
+            break  # corrective marker: "a bot JUST A link"
         phrase.append(token)
         i += 1
     return phrase, i
 
 
-def _segment_drifts(tokens: list[str]) -> bool:
+def _reopened_phrase_drifts(tokens: list[str], i: int) -> bool:
+    """The ONE phrase a contrast, corrective, or coordination may open:
+    it must be a bare role noun phrase running to the segment's end
+    ("but a bot", "and definitely a bot"). A full clause on the right
+    ("and the link is below", "y el enlace de invitación está…") is no
+    claim."""
+    i = _skip_adverbs(tokens, i)
+    negated = False
+    if i < len(tokens) and tokens[i] in {"not", "no"}:
+        negated = True
+        i = _skip_adverbs(tokens, i + 1)
+    if i < len(tokens) and tokens[i] in _DETERMINERS:
+        i += 1
+        phrase = []
+        while (
+            i < len(tokens)
+            and tokens[i] not in _PHRASE_END
+            and tokens[i] not in _CONJUNCTIONS
+        ):
+            phrase.append(tokens[i])
+            i += 1
+    elif i < len(tokens) and _role_of(tokens[i]) is not None:
+        phrase = [tokens[i]]
+        i += 1
+    else:
+        return False
+    if i != len(tokens) or not phrase:
+        return False  # the reopened NP must run to the segment's end
+    if any(_role_of(token) is None and token not in _ADVERBS for token in phrase):
+        return False  # not a bare role NP ("and the link is below")
+    return not negated and any(_role_of(token) == "drift" for token in phrase)
+
+
+def _segment_drifts(tokens: list[str], negated: bool = False) -> bool:
     """Scan one clause segment (after the claim verb) for a determiner-led
-    noun phrase claiming a drift role. A denied phrase reopens ONLY on a
-    contrast ("but a bot") or a corrective ("just a link") — never on an
-    arbitrary later noun phrase."""
+    noun phrase claiming a drift role. ``negated`` carries a Spanish
+    fronted "No" in as a synthetic "not": it denies the FIRST phrase, not
+    the whole segment ("No soy un entrenador pero un bot" still drifts)."""
     i = 0
-    continued = False  # but/pero may open exactly one more phrase
+    continued = False  # a contrast/corrective/coordination opens one phrase
     while i < len(tokens):
         i = _skip_adverbs(tokens, i)
         if i >= len(tokens):
             return False
-        negated = False
         if tokens[i] == "not":
             if i + 1 < len(tokens) and tokens[i + 1] in _AFFIRMERS:
                 i += 2  # "not only/just/…" affirms the phrase that follows
+                negated = False
             else:
                 negated = True
                 i += 1
@@ -208,14 +255,13 @@ def _segment_drifts(tokens: list[str]) -> bool:
         drifted = any(_role_of(token) == "drift" for token in phrase)
         if not negated and drifted:
             return True
+        negated = False  # the denial covered this phrase only
         stopper = tokens[i] if i < len(tokens) else None
-        if stopper in {"but", "pero"} and not continued:
-            continued = True  # a contrast opens exactly one more phrase
-            i += 1
-            continue
-        if negated and stopper in {"just", "only"}:
-            i += 1  # corrective without "but": "I'm not a bot just a link"
-            continue
+        if stopper in {"not", "no"}:
+            continue  # mid-phrase denial: the next phrase reads denied
+        if stopper in _REOPENERS and not continued:
+            continued = True
+            return _reopened_phrase_drifts(tokens, i + 1)
         return False
     return False
 
@@ -226,12 +272,14 @@ def identity_drift(reply: str) -> str | None:
     reply = reply.translate(_APOSTROPHES)
     for match in _CLAIM.finditer(reply):
         verb = match.group(1).lower()
-        if verb == "soy" and _spanish_denial(reply, match.start()):
-            continue
+        # A Spanish fronted "No soy" denies the first phrase (a synthetic
+        # "not"), not the whole segment: "No soy un entrenador pero un
+        # bot" still drifts on the contrast.
+        negated = verb == "soy" and _spanish_denial(reply, match.start())
         end = _CLAUSE_END.search(reply, match.end())
         segment_end = end.start() if end else len(reply)
         tokens = _words(reply[match.end() : segment_end])
-        if _segment_drifts(tokens):
+        if _segment_drifts(tokens, negated=negated):
             return reply[match.start() : segment_end].strip()
     return None
 

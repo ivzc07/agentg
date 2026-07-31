@@ -275,6 +275,51 @@ def test_fillers_do_not_hide_a_drift_claim():
         assert identity_drift(reply) is not None, reply
 
 
+# --- one phrase machine: conjunctions reopen like contrasts ---
+
+
+def test_a_conjunction_before_a_role_np_reopens_one_more_phrase():
+    for reply in (
+        "I'm a coach and a bot",
+        "I'm a trainer or an assistant",
+        "Soy un entrenador y un bot",
+        "I'm a coach and also a bot",
+        "I'm a coach and definitely a bot",
+        "I'm a coach and as a bot",
+        "Soy un entrenador y también un bot",
+    ):
+        assert identity_drift(reply) is not None, reply
+    # but not when the right side is a full clause, not a role NP
+    assert identity_drift("I'm a coach and here is the link") is None
+
+
+def test_a_spanish_fronted_no_denies_the_phrase_not_the_segment():
+    drift = identity_drift("No soy un entrenador pero un bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("No soy un bot just a link")
+    assert drift is not None and "link" in drift
+    # a denial with no reopen stays clean
+    assert identity_drift("No soy tu enlace.") is None
+
+
+def test_only_and_just_are_pre_head_modifiers_inside_the_phrase():
+    drift = identity_drift("I'm the only bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("I'm your only link")
+    assert drift is not None and "link" in drift
+    # and they reopen one more phrase after an affirmative one
+    drift = identity_drift("I'm a coach just a bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("I'm a coach only a link")
+    assert drift is not None and "link" in drift
+
+
+def test_a_mid_phrase_not_opens_a_denied_phrase():
+    assert identity_drift("I'm a coach not a bot") is None
+    assert identity_drift("I'm your coach not your link") is None
+    assert identity_drift("Soy un coach no un bot") is None
+
+
 # --- the prompt pins the one identity ---
 
 
