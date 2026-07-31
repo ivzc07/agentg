@@ -116,20 +116,20 @@ def _is_allowed_prefix(parts: list[str]) -> bool:
     return True
 
 
-def _is_name_core(token: str) -> bool:
-    # Exact allowlist match, or the allowlisted core as a hyphen SUFFIX of a
-    # longer token whose prefix parts are all equipment/variant words
-    # ("bar-muscle-up", "kipping-muscle-up", "strength-band-pull-apart");
-    # plural "s" allowed.
+def _match_name_core(token: str) -> tuple[str, str] | None:
+    # (form, core) for an exact allowlist match, or the allowlisted core as a
+    # hyphen SUFFIX of a longer token whose prefix parts are all
+    # equipment/variant words ("bar-muscle-up", "kipping-muscle-up",
+    # "strength-band-pull-apart"); plural "s" allowed. None if not a core.
     lowered = token.lower()
     forms = [lowered, lowered[:-1]] if lowered.endswith("s") else [lowered]
     for form in forms:
         if form in EXERCISE_NAME_CORES:
-            return True
+            return form, form
         for core in EXERCISE_NAME_CORES:
             if form.endswith(f"-{core}") and _is_allowed_prefix(form[: -len(core) - 1].split("-")):
-                return True
-    return False
+                return form, core
+    return None
 
 
 def _absorbable(word: str, following: str) -> bool:
@@ -144,57 +144,92 @@ def _absorbable(word: str, following: str) -> bool:
     return _is_allowed_prefix(word.split("-"))
 
 
-def _is_lexicon(word: str) -> bool:
-    return any(pattern.fullmatch(word) for pattern in _PATTERNS.values())
-
-
-def _preceded_by_chain_content(tokens: list[re.Match[str]], k: int, text: str) -> bool:
-    # A strength-led token preceded (across a horizontal gap) by another
-    # name-modifier OR by lexicon goal vocabulary is mid-chain, not a chain
-    # start — prose before it means chain start.
-    if k == 0 or not _HORIZONTAL_GAP_RE.fullmatch(text[tokens[k - 1].end() : tokens[k].start()]):
-        return False
-    previous = tokens[k - 1].group().lower()
-    return _absorbable(previous, tokens[k].group().lower()) or _is_lexicon(previous)
-
-
 _HORIZONTAL_GAP_RE = re.compile(r"[ \t]+")
 
 
-def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
+def _hyphen_parts(start: int, token_text: str) -> list[tuple[int, int, str]]:
+    """(start, end, word) per hyphen-separated part of a token."""
+    parts = []
+    offset = 0
+    for part in token_text.split("-"):
+        parts.append((start + offset, start + offset + len(part), part.lower()))
+        offset += len(part) + 1
+    return parts
+
+
+def _lexicon_hit_ends_at(hits: list[tuple[str, int, int]], end: int) -> bool:
+    return any(hit_end == end for _, _, hit_end in hits)
+
+
+def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tuple[int, int]]:
     """Spans the catalog carve-out covers: an allowlisted name core plus the
     modifier tokens immediately preceding it. The walk is bounded by the
     modifier rule itself, not a count; no right-side absorption, no generic
     neighbor walking, and gaps are spaces/tabs only — a name mention broken
-    across lines or separator characters is not one name."""
+    across lines or separator characters is not one name.
+
+    The mid-chain strength discriminator runs on ONE uniform part sequence
+    (absorbed tokens and the core token's own glued prefix, all split into
+    hyphen parts), so glued forms and multi-word lexicon prefixes can't
+    dodge it: "strength" is clean only as the FIRST chain part, preceded by
+    nothing, prose, or punctuation; any preceding chain content — modifier
+    parts or an adjacent lexicon hit — makes it mid-chain, and the span
+    starts after it."""
     tokens = list(_TOKEN_RE.finditer(text))
     spans = []
     for i, tok in enumerate(tokens):
-        if not _is_name_core(tok.group()):
+        matched = _match_name_core(tok.group())
+        if matched is None:
             continue
+        form, core = matched
         start = tok.start()
+        first = i  # token index where the modifier chain starts
         k = i - 1
         while k >= 0 and _HORIZONTAL_GAP_RE.fullmatch(text[tokens[k].end() : start]):
             word = tokens[k].group().lower()
             following = tokens[k + 1].group().lower()
             if not _absorbable(word, following):
                 break
-            # A strength-led token starts the chain only after prose,
-            # punctuation, or line start — never after a modifier or lexicon.
-            if word.split("-", 1)[0] == "strength" and _preceded_by_chain_content(tokens, k, text):
-                break
             start = tokens[k].start()
+            first = k
             k -= 1
+        # One uniform part sequence: absorbed tokens' hyphen parts, then the
+        # core token's own glued prefix parts.
+        parts: list[tuple[int, int, str]] = []
+        for j in range(first, i):
+            parts.extend(_hyphen_parts(tokens[j].start(), tokens[j].group()))
+        if form != core:
+            prefix = tok.group()[: len(form) - len(core) - 1]
+            parts.extend(_hyphen_parts(tok.start(), prefix))
+        # Strength is clean only as the FIRST chain part; cut the span after
+        # the last mid-chain strength (preceded by modifier parts, or by a
+        # lexicon hit ending at the previous token's end — "weight loss",
+        # "stamina-endurance").
+        preceded_by_lexicon = (
+            first > 0
+            and _HORIZONTAL_GAP_RE.fullmatch(text[tokens[first - 1].end() : tokens[first].start()])
+            and _lexicon_hit_ends_at(hits, tokens[first - 1].end())
+        )
+        cut = None
+        for idx, (_, _, word) in enumerate(parts):
+            if word == "strength" and (idx > 0 or preceded_by_lexicon):
+                cut = idx
+        if cut is not None:
+            start = parts[cut + 1][0] if cut + 1 < len(parts) else parts[cut][1]
         spans.append((start, tok.end()))
     return spans
 
 
 def find_english_leaks(reply: str) -> set[str]:
     """English training vocabulary found in a reply — empty means clean."""
-    names = _exercise_name_spans(reply)
-    leaks = set()
-    for term, pattern in _PATTERNS.items():
-        for match in pattern.finditer(reply):
-            if not any(start <= match.start() and match.end() <= end for start, end in names):
-                leaks.add(term)
-    return leaks
+    hits = [
+        (term, match.start(), match.end())
+        for term, pattern in _PATTERNS.items()
+        for match in pattern.finditer(reply)
+    ]
+    names = _exercise_name_spans(reply, hits)
+    return {
+        term
+        for term, start, end in hits
+        if not any(span_start <= start and end <= span_end for span_start, span_end in names)
+    }

@@ -194,6 +194,21 @@ def test_strength_starting_a_chain_after_prose_is_name_internal():
     assert find_english_leaks("haz strength-band pull-apart") == set()
 
 
+def test_mid_chain_strength_flags_in_glued_and_multiword_shapes():
+    # Round-12 P1: the discriminator runs on chain PARTS, not raw tokens, so
+    # glued cores and multi-word lexicon prefixes can't dodge it.
+    assert find_english_leaks("kipping strength-band-pull-apart") == {"strength"}
+    assert find_english_leaks("weighted strength-band-pull-apart") == {"strength"}
+    assert find_english_leaks("weight loss strength band pull-apart") == {"weight loss", "strength"}
+    # "fat" is itself a lexicon term, so it flags alongside the phrase
+    assert find_english_leaks("fat loss strength-band-pull-apart") == {"fat", "fat loss", "strength"}
+    assert find_english_leaks("stamina-endurance strength band pull-apart") == {
+        "stamina",
+        "endurance",
+        "strength",
+    }
+
+
 def test_hypertrophy_is_a_leak():
     # Round-11 P2: the rules doc lists hipertrofia as a primary goal.
     assert (
@@ -218,12 +233,17 @@ def test_the_lexicon_covers_the_rules_docs_goal_vocabulary():
 # flags. A Spanish word glued INSIDE a hyphen chain breaks the name shape,
 # so the chain's strength is adjacent-outside and flags.
 
-_PREFIXES = ("none", "spanish", "modifier", "lexicon")
-_UNITS = ("spaced", "glued", "chain")
+_PREFIXES = ("none", "spanish", "modifier", "lexicon", "multiword-lexicon")
+_UNITS = ("spaced", "glued", "glued-core", "chain")
 _CORES = ("pull-apart", "muscle-up", "pull-aparts")  # singular + plural
 _SUFFIXES = ("none", "prose", "another-name")
 
-_PREFIX_TEXT = {"spanish": "toca", "modifier": "kipping", "lexicon": "stamina"}
+_PREFIX_TEXT = {
+    "spanish": "toca",
+    "modifier": "kipping",
+    "lexicon": "stamina",
+    "multiword-lexicon": "weight loss",
+}
 _SUFFIX_TEXT = {"none": "", "prose": " hoy", "another-name": " y dips"}
 
 
@@ -231,6 +251,7 @@ def _matrix_text(prefix: str, unit: str, core: str, suffix: str) -> str:
     body = {
         "spaced": f"strength band {core}",
         "glued": f"strength-band {core}",
+        "glued-core": f"strength-band-{core}",
         "chain": f"strength-band-{core}",
     }[unit]
     if prefix != "none":
@@ -243,7 +264,11 @@ def _matrix_expected(prefix: str, unit: str, core: str) -> set[str]:
     leaks: set[str] = set()
     if prefix == "lexicon":
         leaks.add("stamina")
-    if prefix in {"modifier", "lexicon"} or (prefix == "spanish" and unit == "chain"):
+    if prefix == "multiword-lexicon":
+        leaks.add("weight loss")
+    if prefix in {"modifier", "lexicon", "multiword-lexicon"} or (
+        prefix == "spanish" and unit == "chain"
+    ):
         leaks.add("strength")
     if unit == "chain" and prefix != "none" and core == "muscle-up":
         # the glued chain is broken by an invalid prefix part, so the whole
