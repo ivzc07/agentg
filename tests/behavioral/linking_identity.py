@@ -44,7 +44,7 @@ _DETERMINERS = {
     "un", "una", "tu", "tus", "su", "sus", "mi", "mis", "el", "la",
     "a", "an", "the", "your", "my",
 }
-_NEGATIONS = {"no", "not"}
+_NEGATIONS = {"no", "not", "tampoco", "ni"}
 _TRAILING_WORD = re.compile(r"(\w+)([^\w]*)$")
 # A negation only denies the claim it is glued to: any clause break
 # (sentence punctuation, comma, colon, dash, newline) between it and the

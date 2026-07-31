@@ -118,6 +118,16 @@ def test_an_ellipsis_breaks_the_denial():
     assert drift is not None and "enlace" in drift
 
 
+def test_spanish_denial_markers_beyond_no():
+    # tampoco and ni deny like "no" when glued to the verb.
+    assert identity_drift("Tampoco soy un bot") is None
+    assert identity_drift("Yo tampoco soy un enlace") is None
+    assert identity_drift("Ni soy un bot") is None
+    assert identity_drift("Ni soy un bot, soy un entrenador.") is None
+    drift = identity_drift("Soy un bot")
+    assert drift is not None and "bot" in drift
+
+
 def test_a_fronted_no_never_negates_an_english_claim():
     # English negation is post-verbal ("I am not"); a bare fronted "No"
     # with no punctuation is a discourse marker, not a denial.
@@ -244,6 +254,16 @@ async def test_live_phraser_holds_one_identity_across_calls_and_instructions():
         (linking.LINK_EXPIRED_INSTRUCTION, "yes"),
         # The happy-path name ask also carries no coach-identity wording.
         (linking.NAME_ASK_INSTRUCTION.format(gym="Iron Temple"), "no"),
+        # The coach paths: welcoming a new coach and re-assuring an
+        # existing one.
+        (
+            linking.COACH_WELCOME_INSTRUCTION.format(name="Ana", gym="Iron Temple"),
+            "yes",
+        ),
+        (
+            linking.ALREADY_COACH_INSTRUCTION.format(name="Ana", gym="Iron Temple"),
+            "/start x",
+        ),
         # The fix must hold for the other linking instructions too.
         (
             linking.NAME_CONFIRM_INSTRUCTION.format(gym="Iron Temple", name="Ana García"),
