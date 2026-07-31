@@ -288,6 +288,16 @@ def test_spanish_and_ties_detect_as_spanish():
     assert detect_language("Solo puede entrenar por la mañana") == "es"
     assert detect_language("Me duele la rodilla al sentarme") == "es"
     assert detect_language("Quiere hacer banca con su propio peso") == "es"
+    # Short first-person Spanish notes: a lone English-scoring "me" must not
+    # flip them.
+    for phrase in (
+        "Me duele",
+        "me siento mal",
+        "no me siento bien",
+        "me duele mucho",
+        "me canso",
+    ):
+        assert detect_language(phrase) == "es", phrase
     # No signal at all: the product's no-signal default.
     assert detect_language("10k 2026") == "es"
 
