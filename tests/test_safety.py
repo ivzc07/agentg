@@ -264,3 +264,33 @@ async def test_a_coachs_own_flag_links_to_the_roster_not_their_404_page(env):
     token = await env.dashboard.peek_login_token(match.group(1))
     assert token is not None
     assert token.next_path == "/"
+
+
+async def test_a_token_mint_failure_still_pings_every_coach(env, monkeypatch):
+    # A mint failure for one coach must not abort the loop after the note is
+    # committed: the rest still get their deep link, and the unlucky coach
+    # gets a text-only ping (like the no-base_url path) — never silence
+    # (review on PR #120).
+    second = await env.linking.link_member(env.gym_id, "Coach Jo", "telegram", "8")
+    await env.linking.set_coach(second.id)
+    real_mint = env.dashboard.create_login_token
+    calls = 0
+
+    async def flaky_mint(member_id, gym_id, next_path=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("db hiccup")
+        return await real_mint(member_id, gym_id, next_path=next_path)
+
+    monkeypatch.setattr(env.dashboard, "create_login_token", flaky_mint)
+
+    result = await flag_to_coach_action(env.context(), "sharp knee pain on squats")
+
+    assert result["coaches_notified"] == 2
+    assert {(c, u) for c, u, _t, _p in env.notifier.sent} == {
+        ("telegram", "7"),
+        ("telegram", "8"),
+    }
+    with_link = [t for _c, _u, t, _p in env.notifier.sent if "/login/" in t]
+    assert len(with_link) == 1  # the mint-failed ping went out text-only

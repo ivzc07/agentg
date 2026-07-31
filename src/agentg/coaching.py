@@ -122,11 +122,17 @@ async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]
         # Note, so a member-influenced summary can't smuggle a phishing URL
         # onto its own line above the real magic link.
         text = f"Heads-up from your member {c.member_name}: {note.text}"
-        if c.dashboard_base_url is not None and c.stores.dashboard is not None:
-            token = await c.stores.dashboard.create_login_token(
-                coach_id, c.gym_id, next_path=next_path
-            )
-            text += f"\n{c.dashboard_base_url}/login/{token}"
+        try:
+            if c.dashboard_base_url is not None and c.stores.dashboard is not None:
+                token = await c.stores.dashboard.create_login_token(
+                    coach_id, c.gym_id, next_path=next_path
+                )
+                text += f"\n{c.dashboard_base_url}/login/{token}"
+        except Exception:
+            # Mint failed for this coach: fall back to a text-only ping (the
+            # no-base_url path) rather than dropping them — or worse, aborting
+            # the loop so the remaining coaches are never pinged at all.
+            logger.exception("failed to mint a dashboard link for coach %s", channel_user_id)
         try:
             # No link preview: Telegram's fetcher would GET the one-time link
             # before the coach does (and the token would land in its logs).

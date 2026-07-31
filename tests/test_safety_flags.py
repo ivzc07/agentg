@@ -308,3 +308,37 @@ async def test_a_second_tick_keeps_the_first_coaches_stamp(env):
     stored = next(n for n in await _notes(env).active(member.id) if n.kind == "safety")
     assert stored.acknowledged_by_member_id == env.coach.id
     assert stored.acknowledged_at == env.clock.now - timedelta(days=1)
+
+
+async def test_tick_off_with_foreign_consistent_ids_is_the_shared_404(env):
+    """The URL ids are consistent with the foreign row, so only the gym_id
+    predicate can produce this 404 — cross-tenant stamping stays impossible
+    (review on PR #120)."""
+    outsider_gym = await env.linking.create_gym("Other Gym")
+    outsider = await env.linking.link_member(outsider_gym.id, "Rex", "telegram", "902")
+    foreign = await _notes(env).remember_safety(outsider.id, outsider_gym.id, "dizzy")
+
+    response = await env.client.post(
+        f"/members/{outsider.id}/flags/{foreign.id}/tick-off",
+        cookies=_cookie(env),  # our coach, their ids
+        allow_redirects=False,
+    )
+
+    assert response.status == 404
+    note = next(n for n in await _notes(env).active(outsider.id) if n.kind == "safety")
+    assert note.acknowledged_at is None and note.acknowledged_by_member_id is None
+
+
+async def test_an_acknowledged_flag_never_reads_expired(env):
+    """Acknowledged wins over expired: once a Coach ticked the flag, aging
+    past FLAG_EXPIRY must keep showing who and when — never "caducada,
+    nunca vista" (review on PR #120)."""
+    member = await env.add_member("Ana")
+    note = await _flag(env, member)
+    await env.store.acknowledge_flag(env.gym.id, member.id, note.id, env.coach.id)
+
+    env.clock.advance(timedelta(days=31))
+
+    html = await _member_page(env, member.id)
+    assert "Vista por Coach Ana" in html
+    assert "caducada, nunca vista" not in html
