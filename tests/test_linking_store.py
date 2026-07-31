@@ -346,6 +346,7 @@ async def test_ensure_schema_adds_the_safety_flag_columns_to_a_legacy_db(tmp_pat
     engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
     await LinkingStore(engine).ensure_schema()
     await engine.dispose()
+
     # Simulate the legacy schema. Done on a raw sync connection (FK
     # enforcement off — our async engine runs with PRAGMA foreign_keys=ON).
     # member_notes is rebuilt the old way: SQLite 3.50 refuses to DROP a
@@ -404,4 +405,70 @@ async def test_ensure_schema_adds_the_safety_flag_columns_to_a_legacy_db(tmp_pat
     await store.ensure_schema()
     rows, _ = await dashboard.roster(gym.id)
     assert not rows[0].has_safety_flag
+    await engine.dispose()
+
+
+async def test_ensure_schema_rebuilds_legacy_routines_for_memberless_masters(tmp_path):
+    """The issue #102 SQLite upgrade keeps old rows while dropping the old
+    NOT NULL member_id constraint so a Preset master can be inserted."""
+    import sqlite3
+
+    from agentg.models import Routine, Workout
+
+    db_path = tmp_path / "legacy-routines.db"
+    engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+    store = LinkingStore(engine)
+    await store.ensure_schema()
+    gym = await store.create_gym("Iron Temple")
+    member = await store.link_member(gym.id, "Luis", "telegram", "2")
+    await engine.dispose()
+
+    raw = sqlite3.connect(str(db_path))
+    raw.execute("DROP TABLE routines")
+    raw.execute(
+        "INSERT INTO routine_presets (id, gym_id, name, retired_at, created_at) "
+        "VALUES (1, ?, 'Legacy', NULL, '2026-01-01 00:00:00')",
+        (gym.id,),
+    )
+    raw.execute(
+        """CREATE TABLE routines (
+            id INTEGER NOT NULL PRIMARY KEY,
+            gym_id INTEGER NOT NULL REFERENCES gyms (id),
+            member_id INTEGER NOT NULL REFERENCES members (id),
+            is_active BOOLEAN NOT NULL,
+            coach_authored BOOLEAN NOT NULL,
+            created_by_member_id INTEGER REFERENCES members (id),
+            created_at DATETIME NOT NULL
+        )"""
+    )
+    raw.execute(
+        "INSERT INTO routines VALUES (1, ?, ?, 1, 0, NULL, '2026-01-01 00:00:00')",
+        (gym.id, member.id),
+    )
+    raw.execute(
+        "INSERT INTO workouts (id, gym_id, routine_id, weekday, name) "
+        "VALUES (1, ?, 1, 0, 'Legacy day')",
+        (gym.id,),
+    )
+    raw.commit()
+    raw.close()
+
+    engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+    store = LinkingStore(engine)
+    await store.ensure_schema()
+    async with store._sessions() as db:
+        old = await db.get(Routine, 1)
+        assert old is not None and old.member_id == member.id
+        assert (await db.get(Workout, 1)).name == "Legacy day"
+        db.add(
+            Routine(
+                gym_id=gym.id,
+                member_id=None,
+                preset_id=1,
+                is_active=True,
+                created_at=old.created_at,
+            )
+        )
+        await db.flush()
+    await store.ensure_schema()
     await engine.dispose()

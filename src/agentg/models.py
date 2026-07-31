@@ -239,11 +239,30 @@ class MemberNote(Base):
     )
 
 
-class Routine(Base):
-    """A Member's written training plan: Workouts pinned to weekdays.
+class RoutinePreset(Base):
+    """A Coach-named Routine identity whose structure lives in master rows."""
 
-    Structure only, never target weights (spec §Data model). One active
-    Routine per Member; superseded plans stay, deactivated.
+    __tablename__ = "routine_presets"
+    __table_args__ = (
+        # Retirement never frees the name: keeping identity reserved makes a
+        # retired Preset unambiguous in historical Routine copies (issue #102).
+        UniqueConstraint("gym_id", "name", name="uq_routine_presets_gym_name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    name: Mapped[str] = mapped_column(String(100))
+    retired_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+class Routine(Base):
+    """A written training plan: Workouts pinned to weekdays.
+
+    Structure only, never target weights (spec §Data model). Most Routines
+    belong to a Member; a Member-less row with ``preset_id`` set is a Preset
+    master. The accepted cost is that "every Routine has a Member" stops
+    being an invariant.
     """
 
     __tablename__ = "routines"
@@ -260,11 +279,21 @@ class Routine(Base):
             sqlite_where=text("is_active"),
             postgresql_where=text("is_active"),
         ),
+        Index(
+            "uq_routines_one_active_master_per_preset",
+            "preset_id",
+            unique=True,
+            sqlite_where=text("is_active AND member_id IS NULL"),
+            postgresql_where=text("is_active AND member_id IS NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
-    member_id: Mapped[int] = mapped_column(ForeignKey("members.id"))
+    member_id: Mapped[int | None] = mapped_column(ForeignKey("members.id"), default=None)
+    preset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("routine_presets.id"), index=True, default=None
+    )
     is_active: Mapped[bool] = mapped_column(default=True)
     # Set when a Coach hand-writes the plan (ticket #30); the Agent never
     # restructures a coach-authored Routine.

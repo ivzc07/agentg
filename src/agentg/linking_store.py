@@ -92,6 +92,45 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text("ALTER TABLE routines ADD COLUMN created_by_member_id INTEGER REFERENCES members(id)")
         )
+    if "preset_id" not in routine_columns:
+        conn.execute(
+            text("ALTER TABLE routines ADD COLUMN preset_id INTEGER REFERENCES routine_presets(id)")
+        )
+    # SQLite has no ALTER COLUMN. Rebuild only legacy tables that still make
+    # Member mandatory, preserving every row inside this startup transaction
+    # (issue #102; the Postgres branch below can alter in place).
+    routine_columns_info = inspect(conn).get_columns("routines")
+    member_column = next(column for column in routine_columns_info if column["name"] == "member_id")
+    if not member_column["nullable"]:
+        if conn.dialect.name == "postgresql":
+            conn.execute(text("ALTER TABLE routines ALTER COLUMN member_id DROP NOT NULL"))
+        elif conn.dialect.name == "sqlite":
+            conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            conn.exec_driver_sql("DROP TABLE IF EXISTS routines__preset_upgrade")
+            conn.exec_driver_sql(
+                """CREATE TABLE routines__preset_upgrade (
+                    id INTEGER NOT NULL PRIMARY KEY,
+                    gym_id INTEGER NOT NULL REFERENCES gyms(id),
+                    member_id INTEGER REFERENCES members(id),
+                    preset_id INTEGER REFERENCES routine_presets(id),
+                    is_active BOOLEAN NOT NULL,
+                    coach_authored BOOLEAN NOT NULL,
+                    created_by_member_id INTEGER REFERENCES members(id),
+                    created_at DATETIME NOT NULL
+                )"""
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO routines__preset_upgrade "
+                    "(id, gym_id, member_id, preset_id, is_active, coach_authored, "
+                    "created_by_member_id, created_at) "
+                    "SELECT id, gym_id, member_id, preset_id, is_active, coach_authored, "
+                    "created_by_member_id, created_at FROM routines"
+                )
+            )
+            conn.exec_driver_sql("DROP TABLE routines")
+            conn.exec_driver_sql("ALTER TABLE routines__preset_upgrade RENAME TO routines")
+            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
     # One active Routine per Member, DB-enforced (issue #100 review): the
     # backstop behind the editor's no-base stale check.
     routine_indexes = {i["name"] for i in inspect(conn).get_indexes("routines")}
@@ -105,8 +144,9 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text(
                 "UPDATE routines SET is_active = false "
-                "WHERE is_active AND id NOT IN ("
-                "  SELECT MAX(id) FROM routines WHERE is_active GROUP BY member_id"
+                "WHERE is_active AND member_id IS NOT NULL AND id NOT IN ("
+                "  SELECT MAX(id) FROM routines "
+                "  WHERE is_active AND member_id IS NOT NULL GROUP BY member_id"
                 ")"
             )
         )
@@ -114,6 +154,32 @@ def _add_missing_columns(conn: Connection) -> None:
             text(
                 "CREATE UNIQUE INDEX uq_routines_one_active_per_member "
                 "ON routines (member_id) WHERE is_active"
+            )
+        )
+    routine_indexes = {i["name"] for i in inspect(conn).get_indexes("routines")}
+    if "ix_routines_member_active" not in routine_indexes:
+        conn.execute(
+            text("CREATE INDEX ix_routines_member_active ON routines (member_id, is_active)")
+        )
+    if "ix_routines_preset_id" not in routine_indexes:
+        conn.execute(text("CREATE INDEX ix_routines_preset_id ON routines (preset_id)"))
+    routine_indexes = {i["name"] for i in inspect(conn).get_indexes("routines")}
+    if "uq_routines_one_active_master_per_preset" not in routine_indexes:
+        conn.execute(
+            text(
+                "UPDATE routines SET is_active = false "
+                "WHERE is_active AND member_id IS NULL AND preset_id IS NOT NULL "
+                "AND id NOT IN ("
+                "  SELECT MAX(id) FROM routines "
+                "  WHERE is_active AND member_id IS NULL AND preset_id IS NOT NULL "
+                "  GROUP BY preset_id"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_routines_one_active_master_per_preset "
+                "ON routines (preset_id) WHERE is_active AND member_id IS NULL"
             )
         )
     # Safety flags (issue #101): the tick-off stamps on member_notes, and the

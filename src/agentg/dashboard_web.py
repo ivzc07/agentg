@@ -61,6 +61,7 @@ import hashlib
 import hmac
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from html import escape
@@ -93,11 +94,18 @@ from agentg.dashboard_store import (
     DayCell,
     MemberPage,
     NoteView,
+    RoutineDayView,
     RosterRow,
 )
 from agentg.linking_store import GYM_NAME_MAX_LENGTH, LinkingStore
-from agentg.models import Gym, Member
-from agentg.routines import ExerciseSpec, StaleRoutineError, UnknownExercisesError, WorkoutSpec
+from agentg.models import Gym, Member, RoutinePreset
+from agentg.routines import (
+    DuplicatePresetNameError,
+    ExerciseSpec,
+    StaleRoutineError,
+    UnknownExercisesError,
+    WorkoutSpec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -364,6 +372,7 @@ def _chrome(gym_name: str, view: str, t: dict, next_path: str, count: int | None
 {_seg(view, t)}
 <input id="search" type="search" placeholder="{t["search_placeholder"]}" autocomplete="off">
 {_lang_toggle(next_path)}
+<a href="/presets">{t["presets"]}</a>
 <a href="/settings">{t["settings"]}</a>
 </header>"""
 
@@ -592,13 +601,17 @@ def _set_lines(sets: list[tuple[str, float | None, int, str | None]], unit: str,
     return "".join(lines)
 
 
-def _ownership_chip(coach_authored: bool, author: str | None, lang: str) -> str:
+def _ownership_chip(
+    coach_authored: bool, author: str | None, lang: str, preset_name: str | None = None
+) -> str:
     """The ownership chip (issue #86): named Coach-authored while the actor
     stamp survives, plain when it has blanked, Agent-managed until the
     first coach save. Always visible — the fork is silent but never a
     surprise."""
     t = STRINGS[lang]
-    if coach_authored:
+    if preset_name is not None:
+        label = t["preset_chip"].format(name=escape(preset_name))
+    elif coach_authored:
         label = t["chip_coach_named"].format(name=escape(author)) if author else t["chip_coach"]
     else:
         label = t["chip_agent"]
@@ -622,7 +635,7 @@ def _routine_card(view: MemberPage, lang: str) -> str:
             )
         body = "".join(days)
     header = (
-        f'<h2>{t["routine"]} {_ownership_chip(view.coach_authored, view.routine_author, lang)} '
+        f'<h2>{t["routine"]} {_ownership_chip(view.coach_authored, view.routine_author, lang, view.routine_preset_name)} '
         f'<a class="edit" href="/members/{view.member_id}/routine">{t["edit"]}</a></h2>'
     )
     return f'<section class="card">{header}{body}</section>'
@@ -820,6 +833,19 @@ def _member_page(gym_name: str, view: MemberPage, roster_view: str, lang: str, n
 
 EditorDay = tuple[int | None, str, str]  # (weekday, workout name, exercise lines)
 
+
+@dataclass(frozen=True)
+class RoutineEditorView:
+    """The shared editor-facing subset for Members and Preset masters."""
+
+    member_id: int
+    name: str
+    routine: list
+    routine_id: int | None
+    coach_authored: bool
+    routine_author: str | None
+    routine_preset_name: str | None = None
+
 # The chat notice a web save sends the Member (issue #77, named per #91):
 # deterministic and chat-side, so it follows the chat rule (Spanish like
 # the nudges), never the dashboard's per-browser language.
@@ -977,16 +1003,21 @@ EDITOR_STYLE = """
 
 def _routine_editor_page(
     gym_name: str,
-    view: MemberPage,
+    view: RoutineEditorView,
     days: list[EditorDay],
     catalog: list[str],
     lang: str,
     next_path: str,
     error: str = "",
     base: str | None = None,
+    action: str | None = None,
+    back_href: str | None = None,
+    title_key: str = "editor_title",
 ) -> str:
     t = STRINGS[lang]
-    chip = _ownership_chip(view.coach_authored, view.routine_author, lang)
+    chip = _ownership_chip(
+        view.coach_authored, view.routine_author, lang, view.routine_preset_name
+    )
     consequence = (
         f'<p class="consequence">{t["chip_consequence"]}</p>'
         if not view.coach_authored
@@ -999,7 +1030,9 @@ def _routine_editor_page(
     # view would let a retry slip past the stale check (review round 4).
     if base is None:
         base = "" if view.routine_id is None else str(view.routine_id)
-    title = t["editor_title"].format(name=escape(view.name))
+    title = t[title_key].format(name=escape(view.name))
+    action = action or f"/members/{view.member_id}/routine"
+    back_href = back_href or f"/members/{view.member_id}"
     return f"""<!DOCTYPE html>
 <html lang="{lang}">
 <head>
@@ -1009,13 +1042,13 @@ def _routine_editor_page(
 <style>{ROSTER_STYLE}{EDITOR_STYLE}</style>
 </head>
 <body>
-<a class="back" href="/members/{view.member_id}">← {escape(view.name)}</a>
+<a class="back" href="{back_href}">← {escape(view.name)}</a>
 <header>
 <h1>{title} {chip}</h1>
 {consequence}
 </header>
 {notice}
-<form method="post" action="/members/{view.member_id}/routine">
+<form method="post" action="{action}">
 <input type="hidden" name="base_routine_id" value="{base}">
 <div id="days">
 {blocks}
@@ -1030,6 +1063,80 @@ def _routine_editor_page(
 <p>{_lang_toggle(next_path)}</p>
 </body>
 </html>"""
+
+
+def _preset_editor_view(preset: RoutinePreset, master: dict | None) -> RoutineEditorView:
+    routine = [
+        RoutineDayView(
+            workout["weekday"],
+            workout["name"],
+            [(e["exercise"], e["sets"], e["reps"]) for e in workout["exercises"]],
+        )
+        for workout in (master["workouts"] if master else [])
+    ]
+    return RoutineEditorView(
+        member_id=preset.id,
+        name=preset.name,
+        routine=routine,
+        routine_id=master["routine_id"] if master else None,
+        coach_authored=True,
+        routine_author=master["created_by_name"] if master else None,
+        routine_preset_name=preset.name,
+    )
+
+
+def _presets_page(
+    gym_name: str,
+    presets: list[RoutinePreset],
+    members: list[Member],
+    lang: str,
+    next_path: str,
+    error: str = "",
+) -> str:
+    """The Coach-only Presets index and copy-on-apply forms (issue #102)."""
+    t = STRINGS[lang]
+    notice = f'<p class="error">{escape(error)}</p>' if error else ""
+    create = f"""<section class="card">
+<h2>{t["create_preset"]}</h2>
+<form method="post" action="/presets">
+<label>{t["preset_name"]}
+<input type="text" name="name" maxlength="100" required>
+</label> <button type="submit">{t["create_preset"]}</button>
+</form></section>"""
+    if not presets:
+        cards = f'<p class="muted">{t["no_presets"]}</p>'
+    else:
+        cards = []
+        for preset in presets:
+            member_choices = "".join(
+                f'<label><input type="checkbox" name="member_ids" value="{member.id}">'
+                f" {escape(member.name)}</label> "
+                for member in members
+            )
+            if members:
+                apply_form = f"""<form method="post" action="/presets/{preset.id}/apply">
+<fieldset><legend>{t["apply_preset"]}</legend>
+<label><input type="checkbox" name="apply_all" value="1"> {t["apply_all"]}</label>
+<div>{member_choices}</div>
+<button type="submit">{t["apply"]}</button>
+</fieldset></form>"""
+            else:
+                apply_form = f'<p class="muted">{t["no_members_to_apply"]}</p>'
+            cards.append(
+                f'<section class="card"><h2>{escape(preset.name)} '
+                f'<a href="/presets/{preset.id}/routine">{t["edit_preset"]}</a></h2>'
+                f"{apply_form}</section>"
+            )
+        cards = "".join(cards)
+    body = f"<main>{notice}{create}{cards}</main>"
+    return f"""<!DOCTYPE html>
+<html lang="{lang}"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{t["presets_title"]} — {escape(gym_name)}</title>
+<style>{ROSTER_STYLE}{EDITOR_STYLE}</style></head><body>
+{_chrome(gym_name, "table", t, next_path, None)}
+{body}
+</body></html>"""
 
 
 # --- The tenant Settings screen (spec-dashboard §Settings) ---
@@ -1380,6 +1487,214 @@ def build_app(
         set_session(response, coach_member.id, gym.id)  # sliding 90-day refresh
         raise response
 
+    async def presets_page(request: web.Request) -> web.Response:
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        member, gym = coach
+        lang = _lang_of(request)
+        response = web.Response(
+            text=_presets_page(
+                gym.name,
+                await store.presets(gym.id),
+                await store.preset_members(gym.id),
+                lang,
+                request.rel_url.path_qs,
+            ),
+            content_type="text/html",
+        )
+        set_session(response, member.id, gym.id)
+        return response
+
+    async def preset_create(request: web.Request) -> web.Response:
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+        form = await request.post()
+        name = form.get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            error = t["preset_name_empty"]
+        elif len(name.strip()) > 100:
+            error = t["preset_name_too_long"]
+        else:
+            try:
+                await store.create_preset(gym.id, name)
+            except DuplicatePresetNameError:
+                error = t["duplicate_preset_name"]
+            except ValueError:
+                error = t["preset_name_empty"]
+            else:
+                response = web.HTTPFound("/presets")
+                set_session(response, member.id, gym.id)
+                raise response
+        response = web.Response(
+            status=400,
+            text=_presets_page(
+                gym.name,
+                await store.presets(gym.id),
+                await store.preset_members(gym.id),
+                lang,
+                "/presets",
+                error=error,
+            ),
+            content_type="text/html",
+        )
+        set_session(response, member.id, gym.id)
+        return response
+
+    async def preset_editor(request: web.Request) -> web.Response:
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        _, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return _not_found()
+        preset = await store.preset_for_gym(gym.id, preset_id)
+        if preset is None:
+            return _not_found()
+        master = await store.preset_master(preset.id)
+        lang = _lang_of(request)
+        response = web.Response(
+            text=_routine_editor_page(
+                gym.name,
+                _preset_editor_view(preset, master),
+                _days_from_view(_preset_editor_view(preset, master)),
+                await store.catalog_exercises(),
+                lang,
+                request.rel_url.path_qs,
+                action=f"/presets/{preset.id}/routine",
+                back_href="/presets",
+                title_key="preset_editor_title",
+            ),
+            content_type="text/html",
+        )
+        set_session(response, coach[0].id, gym.id)
+        return response
+
+    async def preset_save(request: web.Request) -> web.Response:
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return _not_found()
+        preset = await store.preset_for_gym(gym.id, preset_id)
+        if preset is None:
+            return _not_found()
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+        form = await request.post()
+        base_raw = form.get("base_routine_id", "")
+        base_routine_id = None
+        if isinstance(base_raw, str) and base_raw.strip():
+            try:
+                base_routine_id = int(base_raw)
+            except ValueError:
+                return _not_found()
+        submitted_base = base_raw if isinstance(base_raw, str) else ""
+
+        async def reject(
+            error: str,
+            status: int,
+            days: list[EditorDay] | None = None,
+            base: str | None = None,
+        ) -> web.Response:
+            fresh = await store.preset_master(preset.id)
+            view = _preset_editor_view(preset, fresh)
+            response = web.Response(
+                status=status,
+                text=_routine_editor_page(
+                    gym.name,
+                    view,
+                    days if days is not None else _days_from_view(view),
+                    await store.catalog_exercises(),
+                    lang,
+                    f"/presets/{preset.id}/routine",
+                    error=error,
+                    base=base,
+                    action=f"/presets/{preset.id}/routine",
+                    back_href="/presets",
+                    title_key="preset_editor_title",
+                ),
+                content_type="text/html",
+            )
+            set_session(response, coach_member.id, gym.id)
+            return response
+
+        try:
+            workouts = _parse_workouts(form, lang)
+        except ValueError as error:
+            return await reject(
+                str(error), 400, days=_days_from_form(form), base=submitted_base
+            )
+        if not workouts:
+            return await reject(
+                t["empty_routine_error"], 400, days=_days_from_form(form), base=submitted_base
+            )
+        try:
+            await store.save_preset_master_from_web(
+                gym.id, preset.id, coach_member.id, base_routine_id, workouts
+            )
+        except StaleRoutineError:
+            return await reject(t["stale_error"], 409)
+        except UnknownExercisesError as error:
+            message = t["unknown_exercises_error"].format(names=", ".join(error.names))
+            return await reject(message, 400, days=_days_from_form(form), base=submitted_base)
+        response = web.HTTPFound(f"/presets/{preset.id}/routine")
+        set_session(response, coach_member.id, gym.id)
+        raise response
+
+    async def preset_apply(request: web.Request) -> web.Response:
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return _not_found()
+        if await store.preset_for_gym(gym.id, preset_id) is None:
+            return _not_found()
+        form = await request.post()
+        apply_all = bool(
+            form.get("apply_all")
+            or form.get("all_members")
+            or form.get("todos")
+            or form.get("mode") == "all"
+        )
+        try:
+            raw_ids = form.getall("member_ids", []) + form.getall("member_id", [])
+            member_ids = [int(value) for value in raw_ids if isinstance(value, str)]
+        except ValueError:
+            return _not_found()
+        if apply_all:
+            member_ids = [member.id for member in await store.preset_members(gym.id)]
+        elif not member_ids:
+            return _not_found()
+        try:
+            copies = await store.apply_preset(gym.id, preset_id, coach_member.id, member_ids)
+        except (StaleRoutineError, ValueError):
+            return _not_found()
+        for copy in copies:
+            try:
+                channel = await store.member_channel(copy.member_id)
+                if channel is None:
+                    logger.warning("failed to notify member %s of the Preset apply: no channel", copy.member_id)
+                elif notifier is not None:
+                    await notifier.send(channel[0], channel[1], routine_notice(coach_member.name, copy.workouts))
+            except Exception:
+                logger.exception("failed to notify member %s of the Preset apply", copy.member_id)
+        response = web.HTTPFound("/presets")
+        set_session(response, coach_member.id, gym.id)
+        raise response
+
     async def tick_off_flag(request: web.Request) -> web.Response:
         """Tick a safety flag off: stamp who (this Coach) and when.
 
@@ -1507,6 +1822,11 @@ def build_app(
     app.router.add_get("/members/{member_id}", member_page)
     app.router.add_get("/members/{member_id}/routine", routine_editor)
     app.router.add_post("/members/{member_id}/routine", routine_save)
+    app.router.add_get("/presets", presets_page)
+    app.router.add_post("/presets", preset_create)
+    app.router.add_get("/presets/{preset_id}/routine", preset_editor)
+    app.router.add_post("/presets/{preset_id}/routine", preset_save)
+    app.router.add_post("/presets/{preset_id}/apply", preset_apply)
     app.router.add_post("/members/{member_id}/flags/{note_id}/tick-off", tick_off_flag)
     app.router.add_get("/settings", settings)
     app.router.add_post("/settings/regenerate-invite", regenerate_invite)
