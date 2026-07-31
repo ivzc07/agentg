@@ -85,9 +85,24 @@ STRINGS = {
         "band_hot": "Te necesitan ya",
         "band_warm": "Aflojando",
         "band_cool": "Al día",
+        "band_new": "Nuevos",
         "grid_label": "últimas {n} semanas",
+        "sr_missed": "faltó el {date}",
+        "legend_hit": "sesión",
+        "legend_miss": "planificado, sin sesión",
+        "missed_one": "1 día planificado sin sesión",
+        "missed_n": "{n} días planificados sin sesión",
+        "sorted_by_gap": "Ordenado por días sin venir",
+        "nav_views": "Vistas",
+        "nav_sections": "Secciones",
+        "no_matches": "Ningún miembro coincide con la búsqueda.",
+        "empty_roster_title": "Aún no hay miembros",
+        "empty_roster_body": (
+            "Comparte el enlace de invitación desde Ajustes para sumar al primero."
+        ),
         "pick_a_member": "Elige un miembro",
         "back_to_roster": "← Todos los miembros",
+        "member_eyebrow": "miembro",
         "member_since": "Miembro desde {date}",
         "one_session": "1 sesión",
         "n_sessions": "{n} sesiones",
@@ -122,9 +137,14 @@ STRINGS = {
         ),
         "editor_title": "Rutina de {name}",
         "stale_error": (
-            "Esta Rutina cambió mientras la editabas — aquí tienes la versión "
-            "actual. Vuelve a aplicar tus cambios encima."
+            "Esta Rutina cambió mientras la editabas — la versión actual está "
+            "debajo y tus cambios siguen en el formulario, sin guardar. "
+            "Revísala y guarda para aplicar los tuyos encima."
         ),
+        "current_version_label": "Versión actual",
+        "label_weekday": "Día de la semana",
+        "label_workout_name": "Nombre del día",
+        "label_exercises": "Ejercicios (uno por línea)",
         "empty_routine_error": "Una Rutina necesita al menos un día con ejercicios.",
         "empty_workout_error": (
             "Cada día necesita al menos un ejercicio — o vacía el bloque y deja su "
@@ -209,6 +229,10 @@ STRINGS = {
         "set_default_preset": "Usar como predeterminado",
         "clear_default_preset": "Quitar predeterminado",
         "retire_preset": "Retirar Preset",
+        "retire_confirm": (
+            "¿Retirar este Preset? Los miembros conservan su copia, pero el "
+            "Preset ya no se podrá editar ni aplicar."
+        ),
     },
     "en": {
         "settings": "Settings",
@@ -229,9 +253,22 @@ STRINGS = {
         "band_hot": "Needs you now",
         "band_warm": "Slipping",
         "band_cool": "On track",
+        "band_new": "New",
         "grid_label": "last {n} weeks",
+        "sr_missed": "missed {date}",
+        "legend_hit": "session",
+        "legend_miss": "planned, no session",
+        "missed_one": "1 planned day missed",
+        "missed_n": "{n} planned days missed",
+        "sorted_by_gap": "Sorted by days away",
+        "nav_views": "Views",
+        "nav_sections": "Sections",
+        "no_matches": "No member matches the search.",
+        "empty_roster_title": "No members yet",
+        "empty_roster_body": "Share the invite link from Settings to add the first one.",
         "pick_a_member": "Pick a member",
         "back_to_roster": "← All members",
+        "member_eyebrow": "member",
         "member_since": "Member since {date}",
         "one_session": "1 session",
         "n_sessions": "{n} sessions",
@@ -262,9 +299,14 @@ STRINGS = {
         "preset_master_consequence": "Saving updates every Member still on this Preset.",
         "editor_title": "{name}'s routine",
         "stale_error": (
-            "This routine changed while you were editing — here is the current "
-            "version. Re-apply your changes on top of it."
+            "This routine changed while you were editing — the current version "
+            "is below and your edits are still in the form, unsaved. Review it "
+            "and save to apply yours on top."
         ),
+        "current_version_label": "Current version",
+        "label_weekday": "Weekday",
+        "label_workout_name": "Workout name",
+        "label_exercises": "Exercises (one per line)",
         "empty_routine_error": "A routine needs at least one day with exercises.",
         "empty_workout_error": (
             "Every day needs at least one exercise — or empty the block and leave "
@@ -345,6 +387,10 @@ STRINGS = {
         "set_default_preset": "Use as default",
         "clear_default_preset": "Clear default",
         "retire_preset": "Retire preset",
+        "retire_confirm": (
+            "Retire this preset? Members keep their copies, but the preset "
+            "can no longer be edited or applied."
+        ),
     },
 }
 

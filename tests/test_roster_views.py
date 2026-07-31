@@ -168,7 +168,7 @@ async def test_cards_group_members_into_severity_bands_with_day_grids(env):
     assert card.count('class="miss"') == 4
     assert card.count('class="future"') == 4
     assert 'class="hit"' not in card
-    assert '<span class="wd">lu</span>' in card
+    assert '<span class="wd" aria-hidden="true">lu</span>' in card
     # A session on an unplanned day draws a hit square.
     assert "últimas 4 semanas" in card
 

@@ -211,7 +211,7 @@ Removed: `share_with_coach` on `flag_to_coach` ([#80](https://github.com/ivzc07/
 **The dashboard lives inside the bot's process** - the same single Coolify application, one deploy, one container:
 
 - **HTTP server**: aiohttp (already in the tree via aiogram), started on the existing asyncio event loop next to the long poller and APScheduler. A later polling-to-webhook switch reuses this same server.
-- **Rendering**: server-rendered **Jinja2** templates (the one new dependency) plus vanilla JS for the view switcher and typed confirms. No frontend build step, no SPA, no API layer.
+- **Rendering**: server-rendered HTML from typed **Python f-string renderers** (no template engine) plus small vanilla JS snippets; new partial-page interactivity, when it lands, goes through **vendored htmx** returning HTML fragments from the same renderers (not yet shipped - ADR 0003 follow-up). No frontend build step, no SPA, no API layer ([ADR 0003](adr/0003-dashboard-stays-server-rendered.md)).
 - **Public origin**: a subdomain of the flowstate domain attached in Coolify (automatic TLS). The exact hostname is a deploy-time detail behind a `DASHBOARD_BASE_URL` env var that `/dashboard` magic links point at.
 - Delivery stays **long polling**, single replica; only the "no public endpoint" property of [docs/spec.md](spec.md) `§Channel plan` retires.
 
