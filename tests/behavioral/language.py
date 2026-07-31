@@ -180,20 +180,24 @@ def _hyphen_parts(start: int, token_text: str) -> list[tuple[int, int, str]]:
 
 def _build_units(text: str) -> list[tuple[int, int, str, list[tuple[int, int, str]]]]:
     """Matchable units: tokens, plus token pairs joined across ONE
-    dash-derived gap when — and only when — the joined form is an exact
-    allowlisted core ("Muscle–up"). Chain links never cross the gap:
-    "strength—band" is not a core, so it stays two units and absorption
-    stops there; prose never merges ("toca—Muscle-up" is not a core).
+    dash-derived gap when — and only when — the joined form is an EXACT
+    allowlisted core ("Muscle–up"). Prefix+core joins are not names:
+    "strength–band-pull-apart" stays two units and strength flags. Chain
+    links never cross the gap, and prose never merges ("toca—Muscle-up" is
+    not a core).
     """
     tokens = list(_TOKEN_RE.finditer(text))
     units = []
     i = 0
     while i < len(tokens):
         tok = tokens[i]
+        joined = tok.group() + "-" + tokens[i + 1].group() if i + 1 < len(tokens) else ""
+        matched = _match_name_core(joined) if joined else None
         if (
             i + 1 < len(tokens)
             and text[tok.end() : tokens[i + 1].start()] == _DASH_GAP
-            and _match_name_core(tok.group() + "-" + tokens[i + 1].group()) is not None
+            and matched is not None
+            and matched[0] == matched[1]  # exact core only, no prefix chains
         ):
             nxt = tokens[i + 1]
             units.append(
@@ -253,6 +257,14 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
             following = units[k + 1][2].lower()
             if not _absorbable(word, following):
                 break
+            # A dash-separated prefix blocks the strength absorb too
+            # ("non–strength band pull-apart" mirrors ASCII gluing).
+            if (
+                word == "strength"
+                and k > 0
+                and text[units[k - 1][1] : units[k][0]] == _DASH_GAP
+            ):
+                break
             start = units[k][0]
             first = k
             k -= 1
@@ -291,10 +303,16 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
     for entry in entries:
         if not entry["leading_strength"] or entry["first"] == 0:
             continue
-        prev_start, prev_end = units[entry["first"] - 1][0], units[entry["first"] - 1][1]
-        if not _HORIZONTAL_GAP_RE.fullmatch(text[prev_end : units[entry["first"]][0]]):
+        prev_idx = entry["first"] - 1
+        if not _HORIZONTAL_GAP_RE.fullmatch(text[units[prev_idx][1] : units[entry["first"]][0]]):
             continue
-        overlapping = _lexicon_hit_overlaps(hits, prev_start, prev_end)
+        # The preceding content is the whole dash-connected run before the
+        # chain ("muscle–gain" marks strength mid-chain like ASCII
+        # "muscle-gain" does).
+        run_idx = prev_idx
+        while run_idx > 0 and text[units[run_idx - 1][1] : units[run_idx][0]] == _DASH_GAP:
+            run_idx -= 1
+        overlapping = _lexicon_hit_overlaps(hits, units[run_idx][0], units[prev_idx][1])
         survives = [
             hit
             for hit in overlapping

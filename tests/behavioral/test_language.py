@@ -235,17 +235,30 @@ def test_multi_word_terms_match_typographic_dashes():
     assert find_english_leaks("weight–loss strength band pull-apart") == {"weight loss", "strength"}
 
 
-def test_dashed_prose_prefixes_separate_like_spaces():
-    # Round-16: en/em dashes are SEPARATORS -- "non–strength" is prose +
-    # chain start, exactly like "non strength" with a space.
+def test_dashed_prose_prefixes_block_the_strength_absorb():
+    # Round-17 P2: a dash-separated prose/lexicon prefix blocks the
+    # right-hand strength+equipment absorb, mirroring ASCII gluing
+    # ("non-strength band pull-apart" flags today).
+    assert find_english_leaks("non–strength band pull-apart") == {"strength"}
+    assert find_english_leaks("super–strength band pull-apart") == {"strength"}
+    assert find_english_leaks("muscle–gain strength band pull-apart") == {
+        "muscle",
+        "strength",
+    }
+    # a SPACE-separated prose prefix still means chain start (clean).
     assert find_english_leaks("non strength band pull-apart") == set()
-    assert find_english_leaks("non–strength band pull-apart") == set()
-    assert find_english_leaks("super—strength band pull-apart") == set()
-    # ...while TRUE hyphen variants (U+2010/2011/2212) glue like ASCII.
-    assert find_english_leaks("non-strength band pull-apart") == {"strength"}
-    assert find_english_leaks("non‐strength band pull-apart") == {"strength"}
-    assert find_english_leaks("non‑strength band pull-apart") == {"strength"}
-    assert find_english_leaks("non−strength band pull-apart") == {"strength"}
+
+
+def test_dash_gap_joins_accept_exact_cores_only():
+    # Round-17 P1: prefix+core joins across a dash gap are not names -
+    # only EXACT allowlisted cores may be recognized across the gap.
+    for dash in ("–", "—", "―"):
+        assert find_english_leaks(f"strength{dash}band-pull-apart") == {"strength"}, dash
+    assert find_english_leaks("Hoy toca strength–band-pull-apart") == {"strength"}
+    assert find_english_leaks("El foco es strength—band-pull-apart 3x10") == {"strength"}
+    # exact cores still join across the gap; full-ASCII chains stay clean.
+    assert find_english_leaks("Muscle–up") == set()
+    assert find_english_leaks("strength-band-pull-apart") == set()
 
 
 def test_dash_and_nbsp_name_shapes_stay_clean_like_ascii():
@@ -284,16 +297,12 @@ _INVARIANT_BASES = (
     "strength band strength band pull-apart",
 )
 
-# Documented differences from ASCII when en/em dashes replace "-": they are
-# separators, never chain links, so an ASCII hyphen that was GLUING prose
-# to strength no longer makes it a glued leak -- "non–strength" is
-# prose + chain start (clean), exactly like a space; and a glued lexicon
-# compound splits, so the word immediately before the chain is no longer
-# goal vocab -- "muscle–gain strength ..." == "muscle gain strength ...".
-_SEPARATOR_EXPECTED_DIFFS = {
-    "non-strength band pull-apart": set(),
-    "muscle-gain strength band pull-apart": {"muscle"},
-}
+# Documented differences from ASCII when en/em dashes replace "-": NONE left
+# after round-17. Dash gaps block the strength absorb and dash-connected
+# prefixes count for the mid-chain cut, so dashed prose/lexicon prefixes
+# flag exactly like ASCII gluing; and exact-core joins keep the clean cases
+# identical. The table stays as the mechanism for future differences.
+_SEPARATOR_EXPECTED_DIFFS: dict[str, set[str]] = {}
 
 
 @pytest.mark.parametrize("base", _INVARIANT_BASES)
