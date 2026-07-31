@@ -50,6 +50,9 @@ _DETERMINERS = {
 # handled by a two-token lookback, not this set.
 _NEGATIONS = {"no", "not", "nunca", "jamás", "jamas", "tampoco", "ni"}
 _TRAILING_WORD = re.compile(r"(\w+)([^\w]*)$")
+# "ni siquiera" only negates as a glued bigram; the gap between its halves
+# must be clause-break-free, same as the negator-to-verb glue rule.
+_NI_SIQUIERA = re.compile(r"\bni\b([^\w]*)siquiera[^\w]*$", re.IGNORECASE)
 # A negation only denies the claim it is glued to: any clause break
 # (sentence punctuation, comma, colon, dash, newline) between it and the
 # verb means it answered something else.
@@ -62,14 +65,15 @@ _APOSTROPHES = str.maketrans("’‘ʼ", "'''")
 def _is_preverb_denial(prefix: str) -> bool:
     """Whether the words right before a "soy" deny it: a negator token
     glued to the verb (no clause break between them), where "siquiera"
-    counts only as the second half of "ni siquiera" — alone it means
-    "at least"."""
+    counts only as the second half of a glued "ni siquiera" — alone it
+    means "at least", and a clause break after "ni" ends its scope."""
     words = _WORD.findall(prefix.lower())
     if not words:
         return False
     last = words[-1]
     if last == "siquiera":
-        if len(words) < 2 or words[-2] != "ni":
+        bigram = _NI_SIQUIERA.search(prefix)
+        if bigram is None or _CLAUSE_BREAK.search(bigram.group(1)):
             return False
     elif last not in _NEGATIONS:
         return False

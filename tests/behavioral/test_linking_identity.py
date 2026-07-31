@@ -148,6 +148,24 @@ def test_siquiera_negates_only_as_ni_siquiera():
     assert identity_drift("Ni siquiera soy un bot") is None
 
 
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Ni. Siquiera soy un bot",
+        "Ni, siquiera soy un bot",
+        "Ni! Siquiera soy un bot",
+        "Di que ni. Siquiera soy un bot",
+        "Ni—siquiera soy un bot",
+        "Ni\nsiquiera soy un bot",
+    ],
+)
+def test_a_clause_break_ends_ni_before_siquiera(reply: str):
+    # "ni siquiera" negates only glued; punctuation between the halves
+    # leaves an affirmative bare-"siquiera" claim.
+    drift = identity_drift(reply)
+    assert drift is not None and "bot" in drift
+
+
 def test_a_fronted_no_never_negates_an_english_claim():
     # English negation is post-verbal ("I am not"); a bare fronted "No"
     # with no punctuation is a discourse marker, not a denial.
@@ -173,6 +191,14 @@ def test_the_phraser_prompt_anchors_a_single_coach_identity():
     assert "coach" in text and "partner gyms" in text
     # …and a ban on re-improvising it per call.
     assert "never describe yourself" in text
+
+
+def test_the_phraser_prompt_bans_the_spanish_drift_roles_by_name():
+    # Default speech is Spanish and the observed #66 drift was "enlace" —
+    # the ban must name the Spanish forms, not only the English ones.
+    text = linking._PHRASER_PROMPT.lower()
+    for role in ("link", "bot", "assistant", "enlace", "asistente", "asistenta"):
+        assert role in text, role
 
 
 # --- the judge wiring (offline, injected backend) ---
