@@ -244,6 +244,18 @@ async def test_agent_save_without_a_default_keeps_the_generated_plan(env):
     assert active["workouts"][0]["name"] == "Generated plan"
 
 
+async def test_default_without_a_master_keeps_the_generated_plan(env):
+    preset = await env.routines.create_preset(env.gym.id, "Empty")
+    await env.routines.set_default_preset(env.gym.id, preset.id)
+    member = await env.linking.link_member(env.gym.id, "Luis", "telegram", "2")
+
+    await env.routines.save_routine(member.id, env.gym.id, plan("Generated plan"))
+
+    active = await env.routines.active_routine(member.id)
+    assert active["preset_id"] is None
+    assert active["workouts"][0]["name"] == "Generated plan"
+
+
 async def test_retiring_a_default_clears_the_slot_but_keeps_member_copies(env):
     preset = await env.routines.create_preset(env.gym.id, "Beginner")
     await env.routines.save_preset_master(
