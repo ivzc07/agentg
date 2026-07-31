@@ -286,6 +286,14 @@ def _qr_svg(data: str) -> str:
 # --- Language plumbing (issue #106) ---
 
 
+def _done_notice(done: str | None, t: dict) -> str:
+    """The one-line confirmation a ``?done=<key>`` redirect carries (issue
+    #129). Only keys the copy table knows render; anything else is
+    nothing — never an error, never echoed back."""
+    key = f"done_{done}" if done else ""
+    return f'<p class="notice-ok">{t[key]}</p>' if key in t else ""
+
+
 def _is_htmx(request: web.Request) -> bool:
     """True when htmx is asking for a fragment swap (issue #128)."""
     return request.headers.get("HX-Request") == "true"
@@ -900,7 +908,7 @@ def _safety_banner(view: MemberPage, lang: str, roster_view: str) -> str:
     )
 
 
-def _member_content(view: MemberPage, lang: str, roster_view: str) -> str:
+def _member_content(view: MemberPage, lang: str, roster_view: str, notice: str = "") -> str:
     """The one Member page body, shared by the standalone page and Split's
     right pane. Status chips live in their own row — never inside the
     ``<h1>``, where a screen reader would announce them as the page name."""
@@ -926,6 +934,7 @@ def _member_content(view: MemberPage, lang: str, roster_view: str) -> str:
 {chips}
 <div class="facts">{facts}</div>
 </header>
+{notice}
 {_safety_banner(view, lang, roster_view)}
 <div class="columns">
 <div class="col">
@@ -939,7 +948,9 @@ def _member_content(view: MemberPage, lang: str, roster_view: str) -> str:
 </div>"""
 
 
-def _member_page(gym_name: str, view: MemberPage, roster_view: str, lang: str, next_path: str) -> str:
+def _member_page(
+    gym_name: str, view: MemberPage, roster_view: str, lang: str, next_path: str, notice: str = ""
+) -> str:
     """The standalone Member page: the switcher (and the search) hide per
     the spec, but the rest of the chrome stays, and a back link returns to
     the view the Member was opened from."""
@@ -948,7 +959,7 @@ def _member_page(gym_name: str, view: MemberPage, roster_view: str, lang: str, n
     content = f"""{_chrome(gym_name, t, next_path, lang)}
 <div class="member-wrap">
 {back}
-{_member_content(view, lang, roster_view)}
+{_member_content(view, lang, roster_view, notice)}
 </div>"""
     return _document(
         f"{escape(view.name)} — {escape(gym_name)}",
@@ -1269,11 +1280,12 @@ def _presets_page(
     next_path: str,
     error: str = "",
     create_name: str = "",
+    success: str = "",
 ) -> str:
     """The Coach-only Presets index and copy-on-apply forms (issue #102).
     A rejected create keeps the typed name in the form."""
     t = STRINGS[lang]
-    notice = f'<p class="error">{escape(error)}</p>' if error else ""
+    notice = success + (f'<p class="error">{escape(error)}</p>' if error else "")
     create = f"""<section class="pcard">
 <h2>{t["create_preset"]}</h2>
 <form method="post" action="/presets">
@@ -1397,7 +1409,9 @@ document.querySelectorAll("form[data-confirm]").forEach(function (form) {
 """
 
 
-def _settings_page(gym: Gym, bot_username: str, lang: str, next_path: str, error: str = "") -> str:
+def _settings_page(
+    gym: Gym, bot_username: str, lang: str, next_path: str, error: str = "", success: str = ""
+) -> str:
     """The whole tenant Settings screen: two invite links and the gym name,
     nothing else (spec-dashboard §Settings — no new settings). One card per
     concern."""
@@ -1406,7 +1420,7 @@ def _settings_page(gym: Gym, bot_username: str, lang: str, next_path: str, error
     coach_url = _invite_url(bot_username, gym.coach_invite_code or "")
     # The error strings are the dashboard's own (confirm_mismatch carries
     # markup), never user input — rendered as-is like every STRINGS value.
-    notice = f'<p class="error">{error}</p>' if error else ""
+    notice = success + (f'<p class="error">{error}</p>' if error else "")
     content = f"""{_chrome(gym.name, t, next_path, lang, active="settings")}
 <div class="settings-wrap">
 <h1>{t["settings_title"]}</h1>
@@ -1546,15 +1560,16 @@ def build_app(
         lang = _lang_of(request)
         roster_view = _view_of(request)
         next_path = request.rel_url.path_qs
+        notice = _done_notice(request.query.get("done"), STRINGS[lang])
         if roster_view == "split":
             # Split keeps the rail and the switcher with a Member open.
             rows, lapsed = await store.roster(gym.id)
-            pane = _member_content(view, lang, roster_view)
+            pane = _member_content(view, lang, roster_view, notice)
             text = _split_page(
                 gym.name, rows, lapsed, pane, lang, next_path, current_member_id=member_id
             )
         else:
-            text = _member_page(gym.name, view, roster_view, lang, next_path)
+            text = _member_page(gym.name, view, roster_view, lang, next_path, notice)
         response = web.Response(text=text, content_type="text/html")
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
@@ -1768,6 +1783,7 @@ def build_app(
                 await store.default_preset_id(gym.id),
                 lang,
                 request.rel_url.path_qs,
+                success=_done_notice(request.query.get("done"), STRINGS[lang]),
             ),
             content_type="text/html",
         )
@@ -1795,7 +1811,7 @@ def build_app(
             except ValueError:
                 error = t["preset_name_empty"]
             else:
-                found = web.HTTPFound("/presets")
+                found = web.HTTPFound("/presets?done=preset_created")
                 set_session(found, member.id, gym.id)
                 raise found
         response = web.Response(
@@ -2031,7 +2047,7 @@ def build_app(
                     await notifier.send(channel[0], channel[1], routine_notice(coach_member.name, copy.workouts))
             except Exception:
                 logger.exception("failed to notify member %s of the Preset apply", copy.member_id)
-        response = web.HTTPFound("/presets")
+        response = web.HTTPFound("/presets?done=preset_applied")
         set_session(response, coach_member.id, gym.id)
         raise response
 
@@ -2048,12 +2064,13 @@ def build_app(
             return _not_found()
         try:
             current_default = await store.default_preset_id(gym.id)
-            await store.set_default_preset(
-                gym.id, None if current_default == preset_id else preset_id
-            )
+            clearing = current_default == preset_id
+            await store.set_default_preset(gym.id, None if clearing else preset_id)
         except ValueError:
             return _not_found()
-        response = web.HTTPFound("/presets")
+        response = web.HTTPFound(
+            f"/presets?done={'default_cleared' if clearing else 'default_set'}"
+        )
         set_session(response, coach_member.id, gym.id)
         raise response
 
@@ -2070,7 +2087,7 @@ def build_app(
             await store.retire_preset(gym.id, preset_id)
         except ValueError:
             return _not_found()
-        response = web.HTTPFound("/presets")
+        response = web.HTTPFound("/presets?done=preset_retired")
         set_session(response, coach_member.id, gym.id)
         raise response
 
@@ -2096,7 +2113,7 @@ def build_app(
         # must not drop the Coach out of the pane.
         view = request.query.get("view", "table")
         view = view if view in VIEWS else "table"
-        response = web.HTTPFound(f"/members/{member_id}?view={view}")
+        response = web.HTTPFound(f"/members/{member_id}?view={view}&done=flag_seen")
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         raise response
 
@@ -2107,7 +2124,13 @@ def build_app(
         member, gym = coach
         lang = _lang_of(request)
         response = web.Response(
-            text=_settings_page(gym, bot_username, lang, request.rel_url.path_qs),
+            text=_settings_page(
+                gym,
+                bot_username,
+                lang,
+                request.rel_url.path_qs,
+                success=_done_notice(request.query.get("done"), STRINGS[lang]),
+            ),
             content_type="text/html",
         )
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
@@ -2144,7 +2167,7 @@ def build_app(
             await linking.regenerate_invite_code(gym.id)
         else:
             await linking.regenerate_coach_invite_code(gym.id)
-        response = web.HTTPFound("/settings")
+        response = web.HTTPFound("/settings?done=link_regenerated")
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         raise response
 
@@ -2175,7 +2198,7 @@ def build_app(
             set_session(response, member.id, gym.id)  # sliding 90-day refresh
             return response
         await linking.rename_gym(gym.id, name)
-        response = web.HTTPFound("/settings")
+        response = web.HTTPFound("/settings?done=saved")
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         raise response
 

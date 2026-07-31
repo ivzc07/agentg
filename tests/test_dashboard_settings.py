@@ -259,3 +259,27 @@ def test_the_qr_svg_is_memoized_per_invite_url():
     assert _qr_svg.cache_info().misses == 1
     _qr_svg(f"https://t.me/{BOT_USERNAME}?start=newcode99")  # a "regenerated" URL
     assert _qr_svg.cache_info().misses == 2
+
+
+async def test_settings_writes_redirect_with_their_done_keys_and_confirm(env):
+    """Issue #129: gym-name and both regenerations land with a notice."""
+    saved = await env.client.post(
+        "/settings/gym-name", data={"name": "Templo"}, allow_redirects=False
+    )
+    assert saved.headers["Location"] == "/settings?done=saved"
+
+    regenerated = await env.client.post(
+        "/settings/regenerate-invite",
+        data={"confirm": REGENERATE_CONFIRM},
+        allow_redirects=False,
+    )
+    assert regenerated.headers["Location"] == "/settings?done=link_regenerated"
+
+    page = await env.client.get("/settings?done=saved")
+    text = await page.text()
+    assert "notice-ok" in text and "Guardado." in text
+
+    english = await env.client.get(
+        "/settings?done=saved", headers={"Accept-Language": "en"}
+    )
+    assert "Saved." in await english.text()
