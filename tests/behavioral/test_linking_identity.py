@@ -191,6 +191,47 @@ def test_a_coach_role_coming_first_makes_the_clause_clean():
     assert identity_drift("Soy el coach del enlace de invitación.") is None
 
 
+# --- a claim is a determiner-led noun phrase, not any role word in the clause ---
+
+
+def test_bare_object_mentions_are_not_claims():
+    assert identity_drift("I'm waiting for the invite link.") is None
+    assert identity_drift("I'm here to help with the invite link from your gym.") is None
+    assert identity_drift("Soy quien te ayuda con el enlace de invitación.") is None
+    assert identity_drift("Soy nuevo y aquí está el enlace de invitación.") is None
+
+
+def test_no_as_determiner_denies_the_phrase():
+    assert identity_drift("I'm no bot.") is None
+    assert identity_drift("I'm no assistant.") is None
+    assert identity_drift("I am no link.") is None
+
+
+def test_a_denied_phrase_does_not_hide_a_following_affirmative_one():
+    drift = identity_drift("I'm not a coach but a bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("I'm not a coach but a link")
+    assert drift is not None and "link" in drift
+
+
+def test_a_coach_role_compounded_with_a_drift_head_is_drift():
+    drift = identity_drift("I'm a coach bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("I'm the coach assistant")
+    assert drift is not None and "assistant" in drift
+    drift = identity_drift("Soy el coach bot")
+    assert drift is not None and "bot" in drift
+
+
+def test_not_only_affirms_instead_of_denying():
+    drift = identity_drift("I'm not only a bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("I am not just an assistant")
+    assert drift is not None and "assistant" in drift
+    drift = identity_drift("I'm not simply a link")
+    assert drift is not None and "link" in drift
+
+
 # --- the prompt pins the one identity ---
 
 
