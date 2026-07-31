@@ -455,6 +455,45 @@ def test_a_comma_sino_after_a_fronted_no_is_a_corrective_claim():
     assert drift is not None and "bot" in drift
 
 
+# --- the opener type judges the reopened right side ---
+
+
+def test_an_indefinite_reopened_np_is_scored_whatever_pp_follows():
+    for reply in (
+        "I'm a coach and a link from your gym",
+        "I'm not a coach but a bot in training",
+        "I'm a coach and a bot on duty",
+        "I'm a coach and a bot by design",
+        "I'm a coach and a link without context",
+        "I'm a coach and a bot about fitness",
+        "Soy un entrenador y un bot por defecto",
+        "Soy un entrenador y un bot sin contexto",
+        "Soy un entrenador y un enlace desde hoy",
+    ):
+        assert identity_drift(reply) is not None, reply
+
+
+def test_a_denied_coordination_is_absorbed_until_a_contrast():
+    for reply in (
+        "I'm not a coach or a trainer but a bot",
+        "I'm not a bot or a link but an assistant",
+        "No soy un entrenador o un coach sino un bot",
+        "I'm a coach not a bot or a link but an assistant",
+    ):
+        assert identity_drift(reply) is not None, reply
+    # with no contrastive reopener, the denial stands
+    assert identity_drift("I'm not a bot or a link") is None
+    assert identity_drift("No soy un bot ni un enlace") is None
+
+
+def test_a_definite_reopened_np_is_an_object_reference():
+    assert identity_drift("I'm a coach and the link to the gym is below") is None
+    assert identity_drift("I'm a coach and the invite link to the gym awaits") is None
+    assert identity_drift("I'm a coach and the link for your gym is below") is None
+    drift = identity_drift("I'm a coach and a bot")
+    assert drift is not None and "bot" in drift
+
+
 # --- the combinatorial matrix: the grammar space, enumerated ---
 
 _EN = {
@@ -462,10 +501,16 @@ _EN = {
     "coach": "coach",
     "drift_roles": ["bot", "link", "assistant"],
     "det": "a",
+    "def": "the",
     "poss": "your",
     "adj": "stupid",
     "rel": "who helps",
     "pp": "for the gym",
+    "pp_list": [
+        "from your gym", "in training", "on duty", "by design", "at heart",
+        "about fitness", "via software", "without context", "under pressure",
+        "for the gym", "to members", "with attitude",
+    ],
     "adjunct": "today",
     "conj": ["and", "or"],
     "contr": ["but"],
@@ -477,10 +522,15 @@ _ES = {
     "coach": "entrenador",
     "drift_roles": ["bot", "enlace", "asistente"],
     "det": "un",
+    "def": "el",
     "poss": "tu",
     "adj": "gran",
     "rel": "que ayuda",
     "pp": "para el gimnasio",
+    "pp_list": [
+        "por defecto", "sin contexto", "sobre fitness", "desde hoy",
+        "al servicio", "de apoyo", "con actitud", "para el gimnasio",
+    ],
     "adjunct": "hoy",
     "conj": ["y", "o"],
     "contr": ["pero", "sino"],
@@ -538,6 +588,36 @@ def _matrix_cases() -> list[tuple[str, bool]]:
             # a drift role as object of the following clause is no claim
             cases.append((f"{v} {det} {coach} {lang['invite_join']}", False))
             cases.append((f"{v} {det} {coach} {lang['clause_obj']}", False))
+        # reopened right side: the OPENER TYPE judges — indefinite or
+        # possessive claims score whatever PP follows; definite is an
+        # object reference (round 12)
+        for prep in lang["pp_list"]:
+            for role2, drift2 in roles:
+                cases.append(
+                    (f"{v} {det} {coach} {lang['conj'][0]} {det} {role2} {prep}", drift2)
+                )
+        for role2, drift2 in roles:
+            cases += [
+                (f"{v} {det} {coach} {lang['conj'][0]} {poss} {role2}", drift2),
+                (f"{v} {det} {coach} {lang['conj'][0]} {lang['def']} {role2}", False),
+            ]
+        # denial + coordination + contrast chains (round 12)
+        for role2, drift2 in roles:
+            np2 = f"{det} {role2}"
+            cases.append(
+                (
+                    deny(f"{det} {coach} {lang['conj'][0]} {det} {coach}")
+                    + f" {lang['contr'][0]} {np2}",
+                    drift2,
+                )
+            )
+            cases.append(
+                (
+                    deny(f"{det} {role2} {lang['conj'][0]} {np2}")
+                    + f" {lang['contr'][0]} {np2}",
+                    drift2,
+                )
+            )
         # correctives and correlatives (English shapes)
         if en:
             for role, drift in roles:

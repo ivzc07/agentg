@@ -32,20 +32,24 @@ not any role word in the clause.
   ("but"/"pero"/"sino"), a corrective ("just"/"only" + determiner), or a
   coordination ("and"/"y"/"or"/"o"): "I'm not a coach but a bot", "I'm a
   coach just a bot", "I'm a coach and a bot", "No soy un entrenador sino
-  un bot" all drift. The reopened side is judged exactly like a primary
+  un bot" all drift. The reopened side is parsed exactly like a primary
   claim (same fillers, same denial/affirmer handling) or read as a
   determiner-less continuation of the same NP ("y verdadero enlace"); a
   non-NP right side is a clause join and no claim ("and here's the
-  invite link", "y pide el enlace" read clean). Once a drift role head
-  CLOSES, it is scored — trailing conjunctions, clauses, or postnominal
-  material never rescue it ("a bot and a link", "a bot and here is the
-  invite", "a link to the partner gym" drift); only a verb-shaped tail
-  keeps the right side a full clause ("and the link IS below", "y el
-  enlace TE espera" read clean). "rather than" ends the claimed NP and
-  excludes what follows ("I'm a coach rather than a bot" reads clean),
-  while "but rather/instead" are reopen fillers. An arbitrary later noun
-  phrase is never a claim ("I'm not a coach who sends the link" reads
-  clean).
+  invite link", "y pide el enlace" read clean). Its judgment is the
+  OPENER TYPE: an indefinite, possessive, or bare-role opener claims the
+  role head and is scored whatever follows — PPs with any preposition,
+  relativizers, adjuncts, further clauses ("a bot and here is the
+  invite", "a link from your gym", "a bot for new members" drift) — and
+  a DEFINITE opener is an object/clause reference, never a claim ("the
+  link is below", "the invite link to the gym awaits", "el enlace de
+  invitación está…" read clean). Under a denial, coordinated NPs are
+  absorbed as denied too while scanning for a contrast ("I'm not a coach
+  or a trainer but a bot" drifts; "I'm not a bot or a link" reads
+  clean). "rather than" ends the claimed NP and excludes what follows
+  ("I'm a coach rather than a bot" reads clean), while "but
+  rather/instead" are reopen fillers. An arbitrary later noun phrase is
+  never a claim ("I'm not a coach who sends the link" reads clean).
 
 A coach claim needs no anchor to pass; unknown phrasing passes by default.
 Genuinely ambiguous shapes read CLEAN by policy: false negatives on exotic
@@ -133,6 +137,11 @@ _PREPOSITIONS = {"to", "for", "with", "of", "de", "del", "con", "para", "en"}
 # one) — otherwise they are pre-head modifiers INSIDE the phrase ("the
 # only bot", "your only link").
 _PHRASE_END = _PREPOSITIONS | _RELATIVIZERS | {"but", "pero", "sino"}
+
+# A reopened noun phrase led by a DEFINITE article is an object/clause
+# reference, never a self-description ("and the link is below"); an
+# indefinite, possessive, or bare-role opener is judged by its role head.
+_DEFINITE = {"the", "el", "la", "los", "las"}
 
 # After a phrase, exactly one more may open on a contrast, a corrective,
 # or a coordination ("but a bot", "just a link", "and a bot", "sino un
@@ -224,11 +233,14 @@ def _collect_phrase(tokens: list[str], i: int) -> tuple[list[str], int]:
     return phrase, i
 
 
-def _parse_claim_phrase(tokens: list[str], i: int) -> tuple[list[str], bool, int] | None:
+def _parse_claim_phrase(
+    tokens: list[str], i: int
+) -> tuple[list[str], bool, int, str | None] | None:
     """ONE shared phrase parse, used by primary and reopened claims alike:
     fillers skipped, "not"/"no" applied (with the only/just/solo affirmer
     exception, adjacency seen through fillers), then a determiner-led or
-    bare-role noun phrase. Returns (phrase, negated, next_index), or None
+    bare-role noun phrase. Returns (phrase, negated, next_index, opener)
+    — opener is the determiner token, or None for a bare role — or None
     when no claim opens here."""
     i = _skip_adverbs(tokens, i)
     negated = False
@@ -243,14 +255,17 @@ def _parse_claim_phrase(tokens: list[str], i: int) -> tuple[list[str], bool, int
     if i >= len(tokens):
         return None
     if tokens[i] in _DETERMINERS:
+        opener = tokens[i]
         phrase, i = _collect_phrase(tokens, i + 1)
-        return phrase, negated, i
+        return phrase, negated, i, opener
     if _role_of(tokens[i]) is not None:
-        return [tokens[i]], negated, i + 1  # a bare role token claims by itself
+        return [tokens[i]], negated, i + 1, None  # a bare role claims by itself
     return None
 
 
-def _parse_np_continuation(tokens: list[str], i: int) -> tuple[list[str], bool, int] | None:
+def _parse_np_continuation(
+    tokens: list[str], i: int
+) -> tuple[list[str], bool, int, str | None] | None:
     """After a reopener, the right side may continue the SAME noun phrase
     with modifiers and no new determiner ("y verdadero enlace", "and
     conditioning coach"). If a role token follows before any determiner
@@ -277,73 +292,30 @@ def _parse_np_continuation(tokens: list[str], i: int) -> tuple[list[str], bool, 
             ):
                 phrase.append(tokens[i])
                 i += 1
-            return phrase, False, i
+            return phrase, False, i, None
         j += 1
     return None
 
 
-def _drift_head_closed(
-    phrase: list[str], tokens: list[str], i: int, spanish: bool
-) -> bool:
-    """SCORE ON ROLE CLOSE: once a drift role head closes the reopened NP,
-    nothing after it rescues the claim. The head closes at the segment's
-    end, a relativizer, a reopener ("a bot and here is the invite"), or a
-    preposition chain — English PPs take their whole noun group ("a bot
-    for new members", "a link to the partner gym"), Spanish ones exactly
-    one noun. A verb-shaped tail — an unknown word with more clause
-    material after it ("the link IS below", "el enlace TE espera", "de
-    invitación ESTA en recepción", "the invite link AWAITS") — means the
-    "role" was a clause subject, not a claim; only Spanish allows one
-    postnominal adjective at the very end ("un bot útil")."""
-    role_indexes = [idx for idx, token in enumerate(phrase) if _role_of(token)]
-    head = role_indexes[-1]
-    trailing = [*phrase[head + 1 :], *tokens[i:]]
-    j = 0
-    while j < len(trailing):
-        token = trailing[j]
-        if token in _ADVERBS:
-            j += 1
-            continue
-        if token in _RELATIVIZERS or token in _REOPENERS or token in {"not", "no"}:
-            return True  # the NP closed at a constituent boundary
-        if token in _PREPOSITIONS:
-            j += 1
-            while j < len(trailing) and trailing[j] in _DETERMINERS:
-                j += 1
-            if spanish:
-                if j < len(trailing):
-                    j += 1  # exactly one noun; adjectives trail elsewhere
-            else:
-                while (
-                    j < len(trailing)
-                    and trailing[j] not in _PREPOSITIONS
-                    and trailing[j] not in _RELATIVIZERS
-                    and trailing[j] not in _REOPENERS
-                    and trailing[j] not in {"not", "no"}
-                ):
-                    j += 1  # the English noun group — the noun comes last
-            continue
-        return spanish and j + 1 == len(trailing)
-    return True
-
-
-def _reopened_phrase_drifts(tokens: list[str], i: int, spanish: bool) -> bool:
+def _reopened_phrase_drifts(tokens: list[str], i: int) -> bool:
     """The ONE phrase a contrast, corrective, or coordination may open —
-    judged exactly like a primary claim (same fillers, same not/no +
-    affirmer handling), or read as a determiner-less continuation of the
-    same NP. A drift role head inside it is SCORED once closed."""
+    parsed exactly like a primary claim (or as a determiner-less
+    continuation of the same NP), then judged by its OPENER TYPE:
+    indefinite/possessive or bare-role openers claim the role head and
+    are scored whatever follows ("a bot and here is the invite", "a link
+    from your gym", "a bot for new members"); a DEFINITE opener is an
+    object/clause reference, never a claim ("the link is below", "the
+    invite link to the gym awaits", "el enlace de invitación está…")."""
     parsed = _parse_claim_phrase(tokens, i) or _parse_np_continuation(tokens, i)
     if parsed is None:
         return False
-    phrase, negated, end = parsed
-    if negated:
+    phrase, negated, _, opener = parsed
+    if negated or opener in _DEFINITE:
         return False
-    if not any(_role_of(token) == "drift" for token in phrase):
-        return False
-    return _drift_head_closed(phrase, tokens, end, spanish)
+    return any(_role_of(token) == "drift" for token in phrase)
 
 
-def _segment_drifts(tokens: list[str], spanish: bool) -> bool:
+def _segment_drifts(tokens: list[str]) -> bool:
     """Scan one clause segment (after the claim verb) for a determiner-led
     noun phrase claiming a drift role."""
     i = 0
@@ -353,7 +325,7 @@ def _segment_drifts(tokens: list[str], spanish: bool) -> bool:
         parsed = _parse_claim_phrase(tokens, i)
         if parsed is None:
             return False  # no claim here — bare objects read clean
-        phrase, negated, i = parsed
+        phrase, negated, i, _ = parsed
         negated = negated or negate_next
         negate_next = False
         drifted = any(_role_of(token) == "drift" for token in phrase)
@@ -367,10 +339,15 @@ def _segment_drifts(tokens: list[str], spanish: bool) -> bool:
             negate_next = True
             continue
         if negated and stopper in _CONJUNCTIONS:
-            return False  # a denial scopes over coordination ("not a bot or a link")
+            # A denial scopes over coordination: absorb the coordinated NP
+            # as denied too and keep scanning for a contrast ("I'm not a
+            # coach or a trainer BUT A BOT" still drifts).
+            i += 1
+            negate_next = True
+            continue
         if stopper in _REOPENERS and not continued:
             continued = True
-            return _reopened_phrase_drifts(tokens, i + 1, spanish)
+            return _reopened_phrase_drifts(tokens, i + 1)
         return False
     return False
 
@@ -392,7 +369,7 @@ def identity_drift(reply: str) -> str | None:
         fronted_no = verb == "soy" and _spanish_denial(reply, match.start())
         if fronted_no:
             tokens = ["no"] + tokens
-        if _segment_drifts(tokens, spanish=verb == "soy"):
+        if _segment_drifts(tokens):
             return reply[match.start() : segment_end].strip()
         # After a fronted "No soy", a following clause opening with "sino"
         # (across one comma) is the corrective claim ("No soy un enlace,
@@ -401,7 +378,7 @@ def identity_drift(reply: str) -> str | None:
             rest_end_match = _CLAUSE_END.search(reply, end.end())
             rest_end = rest_end_match.start() if rest_end_match else len(reply)
             rest = _words(reply[end.end() : rest_end])
-            if rest and rest[0] == "sino" and _reopened_phrase_drifts(rest, 1, True):
+            if rest and rest[0] == "sino" and _reopened_phrase_drifts(rest, 1):
                 return reply[match.start() : rest_end].strip()
     return None
 
