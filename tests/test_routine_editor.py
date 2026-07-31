@@ -129,7 +129,11 @@ class Env:
         return response.status, await response.text()
 
     async def save_via_web(
-        self, member_id: int, base_routine_id: int | None, *days: tuple[str, str, str]
+        self,
+        member_id: int,
+        base_routine_id: int | None,
+        *days: tuple[str, str, str],
+        headers: dict[str, str] | None = None,
     ):
         """POST the editor form; ``days`` are (weekday, workout name, exercises
         textarea body) triples."""
@@ -143,6 +147,7 @@ class Env:
             data=data,
             cookies=self.cookies(),
             allow_redirects=False,
+            headers=headers or {},
         )
 
 
@@ -951,3 +956,109 @@ async def test_an_empty_form_is_rejected_with_the_submitted_base_kept(env):
     active = await env.routines.active_routine(member.id)
     assert active["routine_id"] == old.id
     assert env.notifier.sent == []
+
+
+# --- In-place saves (issue #128): the htmx branch of the editor POST ---
+
+HTMX = {"HX-Request": "true"}
+
+
+async def test_the_editor_page_loads_htmx_and_posts_in_place(env):
+    member = await env.add_member("Marta")
+
+    status, text = await env.get(f"/members/{member.id}/routine")
+
+    assert status == 200
+    assert "/static/htmx.min.js?v=" in text
+    assert f'hx-post="/members/{member.id}/routine' in text
+    assert 'hx-target="#editor-root"' in text
+    # htmx preventDefaults the submit, which mutes the vanilla guard —
+    # the double-submit protection must ride htmx's own machinery.
+    assert 'hx-disabled-elt="find button[type=submit]"' in text
+    assert 'id="editor-root"' in text
+
+
+async def test_an_htmx_save_returns_the_editor_in_place_with_the_success_line(env):
+    member = await env.add_member("Marta")
+    await env.training.ensure_seeded()  # the Catalog the save validates against
+
+    response = await env.save_via_web(
+        member.id, None, ("0", "Full body", "squat, 3, 8"), headers=HTMX
+    )
+
+    assert response.status == 200
+    assert "Location" not in response.headers
+    text = await response.text()
+    assert "<!DOCTYPE" not in text  # a fragment, not a document
+    assert text.lstrip().startswith('<div id="editor-root"')
+    assert "Rutina guardada." in text
+    assert "Avisamos a Marta." in text
+    assert env.notifier.sent  # the Telegram notice still went out
+
+
+async def test_an_htmx_rejection_keeps_the_typed_work_and_answers_200(env):
+    member = await env.add_member("Marta")
+
+    response = await env.save_via_web(
+        member.id, None, ("", "Huerfano", "squat, 3, 8"), headers=HTMX
+    )
+
+    assert response.status == 200
+    text = await response.text()
+    assert text.lstrip().startswith('<div id="editor-root"')
+    assert UNDATED_BLOCK_ERROR in text
+    assert "Huerfano" in text  # the typed work survives the refusal
+    assert "Rutina guardada." not in text
+
+
+async def test_an_htmx_stale_save_answers_200_with_the_fresh_version(env):
+    member = await env.add_member("Marta")
+    routine = await env.give_routine(member)
+    await env.save_via_web(member.id, routine.id, ("0", "Nueva", "squat, 3, 8"))
+
+    response = await env.save_via_web(
+        member.id, routine.id, ("1", "Vieja", "squat, 3, 8"), headers=HTMX
+    )
+
+    assert response.status == 200
+    text = await response.text()
+    assert STALE_ERROR in text and 'id="editor-root"' in text
+    assert "Vieja" in text  # kept work
+
+
+async def test_the_success_line_follows_the_page_language(env):
+    member = await env.add_member("Marta")
+    await env.training.ensure_seeded()  # the Catalog the save validates against
+
+    response = await env.save_via_web(
+        member.id,
+        None,
+        ("0", "Full body", "squat, 3, 8"),
+        headers={**HTMX, "Accept-Language": "en"},
+    )
+
+    text = await response.text()
+    assert "Routine saved." in text and "We told Marta." in text
+
+
+async def test_an_htmx_save_on_a_dead_session_redirects_the_whole_page(env):
+    member = await env.add_member("Marta")
+
+    response = await env.client.post(
+        f"/members/{member.id}/routine",
+        data=[("base_routine_id", "")],
+        headers=HTMX,
+        allow_redirects=False,
+    )
+
+    assert response.headers.get("HX-Redirect") == "/"
+
+
+async def test_without_the_header_the_save_still_redirects(env):
+    member = await env.add_member("Marta")
+    await env.training.ensure_seeded()  # the Catalog the save validates against
+
+    response = await env.save_via_web(member.id, None, ("0", "Full body", "squat, 3, 8"))
+
+    assert response.status == 302
+    assert response.headers["Location"] == f"/members/{member.id}?view=table"

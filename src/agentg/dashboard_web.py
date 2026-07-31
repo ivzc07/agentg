@@ -204,26 +204,34 @@ window.addEventListener("pageshow", function (e) {
 STATIC_DIR = Path(__file__).parent / "static"
 
 
-@lru_cache(maxsize=1)
-def _css_version() -> str:
-    """A content hash in the stylesheet URL, so a deploy never serves a
-    90-day-cookie Coach last release's CSS from their browser cache."""
-    digest = hashlib.md5((STATIC_DIR / "dashboard.css").read_bytes(), usedforsecurity=False).hexdigest()
+@lru_cache(maxsize=4)
+def _asset_version(filename: str) -> str:
+    """A content hash in a static asset's URL, so a deploy never serves a
+    90-day-cookie Coach last release's copy from their browser cache."""
+    digest = hashlib.md5((STATIC_DIR / filename).read_bytes(), usedforsecurity=False).hexdigest()
     return digest[:8]
 
 
-def _document(title: str, lang: str, body: str, *, scripts: str = "") -> str:
+def _document(
+    title: str, lang: str, body: str, *, scripts: str = "", with_htmx: bool = False
+) -> str:
     """The one page skeleton every surface renders through. All styling
     lives in static/dashboard.css (ADR 0003): one cacheable sheet, served
-    whole from the package - no build step."""
+    whole from the package - no build step. Pages that save in place
+    (issue #128) opt into the vendored htmx with ``with_htmx``."""
     script_html = f"<script>{SUBMIT_GUARD_SCRIPT}{scripts}</script>"
+    htmx_tag = (
+        f'\n<script src="/static/htmx.min.js?v={_asset_version("htmx.min.js")}" defer></script>'
+        if with_htmx
+        else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="{lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
-<link rel="stylesheet" href="/static/dashboard.css?v={_css_version()}">
+<link rel="stylesheet" href="/static/dashboard.css?v={_asset_version("dashboard.css")}">{htmx_tag}
 </head>
 <body>
 {body}
@@ -276,6 +284,11 @@ def _qr_svg(data: str) -> str:
 
 
 # --- Language plumbing (issue #106) ---
+
+
+def _is_htmx(request: web.Request) -> bool:
+    """True when htmx is asking for a fragment swap (issue #128)."""
+    return request.headers.get("HX-Request") == "true"
 
 
 def _lang_of(request: web.Request) -> str:
@@ -1154,6 +1167,8 @@ def _routine_editor_page(
     title_key: str = "editor_title",
     consequence_key: str | None = None,
     fresh_days: list[EditorDay] | None = None,
+    success: str = "",
+    fragment_only: bool = False,
 ) -> str:
     t = STRINGS[lang]
     chip = _ownership_chip(
@@ -1168,7 +1183,8 @@ def _routine_editor_page(
     consequence = (
         f'<p class="consequence">{t[consequence_key]}</p>' if consequence_key else ""
     )
-    notice = f'<p class="error">{escape(error)}</p>' if error else ""
+    notice = f'<p class="notice-ok">{success}</p>' if success else ""
+    notice += f'<p class="error">{escape(error)}</p>' if error else ""
     if fresh_days is not None:
         notice += _fresh_version_block(fresh_days, lang)
     # One spare blank block per weekday still off the Routine, so a whole week
@@ -1187,15 +1203,17 @@ def _routine_editor_page(
     title = t[title_key].format(name=escape(view.name))
     action = action or f"/members/{view.member_id}/routine"
     back_href = back_href or f"/members/{view.member_id}"
-    content = f"""{_chrome(gym_name, t, next_path, lang)}
-<div class="editor-wrap">
+    # The editor's own body is one swappable fragment: an htmx save answers
+    # with just this div, so scroll and page state survive (issue #128).
+    fragment = f"""<div id="editor-root">
 <a class="back" href="{back_href}">← {escape(view.name)}</a>
 <header>
 <h1>{title} {chip}</h1>
 {consequence}
 </header>
 {notice}
-<form method="post" action="{action}">
+<form method="post" action="{action}" hx-post="{action}" hx-target="#editor-root" hx-swap="outerHTML"
+ hx-disabled-elt="find button[type=submit]">
 <input type="hidden" name="base_routine_id" value="{base}">
 <p class="editor-help">{t["editor_help"]}</p>
 <div id="days">
@@ -1208,10 +1226,17 @@ def _routine_editor_page(
 <p><button type="submit" class="btn-primary big">{t["save_routine"]}</button></p>
 </form>
 </div>"""
+    if fragment_only:
+        return fragment
+    content = f"""{_chrome(gym_name, t, next_path, lang)}
+<div class="editor-wrap">
+{fragment}
+</div>"""
     return _document(
         f"{title} — {escape(gym_name)}",
         lang,
         content,
+        with_htmx=True,
     )
 
 
@@ -1591,6 +1616,10 @@ def build_app(
         to the page."""
         coach = await require_coach(request)
         if coach is None:
+            if _is_htmx(request):
+                # The session died mid-edit: swapping the door page into the
+                # form would be nonsense — send the whole browser there.
+                return web.Response(headers={"HX-Redirect": "/"})
             return web.Response(text=_bounce_page(), content_type="text/html")
         coach_member, gym = coach
         try:
@@ -1624,7 +1653,9 @@ def build_app(
             assert view is not None  # roster_member above already scoped it
             catalog = await store.catalog_exercises()
             response = web.Response(
-                status=status,
+                # An htmx refusal still swaps the re-rendered form in, so it
+                # answers 200 — htmx leaves error statuses unswapped.
+                status=200 if _is_htmx(request) else status,
                 text=_routine_editor_page(
                     gym.name,
                     view,
@@ -1639,6 +1670,7 @@ def build_app(
                     action=f"/members/{member_id}/routine?view={roster_view}",
                     back_href=f"/members/{member_id}?view={roster_view}",
                     fresh_days=_days_from_view(view) if show_fresh else None,
+                    fragment_only=_is_htmx(request),
                 ),
                 content_type="text/html",
             )
@@ -1677,6 +1709,7 @@ def build_app(
                 message, 400, days=_days_from_form(form), base=submitted_base
             )
 
+        notified = False
         if notifier is not None:
             # Best-effort, whole block: the save already committed, so any
             # failure on the notify path — the channel lookup included —
@@ -1689,8 +1722,34 @@ def build_app(
                         channel[1],
                         routine_notice(coach_member.name, workouts),
                     )
+                    notified = True
             except Exception:
                 logger.exception("failed to notify member %s of the routine save", member_id)
+        if _is_htmx(request):
+            # In place: the editor again, fresh from the save, with the
+            # success line — honest about whether the Member was told.
+            view = await store.member_page(gym.id, member_id)
+            assert view is not None
+            success = t["routine_saved"]
+            if notified:
+                success += " " + t["member_notified"].format(name=escape(target.name))
+            response = web.Response(
+                text=_routine_editor_page(
+                    gym.name,
+                    view,
+                    _days_from_view(view),
+                    await store.catalog_exercises(),
+                    lang,
+                    f"/members/{member_id}/routine?view={roster_view}",
+                    action=f"/members/{member_id}/routine?view={roster_view}",
+                    back_href=f"/members/{member_id}?view={roster_view}",
+                    success=success,
+                    fragment_only=True,
+                ),
+                content_type="text/html",
+            )
+            set_session(response, coach_member.id, gym.id)
+            return response
         response = web.HTTPFound(f"/members/{member_id}?view={roster_view}")
         set_session(response, coach_member.id, gym.id)  # sliding 90-day refresh
         raise response
@@ -1793,6 +1852,8 @@ def build_app(
     async def preset_save(request: web.Request) -> web.Response:
         coach = await require_coach(request)
         if coach is None:
+            if _is_htmx(request):
+                return web.Response(headers={"HX-Redirect": "/"})
             return web.Response(text=_bounce_page(), content_type="text/html")
         coach_member, gym = coach
         try:
@@ -1824,7 +1885,7 @@ def build_app(
             fresh = await store.preset_master(preset.id)
             view = _preset_editor_view(preset, fresh)
             response = web.Response(
-                status=status,
+                status=200 if _is_htmx(request) else status,
                 text=_routine_editor_page(
                     gym.name,
                     view,
@@ -1839,6 +1900,7 @@ def build_app(
                     title_key="preset_editor_title",
                     consequence_key="preset_master_consequence",
                     fresh_days=_days_from_view(view) if show_fresh else None,
+                    fragment_only=_is_htmx(request),
                 ),
                 content_type="text/html",
             )
@@ -1884,6 +1946,28 @@ def build_app(
                     )
             except Exception:
                 logger.exception("failed to notify member %s of the Preset edit", copy.member_id)
+        if _is_htmx(request):
+            fresh = await store.preset_master(preset.id)
+            view = _preset_editor_view(preset, fresh)
+            response = web.Response(
+                text=_routine_editor_page(
+                    gym.name,
+                    view,
+                    _days_from_view(view),
+                    await store.catalog_exercises(),
+                    lang,
+                    f"/presets/{preset.id}/routine",
+                    action=f"/presets/{preset.id}/routine",
+                    back_href="/presets",
+                    title_key="preset_editor_title",
+                    consequence_key="preset_master_consequence",
+                    success=t["preset_master_saved"],
+                    fragment_only=True,
+                ),
+                content_type="text/html",
+            )
+            set_session(response, coach_member.id, gym.id)
+            return response
         response = web.HTTPFound(f"/presets/{preset.id}/routine")
         set_session(response, coach_member.id, gym.id)
         raise response
