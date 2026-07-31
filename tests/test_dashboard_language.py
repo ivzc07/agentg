@@ -15,7 +15,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from agentg.checkin_store import CheckinStore
-from agentg.dashboard_i18n import fmt_date
+from agentg.dashboard_i18n import detect_language, fmt_date
 from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import LANG_COOKIE, SESSION_COOKIE, build_app, sign_session
 from agentg.db import create_engine
@@ -269,6 +269,27 @@ async def test_a_set_comment_renders_once_no_matter_the_rep_count(env):
     text = await env.page(f"/members/{member.id}")
 
     assert text.count("my shoulder hurt, stopped early") == 1
+
+
+# --- the source-language heuristic itself ---
+
+
+def test_first_person_english_detects_as_english():
+    for phrase in (
+        "spot me on bench",
+        "help me",
+        "I hate burpees",
+        "I'm sore today",
+    ):
+        assert detect_language(phrase) == "en", phrase
+
+
+def test_spanish_and_ties_detect_as_spanish():
+    assert detect_language("Solo puede entrenar por la mañana") == "es"
+    assert detect_language("Me duele la rodilla al sentarme") == "es"
+    assert detect_language("Quiere hacer banca con su propio peso") == "es"
+    # No signal at all: the product's no-signal default.
+    assert detect_language("10k 2026") == "es"
 
 
 async def test_the_language_toggle_sits_in_the_chrome_of_every_screen(env):

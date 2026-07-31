@@ -253,19 +253,22 @@ def away_text(has_sessions: bool, gap_days: int, lang: str) -> str:
 # "is this quote in the language the Coach is reading?", so a small
 # stopword vote is enough — it is a provenance hint, not a classifier.
 # Ambiguous text defaults to Spanish, the product's no-signal default.
+# "me"/"i"/"i'm" score only English: first-person English notes are common
+# and otherwise tie into the Spanish default, while Spanish first-person
+# quotes still win on their other words ("me duele la rodilla…").
 
 _ES_WORDS = frozenset(
     "el la los las de del que un una con por para mi mis su sus se al "
     "quiero puedo solo antes después hacer muy más cuando porque entrenar "
-    "dolor pero también tiene estoy me lo es son está".split()
+    "dolor pero también tiene estoy lo es son está".split()
 )
 _EN_WORDS = frozenset(
-    "the and to of in is it my can want only before with for on at not "
-    "hates will them train pain week but also have has am are was were "
+    "the and to of in is it i me i'm my can want only before with for on at "
+    "not hates will them train pain week but also have has am are was were "
     "would could should this that these those from after when what who".split()
 )
 _ES_ACCENTS = re.compile(r"[áéíóúñ¿¡]")
-_WORDS = re.compile(r"[a-záéíóúñü]+")
+_WORDS = re.compile(r"[a-záéíóúñü]+(?:'[a-z]+)?")
 
 
 def detect_language(text: str) -> str:
