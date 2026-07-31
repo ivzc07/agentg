@@ -700,13 +700,15 @@ def _notes_card(view: MemberPage, lang: str) -> str:
     return f'<section class="card"><h2>{t["notes"]}</h2>{body}</section>'
 
 
-def _safety_banner(view: MemberPage, lang: str) -> str:
+def _safety_banner(view: MemberPage, lang: str, roster_view: str) -> str:
     """The safety-flag banner above the Member page's columns.
 
     Open flags carry the Tick off action; acknowledged ones name the Coach
     and the date (acknowledging is not retiring — the Note stays in the
     Notes card too); an expired unacknowledged flag stays labelled
-    "expired, never seen" (spec-dashboard §Safety flags)."""
+    "expired, never seen" (spec-dashboard §Safety flags). The form keeps
+    the view the page was opened from, so ticking off never bounces a
+    Split or Cards Coach back to Table."""
     if not view.safety_flags:
         return ""
     t = STRINGS[lang]
@@ -716,7 +718,8 @@ def _safety_banner(view: MemberPage, lang: str) -> str:
         if flag.status == "open":
             action = (
                 f'<form method="post" '
-                f'action="/members/{view.member_id}/flags/{flag.note_id}/tick-off">'
+                f'action="/members/{view.member_id}/flags/{flag.note_id}/tick-off'
+                f'?view={roster_view}">'
                 f'<button type="submit">{t["tick_off"]}</button></form>'
             )
         elif flag.status == "acknowledged":
@@ -757,7 +760,7 @@ def _member_content(view: MemberPage, lang: str, roster_view: str) -> str:
 <h1>{escape(view.name)}{tags}</h1>
 <div class="facts">{facts}</div>
 </header>
-{_safety_banner(view, lang)}
+{_safety_banner(view, lang, roster_view)}
 <div class="columns">
 <div class="col">
 {_routine_card(view, lang)}

@@ -342,3 +342,24 @@ async def test_an_acknowledged_flag_never_reads_expired(env):
     html = await _member_page(env, member.id)
     assert "Vista por Coach Ana" in html
     assert "caducada, nunca vista" not in html
+
+
+async def test_the_tick_off_form_keeps_the_view_it_was_opened_from(env):
+    """A Coach in Split (or Cards) must not bounce to Table after ticking
+    off: the form action carries the view, and the POST redirects back to
+    it (review on PR #120)."""
+    member = await env.add_member("Ana")
+    note = await _flag(env, member)
+
+    html = await (
+        await env.client.get(f"/members/{member.id}?view=split", cookies=_cookie(env))
+    ).text()
+    assert f"/members/{member.id}/flags/{note.id}/tick-off?view=split" in html
+
+    response = await env.client.post(
+        f"/members/{member.id}/flags/{note.id}/tick-off?view=split",
+        cookies=_cookie(env),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers["Location"] == f"/members/{member.id}?view=split"
