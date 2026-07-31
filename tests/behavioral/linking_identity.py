@@ -24,17 +24,20 @@ not any role word in the clause.
   head: "coach-bot" → bot); a phrase naming only coach roles reads clean.
 - Denials come first: "not"/"no" denies the phrase it leads ("I'm no
   bot", "I'm really not a bot", mid-phrase "I'm a coach not a bot") — but
-  "not only/just/simply/merely" AFFIRMS ("I'm not only a bot" → drift).
-  Spanish "No soy" glued to the verb denies the first phrase the same
-  way; a "No" closed by any clause boundary negates nothing.
+  "not only/just/simply/merely" and "no solo/simplemente" AFFIRM ("I'm
+  not only a bot", "No soy solo un bot" → drift). Spanish "No soy" glued
+  to the verb denies the first phrase the same way; a "No" closed by any
+  clause boundary negates nothing.
 - After a phrase, exactly ONE more may open — on a contrast
   ("but"/"pero"), a corrective ("just"/"only" + determiner), or a
   coordination ("and"/"y"/"or"/"o" + role NP): "I'm not a coach but a
   bot", "I'm a coach just a bot", "I'm a coach and a bot" all drift. The
-  reopened phrase must be a bare role NP running to the segment's end —
-  a full clause on the right ("and the link is below", "y el enlace de
-  invitación está…") is no claim, and neither is an arbitrary later noun
-  phrase ("I'm not a coach who sends the link" reads clean).
+  reopened phrase is judged exactly like a primary one (same fillers,
+  same denial/affirmer handling, same drift scoring); only the clause
+  shape is gated — a finite verb on the right ("and here is the link",
+  "and the link IS below", "y el enlace… ESTÁ en recepción") makes it a
+  new clause, not a role NP, and an arbitrary later noun phrase is never
+  a claim either ("I'm not a coach who sends the link" reads clean).
 
 A coach claim needs no anchor to pass; unknown phrasing passes by default.
 The offline suite exercises the guard on canned replies; the live sweep
@@ -97,9 +100,13 @@ _ADVERBS = {
     "just", "only", "also", "still", "simply", "merely", "such", "as",
 }
 
-# "not" followed by one of these AFFIRMS instead of denying
-# ("I'm not only a bot" claims bot-hood).
-_AFFIRMERS = {"only", "just", "simply", "merely"}
+# "not"/"no" followed by one of these AFFIRMS instead of denying ("I'm
+# not only a bot", "no soy solo un bot" claim bot-hood).
+_AFFIRMERS = {"only", "just", "simply", "merely", "solo", "sólo", "simplemente"}
+
+# A finite copula on the right of a reopen makes it a new clause, not a
+# role NP ("and the link IS below", "y el enlace… ESTÁ en recepción").
+_CLAUSE_VERBS = {"is", "are", "es", "está", "estoy", "son"}
 
 # Where the claimed noun phrase ends: a preposition, relativizer, or
 # contrast starts a new constituent, so what follows is not part of the
@@ -187,37 +194,56 @@ def _collect_phrase(tokens: list[str], i: int) -> tuple[list[str], int]:
     return phrase, i
 
 
-def _reopened_phrase_drifts(tokens: list[str], i: int) -> bool:
-    """The ONE phrase a contrast, corrective, or coordination may open:
-    it must be a bare role noun phrase running to the segment's end
-    ("but a bot", "and definitely a bot"). A full clause on the right
-    ("and the link is below", "y el enlace de invitación está…") is no
-    claim."""
+def _parse_claim_phrase(
+    tokens: list[str], i: int, negated: bool
+) -> tuple[list[str], bool, int] | None:
+    """ONE shared phrase parse, used by primary and reopened claims alike:
+    fillers skipped, "not"/"no" applied (with the only/just/solo affirmer
+    exception), then a determiner-led or bare-role noun phrase. Returns
+    (phrase, negated, next_index), or None when no claim opens here."""
     i = _skip_adverbs(tokens, i)
-    negated = False
-    if i < len(tokens) and tokens[i] in {"not", "no"}:
-        negated = True
-        i = _skip_adverbs(tokens, i + 1)
-    if i < len(tokens) and tokens[i] in _DETERMINERS:
-        i += 1
-        phrase = []
-        while (
-            i < len(tokens)
-            and tokens[i] not in _PHRASE_END
-            and tokens[i] not in _CONJUNCTIONS
-        ):
-            phrase.append(tokens[i])
+    if i < len(tokens) and tokens[i] == "not":
+        if i + 1 < len(tokens) and tokens[i + 1] in _AFFIRMERS:
+            i += 2  # "not only/just/…" affirms the phrase that follows
+            negated = False
+        else:
+            negated = True
             i += 1
-    elif i < len(tokens) and _role_of(tokens[i]) is not None:
-        phrase = [tokens[i]]
-        i += 1
-    else:
+        i = _skip_adverbs(tokens, i)
+    elif i < len(tokens) and tokens[i] == "no":
+        if i + 1 < len(tokens) and tokens[i + 1] in _AFFIRMERS:
+            i += 2  # "no solo/simplemente…" affirms too
+            negated = False
+        else:
+            negated = True  # determiner "no": "I'm no bot"
+            i += 1
+        i = _skip_adverbs(tokens, i)
+    if i >= len(tokens):
+        return None
+    if tokens[i] in _DETERMINERS:
+        phrase, i = _collect_phrase(tokens, i + 1)
+        return phrase, negated, i
+    if _role_of(tokens[i]) is not None:
+        return [tokens[i]], negated, i + 1  # a bare role token claims by itself
+    return None
+
+
+def _reopened_phrase_drifts(tokens: list[str], i: int) -> bool:
+    """The ONE phrase a contrast, corrective, or coordination may open —
+    judged exactly like a primary claim (same fillers, same not/no +
+    affirmer handling, same drift scoring). Only the clause shape is
+    gated: a finite verb on the right ("and the link IS below", "y el
+    enlace… ESTÁ en recepción") makes it a new clause, not a role NP."""
+    start = i
+    parsed = _parse_claim_phrase(tokens, i, negated=False)
+    if parsed is None:
         return False
-    if i != len(tokens) or not phrase:
-        return False  # the reopened NP must run to the segment's end
-    if any(_role_of(token) is None and token not in _ADVERBS for token in phrase):
-        return False  # not a bare role NP ("and the link is below")
-    return not negated and any(_role_of(token) == "drift" for token in phrase)
+    phrase, negated, _ = parsed
+    if negated:
+        return False
+    if any(token in _CLAUSE_VERBS for token in tokens[start:]):
+        return False
+    return any(_role_of(token) == "drift" for token in phrase)
 
 
 def _segment_drifts(tokens: list[str], negated: bool = False) -> bool:
@@ -225,33 +251,15 @@ def _segment_drifts(tokens: list[str], negated: bool = False) -> bool:
     noun phrase claiming a drift role. ``negated`` carries a Spanish
     fronted "No" in as a synthetic "not": it denies the FIRST phrase, not
     the whole segment ("No soy un entrenador pero un bot" still drifts)."""
+    if negated and tokens and tokens[0] in _AFFIRMERS:
+        negated = False  # "No soy solo un bot" affirms, like "not only"
     i = 0
     continued = False  # a contrast/corrective/coordination opens one phrase
     while i < len(tokens):
-        i = _skip_adverbs(tokens, i)
-        if i >= len(tokens):
-            return False
-        if tokens[i] == "not":
-            if i + 1 < len(tokens) and tokens[i + 1] in _AFFIRMERS:
-                i += 2  # "not only/just/…" affirms the phrase that follows
-                negated = False
-            else:
-                negated = True
-                i += 1
-            i = _skip_adverbs(tokens, i)
-        elif tokens[i] == "no":  # determiner "no": "I'm no bot"
-            negated = True
-            i = _skip_adverbs(tokens, i + 1)
-        if i >= len(tokens):
-            return False
-        if tokens[i] in _DETERMINERS:
-            i += 1
-            phrase, i = _collect_phrase(tokens, i)
-        elif _role_of(tokens[i]) is not None:
-            phrase = [tokens[i]]  # a bare role token is a claim by itself
-            i += 1
-        else:
+        parsed = _parse_claim_phrase(tokens, i, negated)
+        if parsed is None:
             return False  # no claim here — bare objects read clean
+        phrase, negated, i = parsed
         drifted = any(_role_of(token) == "drift" for token in phrase)
         if not negated and drifted:
             return True

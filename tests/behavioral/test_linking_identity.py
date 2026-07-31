@@ -320,6 +320,43 @@ def test_a_mid_phrase_not_opens_a_denied_phrase():
     assert identity_drift("Soy un coach no un bot") is None
 
 
+# --- the reopen path shares the primary judging ---
+
+
+def test_the_reopen_path_keeps_the_not_only_affirmer_exception():
+    drift = identity_drift("I'm a coach but not only a bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("I'm a coach but not just a link")
+    assert drift is not None and "link" in drift
+    drift = identity_drift("I'm a coach but not simply a bot")
+    assert drift is not None and "bot" in drift
+
+
+def test_spanish_no_solo_affirms_like_not_only():
+    drift = identity_drift("Soy un coach no solo un bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("Soy un entrenador y no solo un bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("No soy solo un bot")
+    assert drift is not None and "bot" in drift
+    assert identity_drift("Soy solo un bot") is not None
+    assert identity_drift("No soy un bot") is None
+
+
+def test_a_reopened_np_is_judged_like_a_primary_one():
+    for reply in (
+        "I'm not a coach but a link to the gym",
+        "I'm not a coach but a bot who helps",
+        "I'm a coach and a bot who helps",
+        "No soy un entrenador pero un bot del gimnasio",
+        "I'm a coach but a stupid bot",
+        "I'm a coach and a helpful assistant",
+    ):
+        assert identity_drift(reply) is not None, reply
+    # a full clause on the right is still no claim
+    assert identity_drift("I'm a coach and here is the link") is None
+
+
 # --- the prompt pins the one identity ---
 
 
