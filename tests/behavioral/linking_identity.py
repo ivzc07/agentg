@@ -194,14 +194,14 @@ def _words(text: str) -> list[str]:
 
 
 def _spanish_denial(reply: str, claim_start: int) -> bool:
-    """"No soy" glued to the verb negates it; a "No" closed by any clause
-    boundary ("No, soy…", "No: soy…", "No - soy…", "No\\nsoy…") answered
-    something else. English claims negate after the verb, never from a
-    fronted "No"."""
+    """"No soy" or "tampoco soy" glued to the verb negates it; one closed
+    by any clause boundary ("No, soy…", "No: soy…", "No - soy…",
+    "No\\nsoy…") answered something else. English claims negate after the
+    verb, never from a fronted "No"."""
     trailing = _TRAILING_WORD.search(reply[:claim_start])
     return (
         trailing is not None
-        and trailing.group(1).lower() == "no"
+        and trailing.group(1).lower() in {"no", "tampoco"}
         and not _CLAUSE_END.search(trailing.group(2))
     )
 
@@ -330,11 +330,13 @@ def _parse_np_continuation(
 # Post-head residue classification (see _drift_head_closed): a degree
 # word leads degree+adjective ("un bot MUY ÚTIL", "a bot REALLY cool");
 # these Spanish finite-verb forms mark a clause predicate ("un enlace
-# LLEGA"). Everything else unknown defaults CLEAN — see the module
-# docstring for the frozen policy.
+# LLEGA") — including the unaccented copulas "esta"/"estan" the model
+# actually types, checked BEFORE the demonstrative-determiner skip.
+# Everything else unknown defaults CLEAN — see the module docstring for
+# the frozen policy.
 _DEGREE_WORDS = {"muy", "tan", "bastante", "really", "very", "quite"}
 _SPANISH_VERBS = {
-    "llega", "llegan", "espera", "esperan", "está", "están",
+    "llega", "llegan", "espera", "esperan", "está", "están", "esta", "estan",
     "viene", "vienen", "queda", "quedan",
 }
 
@@ -381,6 +383,13 @@ def _drift_head_closed(phrase: list[str], tokens: list[str], i: int) -> bool:
     j = 0
     while j < len(trailing):
         token = trailing[j]
+        if token in _SPANISH_VERBS:
+            return False  # a copula/predicate — checked BEFORE the det skip
+        if token in {"just", "only"}:
+            nxt = trailing[j + 1] if j + 1 < len(trailing) else None
+            if nxt is not None and (nxt in _DETERMINERS or _role_of(nxt) is not None):
+                return True  # a corrective marker — the head closed
+            return False  # a pre-verbal adverb: a clause follows ("just arrived")
         if token in _RELATIVIZERS or token in _REOPENERS or token in {"not", "no"}:
             return True  # the NP closed at a constituent boundary
         if token in _ADVERBS or token in _DETERMINERS:

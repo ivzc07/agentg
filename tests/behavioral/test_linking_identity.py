@@ -560,6 +560,30 @@ def test_post_head_residue_is_classified_by_policy():
     assert identity_drift("Soy un entrenador y un enlace llega mañana") is None
 
 
+# --- false-positive precision fixes: tampoco, unaccented copulas, just/only ---
+
+
+def test_tampoco_is_a_denial_marker():
+    assert identity_drift("Tampoco soy un bot") is None
+    assert identity_drift("Yo tampoco soy un enlace") is None
+
+
+def test_unaccented_copulas_are_predicates_not_demonstratives():
+    assert identity_drift("Soy un entrenador y tu enlace esta abajo") is None
+    assert identity_drift("Soy un entrenador y tu enlace estan abajo") is None
+    # the accented form was already a predicate
+    assert identity_drift("Soy un entrenador y tu enlace está abajo") is None
+
+
+def test_post_head_just_and_only_are_preverbal_adverbs_without_an_np():
+    assert identity_drift("I am a coach and your invite link just arrived") is None
+    assert identity_drift("I'm a coach and a link just arrived") is None
+    assert identity_drift("I'm a coach and your invite link only works after signup") is None
+    # directly followed by a determiner-led NP they stay corrective markers
+    drift = identity_drift("I am not a bot just a link")
+    assert drift is not None and "link" in drift
+
+
 # --- the combinatorial matrix: the grammar space, enumerated ---
 
 _EN = {
@@ -594,6 +618,8 @@ _EN = {
         ("for new members", True),
         ("from your gym is below", False),  # PP + predicate: a clause
         ("from reception is ready", False),
+        ("just arrived", False),  # pre-verbal just/only: a clause follows
+        ("only works after signup", False),
     ],
     "conj": ["and", "or"],
     "contr": ["but"],
@@ -627,6 +653,8 @@ _ES = {
         ("de tu gimnasio", True),  # a PP with no predicate modifies the role
         ("del gimnasio", True),
         ("de tu gimnasio está abajo", False),  # PP + predicate: a clause
+        ("esta abajo", False),  # unaccented copulas are predicates too
+        ("estan abajo", False),
     ],
     "conj": ["y", "o"],
     "contr": ["pero", "sino"],
@@ -774,6 +802,9 @@ def _matrix_cases() -> list[tuple[str, bool]]:
                     # "ni" coordinates under denial until a sino (round 13)
                     (f"No soy un {coach} ni {np} sino {np}", drift),
                     (f"No soy {np} ni {np}", False),
+                    # "tampoco" is a denial marker like "no" (round 15)
+                    (f"Tampoco soy {np}", False),
+                    (f"Yo tampoco soy {np}", False),
                 ]
     return cases
 
