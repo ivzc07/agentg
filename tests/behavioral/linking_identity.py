@@ -58,9 +58,19 @@ not any role word in the clause.
   sends the link" reads clean).
 
 A coach claim needs no anchor to pass; unknown phrasing passes by default.
-Genuinely ambiguous shapes read CLEAN by policy: false negatives on exotic
-phrasing are acceptable, but false positives on legitimate coach phrasing
-break the opt-in live sweep. tests/behavioral/test_linking_identity.py
+
+FROZEN POLICY (post-head residue): classifying unknown tokens after a
+claimed role head — adjective vs finite verb — is HEURISTIC, because
+Spanish postnominal adjectives and finite verbs are undecidable from
+tokens alone ("un bot útil" vs "un enlace llega"). The guard resolves it
+by closed rules: a lone unknown token reads as a postnominal adjective
+(drift), a known degree word leads degree+adjective (drift), a small
+closed set of Spanish finite-verb forms marks a predicate (clean), and
+ANY other unknown multi-token residue defaults CLEAN — precision over
+recall. False negatives on exotic phrasing are the accepted envelope;
+false positives on legitimate coach phrasing break the opt-in live
+sweep and are not. Do not tune this per case — change it only with a
+documented policy revision. tests/behavioral/test_linking_identity.py
 carries a combinatorial matrix (``_matrix_cases``) that enumerates this
 grammar space — verbs × denials × affirmers × roles × structures — with
 each case labeled by that intent; extend it when new shapes appear. The
@@ -317,52 +327,79 @@ def _parse_np_continuation(
     return None
 
 
-def _drift_head_closed(
-    phrase: list[str], tokens: list[str], i: int, spanish: bool
-) -> bool:
+# Post-head residue classification (see _drift_head_closed): a degree
+# word leads degree+adjective ("un bot MUY ÚTIL", "a bot REALLY cool");
+# these Spanish finite-verb forms mark a clause predicate ("un enlace
+# LLEGA"). Everything else unknown defaults CLEAN — see the module
+# docstring for the frozen policy.
+_DEGREE_WORDS = {"muy", "tan", "bastante", "really", "very", "quite"}
+_SPANISH_VERBS = {
+    "llega", "llegan", "espera", "esperan", "está", "están",
+    "viene", "vienen", "queda", "quedan",
+}
+
+
+def _unknown_run_is_np(residue: list[str], after_preposition: bool) -> bool:
+    """Classify one run of unknown tokens (up to the next boundary) after
+    the role head. A lone token reads as a postnominal adjective ("un bot
+    útil", "a bot as WELL") unless it is a known Spanish finite verb; a
+    degree word leads degree+adjective ("un bot MUY ÚTIL"); after a
+    preposition, two tokens are the PP's noun group ("to the PARTNER
+    GYM", "for NEW MEMBERS"). Anything else is a predicate — the NP was
+    a clause subject ("a link IS BELOW", "a link from your gym IS
+    BELOW")."""
+    if not residue:
+        return True
+    if len(residue) == 1:
+        return residue[0] not in _SPANISH_VERBS
+    if residue[0] in _DEGREE_WORDS:
+        return True
+    if after_preposition and len(residue) == 2:
+        return True
+    return False
+
+
+# Tokens that end an unknown-residue run: anything that starts a new
+# constituent or is skipped on its own.
+_RUN_END = (
+    _PREPOSITIONS | _RELATIVIZERS | _REOPENERS | _ADVERBS | _DETERMINERS | {"not", "no"}
+)
+
+
+def _drift_head_closed(phrase: list[str], tokens: list[str], i: int) -> bool:
     """After a non-definite reopened NP, what FOLLOWS the role head
     decides: the segment's end, a relativizer, a reopener, or a
     preposition chain (the PP modifies the claimed role, whatever the
-    preposition) all score the drift. ANY other word makes the NP a
-    clause SUBJECT — the "role" is not claimed ("your invite link is
-    below", "a link will be sent", "tu enlace de invitación está
-    abajo"). English PPs take their whole noun group ("a bot for new
-    members", "a link to the partner gym"), Spanish ones exactly one
-    noun; Spanish alone allows one postnominal adjective at the very end
-    ("un bot útil")."""
+    preposition) all score the drift. Unknown residue is classified by
+    _unknown_run_is_np: NP material (postnominal adjective, degree+adj,
+    PP noun group) keeps the claim; anything else is a predicate and the
+    NP was a clause SUBJECT ("your invite link is below", "a link from
+    your gym is below", "tu enlace de invitación está abajo")."""
     role_indexes = [idx for idx, token in enumerate(phrase) if _role_of(token)]
     head = role_indexes[-1]
     trailing = [*phrase[head + 1 :], *tokens[i:]]
     j = 0
     while j < len(trailing):
         token = trailing[j]
-        if token in _ADVERBS:
-            j += 1
-            continue
         if token in _RELATIVIZERS or token in _REOPENERS or token in {"not", "no"}:
             return True  # the NP closed at a constituent boundary
-        if token in _PREPOSITIONS:
+        if token in _ADVERBS or token in _DETERMINERS:
+            j += 1  # fillers; a demonstrative here is a relativizer (above)
+            continue
+        after_prep = token in _PREPOSITIONS
+        if after_prep:
             j += 1
             while j < len(trailing) and trailing[j] in _DETERMINERS:
                 j += 1
-            if spanish:
-                if j < len(trailing):
-                    j += 1  # exactly one noun; anything more is outside the PP
-            else:
-                while (
-                    j < len(trailing)
-                    and trailing[j] not in _PREPOSITIONS
-                    and trailing[j] not in _RELATIVIZERS
-                    and trailing[j] not in _REOPENERS
-                    and trailing[j] not in {"not", "no"}
-                ):
-                    j += 1  # the English noun group — the noun comes last
-            continue
-        return spanish and j + 1 == len(trailing)
+        start = j
+        while j < len(trailing) and trailing[j] not in _RUN_END:
+            j += 1
+        if not _unknown_run_is_np(trailing[start:j], after_prep):
+            return False
     return True
 
 
-def _reopened_phrase_drifts(tokens: list[str], i: int, spanish: bool) -> bool:
+def _reopened_phrase_drifts(tokens: list[str], i: int) -> bool:
     """The ONE phrase a contrast, corrective, or coordination may open —
     parsed exactly like a primary claim (or as a determiner-less
     continuation of the same NP), then judged by its OPENER TYPE: a
@@ -380,10 +417,10 @@ def _reopened_phrase_drifts(tokens: list[str], i: int, spanish: bool) -> bool:
         return False
     if not any(_role_of(token) == "drift" for token in phrase):
         return False
-    return _drift_head_closed(phrase, tokens, end, spanish)
+    return _drift_head_closed(phrase, tokens, end)
 
 
-def _segment_drifts(tokens: list[str], spanish: bool) -> bool:
+def _segment_drifts(tokens: list[str]) -> bool:
     """Scan one clause segment (after the claim verb) for a determiner-led
     noun phrase claiming a drift role."""
     i = 0
@@ -415,7 +452,7 @@ def _segment_drifts(tokens: list[str], spanish: bool) -> bool:
             continue
         if stopper in _REOPENERS and not continued:
             continued = True
-            return _reopened_phrase_drifts(tokens, i + 1, spanish)
+            return _reopened_phrase_drifts(tokens, i + 1)
         return False
     return False
 
@@ -437,7 +474,7 @@ def identity_drift(reply: str) -> str | None:
         fronted_no = verb == "soy" and _spanish_denial(reply, match.start())
         if fronted_no:
             tokens = ["no"] + tokens
-        if _segment_drifts(tokens, spanish=verb == "soy"):
+        if _segment_drifts(tokens):
             return reply[match.start() : segment_end].strip()
         # After a fronted "No soy", a following clause opening with "sino"
         # (across one comma) is the corrective claim ("No soy un enlace,
@@ -446,7 +483,7 @@ def identity_drift(reply: str) -> str | None:
             rest_end_match = _CLAUSE_END.search(reply, end.end())
             rest_end = rest_end_match.start() if rest_end_match else len(reply)
             rest = _words(reply[end.end() : rest_end])
-            if rest and rest[0] == "sino" and _reopened_phrase_drifts(rest, 1, True):
+            if rest and rest[0] == "sino" and _reopened_phrase_drifts(rest, 1):
                 return reply[match.start() : rest_end].strip()
     return None
 

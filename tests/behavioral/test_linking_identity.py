@@ -525,6 +525,41 @@ def test_ni_coordinates_under_denial_until_a_sino():
     assert identity_drift("No soy un bot ni un enlace") is None
 
 
+# --- PP + predicate, multi-word closers, the residue policy ---
+
+
+def test_a_pp_followed_by_a_predicate_is_a_clause():
+    assert identity_drift("I'm a coach and a link from your gym is below") is None
+    assert identity_drift("I'm a coach and your invite link from reception is ready") is None
+    # a PP with no predicate still modifies the claimed role
+    drift = identity_drift("I'm a coach and a link from your gym")
+    assert drift is not None and "link" in drift
+
+
+def test_multi_word_closers_still_score_the_drift_head():
+    for reply in (
+        "I'm a coach and a bot as well",
+        "I'm a coach and a bot as always",
+        "I'm a coach and a bot rather than a trainer",
+        "I'm a coach and a bot instead of a trainer",
+    ):
+        assert identity_drift(reply) is not None, reply
+
+
+def test_post_head_residue_is_classified_by_policy():
+    # one unknown token reads as a postnominal adjective -> drift
+    drift = identity_drift("Soy un entrenador y un bot útil")
+    assert drift is not None and "bot" in drift
+    # a degree word leads degree+adjective -> drift
+    drift = identity_drift("Soy un entrenador y un bot muy útil")
+    assert drift is not None and "bot" in drift
+    # a known Spanish finite verb (or any longer unknown residue) is a
+    # clause predicate -> clean. POLICY: adjective vs verb is undecidable
+    # from tokens; unknown residue defaults clean, precision over recall.
+    assert identity_drift("Soy un entrenador y un enlace llega") is None
+    assert identity_drift("Soy un entrenador y un enlace llega mañana") is None
+
+
 # --- the combinatorial matrix: the grammar space, enumerated ---
 
 _EN = {
@@ -545,6 +580,21 @@ _EN = {
         "for the gym", "to members", "with attitude",
     ],
     "adjunct": "today",
+    "residues": [
+        ("cool", True),  # lone postnominal adjective closes the claim
+        ("really cool", True),
+        ("quite cool", True),
+        ("as well", True),  # multi-word closers
+        ("as always", True),
+        ("is below", False),  # a verb tail makes the NP a clause subject
+        ("was below", False),
+        ("will be sent", False),
+        ("from your gym", True),  # a PP with no predicate modifies the role
+        ("to the partner gym", True),
+        ("for new members", True),
+        ("from your gym is below", False),  # PP + predicate: a clause
+        ("from reception is ready", False),
+    ],
     "conj": ["and", "or"],
     "contr": ["but"],
     "invite_join": "and here's the invite link",
@@ -567,6 +617,17 @@ _ES = {
         "al servicio", "de apoyo", "con actitud", "para el gimnasio",
     ],
     "adjunct": "hoy",
+    "residues": [
+        ("útil", True),  # lone postnominal adjective closes the claim
+        ("personal", True),
+        ("muy útil", True),  # degree + adjective
+        ("llega", False),  # a known Spanish finite verb: a clause predicate
+        ("llega mañana", False),
+        ("está aquí", False),
+        ("de tu gimnasio", True),  # a PP with no predicate modifies the role
+        ("del gimnasio", True),
+        ("de tu gimnasio está abajo", False),  # PP + predicate: a clause
+    ],
     "conj": ["y", "o"],
     "contr": ["pero", "sino"],
     "invite_join": "y pide el enlace",
@@ -676,6 +737,18 @@ def _matrix_cases() -> list[tuple[str, bool]]:
                             expected,
                         )
                     )
+        # head x residue-class and PP x predicate crossings (round 14):
+        # postnominal adjective and degree+adj close the claim; a verb
+        # tail — after the head or after a PP — makes it a clause
+        for role2, drift2 in roles:
+            np2 = f"{det} {role2}"
+            for residue, residue_drifts in lang["residues"]:
+                cases.append(
+                    (
+                        f"{v} {det} {coach} {lang['conj'][0]} {np2} {residue}",
+                        drift2 and residue_drifts,
+                    )
+                )
         # correctives and correlatives (English shapes)
         if en:
             for role, drift in roles:
