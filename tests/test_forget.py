@@ -164,7 +164,7 @@ async def test_forgetting_a_coach_clears_their_flag_acknowledgements(env):
     member = await populate(env)
     coach = await env.linking.link_member(env.gym_id, "Coach Sam", "telegram", "7")
     await env.linking.set_coach(coach.id)
-    safety = await env.notes.remember(member.id, env.gym_id, "safety", "sharp knee pain")
+    safety = await env.notes.remember_safety(member.id, env.gym_id, "sharp knee pain")
     store = DashboardStore(env.engine)
     await store.acknowledge_flag(env.gym_id, member.id, safety.id, coach.id)
 

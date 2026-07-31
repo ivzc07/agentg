@@ -30,6 +30,21 @@ class NotesStore:
         self._clock = clock
 
     async def remember(self, member_id: int, gym_id: int, kind: str, text: str) -> MemberNote:
+        # "safety" is reserved for the flag_to_coach referral path
+        # (remember_safety): written any other way it would mark the roster
+        # and the banner without any coach ever being pinged. Remap it like
+        # any unknown kind.
+        if kind == "safety":
+            kind = "other"
+        return await self._write(member_id, gym_id, kind, text)
+
+    async def remember_safety(self, member_id: int, gym_id: int, text: str) -> MemberNote:
+        """The flag_to_coach path's safety Note — the only way a live
+        ``safety`` kind is ever written, so a roster marker always means a
+        coach was pinged."""
+        return await self._write(member_id, gym_id, "safety", text)
+
+    async def _write(self, member_id: int, gym_id: int, kind: str, text: str) -> MemberNote:
         note = MemberNote(
             gym_id=gym_id,
             member_id=member_id,

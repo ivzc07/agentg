@@ -728,7 +728,6 @@ class DashboardStore:
             safety_flags=safety_flags,
         )
 
-<<<<<<< HEAD
     async def roster_member(self, gym_id: int, member_id: int) -> Member | None:
         """The roster-scoped Member the Routine editor may write to, or
         ``None`` — the same rule as ``member_page``: another Gym's Member, a
@@ -782,7 +781,7 @@ class DashboardStore:
         (a web save draws from the catalog, it does not extend it)."""
         async with self._sessions() as db:
             return list(await db.scalars(select(Exercise.name).order_by(Exercise.name)))
-=======
+
     async def _safety_flags(
         self, db, notes: list[MemberNote], timezone: str
     ) -> list[SafetyFlagView]:
@@ -841,8 +840,8 @@ class DashboardStore:
         id, another Gym's or Member's note, a non-safety kind, or a retired
         flag — the web layer turns all of them into the shared 404."""
         async with self._sessions() as db:
-            note = await db.scalar(
-                select(MemberNote)
+            reachable = (
+                select(MemberNote.id)
                 .join(Member, MemberNote.member_id == Member.id)
                 .where(
                     MemberNote.id == note_id,
@@ -851,15 +850,31 @@ class DashboardStore:
                     MemberNote.kind == "safety",
                     MemberNote.retired_at.is_(None),
                 )
+                .scalar_subquery()
             )
-            if note is None:
-                return None
-            if note.acknowledged_at is None:
-                note.acknowledged_at = self._clock()
-                note.acknowledged_by_member_id = by_member_id
-                await db.commit()
-            return note
->>>>>>> 4c8459f (Dashboard: roster flag marker, member-page banner and tick-off)
+            # One atomic UPDATE, guarded on not-yet-acknowledged (the same
+            # pattern as redeem_login_token): two coaches ticking at once
+            # can't last-writer-wins the stamp — the loser updates zero rows
+            # and becomes the idempotent no-op below.
+            result = await db.execute(
+                update(MemberNote)
+                .where(
+                    MemberNote.id == reachable,
+                    MemberNote.acknowledged_at.is_(None),
+                )
+                .values(
+                    acknowledged_at=self._clock(),
+                    acknowledged_by_member_id=by_member_id,
+                )
+            )
+            if result.rowcount == 0:
+                # Unreachable or already acknowledged; only the latter, still
+                # reachable, is a success.
+                return await db.scalar(
+                    select(MemberNote).where(MemberNote.id == reachable)
+                )
+            await db.commit()
+            return await db.get(MemberNote, note_id)
 
     async def _sessions_sets(
         self, db, session_ids: list[int]

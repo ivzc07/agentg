@@ -243,3 +243,24 @@ async def test_a_gym_with_no_coach_still_logs(env):
     result = await flag_to_coach_action(ctx, "dizzy during warmup")
     assert result["logged"] is True
     assert result["coaches_notified"] == 0
+
+
+async def test_a_coachs_own_flag_links_to_the_roster_not_their_404_page(env):
+    # The Member page excludes coach-flagged Members (spec-dashboard §The
+    # roster), so a flag about a coach must deep-link to the roster —
+    # /members/<their id> would be a signed-in 404 (review on PR #120).
+    second = await env.linking.link_member(env.gym_id, "Coach Jo", "telegram", "8")
+    await env.linking.set_coach(second.id)
+
+    result = await flag_to_coach_action(
+        env.context(is_coach=True, member_id=env.coach_id), "chest tightness"
+    )
+
+    assert result["coaches_notified"] == 1
+    _channel, user_id, text, _preview = env.notifier.sent[0]
+    assert user_id == "8"
+    match = re.search(rf"{re.escape(BASE_URL)}/login/(\S+)", text)
+    assert match, f"no deep link in {text!r}"
+    token = await env.dashboard.peek_login_token(match.group(1))
+    assert token is not None
+    assert token.next_path == "/"

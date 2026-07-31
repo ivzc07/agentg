@@ -109,10 +109,13 @@ async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]
     ask (issue #101): the Note is always written and the Coaches are always
     pinged, with an authenticated deep link that lands signed-in on the
     Member's page — the same magic-link mechanism ``/dashboard`` uses."""
-    note = await c.stores.notes.remember(c.member_id, c.gym_id, "safety", summary)
+    note = await c.stores.notes.remember_safety(c.member_id, c.gym_id, summary)
     if c.notifier is None:
         return {"logged": True, "coaches_notified": 0}
     coaches = await c.stores.linking.coaches_for_gym(c.gym_id, exclude_member_id=c.member_id)
+    # The Member page excludes coach-flagged Members, so a flag about a coach
+    # deep-links to the roster — their /members/<id> would be a signed-in 404.
+    next_path = "/" if c.is_coach else f"/members/{c.member_id}"
     notified = 0
     for coach_id, _name, channel, channel_user_id in coaches:
         # The stored text, not the raw summary: whitespace-collapsed like every
@@ -121,7 +124,7 @@ async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]
         text = f"Heads-up from your member {c.member_name}: {note.text}"
         if c.dashboard_base_url is not None and c.stores.dashboard is not None:
             token = await c.stores.dashboard.create_login_token(
-                coach_id, c.gym_id, next_path=f"/members/{c.member_id}"
+                coach_id, c.gym_id, next_path=next_path
             )
             text += f"\n{c.dashboard_base_url}/login/{token}"
         try:

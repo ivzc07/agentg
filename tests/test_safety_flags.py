@@ -30,10 +30,10 @@ async def _flag(env, member, text="sharp knee pain on squats", days_ago=0):
         now = env.clock.now
         env.clock.now = now - timedelta(days=days_ago)
         try:
-            return await _notes(env).remember(member.id, env.gym.id, "safety", text)
+            return await _notes(env).remember_safety(member.id, env.gym.id, text)
         finally:
             env.clock.now = now
-    return await _notes(env).remember(member.id, env.gym.id, "safety", text)
+    return await _notes(env).remember_safety(member.id, env.gym.id, text)
 
 
 def _cookie(env):
@@ -251,3 +251,41 @@ async def test_tick_off_rejects_an_unknown_note_id(env):
     )
 
     assert response.status == 404
+
+
+async def test_concurrent_ticks_keep_the_first_stamp(env):
+    """Two coaches ticking at once must not last-writer-wins the stamp: the
+    ack is one atomic UPDATE guarded on ``acknowledged_at IS NULL``, so the
+    loser is the idempotent no-op (review on PR #120)."""
+    import asyncio
+
+    member = await env.add_member("Ana")
+    coach2 = await env.linking.link_member(env.gym.id, "Coach Bea", "telegram", "2")
+    await env.linking.set_coach(coach2.id)
+    note = await _flag(env, member)
+
+    await asyncio.gather(
+        env.store.acknowledge_flag(env.gym.id, member.id, note.id, env.coach.id),
+        env.store.acknowledge_flag(env.gym.id, member.id, note.id, coach2.id),
+    )
+
+    stored = next(n for n in await _notes(env).active(member.id) if n.kind == "safety")
+    assert stored.acknowledged_at == env.clock.now
+    # One winner, and exactly one: whoever the atomic UPDATE took first.
+    assert stored.acknowledged_by_member_id in {env.coach.id, coach2.id}
+
+
+async def test_a_second_tick_keeps_the_first_coaches_stamp(env):
+    member = await env.add_member("Ana")
+    coach2 = await env.linking.link_member(env.gym.id, "Coach Bea", "telegram", "2")
+    await env.linking.set_coach(coach2.id)
+    note = await _flag(env, member)
+    await env.store.acknowledge_flag(env.gym.id, member.id, note.id, env.coach.id)
+
+    env.clock.advance(timedelta(days=1))
+    again = await env.store.acknowledge_flag(env.gym.id, member.id, note.id, coach2.id)
+
+    assert again is not None  # idempotent, not a 404
+    stored = next(n for n in await _notes(env).active(member.id) if n.kind == "safety")
+    assert stored.acknowledged_by_member_id == env.coach.id
+    assert stored.acknowledged_at == env.clock.now - timedelta(days=1)
