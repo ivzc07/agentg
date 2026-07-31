@@ -270,6 +270,60 @@ def test_underscores_are_separators_too():
     assert find_english_leaks("weight_loss strength band pull-apart") == {"weight loss", "strength"}
 
 
+def test_dash_gap_cut_depends_only_on_the_left_neighbor_class():
+    # Round-19: any dash-class gap (run of dashes, optionally space-padded)
+    # separates like a space; the cut then depends ONLY on the left class.
+    # Modifier / lexicon / glue-prefix on the left -> mid-chain, flag…
+    assert find_english_leaks("kipping--strength-band-pull-apart") == {"strength"}
+    assert find_english_leaks("non--strength band pull-apart") == {"strength"}
+    assert find_english_leaks("stamina - strength band pull-apart") == {"stamina", "strength"}
+    assert find_english_leaks("stamina — strength-band-pull-apart") == {"stamina", "strength"}
+    assert find_english_leaks("weight loss — strength-band-pull-apart") == {
+        "weight loss",
+        "strength",
+    }
+    # …prose, another complete name, or punctuation on the left -> clean.
+    assert find_english_leaks("Hoy toca—strength band pull-apart 3x10") == set()
+    assert find_english_leaks("haz esto—strength band pull-apart") == set()
+    assert find_english_leaks("Muscle-up—strength band pull-apart") == set()
+    assert find_english_leaks("dips—strength-band-pull-apart") == set()
+
+
+# --- gap-form matrix (round-19) ---
+#
+# The left-neighbor class alone decides the cut, across every gap form.
+# A glue prefix (non-, super-) counts as chain content only when attached
+# by a DASH — prefixes attach with hyphens, not spaces ("non–strength"
+# mirrors ASCII "non-strength"; "non strength" is prose).
+
+_R19_LEFT = {
+    "modifier": ("kipping", {"strength"}),
+    "lexicon": ("stamina", {"stamina", "strength"}),
+    "multiword-lexicon": ("weight loss", {"weight loss", "strength"}),
+    "glue-prefix": ("non", {"strength"}),
+    "prose": ("toca", set()),
+    "catalog-name": ("dips", set()),
+    "allowlisted-name": ("Muscle-up", set()),
+}
+_R19_GAPS = (" ", "–", "—", "--", " — ")
+_R19_UNITS = ("strength band pull-apart", "strength-band-pull-apart")
+
+
+def _r19_expected(left_key: str, gap: str) -> set[str]:
+    if left_key == "glue-prefix" and gap == " ":
+        return set()  # a prefix without a hyphen is prose, not glue
+    return _R19_LEFT[left_key][1]
+
+
+@pytest.mark.parametrize("unit", _R19_UNITS)
+@pytest.mark.parametrize("gap", _R19_GAPS)
+@pytest.mark.parametrize("left_key", list(_R19_LEFT))
+def test_dash_gap_left_class_matrix(left_key: str, gap: str, unit: str):
+    left, _ = _R19_LEFT[left_key]
+    text = f"{left}{gap}{unit}"
+    assert find_english_leaks(text) == _r19_expected(left_key, gap), text
+
+
 def test_dash_gap_joins_accept_exact_cores_only():
     # Round-17 P1: prefix+core joins across a dash gap are not names -
     # only EXACT allowlisted cores may be recognized across the gap.

@@ -11,17 +11,20 @@ still flags.
 
 Ambiguity policy: name-internal tokens are clean; anything adjacent-but-
 outside flags. "strength" is name-internal only when it STARTS a name's
-modifier chain — preceded by nothing, by prose (a Spanish word), or by
-punctuation. Preceded by a name-modifier ("kipping strength band
-pull-apart") or by lexicon goal vocabulary ("stamina strength band
-pull-apart"), it is mid-chain vocabulary and flags. A non-modifier word
-glued INSIDE a hyphen chain ("toca-strength-band-pull-apart") breaks the
-name shape, so the chain's lexicon parts are adjacent-outside and flag.
-True hyphens (U+2010-U+2012, U+2212) and NBSP are normalized to their ASCII
-twins before any matching; en/em/horizontal-bar dashes (U+2013-U+2015) are
-separators, never chain links — they split tokens and block absorption,
-with one exception: an allowlisted name core may be recognized across the
-gap ("Muscle–up" == "Muscle-up").
+modifier chain — preceded by nothing, by prose (a Spanish word), by another
+complete name, or by punctuation. Preceded by a name-modifier ("kipping
+strength band pull-apart"), by lexicon goal vocabulary ("stamina strength
+band pull-apart"), or by a dash-attached glue prefix ("non–strength",
+mirroring ASCII "non-strength"), it is mid-chain vocabulary and flags. A
+non-modifier word glued INSIDE a hyphen chain ("toca-strength-band-
+pull-apart") breaks the name shape, so the chain's lexicon parts are
+adjacent-outside and flag. A dash-class gap (a run of ASCII/en/em/bar
+dashes, optionally space-padded) separates like a space: the cut then
+depends only on the left neighbor class. True hyphens (U+2010-U+2012,
+U+2212), NBSP and "_" are normalized to their ASCII twins before any
+matching; en/em/horizontal-bar dashes (U+2013-U+2015) map to a placeholder
+that blocks chain absorption, with one exception: an allowlisted name core
+may be recognized across the gap ("Muscle–up" == "Muscle-up").
 """
 
 from __future__ import annotations
@@ -168,6 +171,21 @@ def _absorbable(word: str, following: str) -> bool:
 
 _HORIZONTAL_GAP_RE = re.compile(r"[ \t]+")
 
+# English glue prefixes that attach to training vocabulary with a hyphen
+# ("non-strength", "super-sets"). A glue prefix on the left of a dash gap
+# counts as chain content; without a dash it is ordinary prose.
+_GLUE_PREFIXES = frozenset({"non", "super"})
+
+
+def _is_dash_gap(gap: str) -> bool:
+    """A run of one or more ASCII/en/em/bar dashes, optionally space-padded.
+
+    After normalization the typographic dashes are _DASH_GAP placeholders,
+    so the class is "-" and _DASH_GAP plus surrounding spaces/tabs.
+    """
+    stripped = gap.strip(" \t")
+    return bool(stripped) and all(c == "-" or c == _DASH_GAP for c in stripped)
+
 
 def _hyphen_parts(start: int, token_text: str) -> list[tuple[int, int, str]]:
     """(start, end, word) per hyphen-separated part of a token."""
@@ -258,14 +276,6 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
             following = units[k + 1][2].lower()
             if not _absorbable(word, following):
                 break
-            # A dash-separated prefix blocks the strength absorb too
-            # ("non–strength band pull-apart" mirrors ASCII gluing).
-            if (
-                word == "strength"
-                and k > 0
-                and text[units[k - 1][1] : units[k][0]] == _DASH_GAP
-            ):
-                break
             start = units[k][0]
             first = k
             k -= 1
@@ -297,30 +307,27 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
             }
         )
     base_spans = [(entry["start"], entry["end"]) for entry in entries]
-    # Pass 2: a chain-leading strength preceded by a SURVIVING lexicon hit —
-    # one no name span exempts — overlapping the previous unit is mid-chain
-    # too ("stamina", "weight loss", "muscle-gain"). A name-internal hit
-    # ("muscle" inside "muscle-up") is not goal vocab and marks nothing.
+    # Pass 2: the leading-strength / mid-chain cut depends ONLY on the left
+    # neighbor class. Modifier parts, a SURVIVING lexicon hit (one no name
+    # span exempts — "muscle" inside "muscle-up" is name-internal and marks
+    # nothing), or a dash-attached glue prefix ("non–strength", mirroring
+    # ASCII "non-strength") mean mid-chain: cut. Ordinary prose, another
+    # complete name, or punctuation mean chain start: clean. A dash-class
+    # gap (a run of dashes, optionally space-padded) separates like a space.
     for entry in entries:
         if not entry["leading_strength"] or entry["first"] == 0:
             continue
         prev_idx = entry["first"] - 1
         gap_before = text[units[prev_idx][1] : units[entry["first"]][0]]
         parts = entry["parts"]
-        # A dash separator right before a strength-led chain blocks its
-        # leading strength exactly like the bare absorb path
-        # ("non–strength-band-pull-apart" mirrors ASCII
-        # "non-strength-band-pull-apart", which is not a name at all).
-        if gap_before == _DASH_GAP:
-            entry["start"] = parts[1][0] if len(parts) > 1 else parts[0][1]
-            continue
-        if not _HORIZONTAL_GAP_RE.fullmatch(gap_before):
+        dash_gap = _is_dash_gap(gap_before)
+        if not dash_gap and not _HORIZONTAL_GAP_RE.fullmatch(gap_before):
             continue
         # The preceding content is the whole dash-connected run before the
         # chain ("muscle–gain" marks strength mid-chain like ASCII
         # "muscle-gain" does).
         run_idx = prev_idx
-        while run_idx > 0 and text[units[run_idx - 1][1] : units[run_idx][0]] == _DASH_GAP:
+        while run_idx > 0 and _is_dash_gap(text[units[run_idx - 1][1] : units[run_idx][0]]):
             run_idx -= 1
         overlapping = _lexicon_hit_overlaps(hits, units[run_idx][0], units[prev_idx][1])
         survives = [
@@ -328,7 +335,13 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
             for hit in overlapping
             if not any(span_start <= hit[1] and hit[2] <= span_end for span_start, span_end in base_spans)
         ]
-        if survives:
+        left_word = units[prev_idx][2].lower()
+        cut = _absorbable(left_word, "strength") or bool(survives)
+        if dash_gap:
+            # A glue prefix only attaches via a hyphen/dash — "non–strength"
+            # mirrors ASCII "non-strength"; "non strength" is prose.
+            cut = cut or left_word in _GLUE_PREFIXES
+        if cut:
             entry["start"] = parts[1][0] if len(parts) > 1 else parts[0][1]
     return [(entry["start"], entry["end"]) for entry in entries]
 
