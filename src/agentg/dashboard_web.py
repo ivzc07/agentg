@@ -10,10 +10,20 @@ is three routes:
   Member in the right pane) — gated on the session cookie *and* a
   per-request ``is_coach`` re-check.
 - ``GET /members/<id>`` — the Member's page: the read-only training record
-  (issue #99). Opened from Table or Cards it hides the switcher; with
+  (issue #99) plus the Routine editor's entry point (issue #100). Opened
+  from Table or Cards it hides the switcher; with
   ``?view=split`` it fills Split's right pane and the switcher stays. A
   departed, forgotten, or mistyped id lands on one shared bare 404 — no
   tombstone, no "this member left" wording.
+- ``GET /members/<id>/routine`` — the Routine editor: a structured
+  weekday-to-exercises form whose header always carries the ownership chip
+  (spec-dashboard §Routines & Presets).
+- ``POST /members/<id>/routine`` — the editor's save: coach-authored and
+  actor-stamped through the supersession machinery, refused with the fresh
+  version when the active Routine changed since the editor loaded. A
+  successful save messages the Member: their coach, named, plus the new
+  plan. A running Session is never disturbed — the new plan simply applies
+  from the next chat turn.
 - ``GET /login/<token>`` — an interstitial that never spends the token, so
   a link-preview fetch (Telegram builds one unless the bot disables it)
   can't burn the one-time link; the browser auto-submits…
@@ -56,7 +66,9 @@ from urllib.parse import quote
 import qrcode
 import qrcode.image.svg
 from aiohttp import web
+from multidict import MultiDictProxy
 
+from agentg.checkin_sweep import Notifier
 from agentg.dashboard_i18n import (
     LANG_COOKIE,
     LANG_COOKIE_TTL_SECONDS,
@@ -82,6 +94,7 @@ from agentg.dashboard_store import (
 )
 from agentg.linking_store import GYM_NAME_MAX_LENGTH, LinkingStore
 from agentg.models import Gym, Member
+from agentg.routines import ExerciseSpec, StaleRoutineError, UnknownExercisesError, WorkoutSpec
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +119,32 @@ BOUNCE_BODY = (
 )
 INTERSTITIAL_TITLE = "Abriendo tu dashboard…"
 INTERSTITIAL_BUTTON = "Entrar al dashboard"
+
+# Spanish aliases of the editor's STRINGS keys, for chat-side use (the
+# member notice follows the chat rule, not the dashboard's language) and
+# for tests asserting the no-signal default.
+AGENT_CHIP = STRINGS["es"]["chip_agent"]
+COACH_CHIP = STRINGS["es"]["chip_coach"]
+CONSEQUENCE_LINE = STRINGS["es"]["chip_consequence"]
+STALE_ERROR = STRINGS["es"]["stale_error"]
+EMPTY_ROUTINE_ERROR = STRINGS["es"]["empty_routine_error"]
+EMPTY_WORKOUT_ERROR = STRINGS["es"]["empty_workout_error"]
+UNDATED_BLOCK_ERROR = STRINGS["es"]["undated_block_error"]
+DUPLICATE_WEEKDAY_ERROR = STRINGS["es"]["duplicate_weekday_error"]
+BAD_WEEKDAY_ERROR = STRINGS["es"]["bad_weekday_error"]
+BAD_SETS_ERROR = STRINGS["es"]["bad_sets_error"]
+UNKNOWN_EXERCISES_ERROR = STRINGS["es"]["unknown_exercises_error"]
+NAME_TOO_LONG_ERROR = STRINGS["es"]["workout_name_too_long"]
+REPS_TOO_LONG_ERROR = STRINGS["es"]["reps_too_long"]
+SETS_RANGE_ERROR = STRINGS["es"]["sets_range_error"]
+
+# Column limits the editor enforces before save — SQLite would silently
+# accept an overflow, Postgres would answer with a DataError (a 500).
+WORKOUT_NAME_MAX_LENGTH = 100  # Workout.name String(100)
+REPS_MAX_LENGTH = 40  # WorkoutExercise.reps String(40)
+# Sets are small by nature; unbounded ints overflow at flush (OverflowError
+# on SQLite, DataError on Postgres).
+SETS_MIN, SETS_MAX = 1, 99
 
 # The typed confirm gating both Regenerate buttons (spec-dashboard
 # §Settings): the word must be typed before the POST does anything, client-
@@ -525,6 +564,19 @@ def _set_lines(sets: list[tuple[str, float | None, int, str | None]], unit: str,
     return "".join(lines)
 
 
+def _ownership_chip(coach_authored: bool, author: str | None, lang: str) -> str:
+    """The ownership chip (issue #86): named Coach-authored while the actor
+    stamp survives, plain when it has blanked, Agent-managed until the
+    first coach save. Always visible — the fork is silent but never a
+    surprise."""
+    t = STRINGS[lang]
+    if coach_authored:
+        label = t["chip_coach_named"].format(name=escape(author)) if author else t["chip_coach"]
+    else:
+        label = t["chip_agent"]
+    return f'<span class="tag chip">{label}</span>'
+
+
 def _routine_card(view: MemberPage, lang: str) -> str:
     t = STRINGS[lang]
     if not view.routine:
@@ -541,7 +593,11 @@ def _routine_card(view: MemberPage, lang: str) -> str:
                 f"{escape(day.name)}<ul>{exercises}</ul></div>"
             )
         body = "".join(days)
-    return f'<section class="card"><h2>{t["routine"]}</h2>{body}</section>'
+    header = (
+        f'<h2>{t["routine"]} {_ownership_chip(view.coach_authored, view.routine_author, lang)} '
+        f'<a class="edit" href="/members/{view.member_id}/routine">{t["edit"]}</a></h2>'
+    )
+    return f'<section class="card">{header}{body}</section>'
 
 
 def _sessions_card(view: MemberPage, lang: str, roster_view: str) -> str:
@@ -684,6 +740,230 @@ def _member_page(gym_name: str, view: MemberPage, roster_view: str, lang: str, n
 </html>"""
 
 
+# --- The Routine editor (issue #100, spec-dashboard §Routines & Presets) ---
+#
+# One form: a block per pinned day (weekday select, Workout name, exercises
+# one per line as "name, sets, reps" — structure only, never weights), a
+# hidden stamp of the Routine it loaded for the stale-save check, and the
+# ownership chip always in the header. A day comes off the plan by clearing
+# the whole block (exercises AND weekday); a half-filled block — content
+# without a weekday, a weekday without exercises — is a refused mistake,
+# never a silent drop.
+
+EditorDay = tuple[int | None, str, str]  # (weekday, workout name, exercise lines)
+
+# The chat notice a web save sends the Member (issue #77, named per #91):
+# deterministic and chat-side, so it follows the chat rule (Spanish like
+# the nudges), never the dashboard's per-browser language.
+ROUTINE_NOTICE = "Tu coach {coach} actualizó tu Rutina 📋\n{plan}"
+
+
+def _days_from_view(view: MemberPage) -> list[EditorDay]:
+    """The active Routine as editor blocks, exercises back to one-per-line."""
+    days: list[EditorDay] = []
+    for day in view.routine:
+        lines = []
+        for name, sets, reps in day.exercises:
+            line = name
+            if sets is not None or reps is not None:
+                line += f", {sets if sets is not None else ''}"
+            if reps is not None:
+                line += f", {reps}"
+            lines.append(line)
+        days.append((day.weekday, day.name, "\n".join(lines)))
+    return days
+
+
+def _days_from_form(form: MultiDictProxy) -> list[EditorDay]:
+    """The raw submitted form back into editor blocks, verbatim — the
+    rejection page for a form that wouldn't parse (bad sets, half-filled
+    blocks) must show exactly what the Coach typed, bad line included."""
+    days: list[EditorDay] = []
+
+    def texts(key: str) -> list[str]:
+        return [v if isinstance(v, str) else "" for v in form.getall(key, [])]
+
+    for weekday_raw, name, body in zip(
+        texts("weekday"), texts("workout_name"), texts("exercises")
+    ):
+        if not weekday_raw.strip() and not name.strip() and not body.strip():
+            continue  # the spare blank block the page always appends
+        try:
+            parsed = int(weekday_raw)
+            weekday = parsed if 0 <= parsed <= 6 else None
+        except ValueError:
+            weekday = None
+        days.append((weekday, name, body))
+    return days
+
+
+def _editor_day(day: EditorDay, lang: str) -> str:
+    weekday, name, exercises_text = day
+    t = STRINGS[lang]
+    options = [f'<option value="">{t["pick_day"]}</option>']
+    for i, weekday_name in enumerate(WEEKDAYS[lang]):
+        selected = " selected" if weekday == i else ""
+        options.append(f'<option value="{i}"{selected}>{weekday_name}</option>')
+    return f"""<fieldset class="day-edit">
+<select name="weekday">{"".join(options)}</select>
+<input type="text" name="workout_name" value="{escape(name, quote=True)}"
+placeholder="{escape(t["workout_name_placeholder"], quote=True)}" maxlength="100">
+<textarea name="exercises" rows="4"
+placeholder="squat, 4, 8-10">{escape(exercises_text)}</textarea>
+</fieldset>"""
+
+
+def _parse_workouts(form: MultiDictProxy, lang: str) -> list[WorkoutSpec]:
+    """The editor form into WorkoutSpecs. A fully blank block (the spare one
+    the page always appends) is dropped; anything malformed or half-filled —
+    content without a weekday, a weekday without exercises, a duplicate
+    weekday — raises ``ValueError`` with a Coach-readable message."""
+
+    def texts(key: str) -> list[str]:
+        return [v.strip() if isinstance(v, str) else "" for v in form.getall(key, [])]
+
+    t = STRINGS[lang]
+    specs = []
+    seen_weekdays: set[int] = set()
+    for weekday_raw, name, body in zip(
+        texts("weekday"), texts("workout_name"), texts("exercises")
+    ):
+        if not weekday_raw:
+            if name or body.strip():
+                # Half-filled blocks are a mistake, never a silent drop — a
+                # day comes off the plan by clearing its exercises too.
+                raise ValueError(t["undated_block_error"])
+            continue
+        try:
+            weekday = int(weekday_raw)
+        except ValueError:
+            raise ValueError(t["bad_weekday_error"]) from None
+        if not 0 <= weekday <= 6:
+            raise ValueError(t["bad_weekday_error"])
+        if weekday in seen_weekdays:
+            # Downstream pickers disagree on duplicate days (first vs last
+            # wins) — the editor refuses to write the ambiguity.
+            raise ValueError(t["duplicate_weekday_error"])
+        seen_weekdays.add(weekday)
+        exercises = []
+        for line in body.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = [part.strip() for part in line.split(",")]
+            sets = None
+            if len(parts) > 1 and parts[1]:
+                try:
+                    sets = int(parts[1])
+                except ValueError:
+                    raise ValueError(t["bad_sets_error"]) from None
+                if not SETS_MIN <= sets <= SETS_MAX:
+                    raise ValueError(t["sets_range_error"])
+            reps = parts[2] if len(parts) > 2 and parts[2] else None
+            if reps is not None and len(reps) > REPS_MAX_LENGTH:
+                raise ValueError(t["reps_too_long"])
+            exercises.append(ExerciseSpec(parts[0], sets, reps))
+        if not exercises:
+            # A picked weekday with no exercises is a mistake, not a rest
+            # day — a day comes off the plan via the empty-day selector,
+            # never by saving an empty Workout.
+            raise ValueError(t["empty_workout_error"])
+        if len(name) > WORKOUT_NAME_MAX_LENGTH:
+            raise ValueError(t["workout_name_too_long"])
+        specs.append(WorkoutSpec(weekday, name or WEEKDAYS[lang][weekday], exercises))
+    return specs
+
+
+def _plain_scheme(sets: int | None, reps: str | None) -> str:
+    """A set/rep scheme for plain text (the chat notice) — ``_scheme``'s
+    unescaped, HTML-free sibling."""
+    if sets is not None and reps is not None:
+        return f" {sets}×{reps}"
+    if reps is not None:
+        return f" {reps}"
+    if sets is not None:
+        return f" {sets}"
+    return ""
+
+
+def routine_notice(coach_name: str, workouts: list[WorkoutSpec]) -> str:
+    """The message the Member gets after a web save: their coach, named,
+    plus the new plan (issues #77, #91)."""
+    plan = "\n".join(
+        f"{WEEKDAYS['es'][w.weekday]} — {w.name}: "
+        + ", ".join(e.exercise + _plain_scheme(e.sets, e.reps) for e in w.exercises)
+        for w in sorted(workouts, key=lambda w: w.weekday)
+    )
+    return ROUTINE_NOTICE.format(coach=coach_name, plan=plan)
+
+
+EDITOR_STYLE = """
+.day-edit { border: 1px solid #ddd; border-radius: 0.5rem; margin: 0.8rem 0; padding: 0.8rem; }
+.day-edit select, .day-edit input, .day-edit textarea { display: block; width: 100%; box-sizing: border-box; margin: 0.3rem 0; font: inherit; padding: 0.35rem 0.5rem; }
+.day-edit select { width: auto; }
+.day-edit textarea { font-family: ui-monospace, monospace; }
+.consequence { color: #666; font-size: 0.9rem; }
+.error { color: #b3261e; }
+"""
+
+
+def _routine_editor_page(
+    gym_name: str,
+    view: MemberPage,
+    days: list[EditorDay],
+    catalog: list[str],
+    lang: str,
+    next_path: str,
+    error: str = "",
+    base: str | None = None,
+) -> str:
+    t = STRINGS[lang]
+    chip = _ownership_chip(view.coach_authored, view.routine_author, lang)
+    consequence = (
+        f'<p class="consequence">{t["chip_consequence"]}</p>'
+        if not view.coach_authored
+        else ""
+    )
+    notice = f'<p class="error">{escape(error)}</p>' if error else ""
+    blocks = "".join(_editor_day(day, lang) for day in days) + _editor_day((None, "", ""), lang)
+    # The stale-check stamp: the view's active Routine by default, but a
+    # rejected save keeps the SUBMITTED stamp — rebuilding it from the fresh
+    # view would let a retry slip past the stale check (review round 4).
+    if base is None:
+        base = "" if view.routine_id is None else str(view.routine_id)
+    title = t["editor_title"].format(name=escape(view.name))
+    return f"""<!DOCTYPE html>
+<html lang="{lang}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} — {escape(gym_name)}</title>
+<style>{ROSTER_STYLE}{EDITOR_STYLE}</style>
+</head>
+<body>
+<a class="back" href="/members/{view.member_id}">← {escape(view.name)}</a>
+<header>
+<h1>{title} {chip}</h1>
+{consequence}
+</header>
+{notice}
+<form method="post" action="/members/{view.member_id}/routine">
+<input type="hidden" name="base_routine_id" value="{base}">
+<div id="days">
+{blocks}
+</div>
+<p class="muted">{t["editor_help"]}</p>
+<details>
+<summary>{t["catalog_label"]}</summary>
+<p class="muted">{escape(", ".join(catalog))}</p>
+</details>
+<p><button type="submit">{t["save_routine"]}</button></p>
+</form>
+<p>{_lang_toggle(next_path)}</p>
+</body>
+</html>"""
+
+
 # --- The tenant Settings screen (spec-dashboard §Settings) ---
 
 
@@ -801,6 +1081,7 @@ def build_app(
     bot_username: str,
     secure_cookies: bool = True,
     clock: Clock = _utcnow,
+    notifier: Notifier | None = None,
 ) -> web.Application:
     def set_session(response: web.StreamResponse, member_id: int, gym_id: int) -> None:
         response.set_cookie(
@@ -900,6 +1181,137 @@ def build_app(
             )
         raise response
 
+    async def routine_editor(request: web.Request) -> web.Response:
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        _, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+        except ValueError:
+            return _not_found()
+        view = await store.member_page(gym.id, member_id)
+        if view is None:  # same rule as the Member page: the shared 404
+            return _not_found()
+        lang = _lang_of(request)
+        catalog = await store.catalog_exercises()
+        response = web.Response(
+            text=_routine_editor_page(
+                gym.name,
+                view,
+                _days_from_view(view),
+                catalog,
+                lang,
+                request.rel_url.path_qs,
+            ),
+            content_type="text/html",
+        )
+        set_session(response, coach[0].id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def routine_save(request: web.Request) -> web.Response:
+        """The editor's save. Three ways to say no, all with the form back:
+        a malformed form, exercises outside the catalog (the Coach's edits
+        stay on the page, base stamp included), and a stale save (the fresh
+        version replaces them). On yes: supersede, notify the Member, back
+        to the page."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        coach_member, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+        except ValueError:
+            return _not_found()
+        target = await store.roster_member(gym.id, member_id)
+        if target is None:  # another Gym's, a coach's, a ghost: the shared 404
+            return _not_found()
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+
+        form = await request.post()
+        base_raw = form.get("base_routine_id", "")
+        base_routine_id = None
+        if isinstance(base_raw, str) and base_raw.strip():
+            try:
+                base_routine_id = int(base_raw)
+            except ValueError:
+                return _not_found()
+
+        async def reject(
+            error: str,
+            status: int,
+            days: list[EditorDay] | None = None,
+            base: str | None = None,
+        ) -> web.Response:
+            view = await store.member_page(gym.id, member_id)
+            assert view is not None  # roster_member above already scoped it
+            catalog = await store.catalog_exercises()
+            response = web.Response(
+                status=status,
+                text=_routine_editor_page(
+                    gym.name,
+                    view,
+                    days if days is not None else _days_from_view(view),
+                    catalog,
+                    lang,
+                    # The language toggle must not point at this POST-only
+                    # path (it would 405 a GET) — aim it at the editor GET.
+                    f"/members/{member_id}/routine",
+                    error=error,
+                    base=base,
+                ),
+                content_type="text/html",
+            )
+            set_session(response, coach_member.id, gym.id)
+            return response
+
+        submitted_base = base_raw if isinstance(base_raw, str) else ""
+        try:
+            workouts = _parse_workouts(form, lang)
+        except ValueError as error:
+            # The Coach's edits stay on the page, bad line included — and the
+            # submitted base too, or a retry would slip past the stale check.
+            return await reject(
+                str(error), 400, days=_days_from_form(form), base=submitted_base
+            )
+        if not workouts:
+            return await reject(
+                t["empty_routine_error"], 400, days=_days_from_form(form), base=submitted_base
+            )
+        try:
+            await store.save_routine_from_web(
+                gym.id, member_id, coach_member.id, base_routine_id, workouts
+            )
+        except StaleRoutineError:
+            # The fresh version on the page; the Coach re-applies on top.
+            return await reject(t["stale_error"], 409)
+        except UnknownExercisesError as error:
+            # Spanish and coach-facing like every other rejection — never
+            # the raw English agent-tool message.
+            message = t["unknown_exercises_error"].format(names=", ".join(error.names))
+            return await reject(
+                message, 400, days=_days_from_form(form), base=submitted_base
+            )
+
+        if notifier is not None:
+            # Best-effort, whole block: the save already committed, so any
+            # failure on the notify path — the channel lookup included —
+            # logs and still redirects. A lost message never eats a save.
+            try:
+                channel = await store.member_channel(member_id)
+                if channel is not None:
+                    await notifier.send(
+                        channel[0],
+                        channel[1],
+                        routine_notice(coach_member.name, workouts),
+                    )
+            except Exception:
+                logger.exception("failed to notify member %s of the routine save", member_id)
+        response = web.HTTPFound(f"/members/{member_id}")
+        set_session(response, coach_member.id, gym.id)  # sliding 90-day refresh
+        raise response
+
     async def settings(request: web.Request) -> web.Response:
         coach = await require_coach(request)
         if coach is None:
@@ -996,6 +1408,8 @@ def build_app(
     app = web.Application()
     app.router.add_get("/", home)
     app.router.add_get("/members/{member_id}", member_page)
+    app.router.add_get("/members/{member_id}/routine", routine_editor)
+    app.router.add_post("/members/{member_id}/routine", routine_save)
     app.router.add_get("/settings", settings)
     app.router.add_post("/settings/regenerate-invite", regenerate_invite)
     app.router.add_post("/settings/regenerate-coach", regenerate_coach)

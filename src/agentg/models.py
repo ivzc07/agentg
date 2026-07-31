@@ -16,6 +16,7 @@ from sqlalchemy import (
     TypeDecorator,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -235,7 +236,20 @@ class Routine(Base):
     """
 
     __tablename__ = "routines"
-    __table_args__ = (Index("ix_routines_member_active", "member_id", "is_active"),)
+    __table_args__ = (
+        Index("ix_routines_member_active", "member_id", "is_active"),
+        # Exactly one active Routine per Member, DB-enforced (a partial
+        # unique index — both Postgres and SQLite support them). The
+        # backstop that keeps two overlapping no-base saves from ever
+        # producing two active rows (issue #100 review).
+        Index(
+            "uq_routines_one_active_per_member",
+            "member_id",
+            unique=True,
+            sqlite_where=text("is_active"),
+            postgresql_where=text("is_active"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
@@ -244,6 +258,12 @@ class Routine(Base):
     # Set when a Coach hand-writes the plan (ticket #30); the Agent never
     # restructures a coach-authored Routine.
     coach_authored: Mapped[bool] = mapped_column(default=False)
+    # Which Member (as Coach) wrote this Routine, in chat or on the dashboard
+    # (issue #91); NULL means the Agent wrote it. The stamp blanks if the
+    # Coach's row ever disappears.
+    created_by_member_id: Mapped[int | None] = mapped_column(
+        ForeignKey("members.id"), default=None
+    )
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
 
 

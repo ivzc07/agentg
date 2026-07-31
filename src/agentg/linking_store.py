@@ -69,6 +69,37 @@ def _add_missing_columns(conn: Connection) -> None:
     sets_indexes = {i["name"] for i in inspect(conn).get_indexes("sets")}
     if "ix_sets_exercise_id" not in sets_indexes:
         conn.execute(text("CREATE INDEX ix_sets_exercise_id ON sets (exercise_id)"))
+    # The dashboard Routine editor's actor stamp (issue #100): which Member
+    # (as Coach) wrote the Routine; NULL keeps meaning "the Agent via chat".
+    routine_columns = {c["name"] for c in inspect(conn).get_columns("routines")}
+    if "created_by_member_id" not in routine_columns:
+        conn.execute(
+            text("ALTER TABLE routines ADD COLUMN created_by_member_id INTEGER REFERENCES members(id)")
+        )
+    # One active Routine per Member, DB-enforced (issue #100 review): the
+    # backstop behind the editor's no-base stale check.
+    routine_indexes = {i["name"] for i in inspect(conn).get_indexes("routines")}
+    if "uq_routines_one_active_per_member" not in routine_indexes:
+        # Heal pre-index duplicates first: a legacy database may hold Members
+        # with two active Routines (pre-PR saves could interleave and commit
+        # both), and creating the unique index over them would abort boot.
+        # The newest active survives (MAX(id) — same "most recent governs"
+        # rule as the dashboard's per-date reconstruction), the rest are
+        # deactivated.
+        conn.execute(
+            text(
+                "UPDATE routines SET is_active = false "
+                "WHERE is_active AND id NOT IN ("
+                "  SELECT MAX(id) FROM routines WHERE is_active GROUP BY member_id"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_routines_one_active_per_member "
+                "ON routines (member_id) WHERE is_active"
+            )
+        )
 
 
 @dataclass(frozen=True)

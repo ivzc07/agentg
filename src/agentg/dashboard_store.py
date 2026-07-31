@@ -219,6 +219,12 @@ class MemberPage:
     ``sessions`` is one page (``page`` of ``pages``), most recent first.
     ``routine`` is empty when no Routine is active; ``snoozed_until`` is set
     only while a snooze still runs — the same rule the roster applies.
+
+    ``routine_id`` is the active Routine's id (``None`` when there is none) —
+    the stamp the Routine editor's stale-save check compares against. The
+    ownership chip reads ``coach_authored`` and ``routine_author`` (the
+    actor stamp's name, ``None`` for an agent-written plan or a blanked
+    stamp).
     """
 
     member_id: int
@@ -232,6 +238,9 @@ class MemberPage:
     lapsed: bool
     snoozed_until: date | None
     routine: list[RoutineDayView]
+    routine_id: int | None
+    coach_authored: bool
+    routine_author: str | None
     sessions: list[SessionView]
     page: int
     pages: int
@@ -644,6 +653,9 @@ class DashboardStore:
             lapsed=member.checkin_state == LAPSED,
             snoozed_until=_active_snooze(member, today),
             routine=routine,
+            routine_id=routine_dict["routine_id"] if routine_dict else None,
+            coach_authored=routine_dict["coach_authored"] if routine_dict else False,
+            routine_author=routine_dict["created_by_name"] if routine_dict else None,
             sessions=sessions,
             page=page,
             pages=pages,
@@ -664,6 +676,60 @@ class DashboardStore:
                 if n.retired_at is not None
             ],
         )
+
+    async def roster_member(self, gym_id: int, member_id: int) -> Member | None:
+        """The roster-scoped Member the Routine editor may write to, or
+        ``None`` — the same rule as ``member_page``: another Gym's Member, a
+        coach-flagged Member, and a gym switch's ghost row (no live channel)
+        all get the shared 404."""
+        async with self._sessions() as db:
+            return await db.scalar(
+                select(Member)
+                .join(MemberChannel, MemberChannel.member_id == Member.id)
+                .where(
+                    Member.id == member_id,
+                    Member.gym_id == gym_id,
+                    Member.is_coach.is_(False),
+                )
+            )
+
+    async def save_routine_from_web(
+        self,
+        gym_id: int,
+        member_id: int,
+        coach_member_id: int,
+        base_routine_id: int | None,
+        workouts: list[Any],
+    ) -> Routine:
+        """The Routine editor's save: through the supersession machinery,
+        coach-authored and actor-stamped; ``StaleRoutineError`` when the
+        active Routine changed since the editor loaded."""
+        return await self._routines.save_coach_routine(
+            member_id,
+            gym_id,
+            coach_member_id,
+            workouts,
+            base_routine_id=base_routine_id,
+        )
+
+    async def member_channel(self, member_id: int) -> tuple[str, str] | None:
+        """The Member's live channel as ``(channel, channel_user_id)`` — where
+        the "your coach updated your Routine" notice is sent."""
+        async with self._sessions() as db:
+            row = (
+                await db.execute(
+                    select(MemberChannel.channel, MemberChannel.channel_user_id).where(
+                        MemberChannel.member_id == member_id
+                    )
+                )
+            ).first()
+        return (row[0], row[1]) if row is not None else None
+
+    async def catalog_exercises(self) -> list[str]:
+        """Every catalog Exercise name, ordered — the editor's reference list
+        (a web save draws from the catalog, it does not extend it)."""
+        async with self._sessions() as db:
+            return list(await db.scalars(select(Exercise.name).order_by(Exercise.name)))
 
     async def _sessions_sets(
         self, db, session_ids: list[int]

@@ -8,7 +8,7 @@ session. No grace period, no anonymized residue. Member-initiated only.
 from __future__ import annotations
 
 from agents.extensions.memory import SQLAlchemySession
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.models import (
@@ -57,6 +57,16 @@ class ForgetStore:
             await db.execute(delete(Workout).where(Workout.routine_id.in_(member_routine_ids)))
             await db.execute(delete(Routine).where(Routine.member_id == member_id))
             await db.execute(delete(MemberNote).where(MemberNote.member_id == member_id))
+            # References OTHER Members' rows hold back: a forgotten Coach's
+            # Routine actor stamps stay coach-authored but by nobody (NULL) —
+            # the chip degrades to plain "Coach-authored" (issue #91), and
+            # the Member delete below can't trip the FK (Postgres would abort
+            # the whole wipe).
+            await db.execute(
+                update(Routine)
+                .where(Routine.created_by_member_id == member_id)
+                .values(created_by_member_id=None)
+            )
             await db.execute(delete(MemberChannel).where(MemberChannel.member_id == member_id))
             await db.execute(delete(Member).where(Member.id == member_id))
             await db.commit()
