@@ -286,6 +286,16 @@ def _qr_svg(data: str) -> str:
 # --- Language plumbing (issue #106) ---
 
 
+def _next_path_sans_done(request: web.Request) -> str:
+    """The page's own URL for round-trips (the language toggle), with the
+    one-shot ``done`` flash stripped - a notice should not survive a
+    toggle, a refresh of the toggled page, or a bookmark."""
+    url = request.rel_url
+    if "done" not in url.query:
+        return url.path_qs
+    return str(url.with_query([(k, v) for k, v in url.query.items() if k != "done"]))
+
+
 def _done_notice(done: str | None, t: dict) -> str:
     """The one-line confirmation a ``?done=<key>`` redirect carries (issue
     #129). Only keys the copy table knows render; anything else is
@@ -1559,7 +1569,7 @@ def build_app(
             return _not_found()
         lang = _lang_of(request)
         roster_view = _view_of(request)
-        next_path = request.rel_url.path_qs
+        next_path = _next_path_sans_done(request)
         notice = _done_notice(request.query.get("done"), STRINGS[lang])
         if roster_view == "split":
             # Split keeps the rail and the switcher with a Member open.
@@ -1782,7 +1792,7 @@ def build_app(
                 await store.preset_members(gym.id),
                 await store.default_preset_id(gym.id),
                 lang,
-                request.rel_url.path_qs,
+                _next_path_sans_done(request),
                 success=_done_notice(request.query.get("done"), STRINGS[lang]),
             ),
             content_type="text/html",
@@ -2128,7 +2138,7 @@ def build_app(
                 gym,
                 bot_username,
                 lang,
-                request.rel_url.path_qs,
+                _next_path_sans_done(request),
                 success=_done_notice(request.query.get("done"), STRINGS[lang]),
             ),
             content_type="text/html",
