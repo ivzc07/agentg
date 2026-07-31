@@ -335,17 +335,21 @@ box.addEventListener("input", () => {
   const q = norm(box.value.trim());
   let lapsedHit = false;
   let shown = 0;
+  let activeShown = 0;  // lapsed stay out of the counters (spec §The roster)
   document.querySelectorAll("[data-name]").forEach((row) => {
     const hit = !q || norm(row.dataset.name).includes(q);
     row.hidden = !hit;
-    if (hit) shown += 1;
-    if (hit && q && lapsed && lapsed.contains(row)) lapsedHit = true;
+    if (hit) {
+      shown += 1;
+      if (lapsed && lapsed.contains(row)) { if (q) lapsedHit = true; }
+      else activeShown += 1;
+    }
   });
   if (lapsed && lapsedHit) lapsed.open = true;
   if (nomatch) nomatch.hidden = shown > 0;
   if (counter) {
     counter.textContent = q
-      ? counter.dataset.fmt.replace("{shown}", shown).replace("{total}", counter.dataset.total)
+      ? counter.dataset.fmt.replaceAll("{shown}", activeShown).replaceAll("{total}", counter.dataset.total)
       : restingLabel;
   }
 });
