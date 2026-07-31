@@ -146,6 +146,20 @@ def test_mixed_space_and_hyphen_name_shapes_stay_clean():
     assert find_english_leaks("strength\tband pull-apart") == set()  # tab
 
 
+def test_multi_part_glued_modifiers_extend_like_their_hyphenated_twins():
+    # Round-8: the space path reuses the same prefix-chain rule.
+    assert find_english_leaks("strength-band-bar pull-apart") == set()
+    assert find_english_leaks("strength-band-cable pull-through") == set()
+    assert find_english_leaks("strength-bands-bar pull-apart") == set()
+
+
+def test_absorption_does_not_cross_newlines():
+    # Round-8: a name mention broken across lines is not one name.
+    assert find_english_leaks("Objetivo: strength\nband-pull-apart 3x10") == {"strength"}
+    assert find_english_leaks("Tu objetivo es strength\nband pull-apart") == {"strength"}
+    assert find_english_leaks("para ganar strength\n\nbar-muscle-up") == {"strength"}
+
+
 # --- what actually guards the behavior: the Agent's language rule ---
 
 

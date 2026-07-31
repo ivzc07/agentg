@@ -121,21 +121,25 @@ def _is_name_core(token: str) -> bool:
 
 
 def _absorbable(word: str, following: str) -> bool:
-    # A token the space path may absorb before a core: an equipment modifier;
-    # "strength" when the following token leads with equipment (plain
-    # "band" or equipment-led "band-pull-apart"); or a glued
-    # "strength-band(s)" token, which is that pair in one token.
-    if _is_equipment(word):
-        return True
+    # A token the space path may absorb before a core: "strength" when the
+    # following token leads with equipment (plain "band" or equipment-led
+    # "band-pull-apart"), or any token whose own hyphen parts form an
+    # allowed prefix chain — equipment, variant words, glued
+    # "strength-band(s)", multi-part "strength-band-bar" — the same rule the
+    # hyphen path applies to core prefixes.
     if word == "strength" and _leads_with_equipment(following):
         return True
-    return word.startswith("strength-") and _is_equipment(word.split("-", 1)[1])
+    return _is_allowed_prefix(word.split("-"))
+
+
+_HORIZONTAL_GAP_RE = re.compile(r"[^\S\n\r]+")
 
 
 def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
     """Spans the catalog carve-out covers: an allowlisted name core plus at
     most two immediately preceding modifier tokens. No right-side absorption,
-    no generic neighbor walking."""
+    no generic neighbor walking, and no absorption across newlines — a name
+    mention broken across lines is not one name."""
     tokens = list(_TOKEN_RE.finditer(text))
     spans = []
     for i, tok in enumerate(tokens):
@@ -144,7 +148,11 @@ def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
         start = tok.start()
         absorbed = 0
         k = i - 1
-        while k >= 0 and absorbed < 2 and text[tokens[k].end() : start].isspace():
+        while (
+            k >= 0
+            and absorbed < 2
+            and _HORIZONTAL_GAP_RE.fullmatch(text[tokens[k].end() : start])
+        ):
             word = tokens[k].group().lower()
             following = tokens[k + 1].group().lower()
             if not _absorbable(word, following):
