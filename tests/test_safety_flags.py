@@ -363,3 +363,37 @@ async def test_the_tick_off_form_keeps_the_view_it_was_opened_from(env):
     )
     assert response.status == 302
     assert response.headers["Location"] == f"/members/{member.id}?view=split"
+
+
+async def test_two_open_flags_each_get_their_own_tick_off(env):
+    """Multi-flag flow (review on PR #120): the banner renders every open
+    flag with its own per-note form; ticking one stamps only that note and
+    the roster marker holds while any flag stays open."""
+    member = await env.add_member("Ana")
+    knee = await _flag(env, member, "sharp knee pain on squats")
+    dizzy = await _flag(env, member, "dizzy during warmup")
+
+    html = await _member_page(env, member.id)
+    assert "sharp knee pain on squats" in html and "dizzy during warmup" in html
+    assert f"/members/{member.id}/flags/{knee.id}/tick-off" in html
+    assert f"/members/{member.id}/flags/{dizzy.id}/tick-off" in html
+    assert (await env.roster_row(member)).has_safety_flag
+
+    # Tick off ONE: only that note is stamped; the other stays open.
+    await env.client.post(
+        f"/members/{member.id}/flags/{knee.id}/tick-off", cookies=_cookie(env)
+    )
+    stored = {n.id: n for n in await _notes(env).active(member.id)}
+    assert stored[knee.id].acknowledged_by_member_id == env.coach.id
+    assert stored[dizzy.id].acknowledged_at is None
+
+    html = await _member_page(env, member.id)
+    assert "Vista por Coach Ana" in html  # the ticked one reads acknowledged
+    assert f"/members/{member.id}/flags/{dizzy.id}/tick-off" in html  # still open
+    assert (await env.roster_row(member)).has_safety_flag  # an open flag still marks
+
+    # Tick the second: no open flags left, the marker clears.
+    await env.client.post(
+        f"/members/{member.id}/flags/{dizzy.id}/tick-off", cookies=_cookie(env)
+    )
+    assert not (await env.roster_row(member)).has_safety_flag
