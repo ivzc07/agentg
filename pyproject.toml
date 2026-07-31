@@ -37,6 +37,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "judge: optional LLM-as-judge behavioral scoring (needs network + AGENTG_BEHAVIORAL_JUDGE=1)",
+    "live: optional live-model behavioral sweeps (needs network + AGENTG_BEHAVIORAL_LIVE=1 and MODEL_API_KEY)",
 ]
 
 [tool.mypy]
