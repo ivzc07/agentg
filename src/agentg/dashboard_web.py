@@ -1212,7 +1212,8 @@ def _routine_editor_page(
 {consequence}
 </header>
 {notice}
-<form method="post" action="{action}" hx-post="{action}" hx-target="#editor-root" hx-swap="outerHTML">
+<form method="post" action="{action}" hx-post="{action}" hx-target="#editor-root" hx-swap="outerHTML"
+ hx-disabled-elt="find button[type=submit]">
 <input type="hidden" name="base_routine_id" value="{base}">
 <p class="editor-help">{t["editor_help"]}</p>
 <div id="days">

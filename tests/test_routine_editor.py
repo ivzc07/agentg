@@ -972,6 +972,9 @@ async def test_the_editor_page_loads_htmx_and_posts_in_place(env):
     assert "/static/htmx.min.js?v=" in text
     assert f'hx-post="/members/{member.id}/routine' in text
     assert 'hx-target="#editor-root"' in text
+    # htmx preventDefaults the submit, which mutes the vanilla guard —
+    # the double-submit protection must ride htmx's own machinery.
+    assert 'hx-disabled-elt="find button[type=submit]"' in text
     assert 'id="editor-root"' in text
 
 
