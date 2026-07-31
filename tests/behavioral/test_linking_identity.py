@@ -12,6 +12,7 @@ of every real phraser reply.
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 
@@ -195,10 +196,11 @@ def test_the_phraser_prompt_anchors_a_single_coach_identity():
 
 def test_the_phraser_prompt_bans_the_spanish_drift_roles_by_name():
     # Default speech is Spanish and the observed #66 drift was "enlace" —
-    # the ban must name the Spanish forms, not only the English ones.
+    # the ban must name the Spanish forms, not only the English ones, as
+    # whole words ("linking"/"linked" elsewhere must not satisfy the pin).
     text = linking._PHRASER_PROMPT.lower()
     for role in ("link", "bot", "assistant", "enlace", "asistente", "asistenta"):
-        assert role in text, role
+        assert re.search(rf"\b{role}\b", text), role
 
 
 # --- the judge wiring (offline, injected backend) ---
