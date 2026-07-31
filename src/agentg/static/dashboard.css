@@ -55,6 +55,8 @@ summary:hover { color: var(--ink-2); }
 .chip { color: var(--ink-2); }
 .error { background: var(--coral-tint); border: 1px solid var(--coral); color: var(--coral);
   padding: 12px 14px; font-size: 14px; margin: 14px 0; }
+.notice-ok { background: var(--mint-tint); border: 1px solid var(--mint); color: var(--mint);
+  padding: 12px 14px; font-size: 14px; margin: 14px 0; }
 .muted { color: var(--ink-2); font-size: 13px; }
 .emptystate { padding: 70px 24px; text-align: center; }
 .emptystate h2 { font-size: 22px; margin-bottom: 8px; }

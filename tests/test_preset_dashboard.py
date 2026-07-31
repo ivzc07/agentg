@@ -367,3 +367,27 @@ async def test_default_and_retire_reject_a_foreign_or_missing_preset(env):
         assert retire.status == 404
     assert await env.store.default_preset_id(env.gym.id) is None
     assert [item.id for item in await env.routines.presets(foreign_gym.id)] == [foreign.id]
+
+
+async def test_an_htmx_master_save_returns_the_editor_in_place(env):
+    preset_id = await create_master(env)
+    master = await env.store.preset_master(preset_id)
+
+    response = await env.client.post(
+        f"/presets/{preset_id}/routine",
+        data=[
+            ("base_routine_id", str(master["routine_id"])),
+            ("weekday", "1"),
+            ("workout_name", "Full body B"),
+            ("exercises", "bench press, 3, 10"),
+        ],
+        cookies=cookies(env),
+        headers={"HX-Request": "true"},
+        allow_redirects=False,
+    )
+
+    assert response.status == 200
+    text = await response.text()
+    assert "<!DOCTYPE" not in text
+    assert text.lstrip().startswith('<div id="editor-root"')
+    assert "Preset guardado" in text
