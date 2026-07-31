@@ -1014,15 +1014,20 @@ def _routine_editor_page(
     action: str | None = None,
     back_href: str | None = None,
     title_key: str = "editor_title",
+    consequence_key: str | None = None,
 ) -> str:
     t = STRINGS[lang]
     chip = _ownership_chip(
         view.coach_authored, view.routine_author, lang, view.routine_preset_name
     )
+    if consequence_key is None:
+        consequence_key = (
+            "chip_consequence"
+            if not view.coach_authored or view.routine_preset_name is not None
+            else None
+        )
     consequence = (
-        f'<p class="consequence">{t["chip_consequence"]}</p>'
-        if not view.coach_authored
-        else ""
+        f'<p class="consequence">{t[consequence_key]}</p>' if consequence_key else ""
     )
     notice = f'<p class="error">{escape(error)}</p>' if error else ""
     blocks = "".join(_editor_day(day, lang) for day in days) + _editor_day((None, "", ""), lang)
@@ -1090,6 +1095,7 @@ def _presets_page(
     gym_name: str,
     presets: list[RoutinePreset],
     members: list[Member],
+    default_preset_id: int | None,
     lang: str,
     next_path: str,
     error: str = "",
@@ -1123,10 +1129,25 @@ def _presets_page(
 </fieldset></form>"""
             else:
                 apply_form = f'<p class="muted">{t["no_members_to_apply"]}</p>'
+            if default_preset_id == preset.id:
+                default_form = (
+                    f'<p><span class="tag">{t["preset_default"]}</span> '
+                    f'<form method="post" action="/presets/{preset.id}/default">'
+                    f'<button type="submit">{t["clear_default_preset"]}</button></form></p>'
+                )
+            else:
+                default_form = (
+                    f'<form method="post" action="/presets/{preset.id}/default">'
+                    f'<button type="submit">{t["set_default_preset"]}</button></form>'
+                )
+            retire_form = (
+                f'<form method="post" action="/presets/{preset.id}/retire">'
+                f'<button type="submit">{t["retire_preset"]}</button></form>'
+            )
             cards.append(
                 f'<section class="card"><h2>{escape(preset.name)} '
                 f'<a href="/presets/{preset.id}/routine">{t["edit_preset"]}</a></h2>'
-                f"{apply_form}</section>"
+                f"{default_form}{apply_form}{retire_form}</section>"
             )
         cards = "".join(cards)
     body = f"<main>{notice}{create}{cards}</main>"
@@ -1499,6 +1520,7 @@ def build_app(
                 gym.name,
                 await store.presets(gym.id),
                 await store.preset_members(gym.id),
+                await store.default_preset_id(gym.id),
                 lang,
                 request.rel_url.path_qs,
             ),
@@ -1537,6 +1559,7 @@ def build_app(
                 gym.name,
                 await store.presets(gym.id),
                 await store.preset_members(gym.id),
+                await store.default_preset_id(gym.id),
                 lang,
                 "/presets",
                 error=error,
@@ -1572,6 +1595,7 @@ def build_app(
                 action=f"/presets/{preset.id}/routine",
                 back_href="/presets",
                 title_key="preset_editor_title",
+                consequence_key="preset_master_consequence",
             ),
             content_type="text/html",
         )
@@ -1624,6 +1648,7 @@ def build_app(
                     action=f"/presets/{preset.id}/routine",
                     back_href="/presets",
                     title_key="preset_editor_title",
+                    consequence_key="preset_master_consequence",
                 ),
                 content_type="text/html",
             )
@@ -1641,7 +1666,7 @@ def build_app(
                 t["empty_routine_error"], 400, days=_days_from_form(form), base=submitted_base
             )
         try:
-            await store.save_preset_master_from_web(
+            copies = await store.save_preset_master_from_web(
                 gym.id, preset.id, coach_member.id, base_routine_id, workouts
             )
         except StaleRoutineError:
@@ -1649,6 +1674,22 @@ def build_app(
         except UnknownExercisesError as error:
             message = t["unknown_exercises_error"].format(names=", ".join(error.names))
             return await reject(message, 400, days=_days_from_form(form), base=submitted_base)
+        for copy in copies:
+            try:
+                channel = await store.member_channel(copy.member_id)
+                if channel is None:
+                    logger.warning(
+                        "failed to notify member %s of the Preset edit: no channel",
+                        copy.member_id,
+                    )
+                elif notifier is not None:
+                    await notifier.send(
+                        channel[0],
+                        channel[1],
+                        routine_notice(coach_member.name, copy.workouts),
+                    )
+            except Exception:
+                logger.exception("failed to notify member %s of the Preset edit", copy.member_id)
         response = web.HTTPFound(f"/presets/{preset.id}/routine")
         set_session(response, coach_member.id, gym.id)
         raise response
@@ -1674,6 +1715,7 @@ def build_app(
                     gym.name,
                     await store.presets(gym.id),
                     await store.preset_members(gym.id),
+                    await store.default_preset_id(gym.id),
                     lang,
                     "/presets",
                     error=error,
@@ -1711,6 +1753,45 @@ def build_app(
                     await notifier.send(channel[0], channel[1], routine_notice(coach_member.name, copy.workouts))
             except Exception:
                 logger.exception("failed to notify member %s of the Preset apply", copy.member_id)
+        response = web.HTTPFound("/presets")
+        set_session(response, coach_member.id, gym.id)
+        raise response
+
+    async def preset_default(request: web.Request) -> web.Response:
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return _not_found()
+        if await store.preset_for_gym(gym.id, preset_id) is None:
+            return _not_found()
+        try:
+            current_default = await store.default_preset_id(gym.id)
+            await store.set_default_preset(
+                gym.id, None if current_default == preset_id else preset_id
+            )
+        except ValueError:
+            return _not_found()
+        response = web.HTTPFound("/presets")
+        set_session(response, coach_member.id, gym.id)
+        raise response
+
+    async def preset_retire(request: web.Request) -> web.Response:
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return _not_found()
+        try:
+            await store.retire_preset(gym.id, preset_id)
+        except ValueError:
+            return _not_found()
         response = web.HTTPFound("/presets")
         set_session(response, coach_member.id, gym.id)
         raise response
@@ -1847,6 +1928,8 @@ def build_app(
     app.router.add_get("/presets/{preset_id}/routine", preset_editor)
     app.router.add_post("/presets/{preset_id}/routine", preset_save)
     app.router.add_post("/presets/{preset_id}/apply", preset_apply)
+    app.router.add_post("/presets/{preset_id}/default", preset_default)
+    app.router.add_post("/presets/{preset_id}/retire", preset_retire)
     app.router.add_post("/members/{member_id}/flags/{note_id}/tick-off", tick_off_flag)
     app.router.add_get("/settings", settings)
     app.router.add_post("/settings/regenerate-invite", regenerate_invite)

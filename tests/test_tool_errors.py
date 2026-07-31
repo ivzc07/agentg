@@ -108,6 +108,35 @@ async def test_unknown_catalog_exercise_names_the_input_and_points_at_list_exerc
     assert "list_exercises" in result["error"]
 
 
+async def test_agent_save_reports_the_default_preset_that_landed(env):
+    coach = await env.stores.linking.link_member(env.gym_id, "Coach Ana", "telegram", "1")
+    await env.stores.linking.set_coach(coach.id, True)
+    preset = await env.stores.routines.create_preset(env.gym_id, "Beginner")
+    await env.stores.routines.save_preset_master(
+        preset.id,
+        env.gym_id,
+        coach.id,
+        [WorkoutSpec(weekday=0, name="Coach plan", exercises=[ExerciseSpec("squat")])],
+        base_routine_id=None,
+    )
+    await env.stores.routines.set_default_preset(env.gym_id, preset.id)
+
+    result = await call_tool(
+        save_routine,
+        env.context,
+        workouts=[
+            {
+                "weekday": 1,
+                "name": "Generated plan",
+                "exercises": [{"exercise": "bench press"}],
+            }
+        ],
+    )
+
+    assert result["applied_preset"] == "Beginner"
+    assert result["routine"]["workouts"][0]["name"] == "Coach plan"
+
+
 async def test_closing_with_no_open_session_says_what_to_do_next(env):
     result = await call_tool(close_session, env.context)
 

@@ -117,6 +117,9 @@ STRINGS = {
         "chip_consequence": (
             "Al guardar, este plan pasa a ser tuyo — el agente dejará de ajustarlo."
         ),
+        "preset_master_consequence": (
+            "Guardar actualiza a todos los miembros que siguen este Preset."
+        ),
         "editor_title": "Rutina de {name}",
         "stale_error": (
             "Esta Rutina cambió mientras la editabas — aquí tienes la versión "
@@ -202,6 +205,10 @@ STRINGS = {
         "no_members_to_apply": "No hay miembros disponibles.",
         "preset_no_master": "Escribe el plan del Preset antes de aplicarlo.",
         "preset_no_selection": "Elige al menos un miembro.",
+        "preset_default": "Predeterminado",
+        "set_default_preset": "Usar como predeterminado",
+        "clear_default_preset": "Quitar predeterminado",
+        "retire_preset": "Retirar Preset",
     },
     "en": {
         "settings": "Settings",
@@ -252,6 +259,7 @@ STRINGS = {
         "chip_coach": "Coach-authored",
         "chip_coach_named": "Coach-authored — {name}",
         "chip_consequence": "Saving makes this plan yours — the Agent will stop adjusting it.",
+        "preset_master_consequence": "Saving updates every Member still on this Preset.",
         "editor_title": "{name}'s routine",
         "stale_error": (
             "This routine changed while you were editing — here is the current "
@@ -333,6 +341,10 @@ STRINGS = {
         "no_members_to_apply": "There are no members to apply it to.",
         "preset_no_master": "Write the preset's plan before applying it.",
         "preset_no_selection": "Pick at least one member.",
+        "preset_default": "Default",
+        "set_default_preset": "Use as default",
+        "clear_default_preset": "Clear default",
+        "retire_preset": "Retire preset",
     },
 }
 

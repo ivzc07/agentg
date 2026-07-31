@@ -17,6 +17,7 @@ from agentg.routines import (
     ExerciseSpec,
     NoPresetMasterError,
     RoutineStore,
+    StaleRoutineError,
     WorkoutSpec,
 )
 from agentg.training import TrainingStore
@@ -149,6 +150,144 @@ async def test_apply_preset_rolls_back_the_batch_on_a_late_write_conflict(env, m
         )
     assert await env.routines.active_routine(first.id) is None
     assert await env.routines.active_routine(second.id) is None
+
+
+async def test_editing_a_master_refreshes_only_still_linked_members(env):
+    preset = await env.routines.create_preset(env.gym.id, "Beginner")
+    master = await env.routines.save_preset_master(
+        preset.id, env.gym.id, env.coach.id, plan(), base_routine_id=None
+    )
+    linked = await env.linking.link_member(env.gym.id, "Luis", "telegram", "2")
+    forked = await env.linking.link_member(env.gym.id, "Mara", "telegram", "3")
+    await env.routines.apply_preset(preset.id, env.gym.id, env.coach.id, [linked.id, forked.id])
+    forked_routine = await env.routines.active_routine(forked.id)
+    await env.routines.save_coach_routine(
+        forked.id,
+        env.gym.id,
+        env.coach.id,
+        plan("Mara's fork"),
+        base_routine_id=forked_routine["routine_id"],
+    )
+
+    await env.routines.save_preset_master(
+        preset.id, env.gym.id, env.coach.id, plan("Beginner v2"), base_routine_id=master.id
+    )
+
+    linked_active = await env.routines.active_routine(linked.id)
+    forked_active = await env.routines.active_routine(forked.id)
+    assert linked_active["preset_id"] == preset.id
+    assert linked_active["workouts"][0]["name"] == "Beginner v2"
+    assert forked_active["preset_id"] is None
+    assert forked_active["workouts"][0]["name"] == "Mara's fork"
+
+
+async def test_master_propagation_is_atomic_when_a_member_write_conflicts(env, monkeypatch):
+    preset = await env.routines.create_preset(env.gym.id, "Beginner")
+    old_master = await env.routines.save_preset_master(
+        preset.id, env.gym.id, env.coach.id, plan(), base_routine_id=None
+    )
+    first = await env.linking.link_member(env.gym.id, "Luis", "telegram", "2")
+    second = await env.linking.link_member(env.gym.id, "Mara", "telegram", "3")
+    await env.routines.apply_preset(
+        preset.id, env.gym.id, env.coach.id, [first.id, second.id]
+    )
+    original = env.routines._save
+    calls = 0
+
+    async def conflict_on_second_copy(db, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:  # master, first copy, second copy
+            from sqlalchemy.exc import IntegrityError
+
+            raise IntegrityError("concurrent Routine", {}, Exception("unique"))
+        return await original(db, *args, **kwargs)
+
+    monkeypatch.setattr(env.routines, "_save", conflict_on_second_copy)
+    with pytest.raises(StaleRoutineError):
+        await env.routines.save_preset_master(
+            preset.id,
+            env.gym.id,
+            env.coach.id,
+            plan("Beginner v2"),
+            base_routine_id=old_master.id,
+        )
+
+    assert (await env.routines.preset_master(preset.id))["routine_id"] == old_master.id
+    assert (await env.routines.active_routine(first.id))["workouts"][0]["name"] == "Full body"
+    assert (await env.routines.active_routine(second.id))["workouts"][0]["name"] == "Full body"
+
+
+async def test_default_preset_lands_on_a_new_member_at_agent_save_time(env):
+    preset = await env.routines.create_preset(env.gym.id, "Beginner")
+    await env.routines.save_preset_master(
+        preset.id, env.gym.id, env.coach.id, plan("Coach plan"), base_routine_id=None
+    )
+    await env.routines.set_default_preset(env.gym.id, preset.id)
+    member = await env.linking.link_member(env.gym.id, "Luis", "telegram", "2")
+
+    await env.routines.save_routine(member.id, env.gym.id, plan("Generated plan"))
+
+    active = await env.routines.active_routine(member.id)
+    assert active["preset_id"] == preset.id
+    assert active["preset_name"] == "Beginner"
+    assert active["workouts"][0]["name"] == "Coach plan"
+
+
+async def test_agent_save_without_a_default_keeps_the_generated_plan(env):
+    member = await env.linking.link_member(env.gym.id, "Luis", "telegram", "2")
+
+    await env.routines.save_routine(member.id, env.gym.id, plan("Generated plan"))
+
+    active = await env.routines.active_routine(member.id)
+    assert active["preset_id"] is None
+    assert active["workouts"][0]["name"] == "Generated plan"
+
+
+async def test_default_without_a_master_keeps_the_generated_plan(env):
+    preset = await env.routines.create_preset(env.gym.id, "Empty")
+    await env.routines.set_default_preset(env.gym.id, preset.id)
+    member = await env.linking.link_member(env.gym.id, "Luis", "telegram", "2")
+
+    await env.routines.save_routine(member.id, env.gym.id, plan("Generated plan"))
+
+    active = await env.routines.active_routine(member.id)
+    assert active["preset_id"] is None
+    assert active["workouts"][0]["name"] == "Generated plan"
+
+
+async def test_retiring_a_default_clears_the_slot_but_keeps_member_copies(env):
+    preset = await env.routines.create_preset(env.gym.id, "Beginner")
+    await env.routines.save_preset_master(
+        preset.id, env.gym.id, env.coach.id, plan(), base_routine_id=None
+    )
+    await env.routines.set_default_preset(env.gym.id, preset.id)
+    member = await env.linking.link_member(env.gym.id, "Luis", "telegram", "2")
+    await env.routines.apply_preset(preset.id, env.gym.id, env.coach.id, [member.id])
+
+    await env.routines.retire_preset(env.gym.id, preset.id)
+
+    async with env.routines._sessions() as db:
+        from agentg.models import Gym
+
+        gym = await db.get(Gym, env.gym.id)
+        assert gym.default_preset_id is None
+    assert await env.routines.presets(env.gym.id) == []
+    active = await env.routines.active_routine(member.id)
+    assert active["preset_name"] == "Beginner"
+
+
+async def test_agent_cannot_overwrite_a_preset_copy(env):
+    preset = await env.routines.create_preset(env.gym.id, "Beginner")
+    await env.routines.save_preset_master(
+        preset.id, env.gym.id, env.coach.id, plan(), base_routine_id=None
+    )
+    member = await env.linking.link_member(env.gym.id, "Luis", "telegram", "2")
+    await env.routines.apply_preset(preset.id, env.gym.id, env.coach.id, [member.id])
+
+    with pytest.raises(ValueError):
+        await env.routines.save_routine(member.id, env.gym.id, plan("Agent deviation"))
+    assert (await env.routines.active_routine(member.id))["workouts"][0]["name"] == "Full body"
 
 
 async def test_master_rows_do_not_change_roster_or_attendance(env):

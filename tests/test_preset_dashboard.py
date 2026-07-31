@@ -5,11 +5,11 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
-from agentg.dashboard_web import STALE_ERROR
+from agentg.dashboard_web import CONSEQUENCE_LINE, STALE_ERROR
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
 from agentg.models import Member
-from agentg.routines import RoutineStore
+from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.training import TrainingStore
 from conftest import FakeClock
 
@@ -127,6 +127,37 @@ async def test_preset_editor_reuses_validation_and_unknown_ids_are_404(env):
     assert response.status == 404
 
 
+async def test_preset_master_editor_shows_its_own_consequence_not_the_member_warning(env):
+    preset_id = await create_master(env)
+
+    response = await env.client.get(
+        f"/presets/{preset_id}/routine", cookies=cookies(env)
+    )
+
+    assert response.status == 200
+    body = await response.text()
+    assert "Guardar actualiza a todos los miembros que siguen este Preset." in body
+    assert CONSEQUENCE_LINE not in body
+
+    # The rejection re-render is the same page: a refused master save must
+    # not fall back to the Member's fork warning either.
+    refused = await env.client.post(
+        f"/presets/{preset_id}/routine",
+        data={
+            "base_routine_id": "999999",
+            "weekday": "0",
+            "workout_name": "X",
+            "exercises": "squat",
+        },
+        cookies=cookies(env),
+    )
+
+    assert refused.status == 409
+    body = await refused.text()
+    assert "Guardar actualiza a todos los miembros que siguen este Preset." in body
+    assert CONSEQUENCE_LINE not in body
+
+
 async def test_apply_multi_and_all_notifies_each_member_and_never_coach(env, caplog):
     preset_id = await create_master(env)
     first = await add_member(env, "Luis", "2")
@@ -217,3 +248,122 @@ async def test_stale_apply_rerenders_presets_with_the_stale_error(env, monkeypat
     )
     assert response.status == 409
     assert STALE_ERROR in await response.text()
+
+
+async def test_editing_a_preset_notifies_only_members_still_linked_to_it(env, monkeypatch, caplog):
+    preset_id = await create_master(env)
+    linked = await add_member(env, "Luis", "2")
+    forked = await add_member(env, "Mara", "3")
+    await env.routines.apply_preset(preset_id, env.gym.id, env.coach.id, [linked.id, forked.id])
+    forked_active = await env.routines.active_routine(forked.id)
+    await env.routines.save_coach_routine(
+        forked.id,
+        env.gym.id,
+        env.coach.id,
+        [WorkoutSpec(weekday=1, name="Mara fork", exercises=[ExerciseSpec("bench press")])],
+        base_routine_id=forked_active["routine_id"],
+    )
+    env.notifier.sent.clear()
+    master = await env.routines.preset_master(preset_id)
+
+    response = await env.client.post(
+        f"/presets/{preset_id}/routine",
+        data=[
+            ("base_routine_id", str(master["routine_id"])),
+            ("weekday", "0"),
+            ("workout_name", "Refreshed"),
+            ("exercises", "squat, 3, 8"),
+        ],
+        cookies=cookies(env),
+        allow_redirects=False,
+    )
+
+    assert response.status == 302
+    assert [sent[1] for sent in env.notifier.sent] == ["2"]
+    assert "Coach Ana" in env.notifier.sent[0][2]
+    assert (await env.routines.active_routine(linked.id))["workouts"][0]["name"] == "Refreshed"
+    assert (await env.routines.active_routine(forked.id))["workouts"][0]["name"] == "Mara fork"
+
+    env.notifier.fail_ids.add("2")
+    master = await env.routines.preset_master(preset_id)
+    response = await env.client.post(
+        f"/presets/{preset_id}/routine",
+        data=[
+            ("base_routine_id", str(master["routine_id"])),
+            ("weekday", "0"),
+            ("workout_name", "Refreshed again"),
+            ("exercises", "squat, 3, 8"),
+        ],
+        cookies=cookies(env),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert "failed to notify member" in caplog.text
+
+    original_member_channel = env.store.member_channel
+
+    async def no_channel(member_id):
+        if member_id == linked.id:
+            return None
+        return await original_member_channel(member_id)
+
+    monkeypatch.setattr(env.store, "member_channel", no_channel)
+    master = await env.routines.preset_master(preset_id)
+    response = await env.client.post(
+        f"/presets/{preset_id}/routine",
+        data=[
+            ("base_routine_id", str(master["routine_id"])),
+            ("weekday", "0"),
+            ("workout_name", "Refreshed without channel"),
+            ("exercises", "squat, 3, 8"),
+        ],
+        cookies=cookies(env),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert "no channel" in caplog.text
+
+
+async def test_presets_can_move_the_default_slot_and_retire_it(env):
+    first = await env.routines.create_preset(env.gym.id, "Beginner")
+    second = await env.routines.create_preset(env.gym.id, "Advanced")
+
+    response = await env.client.post(
+        f"/presets/{first.id}/default", cookies=cookies(env), allow_redirects=False
+    )
+    assert response.status == 302
+    assert await env.store.default_preset_id(env.gym.id) == first.id
+    response = await env.client.post(
+        f"/presets/{second.id}/default", cookies=cookies(env), allow_redirects=False
+    )
+    assert response.status == 302
+    assert await env.store.default_preset_id(env.gym.id) == second.id
+
+    response = await env.client.post(
+        f"/presets/{second.id}/default", cookies=cookies(env), allow_redirects=False
+    )
+    assert response.status == 302
+    assert await env.store.default_preset_id(env.gym.id) is None
+
+    response = await env.client.post(
+        f"/presets/{second.id}/retire", cookies=cookies(env), allow_redirects=False
+    )
+    assert response.status == 302
+    assert await env.store.default_preset_id(env.gym.id) is None
+    assert (await env.client.get(f"/presets/{second.id}/routine", cookies=cookies(env))).status == 404
+
+
+async def test_default_and_retire_reject_a_foreign_or_missing_preset(env):
+    foreign_gym = await env.linking.create_gym("Other Gym")
+    foreign = await env.routines.create_preset(foreign_gym.id, "Foreign")
+    for preset_id in (foreign.id, 999999):
+        default = await env.client.post(
+            f"/presets/{preset_id}/default", cookies=cookies(env)
+        )
+        retire = await env.client.post(
+            f"/presets/{preset_id}/retire", cookies=cookies(env)
+        )
+        assert default.status == 404
+        assert retire.status == 404
+    assert await env.store.default_preset_id(env.gym.id) is None
+    assert [item.id for item in await env.routines.presets(foreign_gym.id)] == [foreign.id]

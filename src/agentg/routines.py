@@ -188,6 +188,37 @@ class RoutineStore:
         """
         async with self._sessions() as db:
             try:
+                preset_id = None
+                if not coach_authored:
+                    active = await db.scalar(
+                        select(Routine).where(
+                            Routine.member_id == member_id,
+                            Routine.is_active.is_(True),
+                        )
+                    )
+                    gym = await db.get(Gym, gym_id)
+                    if active is None and gym is not None and gym.default_preset_id is not None:
+                        preset = await db.scalar(
+                            select(RoutinePreset).where(
+                                RoutinePreset.id == gym.default_preset_id,
+                                RoutinePreset.gym_id == gym_id,
+                                RoutinePreset.retired_at.is_(None),
+                            )
+                        )
+                        master = await db.scalar(
+                            select(Routine).where(
+                                Routine.preset_id == gym.default_preset_id,
+                                Routine.member_id.is_(None),
+                                Routine.is_active.is_(True),
+                            )
+                        ) if preset is not None else None
+                        if master is not None:
+                            workouts = self._specs_from_workouts(
+                                await self._workouts(db, master.id)
+                            )
+                            preset_id = master.preset_id
+                            coach_authored = True
+                            created_by_member_id = master.created_by_member_id
                 return await self._save(
                     db,
                     member_id,
@@ -196,6 +227,7 @@ class RoutineStore:
                     coach_authored=coach_authored,
                     created_by_member_id=created_by_member_id,
                     expected_active_id=REPLACE_ACTIVE,
+                    preset_id=preset_id,
                 )
             except IntegrityError:
                 # Another save (a Coach's web save) committed between this
@@ -286,6 +318,43 @@ class RoutineStore:
                 )
             )
 
+    async def set_default_preset(self, gym_id: int, preset_id: int | None) -> None:
+        """Set or clear the Gym's one live Preset default (issue #103)."""
+        async with self._sessions() as db:
+            gym = await db.get(Gym, gym_id)
+            if gym is None:
+                raise ValueError("unknown Gym")
+            if preset_id is not None:
+                preset = await db.scalar(
+                    select(RoutinePreset).where(
+                        RoutinePreset.id == preset_id,
+                        RoutinePreset.gym_id == gym_id,
+                        RoutinePreset.retired_at.is_(None),
+                    )
+                )
+                if preset is None:
+                    raise ValueError("unknown Preset")
+            gym.default_preset_id = preset_id
+            await db.commit()
+
+    async def retire_preset(self, gym_id: int, preset_id: int) -> None:
+        """Retire a Preset and clear its Gym default without touching copies."""
+        async with self._sessions() as db:
+            preset = await db.scalar(
+                select(RoutinePreset).where(
+                    RoutinePreset.id == preset_id,
+                    RoutinePreset.gym_id == gym_id,
+                    RoutinePreset.retired_at.is_(None),
+                )
+            )
+            if preset is None:
+                raise ValueError("unknown Preset")
+            gym = await db.get(Gym, gym_id)
+            preset.retired_at = self._clock()
+            if gym is not None and gym.default_preset_id == preset_id:
+                gym.default_preset_id = None
+            await db.commit()
+
     async def save_preset_master(
         self,
         preset_id: int,
@@ -307,7 +376,7 @@ class RoutineStore:
             if preset is None:
                 raise ValueError("unknown Preset")
             try:
-                return await self._save(
+                master = await self._save(
                     db,
                     None,
                     gym_id,
@@ -316,11 +385,41 @@ class RoutineStore:
                     created_by_member_id=coach_member_id,
                     expected_active_id=base_routine_id,
                     preset_id=preset_id,
+                    commit=False,
                 )
+                linked = list(
+                    await db.scalars(
+                        select(Routine).where(
+                            Routine.gym_id == gym_id,
+                            Routine.member_id.is_not(None),
+                            Routine.preset_id == preset_id,
+                            Routine.is_active.is_(True),
+                        )
+                    )
+                )
+                await self._copy_master_to_members(
+                    db,
+                    preset_id,
+                    gym_id,
+                    coach_member_id,
+                    workouts,
+                    [routine.member_id for routine in linked if routine.member_id is not None],
+                    expected_active_ids={
+                        routine.member_id: routine.id
+                        for routine in linked
+                        if routine.member_id is not None
+                    },
+                )
+                await db.commit()
+                return master
             except IntegrityError:
+                await db.rollback()
                 raise StaleRoutineError(
                     "the Preset changed since the editor loaded it"
                 ) from None
+            except StaleRoutineError:
+                await db.rollback()
+                raise
 
     async def preset_master(self, preset_id: int) -> dict[str, Any] | None:
         """The active Member-less master, including a retired Preset's name."""
@@ -372,8 +471,82 @@ class RoutineStore:
             unique_member_ids = list(dict.fromkeys(member_ids))
             if len(members) != len(unique_member_ids):
                 raise ValueError("all applied Members must be non-coaches in the Gym")
+            specs = self._specs_from_workouts(master_workouts)
+            try:
+                copies = await self._copy_master_to_members(
+                    db,
+                    preset_id,
+                    gym_id,
+                    coach_member_id,
+                    specs,
+                    unique_member_ids,
+                )
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                raise StaleRoutineError(
+                    "the Member's Routine changed while applying the Preset"
+                ) from None
+        return copies
 
-        specs = [
+    async def preset_linked_copies(self, preset_id: int, gym_id: int) -> list[AppliedCopy]:
+        """Read the linked copies after a committed master edit for notices."""
+        async with self._sessions() as db:
+            routines = list(
+                await db.scalars(
+                    select(Routine).where(
+                        Routine.gym_id == gym_id,
+                        Routine.member_id.is_not(None),
+                        Routine.preset_id == preset_id,
+                        Routine.is_active.is_(True),
+                    )
+                )
+            )
+            return [
+                AppliedCopy(
+                    routine.member_id,
+                    self._specs_from_workouts(await self._workouts(db, routine.id)),
+                    routine.id,
+                )
+                for routine in routines
+                if routine.member_id is not None
+            ]
+
+    async def _copy_master_to_members(
+        self,
+        db: Any,
+        preset_id: int,
+        gym_id: int,
+        coach_member_id: int,
+        specs: list[WorkoutSpec],
+        member_ids: list[int],
+        *,
+        expected_active_ids: dict[int, int] | None = None,
+    ) -> list[AppliedCopy]:
+        """Stamp Preset copies inside the caller's transaction (issue #103)."""
+        copies: list[AppliedCopy] = []
+        for member_id in member_ids:
+            routine = await self._save(
+                db,
+                member_id,
+                gym_id,
+                specs,
+                coach_authored=True,
+                created_by_member_id=coach_member_id,
+                expected_active_id=(
+                    expected_active_ids[member_id]
+                    if expected_active_ids is not None
+                    else REPLACE_ACTIVE
+                ),
+                preset_id=preset_id,
+                commit=False,
+            )
+            copies.append(AppliedCopy(member_id, list(specs), routine.id))
+        return copies
+
+    @staticmethod
+    def _specs_from_workouts(workouts: list[dict[str, Any]]) -> list[WorkoutSpec]:
+        return [
             WorkoutSpec(
                 weekday=workout["weekday"],
                 name=workout["name"],
@@ -382,30 +555,8 @@ class RoutineStore:
                     for exercise in workout["exercises"]
                 ],
             )
-            for workout in master_workouts
+            for workout in workouts
         ]
-        copies: list[AppliedCopy] = []
-        async with self._sessions() as db:
-            try:
-                for member_id in unique_member_ids:
-                    routine = await self._save(
-                        db,
-                        member_id,
-                        gym_id,
-                        specs,
-                        coach_authored=True,
-                        created_by_member_id=coach_member_id,
-                        expected_active_id=REPLACE_ACTIVE,
-                        preset_id=preset_id,
-                        commit=False,
-                    )
-                    copies.append(AppliedCopy(member_id, list(specs), routine.id))
-                await db.commit()
-            except IntegrityError:
-                raise StaleRoutineError(
-                    "the Member's Routine changed while applying the Preset"
-                ) from None
-        return copies
 
     async def _save(
         self,

@@ -65,7 +65,7 @@ _Avoid_: Questionnaire, survey, sign-up
 
 **Preset**:
 A named Routine a Coach saves once and applies to one Member, several, or the whole Gym; each Member on it holds their own copy, refreshed when the Coach edits the Preset.
-Editing a Member's copy directly detaches that Member from the Preset for good; a Gym may mark one Preset as the default a brand-new Member starts on.
+Editing a Preset re-stamps every still-linked Member immediately; editing a Member's copy directly detaches that Member from the Preset for good. A Gym may mark one Preset as the default a brand-new Member starts on after Intake.
 A Preset is retired, never deleted - Members keep the copies they hold.
 _Avoid_: Template, program, shared routine
 
