@@ -108,6 +108,44 @@ STRINGS = {
         "retired_tail": "Retiradas ({n})",
         "retired_on": "retirada el {date}",
         "verbatim_tag": "textual",
+        # The Routine editor (issue #100).
+        "edit": "Editar",
+        "chip_agent": "Gestionada por el agente",
+        "chip_coach": "Escrita por un coach",
+        "chip_coach_named": "Escrita por {name}",
+        "chip_consequence": (
+            "Al guardar, este plan pasa a ser tuyo — el agente dejará de ajustarlo."
+        ),
+        "editor_title": "Rutina de {name}",
+        "stale_error": (
+            "Esta Rutina cambió mientras la editabas — aquí tienes la versión "
+            "actual. Vuelve a aplicar tus cambios encima."
+        ),
+        "empty_routine_error": "Una Rutina necesita al menos un día con ejercicios.",
+        "empty_workout_error": (
+            "Cada día necesita al menos un ejercicio — o vacía el bloque y deja su "
+            "selector en «— día —»."
+        ),
+        "undated_block_error": (
+            "Un bloque con contenido no tiene día — elige un día de la semana o "
+            "vacía el bloque."
+        ),
+        "duplicate_weekday_error": "Cada día de la semana solo puede aparecer una vez.",
+        "bad_weekday_error": "Uno de los días no es válido.",
+        "bad_sets_error": "Las series deben ser un número (p. ej. «squat, 4, 8-10»).",
+        "unknown_exercises_error": (
+            "Estos ejercicios no están en el catálogo: {names}. Escríbelos "
+            "exactamente como aparecen en el catálogo."
+        ),
+        "editor_help": (
+            "Un ejercicio por línea: nombre, series, repeticiones (series "
+            "y repeticiones opcionales). Para quitar un día, vacía sus ejercicios y deja "
+            "su selector en «— día —»."
+        ),
+        "catalog_label": "Catálogo de ejercicios",
+        "save_routine": "Guardar Rutina",
+        "pick_day": "— día —",
+        "workout_name_placeholder": "Nombre (p. ej. Piernas)",
         # Settings screen.
         "settings_title": "Ajustes",
         "invite_section": "Enlace de invitación",
@@ -177,6 +215,40 @@ STRINGS = {
         "retired_tail": "Retired ({n})",
         "retired_on": "retired {date}",
         "verbatim_tag": "as written",
+        # The Routine editor (issue #100).
+        "edit": "Edit",
+        "chip_agent": "Agent-managed",
+        "chip_coach": "Coach-authored",
+        "chip_coach_named": "Coach-authored — {name}",
+        "chip_consequence": "Saving makes this plan yours — the Agent will stop adjusting it.",
+        "editor_title": "{name}'s routine",
+        "stale_error": (
+            "This routine changed while you were editing — here is the current "
+            "version. Re-apply your changes on top of it."
+        ),
+        "empty_routine_error": "A routine needs at least one day with exercises.",
+        "empty_workout_error": (
+            "Every day needs at least one exercise — or empty the block and leave "
+            "its selector on «— day —»."
+        ),
+        "undated_block_error": (
+            "A block with content has no day — pick a weekday or empty the block."
+        ),
+        "duplicate_weekday_error": "Each weekday can only appear once.",
+        "bad_weekday_error": "One of the days is not valid.",
+        "bad_sets_error": "Sets must be a number (e.g. «squat, 4, 8-10»).",
+        "unknown_exercises_error": (
+            "These exercises are not in the catalog: {names}. Type them exactly "
+            "as they appear in the catalog."
+        ),
+        "editor_help": (
+            "One exercise per line: name, sets, reps (sets and reps optional). "
+            "To remove a day, clear its exercises and leave its selector on «— day —»."
+        ),
+        "catalog_label": "Exercise catalog",
+        "save_routine": "Save routine",
+        "pick_day": "— day —",
+        "workout_name_placeholder": "Name (e.g. Legs)",
         # Settings screen.
         "settings_title": "Settings",
         "invite_section": "Invite link",

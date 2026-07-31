@@ -82,7 +82,13 @@ async def write_routine_action(
         return target
     try:
         routine = await c.stores.routines.save_routine(
-            target.id, c.gym_id, specs, coach_authored=True
+            target.id,
+            c.gym_id,
+            specs,
+            coach_authored=True,
+            # A Coach's write is actor-stamped wherever it happens (chat or
+            # dashboard) — NULL means the Agent wrote it (issue #91).
+            created_by_member_id=c.member_id,
         )
     except ValueError as error:
         return {"error": str(error)}

@@ -64,6 +64,7 @@ async def run() -> None:
             or settings.telegram_bot_token,
             bot_username=bot_username,
             secure_cookies=settings.dashboard_base_url.startswith("https://"),
+            notifier=notifier,
         ),
         host="0.0.0.0",
         port=settings.dashboard_port,
