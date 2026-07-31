@@ -83,6 +83,16 @@ _ZS_SPACES = tuple(map(chr, (0x00A0, 0x1680, *range(0x2000, 0x200B), 0x202F, 0x2
 # readings per occurrence in the reply's own coordinates: a leak found
 # under either reading is real unless the other reading resolves that
 # very span into an allowlisted name.
+#
+# SCOPE: the two-reading model resolves ONE break ambiguity per region.
+# Multiple break points placed so that each reading shatters a different
+# half of the same name (or a name plus its left-context) are out of the
+# threat model — this gate screens MODEL OUTPUT, which does not emit
+# coordinated invisible characters; per-character reading resolution
+# would be exponential and is not warranted in a test helper. Under such
+# constructions the checker may flag a legitimate name or miss a
+# mid-chain term; both are accepted and pinned in
+# test_dual_break_constructions_are_out_of_scope.
 _BREAK_POINTS = frozenset(
     map(chr, (0x00AD, *range(0x200B, 0x2010), *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A), 0xFEFF))
 )

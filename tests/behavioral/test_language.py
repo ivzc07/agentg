@@ -459,6 +459,18 @@ def test_a_name_exemption_never_covers_a_separate_leak():
     assert find_english_leaks("mus­cle y haz Muscle-ups") == {"muscle"}
 
 
+def test_dual_break_constructions_are_out_of_scope():
+    # Two coordinated break points defeat the two-reading model by
+    # construction (each reading shatters a different half). Model output
+    # never contains them, so the checker's behavior here is pinned as
+    # documented scope, not asserted as ideal: conservative flags and
+    # misses are both accepted. See the SCOPE note in language.py.
+    assert find_english_leaks("stren​gth band pull​apart") == {"strength"}
+    assert find_english_leaks("Muscle​up​s") == {"muscle"}
+    assert find_english_leaks("kip​ping strength band pull​apart") == set()
+    assert find_english_leaks("weigh­ted strength band pull­apart") == set()
+
+
 def test_a_break_elsewhere_never_launders_mid_chain_strength():
     # A name span only exempts a leak when the span itself contains the
     # break point; a break that merely destroyed left-context under one
