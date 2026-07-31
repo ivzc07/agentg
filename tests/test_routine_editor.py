@@ -725,3 +725,59 @@ async def test_the_editor_post_is_scoped_like_the_get(env):
     assert await env.routines.active_routine(outsider.id) is None
     assert await env.routines.active_routine(env.coach.id) is None
     assert env.notifier.sent == []
+
+
+async def test_ensure_schema_heals_dual_active_routines_before_the_index(tmp_path):
+    """A legacy database (no unique index yet) may hold a Member with two
+    active Routines — pre-PR saves could interleave and commit both.
+    ensure_schema must deactivate the extras (the newest survives, the same
+    "most recent governs" rule as everywhere else) instead of aborting
+    boot on the CREATE UNIQUE INDEX."""
+    from sqlalchemy import select, text
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'legacy.db'}")
+    clock = FakeClock()
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+    # Roll back to the legacy schema: no one-active index.
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP INDEX uq_routines_one_active_per_member"))
+    gym = await linking.create_gym("Iron Temple")
+    member = await linking.link_member(gym.id, "Luis", "telegram", "2")
+    training = TrainingStore(engine, clock=clock)
+    routines = RoutineStore(engine, clock=clock)
+    await training.ensure_seeded()
+    older = await routines.save_routine(
+        member.id,
+        gym.id,
+        [WorkoutSpec(weekday=2, name="Piernas", exercises=[ExerciseSpec("squat")])],
+    )
+    # A second active row, planted the way a lost pre-index race would.
+    async with routines._sessions() as db:
+        newer = Routine(
+            gym_id=gym.id, member_id=member.id, is_active=True, created_at=clock()
+        )
+        db.add(newer)
+        await db.commit()
+
+    await linking.ensure_schema()  # must not abort
+
+    async with routines._sessions() as db:
+        actives = list(
+            await db.scalars(
+                select(Routine).where(
+                    Routine.member_id == member.id, Routine.is_active.is_(True)
+                )
+            )
+        )
+        assert [routine.id for routine in actives] == [newer.id]
+        assert (await db.get(Routine, older.id)).is_active is False
+        # And the index now guards the member.
+        db.add(
+            Routine(gym_id=gym.id, member_id=member.id, is_active=True, created_at=clock())
+        )
+        from sqlalchemy.exc import IntegrityError
+
+        with pytest.raises(IntegrityError):
+            await db.flush()
+    await engine.dispose()
