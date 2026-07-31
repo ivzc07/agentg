@@ -71,10 +71,20 @@ _EQUIPMENT_MODIFIERS = frozenset({"band", "bar", "ring", "cable"})
 
 
 def _is_name_core(token: str) -> bool:
+    # Exact allowlist match, or the allowlisted core as a hyphen SUFFIX of a
+    # longer token ("bar-muscle-up", "kipping-muscle-up"); plural "s" allowed.
     lowered = token.lower()
-    return lowered in EXERCISE_NAME_CORES or (
-        lowered.endswith("s") and lowered[:-1] in EXERCISE_NAME_CORES
+    forms = [lowered, lowered[:-1]] if lowered.endswith("s") else [lowered]
+    return any(
+        form in EXERCISE_NAME_CORES
+        or any(form.endswith(f"-{core}") for core in EXERCISE_NAME_CORES)
+        for form in forms
     )
+
+
+def _equipment_base(word: str) -> str:
+    lowered = word.lower()
+    return lowered[:-1] if lowered.endswith("s") else lowered  # plural ok
 
 
 def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
@@ -92,8 +102,8 @@ def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
         while k >= 0 and absorbed < 2 and text[tokens[k].end() : start] == " ":
             word = tokens[k].group().lower()
             following = tokens[k + 1].group().lower()
-            if word not in _EQUIPMENT_MODIFIERS and not (
-                word == "strength" and following in _EQUIPMENT_MODIFIERS
+            if _equipment_base(word) not in _EQUIPMENT_MODIFIERS and not (
+                word == "strength" and _equipment_base(following) in _EQUIPMENT_MODIFIERS
             ):
                 break
             start = tokens[k].start()

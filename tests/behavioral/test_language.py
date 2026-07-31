@@ -110,6 +110,19 @@ def test_other_hyphenated_tokens_are_not_name_cores():
     assert find_english_leaks("strength-through-progress") == {"strength"}
 
 
+def test_a_core_may_be_a_hyphen_suffix_of_a_longer_token():
+    # Round-5: equipment/variant prefixes join the core with a hyphen.
+    assert find_english_leaks("bar-muscle-up") == set()
+    assert find_english_leaks("ring-muscle-up") == set()
+    assert find_english_leaks("kipping-muscle-up") == set()
+    assert find_english_leaks("strength-band-pull-apart") == set()
+
+
+def test_equipment_modifiers_accept_plural_s():
+    for equipment in ("band", "bands", "bar", "bars", "ring", "rings", "cable", "cables"):
+        assert find_english_leaks(f"strength {equipment} pull-apart") == set(), equipment
+
+
 # --- what actually guards the behavior: the Agent's language rule ---
 
 
