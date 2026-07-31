@@ -208,7 +208,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 def _css_version() -> str:
     """A content hash in the stylesheet URL, so a deploy never serves a
     90-day-cookie Coach last release's CSS from their browser cache."""
-    digest = hashlib.md5((STATIC_DIR / "dashboard.css").read_bytes()).hexdigest()
+    digest = hashlib.md5((STATIC_DIR / "dashboard.css").read_bytes(), usedforsecurity=False).hexdigest()
     return digest[:8]
 
 
