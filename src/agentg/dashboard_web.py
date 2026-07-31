@@ -65,6 +65,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from html import escape
+from pathlib import Path
 from urllib.parse import quote, unquote
 
 import qrcode
@@ -177,79 +178,7 @@ REGENERATE_CONFIRM = STRINGS["es"]["confirm_word"]
 # slipping, purple extra. All values live here as custom properties; the
 # per-surface style blocks below only compose them.
 
-BASE_STYLE = """
-:root {
-  --bg: #000; --surface: #131313; --surface-2: #1b1c1e;
-  --line: #2a2b2d; --line-2: #3a3a3c;
-  --ink: #fff; --ink-2: #9a9a9a; --ink-3: #85858a; /* AA (>=4.5:1) on bg AND surface */
-  --mint: #6ef3a5; --mint-tint: #0f2a1c;
-  --coral: #f58060; --coral-tint: #2b1712;
-  --amber: #f2b84b; --amber-tint: #2a2110;
-  --purple: #8b7cf6; --purple-tint: #201e33;
-  --gut: 16px;
-  --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
-  --t-fast: 120ms ease-out;
-  color-scheme: dark;
-}
-* { box-sizing: border-box; }
-/* Author display rules (.mcard is flex) must never beat the hidden
-   attribute the search filter relies on. */
-[hidden] { display: none !important; }
-html { background: var(--bg); }
-body { margin: 0; background: var(--bg); color: var(--ink);
-  font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", sans-serif;
-  -webkit-font-smoothing: antialiased; }
-h1, h2, h3 { margin: 0; font-weight: 700; letter-spacing: -0.02em; }
-a { color: inherit; text-decoration: none; }
-p { margin: 0.6em 0; }
-:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-.eyebrow { font-family: var(--mono); text-transform: uppercase; font-size: 11px; letter-spacing: .14em; color: var(--ink-2); display: block; }
-button { font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
-  background: var(--surface-2); color: var(--ink); border: 1px solid var(--line-2);
-  min-height: 44px; padding: 8px 16px;
-  transition: background var(--t-fast), border-color var(--t-fast); }
-button:hover { border-color: var(--ink-2); }
-button:disabled { opacity: .4; cursor: default; }
-.btn-primary { background: var(--ink); color: #000; border-color: var(--ink); }
-.btn-primary:hover { background: #e6e6e6; border-color: #e6e6e6; }
-.btn-primary.big { display: block; width: 100%; min-height: 55px; font-size: 16px; }
-input[type="text"], input[type="search"], select, textarea {
-  background: var(--surface-2); color: var(--ink); border: 1px solid var(--line-2);
-  font: inherit; min-height: 44px; padding: 8px 12px;
-  transition: border-color var(--t-fast); }
-input[type="text"]:hover, input[type="search"]:hover, select:hover, textarea:hover { border-color: var(--ink-2); }
-input[type="checkbox"] { accent-color: var(--mint); width: 16px; height: 16px; }
-code { font-family: var(--mono); font-size: 13px; background: var(--surface-2); padding: 6px 8px; overflow-wrap: anywhere; }
-summary { cursor: pointer; color: var(--ink-3); font-size: 13px; padding: 10px 0; }
-summary:hover { color: var(--ink-2); }
-.tag { display: inline-block; font-family: var(--mono); text-transform: uppercase; font-weight: 400;
-  font-size: 10px; letter-spacing: .12em; padding: 3px 7px; white-space: nowrap;
-  border: 1px solid var(--line-2); color: var(--ink-2); }
-.tag-flag { background: var(--ink); border-color: var(--ink); color: #000; font-weight: 700; }
-.tag-new { color: var(--ink); border-color: var(--ink-2); }
-.chip { color: var(--ink-2); }
-.error { background: var(--coral-tint); border: 1px solid var(--coral); color: var(--coral);
-  padding: 12px 14px; font-size: 14px; margin: 14px 0; }
-.muted { color: var(--ink-2); font-size: 13px; }
-.emptystate { padding: 70px 24px; text-align: center; }
-.emptystate h2 { font-size: 22px; margin-bottom: 8px; }
-.emptystate p { color: var(--ink-2); font-size: 15px; margin: 0; }
-.lang-toggle { white-space: nowrap; }
-.lang-toggle a { font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
-  color: var(--ink-3); padding: 12px 6px; }
-.lang-toggle a:hover { color: var(--ink-2); }
-.lang-toggle a[aria-current="true"] { color: var(--ink); }
-"""
-
 # Login door and bounce pages: one centered column, one action.
-DOOR_STYLE = """
-.door { max-width: 26rem; margin: 18vh auto 0; padding: 0 var(--gut); text-align: center; }
-.door h1 { font-size: 22px; }
-.door p { color: var(--ink-2); font-size: 15px; }
-.door form { margin-top: 24px; }
-"""
-
 # Every form disables its submit buttons once a submit is on its way —
 # a double-clicked Apply must not message every Member twice. The timeout
 # lets the click's own submit complete before the buttons grey out. A
@@ -272,10 +201,21 @@ window.addEventListener("pageshow", function (e) {
 """
 
 
-def _document(
-    title: str, lang: str, body: str, *, styles: str = "", scripts: str = ""
-) -> str:
-    """The one page skeleton every surface renders through."""
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+@lru_cache(maxsize=1)
+def _css_version() -> str:
+    """A content hash in the stylesheet URL, so a deploy never serves a
+    90-day-cookie Coach last release's CSS from their browser cache."""
+    digest = hashlib.md5((STATIC_DIR / "dashboard.css").read_bytes()).hexdigest()
+    return digest[:8]
+
+
+def _document(title: str, lang: str, body: str, *, scripts: str = "") -> str:
+    """The one page skeleton every surface renders through. All styling
+    lives in static/dashboard.css (ADR 0003): one cacheable sheet, served
+    whole from the package - no build step."""
     script_html = f"<script>{SUBMIT_GUARD_SCRIPT}{scripts}</script>"
     return f"""<!DOCTYPE html>
 <html lang="{lang}">
@@ -283,7 +223,7 @@ def _document(
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
-<style>{BASE_STYLE}{styles}</style>
+<link rel="stylesheet" href="/static/dashboard.css?v={_css_version()}">
 </head>
 <body>
 {body}
@@ -298,7 +238,7 @@ def _page(title: str, body: str, extra: str = "", lang: str = "es") -> str:
 <p>{body}</p>
 {extra}
 </div>"""
-    return _document(title, lang, content, styles=DOOR_STYLE)
+    return _document(title, lang, content)
 
 
 def _bounce_page() -> str:
@@ -377,145 +317,6 @@ def _safe_next(raw: str | None) -> str:
 
 
 # --- The shared chrome: segmented view control, search, toggle, settings ---
-
-ROSTER_STYLE = """
-header.top { position: sticky; top: 0; z-index: 20; display: flex; align-items: center;
-  gap: 6px 14px; flex-wrap: wrap; min-height: 46px; padding: 6px var(--gut);
-  background: var(--bg); border-bottom: 1px solid var(--line); }
-header.top h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
-header.top .count { color: var(--ink-2); font-size: 13px; }
-header.top .spacer { flex: 1; }
-.quick a { color: var(--ink-2); font-size: 14px; padding: 12px 6px; }
-.quick a:hover { color: var(--ink); }
-.quick a[aria-current="true"] { color: var(--ink); font-weight: 600; }
-.seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 999px; padding: 3px; gap: 2px; }
-.seg a { color: var(--ink-2); padding: 9px 16px; border-radius: 999px; font-size: 13px; font-weight: 500;
-  transition: color var(--t-fast); }
-.seg a:hover { color: var(--ink); }
-.seg a[aria-current="true"] { background: var(--ink); color: #000; }
-#search { min-height: 40px; width: 200px; font-size: 14px; }
-@media (max-width: 700px) { #search { flex: 1 1 100%; order: 9; width: auto; } }
-.countbar { display: flex; align-items: baseline; gap: 8px; padding: 10px var(--gut);
-  border-bottom: 1px solid var(--line); font-size: 14px; color: var(--ink-2); }
-.countbar b { color: var(--ink); font-weight: 600; }
-.roster-body { padding: 0 0 40px; }
-ul#roster { list-style: none; padding: 0; margin: 0; }
-#lapsed ul { list-style: none; padding: 0; margin: 0; }
-#lapsed summary { padding: 12px var(--gut); }
-.row { border-bottom: 1px solid var(--line); }
-.row > a { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 0 12px; align-items: center;
-  padding: 10px var(--gut); transition: background var(--t-fast); }
-.row > a:hover { background: #0b0b0b; }
-.row > a[aria-current="true"] { background: #0e0e0e; box-shadow: inset 2px 0 0 var(--ink); }
-.tile { width: 44px; height: 44px; background: var(--surface-2); display: grid; place-items: center;
-  font-size: 15px; font-weight: 600; letter-spacing: .02em; }
-.row .t { font-size: 16px; font-weight: 600; letter-spacing: -0.01em;
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-.row .t .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-.row .meta, .mcard .meta { display: flex; gap: 4px 12px; color: var(--ink-2); font-size: 13px; margin-top: 2px; flex-wrap: wrap; }
-.away { white-space: nowrap; }
-.sev { white-space: nowrap; }
-.sev-amber { color: var(--amber); font-weight: 600; }
-.sev-red { color: var(--coral); font-weight: 600; }
-/* Cards: severity bands plus the 4-week Mon-Sun day grid. */
-.band { padding: 0 var(--gut); }
-.band > h2 { font-family: var(--mono); text-transform: uppercase; font-size: 11px; letter-spacing: .14em;
-  font-weight: 400; color: var(--ink-2); margin: 24px 0 10px; }
-.band-hot > h2 { color: var(--coral); }
-.band-warm > h2 { color: var(--amber); }
-.band .count { color: var(--ink-3); }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-.mcard { background: var(--surface); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
-.mcard .top-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.mcard a.name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mcard a.name:hover { text-decoration: underline; }
-.mcard .away { color: var(--ink-2); font-size: 13px; }
-.daygrid { display: grid; grid-template-columns: repeat(7, 18px); gap: 4px; }
-.daygrid i { height: 18px; background: var(--surface-2); }
-.daygrid i.hit { background: var(--mint); }
-.daygrid i.miss { background: transparent; box-shadow: inset 0 0 0 2px var(--coral); }
-.daygrid i.future { background: transparent; border: 1px dashed var(--line-2); }
-.daygrid .wd { font-family: var(--mono); font-size: 11px; line-height: 1; text-align: center;
-  text-transform: uppercase; letter-spacing: .04em; color: var(--ink-2); }
-.sparklab { font-size: 12px; color: var(--ink-3); }
-.legend { display: flex; gap: 16px; padding: 18px var(--gut) 0; font-size: 12px; color: var(--ink-2); flex-wrap: wrap; }
-.legend span { display: inline-flex; align-items: center; gap: 7px; }
-.legend i { width: 12px; height: 12px; background: var(--surface-2); }
-.legend i.l-hit { background: var(--mint); }
-.legend i.l-miss { background: transparent; box-shadow: inset 0 0 0 2px var(--coral); }
-/* Split: the roster never leaves. */
-.split { display: grid; grid-template-columns: 340px minmax(0, 1fr); align-items: start; }
-.split .rail { border-right: 1px solid var(--line); position: sticky; top: 47px;
-  height: calc(100vh - 47px); overflow-y: auto; }
-/* The rail's sticky top assumes a one-row 46px header, so above the split
-   breakpoint the chrome must never wrap: the title truncates and the
-   search shrinks instead. */
-@media (min-width: 900px) {
-  header.top { flex-wrap: nowrap; }
-  header.top h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-  header.top .count { white-space: nowrap; }
-  #search { flex: 0 1 200px; min-width: 90px; }
-}
-.split .pane { padding: 0 var(--gut) 40px; max-width: 60rem; }
-.split .pane-empty { display: grid; place-items: center; min-height: 60vh; }
-@media (max-width: 899px) {
-  .split { grid-template-columns: 1fr; }
-  .split .rail { position: static; height: auto; max-height: 45vh; border-right: 0;
-    border-bottom: 1px solid var(--line); }
-}
-"""
-
-MEMBER_STYLE = """
-.member-wrap { max-width: 60rem; margin: 0 auto; padding: 0 var(--gut) 48px; }
-a.back { display: inline-block; color: var(--ink-2); font-size: 14px; padding: 12px 0; }
-a.back:hover { color: var(--ink); }
-header.mhead { padding: 8px 0 4px; }
-header.mhead h1 { font-size: 33px; line-height: 1.05; }
-header.mhead .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-header.mhead .facts { color: var(--ink-2); font-size: 14px; margin-top: 10px; }
-.dot { display: inline-block; width: 3px; height: 3px; border-radius: 50%; background: var(--ink-3);
-  vertical-align: middle; margin: 0 7px 2px; }
-.columns { display: flex; gap: 32px; flex-wrap: wrap; align-items: flex-start; }
-.col { flex: 1; min-width: 18rem; }
-.card { margin: 26px 0 0; }
-.card h2 { font-size: 20px; margin: 0 0 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-a.edit { font-size: 14px; font-weight: 600; letter-spacing: 0; border: 1px solid var(--line-2);
-  padding: 8px 14px; margin-left: auto; transition: border-color var(--t-fast); }
-a.edit:hover { border-color: var(--ink-2); }
-.day { background: var(--surface); padding: 12px 14px; margin-bottom: 10px; }
-.day > b { font-family: var(--mono); text-transform: uppercase; font-size: 11px; letter-spacing: .14em;
-  font-weight: 400; color: var(--ink-2); display: block; margin-bottom: 2px; }
-.day .dayname { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
-.card .day ul { list-style: none; margin: 8px 0 0; padding: 0; }
-.card .day li { padding: 5px 0; border-top: 1px solid var(--line); font-size: 14px; }
-.card .day li:first-child { border-top: 0; }
-.sess { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
-.sess .set { color: var(--ink-2); font-size: 13px; padding: 2px 0; }
-.sess .said { color: var(--coral); font-size: 13px; }
-.card > ul { list-style: none; margin: 0; padding: 0; }
-.card > ul > li { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
-.note { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
-.tail summary { padding: 8px 0; }
-.pages { display: flex; gap: 16px; margin-top: 10px; align-items: baseline; }
-.pages a { font-size: 14px; padding: 8px 0; }
-.pages a:hover { text-decoration: underline; }
-.pages .muted { margin: 0 auto; }
-/* The loudest thing in the system is a white block, so the safety banner is one. */
-.safety-banner { background: var(--ink); color: #000; padding: 16px; margin-top: 20px; }
-.safety-banner h2 { color: #000; font-size: 20px; margin-bottom: 4px; }
-.safety-banner .flag { padding: 8px 0; display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; }
-.safety-banner .flag b { font-size: 16px; letter-spacing: -0.01em; }
-.safety-banner .muted { color: #555; }
-.safety-banner form { margin: 0 0 0 auto; }
-.safety-banner button { background: #000; color: #fff; border: 0; }
-.safety-banner button:hover { background: #2a2a2a; }
-/* The global focus ring is white — invisible on this white block. */
-.safety-banner :focus-visible { outline-color: #000; }
-/* The Member's own words, left alone, tagged when not in the Coach's language. */
-.verbatim { border-left: 2px solid var(--line-2); padding-left: 8px; }
-.langtag { display: inline-block; white-space: nowrap; font-family: var(--mono); font-size: 10px;
-  letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); margin-left: 6px; }
-"""
 
 SEARCH_SCRIPT = """
 // Live, name-only, accent-insensitive filter. It only hides rows — the Gap
@@ -678,11 +479,10 @@ def _roster_document(
     gym_name: str, view: str, lang: str, next_path: str, count: int | None, body: str, split: bool
 ) -> str:
     t = STRINGS[lang]
-    styles = ROSTER_STYLE + (MEMBER_STYLE if split else "")
     content = f"""{_chrome(gym_name, t, next_path, lang, view=view, count=count)}
 {body}"""
     return _document(
-        f"{escape(gym_name)} — Dashboard", lang, content, styles=styles, scripts=SEARCH_SCRIPT
+        f"{escape(gym_name)} — Dashboard", lang, content, scripts=SEARCH_SCRIPT
     )
 
 
@@ -1126,7 +926,6 @@ def _member_page(gym_name: str, view: MemberPage, roster_view: str, lang: str, n
         f"{escape(view.name)} — {escape(gym_name)}",
         lang,
         content,
-        styles=ROSTER_STYLE + MEMBER_STYLE,
     )
 
 
@@ -1303,34 +1102,6 @@ def routine_notice(coach_name: str, workouts: list[WorkoutSpec]) -> str:
     return ROUTINE_NOTICE.format(coach=coach_name, plan=plan)
 
 
-EDITOR_STYLE = """
-.editor-wrap { max-width: 44rem; margin: 0 auto; padding: 0 var(--gut) 48px; }
-.editor-wrap header h1 { font-size: 22px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.day-edit { background: var(--surface); border: 0; margin: 12px 0; padding: 14px 16px; }
-.day-edit label { display: block; font-size: 13px; color: var(--ink-2); margin: 10px 0 0; }
-.day-edit select, .day-edit input, .day-edit textarea { display: block; width: 100%; margin: 4px 0 0; }
-.day-edit select { width: auto; }
-.day-edit textarea { font-family: var(--mono); min-height: 96px; }
-.consequence { color: var(--ink-2); font-size: 14px; margin: 6px 0 0; }
-.editor-help { color: var(--ink-2); font-size: 13px; margin: 12px 0 4px; }
-.catalog { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0 10px; }
-.catchip { border: 1px solid var(--line-2); color: var(--ink-2); font-size: 12px; padding: 4px 8px; white-space: nowrap; }
-.fresh-version { background: var(--surface); padding: 4px 16px 12px; margin: 12px 0; }
-/* Presets: one card per Preset, members picked as chips. */
-.pcard { background: var(--surface); padding: 16px; margin-top: 14px; }
-.pcard h2 { font-size: 17px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.pcard fieldset { border: 1px solid var(--line); padding: 10px 12px; margin: 12px 0 0; }
-.pcard legend { font-size: 13px; color: var(--ink-2); padding: 0 6px; }
-.pcard label.stack { display: block; font-size: 13px; color: var(--ink-2); margin: 8px 0; }
-.pcard label.stack input { display: block; margin-top: 4px; width: 100%; }
-.pick { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
-.pick label { border: 1px solid var(--line-2); padding: 8px 12px; font-size: 14px; color: var(--ink-2);
-  display: inline-flex; gap: 8px; align-items: center; cursor: pointer;
-  transition: border-color var(--t-fast), color var(--t-fast); }
-.pick label:hover { border-color: var(--ink-2); color: var(--ink); }
-.actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
-"""
-
 
 def _fresh_version_block(fresh_days: list[EditorDay], lang: str) -> str:
     """The active Routine as a read-only reference beside a refused stale
@@ -1426,7 +1197,6 @@ def _routine_editor_page(
         f"{title} — {escape(gym_name)}",
         lang,
         content,
-        styles=ROSTER_STYLE + MEMBER_STYLE + EDITOR_STYLE,
     )
 
 
@@ -1527,23 +1297,10 @@ def _presets_page(
         f'{t["presets_title"]} — {escape(gym_name)}',
         lang,
         content,
-        styles=ROSTER_STYLE + MEMBER_STYLE + EDITOR_STYLE,
     )
 
 
 # --- The tenant Settings screen (spec-dashboard §Settings) ---
-
-SETTINGS_STYLE = """
-.settings-wrap { max-width: 36rem; margin: 0 auto; padding: 0 var(--gut) 48px; }
-.settings-wrap > h1 { font-size: 22px; padding: 18px 0 2px; }
-.setcard { background: var(--surface); padding: 18px; margin-top: 16px; }
-.setcard h2 { font-size: 17px; }
-.setcard p { color: var(--ink-2); font-size: 14px; }
-.setcard code { display: inline-block; color: var(--ink); max-width: 100%; }
-/* A QR must sit on white to scan — the one white block that is not a flag. */
-.qr { background: #fff; padding: 12px; width: 200px; margin: 12px 0; }
-.qr svg { display: block; width: 100%; height: auto; }
-"""
 
 
 def _copy_button(url: str, t: dict) -> str:
@@ -1642,7 +1399,6 @@ maxlength="{GYM_NAME_MAX_LENGTH}" required>
         f"{t['settings_title']} — {escape(gym.name)}",
         lang,
         content,
-        styles=ROSTER_STYLE + MEMBER_STYLE + SETTINGS_STYLE,
         scripts=SETTINGS_SCRIPT,
     )
 
@@ -2361,6 +2117,7 @@ def build_app(
     app.router.add_get("/lang/{lang}", set_language)
     app.router.add_get("/login/{token}", login_form)
     app.router.add_post("/login/{token}", login_redeem)
+    app.router.add_static("/static/", STATIC_DIR)
     return app
 
 
