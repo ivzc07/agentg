@@ -459,6 +459,17 @@ def test_a_name_exemption_never_covers_a_separate_leak():
     assert find_english_leaks("mus­cle y haz Muscle-ups") == {"muscle"}
 
 
+def test_a_break_elsewhere_never_launders_mid_chain_strength():
+    # A name span only exempts a leak when the span itself contains the
+    # break point; a break that merely destroyed left-context under one
+    # reading proves nothing about the strength hit.
+    assert find_english_leaks("weight​loss strength band pull-apart") == {"weight loss", "strength"}
+    assert find_english_leaks("wei​ght loss strength band pull-apart") == {"weight loss", "strength"}
+    assert find_english_leaks("kip­ping strength band pull-apart") == {"strength"}
+    assert find_english_leaks("weigh­ted strength band pull-apart") == {"strength"}
+    assert find_english_leaks("no­n–strength band pull-apart") == {"strength"}
+
+
 def test_hypertrophy_is_a_leak():
     # Round-11 P2: the rules doc lists hipertrofia as a primary goal.
     assert (

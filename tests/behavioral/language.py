@@ -425,14 +425,21 @@ def find_english_leaks(reply: str) -> set[str]:
     # A break point is glue or a separator, undecidable per character:
     # judge both readings per occurrence. A leak under either reading is
     # real unless the OTHER reading resolves that very span into an
-    # allowlisted name ("Muscle-up­s") — a clean name elsewhere in the
-    # reply never launders a separate occurrence of the same word.
+    # allowlisted name whose span contains a break point ("Muscle-up­s").
+    # A name span with no break point inside proves nothing about the
+    # leak — the ambiguity that produced it lies elsewhere in the reply
+    # (a shattered modifier or lexicon term must not launder mid-chain
+    # strength), and a clean name elsewhere never launders a separate
+    # occurrence of the same word.
     split_leaks, split_names = _scan(*_reading(reply, _SPLIT_TABLE))
+    breaks = {i for i, ch in enumerate(reply) if ch in _BREAK_POINTS}
+    def qualified(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        return [(s, e) for s, e in spans if any(s <= p < e for p in breaks)]
     return {
         term
         for occurrences, other_names in (
-            (glued_leaks, split_names),
-            (split_leaks, glued_names),
+            (glued_leaks, qualified(split_names)),
+            (split_leaks, qualified(glued_names)),
         )
         for term, start, end in occurrences
         if not any(ns < end and start < ne for ns, ne in other_names)
