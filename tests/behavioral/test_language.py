@@ -209,6 +209,16 @@ def test_mid_chain_strength_flags_in_glued_and_multiword_shapes():
     }
 
 
+def test_lexicon_compounds_before_a_chain_also_mark_strength_mid_chain():
+    # Round-13: any lexicon hit OVERLAPPING the previous token counts, not
+    # only one ending exactly at the token boundary.
+    assert find_english_leaks("muscle-gain strength band pull-apart") == {"muscle", "strength"}
+    assert find_english_leaks("stamina-focused strength-band-pull-apart") == {"stamina", "strength"}
+    assert find_english_leaks("lean-out strength band pull-apart") == {"lean", "strength"}
+    assert find_english_leaks("bulking-up strength band pull-apart") == {"bulking", "strength"}
+    assert find_english_leaks("muscle-building strength band pull-apart") == {"muscle", "strength"}
+
+
 def test_hypertrophy_is_a_leak():
     # Round-11 P2: the rules doc lists hipertrofia as a primary goal.
     assert (

@@ -157,8 +157,11 @@ def _hyphen_parts(start: int, token_text: str) -> list[tuple[int, int, str]]:
     return parts
 
 
-def _lexicon_hit_ends_at(hits: list[tuple[str, int, int]], end: int) -> bool:
-    return any(hit_end == end for _, _, hit_end in hits)
+def _lexicon_hit_overlaps(hits: list[tuple[str, int, int]], start: int, end: int) -> bool:
+    # Any lexicon hit intersecting the token's span — exact ends ("weight
+    # loss") and prefix-shaped compounds ("muscle-gain", "stamina-focused")
+    # alike.
+    return any(hit_start < end and hit_end > start for _, hit_start, hit_end in hits)
 
 
 def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tuple[int, int]]:
@@ -203,12 +206,12 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
             parts.extend(_hyphen_parts(tok.start(), prefix))
         # Strength is clean only as the FIRST chain part; cut the span after
         # the last mid-chain strength (preceded by modifier parts, or by a
-        # lexicon hit ending at the previous token's end — "weight loss",
-        # "stamina-endurance").
+        # lexicon hit overlapping the previous token — "weight loss",
+        # "stamina-endurance", "muscle-gain").
         preceded_by_lexicon = (
             first > 0
             and _HORIZONTAL_GAP_RE.fullmatch(text[tokens[first - 1].end() : tokens[first].start()])
-            and _lexicon_hit_ends_at(hits, tokens[first - 1].end())
+            and _lexicon_hit_overlaps(hits, tokens[first - 1].start(), tokens[first - 1].end())
         )
         cut = None
         for idx, (_, _, word) in enumerate(parts):
