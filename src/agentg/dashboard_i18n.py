@@ -200,6 +200,8 @@ STRINGS = {
         "apply_all": "Todos los miembros",
         "apply": "Aplicar",
         "no_members_to_apply": "No hay miembros disponibles.",
+        "preset_no_master": "Escribe el plan del Preset antes de aplicarlo.",
+        "preset_no_selection": "Elige al menos un miembro.",
     },
     "en": {
         "settings": "Settings",
@@ -329,6 +331,8 @@ STRINGS = {
         "apply_all": "All members",
         "apply": "Apply",
         "no_members_to_apply": "There are no members to apply it to.",
+        "preset_no_master": "Write the preset's plan before applying it.",
+        "preset_no_selection": "Pick at least one member.",
     },
 }
 

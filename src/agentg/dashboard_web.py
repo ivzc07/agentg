@@ -102,6 +102,7 @@ from agentg.models import Gym, Member, RoutinePreset
 from agentg.routines import (
     DuplicatePresetNameError,
     ExerciseSpec,
+    NoPresetMasterError,
     StaleRoutineError,
     UnknownExercisesError,
     WorkoutSpec,
@@ -1663,25 +1664,43 @@ def build_app(
             return _not_found()
         if await store.preset_for_gym(gym.id, preset_id) is None:
             return _not_found()
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+
+        async def reject(error: str, status: int) -> web.Response:
+            response = web.Response(
+                status=status,
+                text=_presets_page(
+                    gym.name,
+                    await store.presets(gym.id),
+                    await store.preset_members(gym.id),
+                    lang,
+                    "/presets",
+                    error=error,
+                ),
+                content_type="text/html",
+            )
+            set_session(response, coach_member.id, gym.id)
+            return response
+
         form = await request.post()
-        apply_all = bool(
-            form.get("apply_all")
-            or form.get("all_members")
-            or form.get("todos")
-            or form.get("mode") == "all"
-        )
+        apply_all = bool(form.get("apply_all"))
         try:
-            raw_ids = form.getall("member_ids", []) + form.getall("member_id", [])
+            raw_ids = form.getall("member_ids", [])
             member_ids = [int(value) for value in raw_ids if isinstance(value, str)]
         except ValueError:
             return _not_found()
         if apply_all:
             member_ids = [member.id for member in await store.preset_members(gym.id)]
         elif not member_ids:
-            return _not_found()
+            return await reject(t["preset_no_selection"], 400)
         try:
             copies = await store.apply_preset(gym.id, preset_id, coach_member.id, member_ids)
-        except (StaleRoutineError, ValueError):
+        except NoPresetMasterError:
+            return await reject(t["preset_no_master"], 400)
+        except StaleRoutineError:
+            return await reject(t["stale_error"], 409)
+        except ValueError:
             return _not_found()
         for copy in copies:
             try:

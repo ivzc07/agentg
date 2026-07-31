@@ -5,6 +5,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
+from agentg.dashboard_web import STALE_ERROR
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
 from agentg.models import Member
@@ -176,3 +177,43 @@ async def test_apply_rejects_a_foreign_or_coach_member_without_writing(env):
         )
         assert response.status == 404
         assert await env.routines.active_routine(member_id) is None
+
+
+async def test_apply_without_a_master_rerenders_presets_with_a_coach_error(env):
+    preset = await env.routines.create_preset(env.gym.id, "Beginner")
+    member = await add_member(env, "Luis", "2")
+    response = await env.client.post(
+        f"/presets/{preset.id}/apply",
+        data={"member_ids": str(member.id)},
+        cookies=cookies(env),
+    )
+    assert response.status == 400
+    assert "Escribe el plan del Preset antes de aplicarlo." in await response.text()
+
+
+async def test_apply_without_selection_rerenders_presets_with_a_coach_error(env):
+    preset_id = await create_master(env)
+    response = await env.client.post(
+        f"/presets/{preset_id}/apply", data={}, cookies=cookies(env)
+    )
+    assert response.status == 400
+    assert "Elige al menos un miembro." in await response.text()
+
+
+async def test_stale_apply_rerenders_presets_with_the_stale_error(env, monkeypatch):
+    preset_id = await create_master(env)
+    member = await add_member(env, "Luis", "2")
+
+    async def stale(*args, **kwargs):
+        from agentg.routines import StaleRoutineError
+
+        raise StaleRoutineError("concurrent apply")
+
+    monkeypatch.setattr(env.store, "apply_preset", stale)
+    response = await env.client.post(
+        f"/presets/{preset_id}/apply",
+        data={"member_ids": str(member.id)},
+        cookies=cookies(env),
+    )
+    assert response.status == 409
+    assert STALE_ERROR in await response.text()
