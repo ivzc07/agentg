@@ -1126,7 +1126,7 @@ class RoutineEditorView:
 ROUTINE_NOTICE = "Tu coach {coach} actualizó tu Rutina 📋\n{plan}"
 
 
-def _days_from_view(view: MemberPage) -> list[EditorDay]:
+def _days_from_view(view: MemberPage | RoutineEditorView) -> list[EditorDay]:
     """The active Routine as editor blocks, exercises back to one-per-line."""
     days: list[EditorDay] = []
     for day in view.routine:
@@ -1321,7 +1321,7 @@ def _fresh_version_block(fresh_days: list[EditorDay], lang: str) -> str:
 
 def _routine_editor_page(
     gym_name: str,
-    view: RoutineEditorView,
+    view: MemberPage | RoutineEditorView,
     days: list[EditorDay],
     catalog: list[str],
     lang: str,
@@ -1439,7 +1439,7 @@ def _presets_page(
     if not presets:
         cards = f'<div class="emptystate"><h2>{t["no_presets"]}</h2></div>'
     else:
-        cards = []
+        card_blocks: list[str] = []
         for preset in presets:
             member_choices = "".join(
                 f'<label><input type="checkbox" name="member_ids" value="{member.id}">'
@@ -1479,12 +1479,12 @@ def _presets_page(
                 f'data-confirm="{escape(t["retire_confirm"], quote=True)}">'
                 f'<button type="submit">{t["retire_preset"]}</button></form>'
             )
-            cards.append(
+            card_blocks.append(
                 f'<section class="pcard"><h2>{escape(preset.name)}{default_tag} '
                 f'<a class="edit" href="/presets/{preset.id}/routine">{t["edit_preset"]}</a></h2>'
                 f'{apply_form}<div class="actions">{default_form}{retire_form}</div></section>'
             )
-        cards = "".join(cards)
+        cards = "".join(card_blocks)
     body = f'<main class="editor-wrap">{notice}{create}{cards}</main>'
     content = f"""{_chrome(gym_name, t, next_path, lang, active="presets")}
 {body}"""
@@ -1930,9 +1930,9 @@ def build_app(
             except ValueError:
                 error = t["preset_name_empty"]
             else:
-                response = web.HTTPFound("/presets")
-                set_session(response, member.id, gym.id)
-                raise response
+                found = web.HTTPFound("/presets")
+                set_session(found, member.id, gym.id)
+                raise found
         response = web.Response(
             status=400,
             text=_presets_page(
