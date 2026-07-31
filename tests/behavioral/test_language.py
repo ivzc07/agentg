@@ -123,6 +123,16 @@ def test_equipment_modifiers_accept_plural_s():
         assert find_english_leaks(f"strength {equipment} pull-apart") == set(), equipment
 
 
+def test_a_core_suffix_prefix_must_be_equipment_or_variant_words():
+    # Round-6: a lexicon term glued to a core is a leak, not a name prefix.
+    assert find_english_leaks("muscle-pull-up") == {"muscle"}
+    assert find_english_leaks("strength-pull-up") == {"strength"}
+    assert find_english_leaks("fat-pull-up") == {"fat"}
+    assert find_english_leaks("lean-muscle-up") == {"lean", "muscle"}
+    assert find_english_leaks("weight-loss-pull-up") == {"weight loss"}
+    assert find_english_leaks("muscle-building-pull-up") == {"muscle"}
+
+
 # --- what actually guards the behavior: the Agent's language rule ---
 
 

@@ -69,22 +69,43 @@ EXERCISE_NAME_CORES: frozenset[str] = frozenset(
 # ("strength band pull-apart") — never alone next to a core.
 _EQUIPMENT_MODIFIERS = frozenset({"band", "bar", "ring", "cable"})
 
-
-def _is_name_core(token: str) -> bool:
-    # Exact allowlist match, or the allowlisted core as a hyphen SUFFIX of a
-    # longer token ("bar-muscle-up", "kipping-muscle-up"); plural "s" allowed.
-    lowered = token.lower()
-    forms = [lowered, lowered[:-1]] if lowered.endswith("s") else [lowered]
-    return any(
-        form in EXERCISE_NAME_CORES
-        or any(form.endswith(f"-{core}") for core in EXERCISE_NAME_CORES)
-        for form in forms
-    )
+# Variant words allowed in a hyphen-joined prefix chain ("kipping-muscle-up").
+_VARIANT_WORDS = frozenset({"kipping", "strict", "weighted", "banded"})
 
 
 def _equipment_base(word: str) -> str:
     lowered = word.lower()
     return lowered[:-1] if lowered.endswith("s") else lowered  # plural ok
+
+
+def _is_allowed_prefix(parts: list[str]) -> bool:
+    # Every prefix part must be an equipment modifier or variant word;
+    # "strength" only immediately before an equipment part — a lexicon term
+    # glued to a core ("muscle-pull-up") is a leak, not a name.
+    for i, part in enumerate(parts):
+        if _equipment_base(part) in _EQUIPMENT_MODIFIERS or part in _VARIANT_WORDS:
+            continue
+        following = parts[i + 1] if i + 1 < len(parts) else ""
+        if part == "strength" and _equipment_base(following) in _EQUIPMENT_MODIFIERS:
+            continue
+        return False
+    return True
+
+
+def _is_name_core(token: str) -> bool:
+    # Exact allowlist match, or the allowlisted core as a hyphen SUFFIX of a
+    # longer token whose prefix parts are all equipment/variant words
+    # ("bar-muscle-up", "kipping-muscle-up", "strength-band-pull-apart");
+    # plural "s" allowed.
+    lowered = token.lower()
+    forms = [lowered, lowered[:-1]] if lowered.endswith("s") else [lowered]
+    for form in forms:
+        if form in EXERCISE_NAME_CORES:
+            return True
+        for core in EXERCISE_NAME_CORES:
+            if form.endswith(f"-{core}") and _is_allowed_prefix(form[: -len(core) - 1].split("-")):
+                return True
+    return False
 
 
 def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
