@@ -79,10 +79,11 @@ _ZS_SPACES = tuple(map(chr, (0x00A0, 0x1680, *range(0x2000, 0x200B), 0x202F, 0x2
 # Invisible break-point characters: soft hyphen, ZWSP, the joiners and
 # directional marks, word joiner and friends, BOM. Whether one glues its
 # neighbors ("mus­cle" is muscle) or separates them ("weight­loss" is
-# weight loss) is undecidable per character, so the leak scan runs the
-# full pipeline over BOTH readings and unions the results — a leak found
-# under either reading is a leak.
-_BREAK_POINTS = tuple(
+# weight loss) is undecidable per character, so the leak scan judges BOTH
+# readings per occurrence in the reply's own coordinates: a leak found
+# under either reading is real unless the other reading resolves that
+# very span into an allowlisted name.
+_BREAK_POINTS = frozenset(
     map(chr, (0x00AD, *range(0x200B, 0x2010), *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A), 0xFEFF))
 )
 
@@ -95,8 +96,35 @@ _BASE_TABLE = (
 _NORMALIZE = str.maketrans(_BASE_TABLE | {cp: None for cp in _BREAK_POINTS})
 _NORMALIZE_SPLIT = str.maketrans(_BASE_TABLE | {cp: "-" for cp in _BREAK_POINTS})
 # Break points folded to "-" next to a real hyphen would forge "--" and
-# shatter allowlisted cores; collapse the runs before matching.
+# shatter allowlisted cores; runs are collapsed (with an offset map, so
+# every match still lands on original reply coordinates).
 _HYPHEN_RUN = re.compile(r"-{2,}")
+
+
+def _reading(reply: str, table: dict[str, str | None]) -> tuple[str, list[int]]:
+    """One normalized reading plus a map from its indices back to the
+    reply's. Hyphen runs collapse only when a break point contributed a
+    hyphen to the run — an all-ASCII "--" is a real dash-class separator
+    and must survive."""
+    chars: list[str] = []
+    origin: list[int] = []
+    run_tainted = False
+    for i, ch in enumerate(reply):
+        out = table.get(ch, ch)
+        if out is None:
+            continue
+        if out == "-":
+            tainted = ch in _BREAK_POINTS
+            if chars and chars[-1] == "-" and (tainted or run_tainted):
+                run_tainted = True
+                continue
+            run_tainted = tainted
+        else:
+            run_tainted = False
+        chars.append(out)
+        origin.append(i)
+    origin.append(len(reply))  # so span ends map cleanly
+    return "".join(chars), origin
 
 _PATTERNS = {term: _compile(term) for term in ENGLISH_TRAINING_VOCAB}
 
@@ -368,33 +396,44 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
     return [(entry["start"], entry["end"]) for entry in entries]
 
 
-def _scan(text: str) -> tuple[set[str], set[str]]:
-    """(leaking terms, fully name-exempt terms) for one reading."""
+def _scan(text: str, origin: list[int]) -> tuple[list[tuple[str, int, int]], list[tuple[int, int]]]:
+    """(leak occurrences, name spans) for one reading, both expressed in
+    the original reply's coordinates via ``origin``."""
     hits = [
         (term, match.start(), match.end())
         for term, pattern in _PATTERNS.items()
         for match in pattern.finditer(text)
     ]
     names = _exercise_name_spans(text, hits)
-    leaks = {
-        term
+    leaks = [
+        (term, origin[start], origin[end - 1] + 1)
         for term, start, end in hits
         if not any(span_start <= start and end <= span_end for span_start, span_end in names)
-    }
-    return leaks, {term for term, _, _ in hits} - leaks
+    ]
+    return leaks, [(origin[start], origin[end - 1] + 1) for start, end in names]
+
+
+_GLUED_TABLE = _BASE_TABLE | {cp: None for cp in _BREAK_POINTS}
+_SPLIT_TABLE = _BASE_TABLE | {cp: "-" for cp in _BREAK_POINTS}
 
 
 def find_english_leaks(reply: str) -> set[str]:
     """English training vocabulary found in a reply — empty means clean."""
-    glued_leaks, glued_exempt = _scan(reply.translate(_NORMALIZE))
+    glued_leaks, glued_names = _scan(*_reading(reply, _GLUED_TABLE))
     if not any(cp in reply for cp in _BREAK_POINTS):
-        return glued_leaks
+        return {term for term, _, _ in glued_leaks}
     # A break point is glue or a separator, undecidable per character:
-    # judge both readings. A term leaking under either reading leaks —
-    # unless some reading resolves every occurrence of it into an
-    # allowlisted name, which proves the break point sat inside a
-    # legitimate name ("Muscle-up­s") rather than hiding goal vocab.
-    split_leaks, split_exempt = _scan(
-        _HYPHEN_RUN.sub("-", reply.translate(_NORMALIZE_SPLIT))
-    )
-    return (glued_leaks | split_leaks) - (glued_exempt | split_exempt)
+    # judge both readings per occurrence. A leak under either reading is
+    # real unless the OTHER reading resolves that very span into an
+    # allowlisted name ("Muscle-up­s") — a clean name elsewhere in the
+    # reply never launders a separate occurrence of the same word.
+    split_leaks, split_names = _scan(*_reading(reply, _SPLIT_TABLE))
+    return {
+        term
+        for occurrences, other_names in (
+            (glued_leaks, split_names),
+            (split_leaks, glued_names),
+        )
+        for term, start, end in occurrences
+        if not any(ns < end and start < ne for ns, ne in other_names)
+    }

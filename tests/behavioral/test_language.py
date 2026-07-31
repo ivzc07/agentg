@@ -450,9 +450,13 @@ def test_a_break_point_inside_a_recognized_name_stays_clean(breaker: str):
 
 
 def test_a_name_exemption_never_covers_a_separate_leak():
-    # The cross-reading exemption is per-occurrence in spirit: a clean
-    # name cannot launder the same word leaking elsewhere in the reply.
+    # The cross-reading exemption is per-occurrence: a clean name cannot
+    # launder the same word leaking elsewhere in the reply.
     assert find_english_leaks("gana muscle y haz Muscle-up­s") == {"muscle"}
+    # …including when the leak itself is break-shattered while a clean
+    # ASCII name of the same word sits nearby.
+    assert find_english_leaks("muscle​gain y Muscle-ups") == {"muscle"}
+    assert find_english_leaks("mus­cle y haz Muscle-ups") == {"muscle"}
 
 
 def test_hypertrophy_is_a_leak():
