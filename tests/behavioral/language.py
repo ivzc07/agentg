@@ -132,33 +132,28 @@ def _absorbable(word: str, following: str) -> bool:
     return _is_allowed_prefix(word.split("-"))
 
 
-_HORIZONTAL_GAP_RE = re.compile(r"[^\S\n\r]+")
+_HORIZONTAL_GAP_RE = re.compile(r"[ \t]+")
 
 
 def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
-    """Spans the catalog carve-out covers: an allowlisted name core plus at
-    most two immediately preceding modifier tokens. No right-side absorption,
-    no generic neighbor walking, and no absorption across newlines — a name
-    mention broken across lines is not one name."""
+    """Spans the catalog carve-out covers: an allowlisted name core plus the
+    modifier tokens immediately preceding it. The walk is bounded by the
+    modifier rule itself, not a count; no right-side absorption, no generic
+    neighbor walking, and gaps are spaces/tabs only — a name mention broken
+    across lines or separator characters is not one name."""
     tokens = list(_TOKEN_RE.finditer(text))
     spans = []
     for i, tok in enumerate(tokens):
         if not _is_name_core(tok.group()):
             continue
         start = tok.start()
-        absorbed = 0
         k = i - 1
-        while (
-            k >= 0
-            and absorbed < 2
-            and _HORIZONTAL_GAP_RE.fullmatch(text[tokens[k].end() : start])
-        ):
+        while k >= 0 and _HORIZONTAL_GAP_RE.fullmatch(text[tokens[k].end() : start]):
             word = tokens[k].group().lower()
             following = tokens[k + 1].group().lower()
             if not _absorbable(word, following):
                 break
             start = tokens[k].start()
-            absorbed += 1
             k -= 1
         spans.append((start, tok.end()))
     return spans

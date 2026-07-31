@@ -160,6 +160,21 @@ def test_absorption_does_not_cross_newlines():
     assert find_english_leaks("para ganar strength\n\nbar-muscle-up") == {"strength"}
 
 
+def test_absorption_gaps_are_space_or_tab_only():
+    # Round-9: \v, \f, NEL, line separators are not name-internal gaps.
+    assert find_english_leaks("strength\x85band-pull-apart") == {"strength"}
+    assert find_english_leaks("strength bar-muscle-up") == {"strength"}
+    assert find_english_leaks("strength\vband pull-apart") == {"strength"}
+    assert find_english_leaks("strength\fband-pull-apart") == {"strength"}
+
+
+def test_the_space_walk_is_bounded_by_the_modifier_rule_not_a_count():
+    # Round-9: longer modifier chains are clean like their hyphenated twins.
+    assert find_english_leaks("strength band bar pull-apart") == set()
+    assert find_english_leaks("strength bands bar pull-apart") == set()
+    assert find_english_leaks("strength cable bar pull-through") == set()
+
+
 # --- what actually guards the behavior: the Agent's language rule ---
 
 
