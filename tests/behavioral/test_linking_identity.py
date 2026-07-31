@@ -232,6 +232,49 @@ def test_not_only_affirms_instead_of_denying():
     assert drift is not None and "link" in drift
 
 
+# --- conjunctions end the phrase; only a contrast opens one more ---
+
+
+def test_a_coach_claim_followed_by_the_invite_ask_stays_clean():
+    assert identity_drift("I'm a coach and here is the link") is None
+    assert identity_drift("I'm a coach and the link is below") is None
+    assert identity_drift("Soy un entrenador y el enlace de invitación está en recepción") is None
+
+
+def test_a_denied_phrase_does_not_reopen_on_arbitrary_later_noun_phrases():
+    assert identity_drift("I'm not a coach who sends the link") is None
+    assert identity_drift("I'm not a bot so ask for the invite link") is None
+    assert identity_drift("I'm not a coach for the link") is None
+
+
+def test_a_contrast_or_correlative_opens_exactly_one_more_phrase():
+    drift = identity_drift("I'm not only a coach but a bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("I'm not just a coach but a link")
+    assert drift is not None and "link" in drift
+    drift = identity_drift("I'm a coach but a bot")
+    assert drift is not None and "bot" in drift
+
+
+def test_a_corrective_without_but_still_claims():
+    drift = identity_drift("I'm not a bot just a link")
+    assert drift is not None and "link" in drift
+
+
+def test_fillers_do_not_hide_a_drift_claim():
+    for reply in (
+        "I'm definitely a bot",
+        "I'm basically a bot",
+        "I'm currently a bot",
+        "Soy realmente un bot",
+        "Soy yo el enlace",
+        "I'm here as a bot",
+        "I'm here as your link",
+        "I'm such a bot",
+    ):
+        assert identity_drift(reply) is not None, reply
+
+
 # --- the prompt pins the one identity ---
 
 
