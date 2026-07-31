@@ -238,3 +238,25 @@ async def test_runtime_routes_the_command_to_the_door_not_the_agent(stores, engi
     assert isinstance(reply, Reply)
     assert "/login/" in reply
     run.assert_not_awaited()  # the Agent never sees the command
+
+
+async def test_the_factory_wires_the_injected_clock_into_the_dashboard_store(engine):
+    """FLAG_EXPIRY is compared against the DashboardStore's clock — a Stores
+    built with a fake clock must age flags by fake time, not wall time
+    (review on PR #120). The fake clock starts far in the future so a
+    wall-clock store can never accidentally agree."""
+    from datetime import UTC, datetime
+
+    clock = FakeClock(start=datetime(2099, 1, 1, tzinfo=UTC))
+    stores = Stores.from_engine(engine, clock=clock)
+    await stores.linking.ensure_schema()
+    gym = await stores.linking.create_gym("Iron Temple")
+    member = await stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    await stores.notes.remember_safety(member.id, gym.id, "sharp knee pain")
+
+    rows, _ = await stores.dashboard.roster(gym.id)
+    assert rows[0].has_safety_flag  # fresh flag marks
+
+    clock.advance(timedelta(days=31))
+    rows, _ = await stores.dashboard.roster(gym.id)
+    assert not rows[0].has_safety_flag  # 30 days on the fake clock: cleared

@@ -155,11 +155,11 @@ async def test_an_expired_unacknowledged_flag_reads_expired_never_seen(env):
     assert "caducada, nunca vista" in html
 
 
-async def test_tick_off_of_an_unknown_or_foreign_note_is_the_shared_404(env):
+async def test_tick_off_of_a_foreign_gyms_flag_is_the_shared_404(env):
     member = await env.add_member("Ana")
     outsider_gym = await env.linking.create_gym("Other Gym")
     outsider = await env.linking.link_member(outsider_gym.id, "Rex", "telegram", "902")
-    foreign = await _notes(env).remember(outsider.id, outsider_gym.id, "safety", "dizzy")
+    foreign = await _notes(env).remember_safety(outsider.id, outsider_gym.id, "dizzy")
 
     response = await env.client.post(
         f"/members/{member.id}/flags/{foreign.id}/tick-off",
@@ -169,6 +169,23 @@ async def test_tick_off_of_an_unknown_or_foreign_note_is_the_shared_404(env):
     assert response.status == 404
     note = await _notes(env).active(outsider.id)
     assert note[0].acknowledged_at is None
+
+
+async def test_tick_off_of_another_members_flag_is_the_shared_404(env):
+    """Same gym, wrong Member: the member_id predicate is what stops a Coach
+    stamping one Member's flag through another's page."""
+    ana = await env.add_member("Ana")
+    bea = await env.add_member("Bea")
+    beas_flag = await _flag(env, bea)
+
+    response = await env.client.post(
+        f"/members/{ana.id}/flags/{beas_flag.id}/tick-off",
+        cookies=_cookie(env),
+        allow_redirects=False,
+    )
+    assert response.status == 404
+    note = next(n for n in await _notes(env).active(bea.id) if n.kind == "safety")
+    assert note.acknowledged_at is None and note.acknowledged_by_member_id is None
 
 
 async def test_tick_off_requires_a_coach_session(env):
@@ -254,25 +271,27 @@ async def test_tick_off_rejects_an_unknown_note_id(env):
 
 
 async def test_concurrent_ticks_keep_the_first_stamp(env):
-    """Two coaches ticking at once must not last-writer-wins the stamp: the
-    ack is one atomic UPDATE guarded on ``acknowledged_at IS NULL``, so the
-    loser is the idempotent no-op (review on PR #120)."""
+    """A concurrent tick after the first must be the idempotent no-op, even
+    at the same clock instant: the ack is one atomic UPDATE guarded on
+    ``acknowledged_at IS NULL``, so last-writer-wins is impossible (review
+    on PR #120)."""
     import asyncio
 
     member = await env.add_member("Ana")
     coach2 = await env.linking.link_member(env.gym.id, "Coach Bea", "telegram", "2")
     await env.linking.set_coach(coach2.id)
     note = await _flag(env, member)
+    await env.store.acknowledge_flag(env.gym.id, member.id, note.id, env.coach.id)
 
+    # Same instant, two more writers — neither may move the stamp.
     await asyncio.gather(
-        env.store.acknowledge_flag(env.gym.id, member.id, note.id, env.coach.id),
+        env.store.acknowledge_flag(env.gym.id, member.id, note.id, coach2.id),
         env.store.acknowledge_flag(env.gym.id, member.id, note.id, coach2.id),
     )
 
     stored = next(n for n in await _notes(env).active(member.id) if n.kind == "safety")
+    assert stored.acknowledged_by_member_id == env.coach.id
     assert stored.acknowledged_at == env.clock.now
-    # One winner, and exactly one: whoever the atomic UPDATE took first.
-    assert stored.acknowledged_by_member_id in {env.coach.id, coach2.id}
 
 
 async def test_a_second_tick_keeps_the_first_coaches_stamp(env):

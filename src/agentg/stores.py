@@ -46,7 +46,7 @@ class Stores:
                 checkins=CheckinStore(engine),
                 demos=DemoStore(engine),
                 forget=ForgetStore(engine),
-                dashboard=DashboardStore(engine),
+                dashboard=DashboardStore(engine, clock=clock),
             )
         return cls(
             linking=LinkingStore(engine),
