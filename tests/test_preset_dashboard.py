@@ -5,7 +5,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
-from agentg.dashboard_web import STALE_ERROR
+from agentg.dashboard_web import CONSEQUENCE_LINE, STALE_ERROR
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
 from agentg.models import Member
@@ -125,6 +125,19 @@ async def test_preset_editor_reuses_validation_and_unknown_ids_are_404(env):
     assert response.status == 409
     response = await env.client.get("/presets/not-an-id/routine", cookies=cookies(env))
     assert response.status == 404
+
+
+async def test_preset_master_editor_shows_its_own_consequence_not_the_member_warning(env):
+    preset_id = await create_master(env)
+
+    response = await env.client.get(
+        f"/presets/{preset_id}/routine", cookies=cookies(env)
+    )
+
+    assert response.status == 200
+    body = await response.text()
+    assert "Guardar actualiza a todos los miembros que siguen este Preset." in body
+    assert CONSEQUENCE_LINE not in body
 
 
 async def test_apply_multi_and_all_notifies_each_member_and_never_coach(env, caplog):

@@ -117,6 +117,9 @@ STRINGS = {
         "chip_consequence": (
             "Al guardar, este plan pasa a ser tuyo — el agente dejará de ajustarlo."
         ),
+        "preset_master_consequence": (
+            "Guardar actualiza a todos los miembros que siguen este Preset."
+        ),
         "editor_title": "Rutina de {name}",
         "stale_error": (
             "Esta Rutina cambió mientras la editabas — aquí tienes la versión "
@@ -256,6 +259,7 @@ STRINGS = {
         "chip_coach": "Coach-authored",
         "chip_coach_named": "Coach-authored — {name}",
         "chip_consequence": "Saving makes this plan yours — the Agent will stop adjusting it.",
+        "preset_master_consequence": "Saving updates every Member still on this Preset.",
         "editor_title": "{name}'s routine",
         "stale_error": (
             "This routine changed while you were editing — here is the current "

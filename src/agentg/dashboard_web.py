@@ -1014,15 +1014,20 @@ def _routine_editor_page(
     action: str | None = None,
     back_href: str | None = None,
     title_key: str = "editor_title",
+    consequence_key: str | None = None,
 ) -> str:
     t = STRINGS[lang]
     chip = _ownership_chip(
         view.coach_authored, view.routine_author, lang, view.routine_preset_name
     )
+    if consequence_key is None:
+        consequence_key = (
+            "chip_consequence"
+            if not view.coach_authored or view.routine_preset_name is not None
+            else None
+        )
     consequence = (
-        f'<p class="consequence">{t["chip_consequence"]}</p>'
-        if not view.coach_authored or view.routine_preset_name is not None
-        else ""
+        f'<p class="consequence">{t[consequence_key]}</p>' if consequence_key else ""
     )
     notice = f'<p class="error">{escape(error)}</p>' if error else ""
     blocks = "".join(_editor_day(day, lang) for day in days) + _editor_day((None, "", ""), lang)
@@ -1590,6 +1595,7 @@ def build_app(
                 action=f"/presets/{preset.id}/routine",
                 back_href="/presets",
                 title_key="preset_editor_title",
+                consequence_key="preset_master_consequence",
             ),
             content_type="text/html",
         )
