@@ -244,3 +244,16 @@ async def test_a_member_opened_from_table_or_cards_hides_the_switcher(env):
     for view in ("table", "cards"):
         roster = await env.page(f"/?view={view}")
         assert f'href="/members/{member.id}?view={view}"' in roster
+
+
+async def test_the_header_count_is_wired_for_live_filtering(env):
+    """Issue #127: the chrome's Members (N) carries the hooks the search
+    script rewrites into "X de N" while a query is filtering."""
+    await env.add_member("Marta")
+    await env.add_member("Luis")
+
+    for view in ("table", "cards", "split"):
+        text = await env.page(f"/?view={view}")
+        assert 'id="members-count"' in text
+        assert 'data-total="2"' in text
+        assert 'data-fmt="{shown} de {total}"' in text

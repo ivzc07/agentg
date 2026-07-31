@@ -326,19 +326,32 @@ SEARCH_SCRIPT = """
 const box = document.getElementById("search");
 const lapsed = document.getElementById("lapsed");
 const nomatch = document.getElementById("no-matches");
+// The chrome's Members (N), rewritten to "X de N" while a query filters
+// (issue #127); its resting label is restored when the box empties.
+const counter = document.getElementById("members-count");
+const restingLabel = counter ? counter.textContent : "";
 const norm = (s) => s.normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").toLowerCase();
 box.addEventListener("input", () => {
   const q = norm(box.value.trim());
   let lapsedHit = false;
   let shown = 0;
+  let activeShown = 0;  // lapsed stay out of the counters (spec §The roster)
   document.querySelectorAll("[data-name]").forEach((row) => {
     const hit = !q || norm(row.dataset.name).includes(q);
     row.hidden = !hit;
-    if (hit) shown += 1;
-    if (hit && q && lapsed && lapsed.contains(row)) lapsedHit = true;
+    if (hit) {
+      shown += 1;
+      if (lapsed && lapsed.contains(row)) { if (q) lapsedHit = true; }
+      else activeShown += 1;
+    }
   });
   if (lapsed && lapsedHit) lapsed.open = true;
   if (nomatch) nomatch.hidden = shown > 0;
+  if (counter) {
+    counter.textContent = q
+      ? counter.dataset.fmt.replaceAll("{shown}", activeShown).replaceAll("{total}", counter.dataset.total)
+      : restingLabel;
+  }
 });
 """
 
@@ -368,7 +381,9 @@ def _chrome(
     search beside it on roster pages (``view`` set), the Presets and
     Settings links with an active state, and the language toggle."""
     count_html = (
-        f'<span class="count">{t["members_count"].format(n=count)}</span>' if count is not None else ""
+        f'<span class="count" id="members-count" data-total="{count}"'
+        f' data-fmt="{escape(t["match_count"], quote=True)}">'
+        f'{t["members_count"].format(n=count)}</span>' if count is not None else ""
     )
     seg = _seg(view, t) if view is not None else ""
     search = (

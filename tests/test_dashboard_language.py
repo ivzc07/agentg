@@ -312,3 +312,12 @@ async def test_the_language_toggle_sits_in_the_chrome_of_every_screen(env):
     for path in ("/", "/?view=cards", "/?view=split", f"/members/{member.id}", "/settings"):
         text = await env.page(path)
         assert 'href="/lang/en?' in text and 'href="/lang/es?' in text
+
+
+async def test_the_live_count_format_follows_the_page_language(env):
+    """Issue #127: the match-count template localizes with the page."""
+    en = await env.page("/", headers={"Accept-Language": "en"})
+    assert 'data-fmt="{shown} of {total}"' in en
+
+    es = await env.page("/")
+    assert 'data-fmt="{shown} de {total}"' in es
