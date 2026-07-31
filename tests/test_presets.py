@@ -6,6 +6,7 @@ master rows out of every Member-facing read.
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from agentg.db import create_engine
 from agentg.forget import ForgetStore
@@ -122,6 +123,32 @@ async def test_applying_a_preset_without_a_master_is_typed_and_does_not_save(env
     with pytest.raises(NoPresetMasterError):
         await env.routines.apply_preset(preset.id, env.gym.id, env.coach.id, [member.id])
     assert await env.routines.active_routine(member.id) is None
+
+
+async def test_apply_preset_rolls_back_the_batch_on_a_late_write_conflict(env, monkeypatch):
+    preset = await env.routines.create_preset(env.gym.id, "Beginner")
+    await env.routines.save_preset_master(
+        preset.id, env.gym.id, env.coach.id, plan(), base_routine_id=None
+    )
+    first = await env.linking.link_member(env.gym.id, "Luis", "telegram", "2")
+    second = await env.linking.link_member(env.gym.id, "Mara", "telegram", "3")
+    original = env.routines._save
+    calls = 0
+
+    async def conflict_on_second(db, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise IntegrityError("concurrent Routine", {}, Exception("unique"))
+        return await original(db, *args, **kwargs)
+
+    monkeypatch.setattr(env.routines, "_save", conflict_on_second)
+    with pytest.raises(ValueError):
+        await env.routines.apply_preset(
+            preset.id, env.gym.id, env.coach.id, [first.id, second.id]
+        )
+    assert await env.routines.active_routine(first.id) is None
+    assert await env.routines.active_routine(second.id) is None
 
 
 async def test_master_rows_do_not_change_roster_or_attendance(env):

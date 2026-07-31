@@ -162,3 +162,17 @@ async def test_member_chip_prefers_preset_name_over_coach_authored(env):
     body = await response.text()
     assert "Preset: Beginner" in body
     assert "Escrita por un coach" not in body
+
+
+async def test_apply_rejects_a_foreign_or_coach_member_without_writing(env):
+    preset_id = await create_master(env)
+    foreign_gym = await env.linking.create_gym("Other Gym")
+    foreign_member = await env.linking.link_member(foreign_gym.id, "Mara", "telegram", "7")
+    for member_id in (foreign_member.id, env.coach.id):
+        response = await env.client.post(
+            f"/presets/{preset_id}/apply",
+            data={"member_ids": str(member_id)},
+            cookies=cookies(env),
+        )
+        assert response.status == 404
+        assert await env.routines.active_routine(member_id) is None

@@ -1558,12 +1558,13 @@ def build_app(
         if preset is None:
             return _not_found()
         master = await store.preset_master(preset.id)
+        view = _preset_editor_view(preset, master)
         lang = _lang_of(request)
         response = web.Response(
             text=_routine_editor_page(
                 gym.name,
-                _preset_editor_view(preset, master),
-                _days_from_view(_preset_editor_view(preset, master)),
+                view,
+                _days_from_view(view),
                 await store.catalog_exercises(),
                 lang,
                 request.rel_url.path_qs,

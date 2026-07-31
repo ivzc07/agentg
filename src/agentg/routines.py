@@ -385,9 +385,9 @@ class RoutineStore:
             for workout in master_workouts
         ]
         copies: list[AppliedCopy] = []
-        for member_id in unique_member_ids:
-            async with self._sessions() as db:
-                try:
+        async with self._sessions() as db:
+            try:
+                for member_id in unique_member_ids:
                     routine = await self._save(
                         db,
                         member_id,
@@ -397,12 +397,14 @@ class RoutineStore:
                         created_by_member_id=coach_member_id,
                         expected_active_id=REPLACE_ACTIVE,
                         preset_id=preset_id,
+                        commit=False,
                     )
-                except IntegrityError:
-                    raise StaleRoutineError(
-                        "the Member's Routine changed while applying the Preset"
-                    ) from None
-            copies.append(AppliedCopy(member_id, list(specs), routine.id))
+                    copies.append(AppliedCopy(member_id, list(specs), routine.id))
+                await db.commit()
+            except IntegrityError:
+                raise StaleRoutineError(
+                    "the Member's Routine changed while applying the Preset"
+                ) from None
         return copies
 
     async def _save(
@@ -416,6 +418,7 @@ class RoutineStore:
         created_by_member_id: int | None,
         expected_active_id: int | None | _ReplaceActive,
         preset_id: int | None = None,
+        commit: bool = True,
     ) -> Routine:
         """The writes of ``save_routine`` inside an already-open transaction.
 
@@ -529,7 +532,8 @@ class RoutineStore:
                         reps=exercise_spec.reps,
                     )
                 )
-        await db.commit()
+        if commit:
+            await db.commit()
         return routine
 
     async def active_routine(self, member_id: int) -> dict[str, Any] | None:
