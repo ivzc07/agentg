@@ -385,6 +385,47 @@ def test_the_fronted_no_affirmer_check_survives_fillers():
     assert drift is not None and "bot" in drift
 
 
+# --- score on role close; conjunction clause joins; correlatives ---
+
+
+def test_a_conjunction_before_a_non_np_right_side_is_a_clause_join():
+    assert identity_drift("I'm a coach and here's the invite link") is None
+    assert identity_drift("I'm a coach and there's the link") is None
+    assert identity_drift("I'm a coach and get the invite link") is None
+    assert identity_drift("Soy un entrenador y pide el enlace") is None
+
+
+def test_a_closed_drift_head_is_scored_whatever_follows():
+    for reply in (
+        "I'm a coach and a bot and here is the invite",
+        "I'm a coach and a bot and a link",
+        "I'm not a coach but a bot and here is the link",
+        "Soy un entrenador y un bot y aquí está el enlace",
+        "Soy un entrenador y un asistente personal",
+        "Soy un entrenador y un bot útil",
+        "I'm a coach and a bot too",
+        "I'm a coach and a bot today",
+        "I'm a coach and a link to the partner gym",
+        "I'm a coach and a bot for new members",
+    ):
+        assert identity_drift(reply) is not None, reply
+
+
+def test_sino_reopens_like_pero_and_rather_is_a_reopen_filler():
+    drift = identity_drift("No soy un entrenador sino un bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("No soy un bot sino tu enlace")
+    assert drift is not None and "enlace" in drift
+    drift = identity_drift("I'm not a coach but rather a bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("I'm a coach but instead a bot")
+    assert drift is not None and "bot" in drift
+
+
+def test_rather_than_ends_the_claimed_np():
+    assert identity_drift("I'm a coach rather than a bot") is None
+
+
 # --- the prompt pins the one identity ---
 
 
