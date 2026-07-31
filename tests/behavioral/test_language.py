@@ -400,6 +400,36 @@ def test_separator_dash_behavior(base: str, dash: str):
     assert find_english_leaks(base.replace("-", dash)) == expected
 
 
+# Representative Zs separators: em, thin, and hair space, NNBSP,
+# ideographic space, ogham mark.
+_ZS_VARIANTS = (" ", " ", " ", " ", "　", " ")
+
+
+@pytest.mark.parametrize("base", _INVARIANT_BASES)
+@pytest.mark.parametrize("space", _ZS_VARIANTS)
+def test_unicode_space_invariance(base: str, space: str):
+    # Any Zs separator behaves exactly like an ASCII space.
+    assert find_english_leaks(base.replace(" ", space)) == find_english_leaks(base)
+
+
+@pytest.mark.parametrize("breaker", ("­", "​"))
+def test_soft_hyphen_and_zwsp_take_hyphen_glue(breaker: str):
+    # Both mark an intra-word break, so they behave like a hyphen: they
+    # cannot hide a goal-vocab compound, and they keep a name's carve-out.
+    assert find_english_leaks(f"weight{breaker}loss") == {"weight loss"}
+    assert find_english_leaks(f"non{breaker}strength band pull-apart") == {"strength"}
+    assert find_english_leaks(f"Muscle{breaker}up") == set()
+    assert find_english_leaks(f"strength{breaker}band pull-apart") == set()
+
+
+@pytest.mark.parametrize("invisible", ("‌", "‍", "⁠", "﻿", "‪"))
+def test_format_controls_cannot_split_a_leak(invisible: str):
+    # Joiners, word joiner, BOM, and directional embeddings are stripped,
+    # so smuggling one into a term never hides it.
+    assert find_english_leaks(f"wei{invisible}ght loss") == {"weight loss"}
+    assert find_english_leaks(f"{invisible}muscle") == {"muscle"}
+
+
 def test_hypertrophy_is_a_leak():
     # Round-11 P2: the rules doc lists hipertrofia as a primary goal.
     assert (

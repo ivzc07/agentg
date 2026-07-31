@@ -65,15 +65,29 @@ def _compile(term: str) -> re.Pattern[str]:
 # (U+2013/U+2014/U+2015) are SEPARATORS, never chain links: they map to a
 # private placeholder that splits tokens and blocks chain absorption, with
 # one exception -- an allowlisted name core may be recognized across the
-# gap ("Muscle–up" == "Muscle-up"). NBSP and "_" map to a plain space
-# ("_" is part of \w, so \b lexicon boundaries would dodge it). All
-# one-code-point-for-one, so offsets are unchanged.
+# gap ("Muscle–up" == "Muscle-up"). Every Zs space separator and "_" map
+# to a plain space ("_" is part of \w, so \b lexicon boundaries would
+# dodge it). Soft hyphen and ZWSP mark an intra-word break point, so they
+# fold to "-" and take the hyphen-glue semantics; the remaining invisible
+# format controls (joiners, directional marks, BOM) are deleted, so all
+# downstream matching must use the translated text, never the raw reply.
 _DASH_GAP = ""
 
+# The complete Zs category: NBSP, ogham mark, the U+2000 block, NNBSP,
+# math space, ideographic space.
+_ZS_SPACES = tuple(map(chr, (0x00A0, 0x1680, *range(0x2000, 0x200B), 0x202F, 0x205F, 0x3000)))
+# Cf-class invisibles with no break semantics: joiners, directional
+# marks and embeddings, word joiner and friends, BOM.
+_STRIPPED_FORMAT = tuple(
+    map(chr, (*range(0x200C, 0x2010), *range(0x202A, 0x202F), *range(0x2060, 0x2065), *range(0x2066, 0x206A), 0xFEFF))
+)
+
 _NORMALIZE = str.maketrans(
-    {cp: "-" for cp in "‐‑‒−"}
+    {cp: "-" for cp in "‐‑‒−­​"}
     | {cp: _DASH_GAP for cp in "–—―"}
-    | {" ": " ", "_": " "}
+    | {cp: " " for cp in _ZS_SPACES}
+    | {cp: None for cp in _STRIPPED_FORMAT}
+    | {"_": " "}
 )
 
 _PATTERNS = {term: _compile(term) for term in ENGLISH_TRAINING_VOCAB}
@@ -348,7 +362,7 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
 
 def find_english_leaks(reply: str) -> set[str]:
     """English training vocabulary found in a reply — empty means clean."""
-    text = reply.translate(_NORMALIZE)  # dashes/NBSP -> ASCII, offsets kept
+    text = reply.translate(_NORMALIZE)  # all matching runs on this text
     hits = [
         (term, match.start(), match.end())
         for term, pattern in _PATTERNS.items()
