@@ -49,7 +49,7 @@ _TRAILING_WORD = re.compile(r"(\w+)([^\w]*)$")
 # A negation only denies the claim it is glued to: any clause break
 # (sentence punctuation, comma, colon, dash, newline) between it and the
 # verb means it answered something else.
-_CLAUSE_BREAK = re.compile(r"[,;.!?:\n—–]|(?<=\s)-(?=\s)")
+_CLAUSE_BREAK = re.compile(r"[,;.!?:\n—–…]|(?<=\s)-(?=\s)")
 
 # Curly/typographic apostrophes read as ASCII so "I’m" is still a claim.
 _APOSTROPHES = str.maketrans("’‘ʼ", "'''")
