@@ -362,7 +362,7 @@ async def test_the_tick_off_form_keeps_the_view_it_was_opened_from(env):
         allow_redirects=False,
     )
     assert response.status == 302
-    assert response.headers["Location"] == f"/members/{member.id}?view=split"
+    assert response.headers["Location"] == f"/members/{member.id}?view=split&done=flag_seen"
 
 
 async def test_two_open_flags_each_get_their_own_tick_off(env):
@@ -397,3 +397,21 @@ async def test_two_open_flags_each_get_their_own_tick_off(env):
         f"/members/{member.id}/flags/{dizzy.id}/tick-off", cookies=_cookie(env)
     )
     assert not (await env.roster_row(member)).has_safety_flag
+
+
+async def test_tick_off_redirects_with_the_done_key_and_the_member_page_confirms(env):
+    """Issue #129: the tick-off lands back on the page with a notice."""
+    member = await env.add_member("Ana")
+    note = await _flag(env, member)
+
+    response = await env.client.post(
+        f"/members/{member.id}/flags/{note.id}/tick-off?view=split",
+        cookies=_cookie(env),
+        allow_redirects=False,
+    )
+    assert response.status == 302
+    assert response.headers["Location"] == f"/members/{member.id}?view=split&done=flag_seen"
+
+    landing = await env.client.get(response.headers["Location"], cookies=_cookie(env))
+    text = await landing.text()
+    assert "notice-ok" in text and "Marcada como vista." in text

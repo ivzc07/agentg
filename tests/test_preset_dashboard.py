@@ -391,3 +391,50 @@ async def test_an_htmx_master_save_returns_the_editor_in_place(env):
     assert "<!DOCTYPE" not in text
     assert text.lstrip().startswith('<div id="editor-root"')
     assert "Preset guardado" in text
+
+
+async def test_preset_writes_redirect_with_their_done_keys(env):
+    """Issue #129: every redirect write carries its confirmation key."""
+    preset_id = await create_master(env)
+    member = await add_member(env, "Marta", "201")
+
+    created = await env.client.post(
+        "/presets", data={"name": "Cutting"}, cookies=cookies(env), allow_redirects=False
+    )
+    assert created.headers["Location"] == "/presets?done=preset_created"
+
+    applied = await env.client.post(
+        f"/presets/{preset_id}/apply",
+        data={"member_ids": str(member.id)},
+        cookies=cookies(env),
+        allow_redirects=False,
+    )
+    assert applied.headers["Location"] == "/presets?done=preset_applied"
+
+    default_set = await env.client.post(
+        f"/presets/{preset_id}/default", cookies=cookies(env), allow_redirects=False
+    )
+    assert default_set.headers["Location"] == "/presets?done=default_set"
+    cleared = await env.client.post(
+        f"/presets/{preset_id}/default", cookies=cookies(env), allow_redirects=False
+    )
+    assert cleared.headers["Location"] == "/presets?done=default_cleared"
+
+    retired = await env.client.post(
+        f"/presets/{preset_id}/retire", cookies=cookies(env), allow_redirects=False
+    )
+    assert retired.headers["Location"] == "/presets?done=preset_retired"
+
+
+async def test_the_presets_page_renders_a_known_done_notice_and_ignores_garbage(env):
+    await create_master(env)
+
+    page = await env.client.get("/presets?done=preset_applied", cookies=cookies(env))
+    text = await page.text()
+    assert "notice-ok" in text and "Preset aplicado." in text
+
+    garbage = await env.client.get(
+        "/presets?done=%3Cscript%3Ealert(1)%3C/script%3E", cookies=cookies(env)
+    )
+    text = await garbage.text()
+    assert "notice-ok" not in text and "<script>alert(1)" not in text
