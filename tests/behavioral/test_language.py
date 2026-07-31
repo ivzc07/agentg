@@ -235,6 +235,47 @@ def test_multi_word_terms_match_typographic_dashes():
     assert find_english_leaks("weight–loss strength band pull-apart") == {"weight loss", "strength"}
 
 
+def test_dashed_prose_prefixes_flag_strength_like_ascii():
+    # Round-15 P1: "non-strength band pull-apart" flags strength today;
+    # every dash variant must behave identically.
+    assert find_english_leaks("non-strength band pull-apart") == {"strength"}
+    assert find_english_leaks("non–strength band pull-apart") == {"strength"}
+    assert find_english_leaks("super—strength band pull-apart") == {"strength"}
+
+
+def test_dash_and_nbsp_name_shapes_stay_clean_like_ascii():
+    # Round-15 P2: same names, typographic spelling.
+    assert find_english_leaks("Muscle–up") == set()
+    assert find_english_leaks("Muscle—up") == set()
+    assert find_english_leaks("Muscle‐up") == set()
+    assert find_english_leaks("strength band pull-apart") == set()
+
+
+_DASH_VARIANTS = ("-", "‐", "‑", "‒", "–", "—", "―", "−")
+_INVARIANT_BASES = (
+    "strength band pull-apart",
+    "Muscle-up",
+    "non-strength band pull-apart",
+    "kipping strength-band-pull-apart",
+    "weight loss strength band pull-apart",
+    "muscle-gain strength band pull-apart",
+    "Hoy toca strength band pull-apart",
+    "muscle pull-apart",
+    "weight-loss",
+    "strength band strength band pull-apart",
+)
+
+
+@pytest.mark.parametrize("base", _INVARIANT_BASES)
+@pytest.mark.parametrize("dash", _DASH_VARIANTS)
+def test_dash_and_nbsp_invariance(base: str, dash: str):
+    # The invariant: swapping any ASCII hyphen for a Unicode dash variant,
+    # or any space for NBSP, never changes the result.
+    expected = find_english_leaks(base)
+    assert find_english_leaks(base.replace("-", dash)) == expected
+    assert find_english_leaks(base.replace(" ", " ")) == expected
+
+
 def test_hypertrophy_is_a_leak():
     # Round-11 P2: the rules doc lists hipertrofia as a primary goal.
     assert (

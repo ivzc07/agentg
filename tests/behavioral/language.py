@@ -17,6 +17,9 @@ pull-apart") or by lexicon goal vocabulary ("stamina strength band
 pull-apart"), it is mid-chain vocabulary and flags. A non-modifier word
 glued INSIDE a hyphen chain ("toca-strength-band-pull-apart") breaks the
 name shape, so the chain's lexicon parts are adjacent-outside and flag.
+Unicode dashes (U+2010-U+2015, U+2212) and NBSP are normalized to their
+ASCII twins before any matching, so typographic spellings behave exactly
+like ASCII.
 """
 
 from __future__ import annotations
@@ -43,16 +46,24 @@ ENGLISH_TRAINING_VOCAB: tuple[str, ...] = (
 )
 
 def _compile(term: str) -> re.Pattern[str]:
-    # Multi-word terms match any run of whitespace or dashes between words,
-    # so "weight loss" catches "weight-loss", "weight–loss", "weight—loss",
-    # doubled spaces, tabs, newlines.
+    # Multi-word terms match any run of whitespace or hyphens between words,
+    # so "weight loss" catches "weight-loss", doubled spaces, tabs, newlines.
+    # Typographic dashes are handled once, by _NORMALIZE below.
     return re.compile(
-        r"\b" + r"[\s–—-]+".join(re.escape(part) for part in term.split()) + r"\b",
+        r"\b" + r"[\s-]+".join(re.escape(part) for part in term.split()) + r"\b",
         re.IGNORECASE,
     )
 
 
 _PATTERNS = {term: _compile(term) for term in ENGLISH_TRAINING_VOCAB}
+
+# Unicode hyphen/dash variants (U+2010-U+2015, U+2212) and NBSP map onto
+# their ASCII twins before ANY matching, one code point for one, so offsets
+# are unchanged and typographic spellings behave exactly like ASCII:
+# "Muscle–up" == "Muscle-up", "strength band pull-apart" == spaced.
+_NORMALIZE = str.maketrans(
+    {cp: "-" for cp in "‐‑‒–—―−"} | {" ": " "}
+)
 
 _LETTER = r"A-Za-zÀ-ÖØ-öø-ÿ"
 _TOKEN_RE = re.compile(rf"[{_LETTER}]+(?:-[{_LETTER}]+)*")
@@ -252,12 +263,13 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
 
 def find_english_leaks(reply: str) -> set[str]:
     """English training vocabulary found in a reply — empty means clean."""
+    text = reply.translate(_NORMALIZE)  # dashes/NBSP -> ASCII, offsets kept
     hits = [
         (term, match.start(), match.end())
         for term, pattern in _PATTERNS.items()
-        for match in pattern.finditer(reply)
+        for match in pattern.finditer(text)
     ]
-    names = _exercise_name_spans(reply, hits)
+    names = _exercise_name_spans(text, hits)
     return {
         term
         for term, start, end in hits
