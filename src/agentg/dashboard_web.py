@@ -710,9 +710,18 @@ def _member_card(row: RosterRow, cells: list[DayCell], lang: str) -> str:
     missed squares are hollow coral rings, so the two never read by hue
     alone."""
     t = STRINGS[lang]
-    initials = "".join(f'<span class="wd">{w}</span>' for w in WEEKDAY_INITIALS[lang])
+    initials = "".join(
+        f'<span class="wd" aria-hidden="true">{w}</span>' for w in WEEKDAY_INITIALS[lang]
+    )
+    # Missed days carry their date for screen readers — the one fact a
+    # Coach acts on ("you missed Monday"); hits and future days stay
+    # decorative so the count sentence isn't buried under 28 dates.
     squares = "".join(
-        f'<i class="{cell.state}" title="{fmt_date(cell.on, lang)}"></i>' for cell in cells
+        f'<i class="miss" title="{fmt_date(cell.on, lang)}">'
+        f'<span class="sr">{t["sr_missed"].format(date=fmt_date(cell.on, lang))}</span></i>'
+        if cell.state == "miss"
+        else f'<i class="{cell.state}" title="{fmt_date(cell.on, lang)}" aria-hidden="true"></i>'
+        for cell in cells
     )
     tags = ""
     if row.is_new:
@@ -728,7 +737,7 @@ def _member_card(row: RosterRow, cells: list[DayCell], lang: str) -> str:
 <div class="top-row"><a class="name" href="{_member_href(row.member_id, "cards")}">{escape(row.name)}</a>
 <span class="away">{away_text(row.has_sessions, row.gap_days, lang)}</span></div>
 {f'<div class="meta">{severity}</div>' if severity else ""}
-<div class="daygrid" aria-hidden="true">{initials}{squares}</div>
+<div class="daygrid">{initials}{squares}</div>
 <div class="sparklab">{t["grid_label"].format(n=GRID_WEEKS)}</div>
 {f"<div>{tags}</div>" if tags else ""}
 </div>"""
@@ -1126,7 +1135,7 @@ def _member_page(gym_name: str, view: MemberPage, roster_view: str, lang: str, n
 # One form: a block per pinned day (weekday select, Workout name, exercises
 # one per line as "name, sets, reps" — structure only, never weights), a
 # hidden stamp of the Routine it loaded for the stale-save check, and the
-# ownership chip always in the header. A day comes off the plan by clearing
+# ownership chip always in the header. A day comes off the Routine by clearing
 # the whole block (exercises AND weekday); a half-filled block — content
 # without a weekday, a weekday without exercises — is a refused mistake,
 # never a silent drop.
@@ -1228,7 +1237,7 @@ def _parse_workouts(form: MultiDictProxy, lang: str) -> list[WorkoutSpec]:
         if not weekday_raw:
             if name or body.strip():
                 # Half-filled blocks are a mistake, never a silent drop — a
-                # day comes off the plan by clearing its exercises too.
+                # day comes off the Routine by clearing its exercises too.
                 raise ValueError(t["undated_block_error"])
             continue
         try:
@@ -1262,7 +1271,7 @@ def _parse_workouts(form: MultiDictProxy, lang: str) -> list[WorkoutSpec]:
             exercises.append(ExerciseSpec(parts[0], sets, reps))
         if not exercises:
             # A picked weekday with no exercises is a mistake, not a rest
-            # day — a day comes off the plan via the empty-day selector,
+            # day — a day comes off the Routine via the empty-day selector,
             # never by saving an empty Workout.
             raise ValueError(t["empty_workout_error"])
         if len(name) > WORKOUT_NAME_MAX_LENGTH:
@@ -1376,7 +1385,7 @@ def _routine_editor_page(
     notice = f'<p class="error">{escape(error)}</p>' if error else ""
     if fresh_days is not None:
         notice += _fresh_version_block(fresh_days, lang)
-    # One spare blank block per weekday still off the plan, so a whole week
+    # One spare blank block per weekday still off the Routine, so a whole week
     # can be written in a single save — and the Member gets one notice, not
     # one per round-trip. The parser drops the blocks left blank.
     used = {day[0] for day in days if day[0] is not None}

@@ -199,7 +199,7 @@ async def test_cards_and_split_translate_too(env):
     en_split = await env.page("/?view=split", headers={"Accept-Language": "en"})
 
     assert "On track" in en_cards and "last 4 weeks" in en_cards
-    assert '<span class="wd">Mo</span>' in en_cards
+    assert '<span class="wd" aria-hidden="true">Mo</span>' in en_cards
     assert "Pick a member" in en_split
 
 

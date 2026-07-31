@@ -31,14 +31,17 @@ Against that backdrop the owner proposed rebuilding the frontend on Node + React
 
 ## Rationale
 
-- **The interaction ceiling was the only honest argument for React, and it isn't reached.** Every capability behind "premium" is deliverable with fragment-returning endpoints plus htmx; feat/UXUI already delivers the visual half inside the constraint.
+- **The interaction ceiling was the only honest argument for React, and it isn't reached.**
+  Every capability behind "premium" is deliverable with fragment-returning endpoints plus htmx; feat/UXUI already delivers the visual half inside the constraint.
 - **React's real price bought nothing current features need:** a second toolchain and build step, a JSON API layer with duplicated auth and i18n, a rewrite of a ~1130-test suite that asserts server HTML, and two stacks to maintain for single-digit gyms.
-- **F-strings over Jinja2:** the renderers are typed, pure, directly unit-tested functions; a migration would churn the whole test suite for zero user-visible payoff, and htmx needs exactly the small composable fragment renderers these already are.
+- **F-strings over Jinja2:** the renderers are typed, pure, directly unit-tested functions.
+  A migration would churn the whole test suite for zero user-visible payoff, and htmx needs exactly the small composable fragment renderers these already are.
 - **One researched theme done properly beats two half-QA'd ones** at this stage of the product.
 
 ## Consequences
 
 - Spec-dashboard §Stack is amended in this change: the Jinja2 line is replaced by f-string renderers plus vendored htmx, citing this ADR.
 - The `fix/shadcn` branch is closed without merging.
-- Follow-up order: 1. this merge, 2. the `/static/` stylesheet extraction, 3. the htmx interaction cluster (editor saves that keep typed work on a stale 409, add-a-day without a full round-trip so one save sends one Telegram notice, success feedback) - the cluster is behavior-changing, multi-session work and gets its own spec and tickets.
+- Follow-up order: 1. this merge, 2. the `/static/` stylesheet extraction, 3. the htmx interaction cluster (in-place editor saves, success feedback, a live roster count) - behavior-changing, multi-session work that gets its own spec and tickets.
+  The merged editor already renders a spare block per unused weekday, so a whole week is one save and one Telegram notice.
 - Anyone proposing a frontend framework here again starts from the revisit trigger in this ADR.

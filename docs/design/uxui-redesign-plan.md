@@ -251,8 +251,8 @@ Tokens first, then primitives, then composites, then screens; small commits, pyt
 Per the task rules these are **not** in the cosmetic scope above; each is small but alters behavior or specced copy.
 
 1. **Stale-save keeps the Coach's typed form** beside the fresh version instead of destroying it (pain 14) - contradicts the current "the fresh version replaces them" comment; strongly recommended, needs your yes.
-2. **Editor renders a spare block per unused weekday** instead of one, so a 4-day plan is one save and one Member notification instead of four (pain 12) - parser already ignores blank blocks; needs your yes.
-3. **Retire preset gets a confirm** (currently one silent click next to Apply, while regenerating a link has a typed ceremony) - needs your yes.
+2. **Editor renders a spare block per unused weekday** instead of one, so a 4-day plan is one save and one Member notification instead of four (pain 12) - parser already ignores blank blocks; approved 2026-07-31 with the branch.
+3. **Retire preset gets a confirm** (currently one silent click next to Apply, while regenerating a link has a typed ceremony) - approved 2026-07-31 with the branch.
 4. **POST double-submit protection** (disable-on-submit one-liner in the shared shell) - prevents double Apply messaging every Member twice; borderline cosmetic, included in scope unless you object.
 5. **Editor journey preserves `?view`** (pain 16) - navigation consistency with tick-off's existing behavior; borderline, included unless you object.
 
@@ -284,6 +284,11 @@ Linear's row anatomy and grouped sections with counts (roster rows, bands, lapse
 - The row severity cue is a text sentence ("N días planificados sin sesión") rather than v3's strip-on-every-row - the Table stays denser and the words carry the count colorblind-safely.
 
 ### Left undone, knowingly
+
+- Routine day-cards carry no per-exercise "last logged" lines (plan §3): needs per-Member exercise history in `member_page`, out of the store's scope this pass.
+- Sessions stay flat rows, not `details` collapses - revisit with the htmx interaction cluster (ADR 0003).
+- The zero-match search state is a fixed sentence, not "0 de N", and the header count never updates live - same cluster.
+- No per-day remove affordance in the editor (pain 13) - the clear-the-block gesture stands for now.
 
 - The Member hero's away text carries no severity color: `MemberPage` does not expose `missed_days`, and the store was out of scope. Follow-up: add it to the `member_page` query and color the fact.
 - The Split placeholder shows no live counts (v3's emptyPane had them) - same reason, kept simple.
