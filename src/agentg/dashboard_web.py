@@ -1173,11 +1173,14 @@ def _editor_day(day: EditorDay, lang: str) -> str:
         selected = " selected" if weekday == i else ""
         options.append(f'<option value="{i}"{selected}>{weekday_name}</option>')
     return f"""<fieldset class="day-edit">
-<select name="weekday">{"".join(options)}</select>
+<label>{t["label_weekday"]}
+<select name="weekday">{"".join(options)}</select></label>
+<label>{t["label_workout_name"]}
 <input type="text" name="workout_name" value="{escape(name, quote=True)}"
-placeholder="{escape(t["workout_name_placeholder"], quote=True)}" maxlength="100">
+placeholder="{escape(t["workout_name_placeholder"], quote=True)}" maxlength="100"></label>
+<label>{t["label_exercises"]}
 <textarea name="exercises" rows="4"
-placeholder="squat, 4, 8-10">{escape(exercises_text)}</textarea>
+placeholder="squat, 4, 8-10">{escape(exercises_text)}</textarea></label>
 </fieldset>"""
 
 
@@ -1278,7 +1281,42 @@ EDITOR_STYLE = """
 .catalog { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0 10px; }
 .catchip { border: 1px solid var(--line-2); color: var(--ink-2); font-size: 12px; padding: 4px 8px; white-space: nowrap; }
 .fresh-version { background: var(--surface); padding: 4px 16px 12px; margin: 12px 0; }
+/* Presets: one card per Preset, members picked as chips. */
+.pcard { background: var(--surface); padding: 16px; margin-top: 14px; }
+.pcard h2 { font-size: 17px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.pcard fieldset { border: 1px solid var(--line); padding: 10px 12px; margin: 12px 0 0; }
+.pcard legend { font-size: 13px; color: var(--ink-2); padding: 0 6px; }
+.pcard label.stack { display: block; font-size: 13px; color: var(--ink-2); margin: 8px 0; }
+.pcard label.stack input { display: block; margin-top: 4px; width: 100%; }
+.pick { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.pick label { border: 1px solid var(--line-2); padding: 8px 12px; font-size: 14px; color: var(--ink-2);
+  display: inline-flex; gap: 8px; align-items: center; cursor: pointer;
+  transition: border-color var(--t-fast), color var(--t-fast); }
+.pick label:hover { border-color: var(--ink-2); color: var(--ink); }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
 """
+
+
+def _fresh_version_block(fresh_days: list[EditorDay], lang: str) -> str:
+    """The active Routine as a read-only reference beside a refused stale
+    save — the Coach's own edits stay in the form below it."""
+    t = STRINGS[lang]
+    days_html = []
+    for weekday, name, exercises_text in fresh_days:
+        weekday_html = (
+            f"<b>{WEEKDAYS[lang][weekday]}</b>" if weekday is not None else ""
+        )
+        lines = "".join(
+            f"<li>{escape(line)}</li>" for line in exercises_text.splitlines() if line.strip()
+        )
+        days_html.append(
+            f'<div class="day">{weekday_html}<span class="dayname">{escape(name)}</span>'
+            f"<ul>{lines}</ul></div>"
+        )
+    return f"""<details class="fresh-version" open>
+<summary>{t["current_version_label"]}</summary>
+{"".join(days_html)}
+</details>"""
 
 
 def _routine_editor_page(
@@ -1294,6 +1332,7 @@ def _routine_editor_page(
     back_href: str | None = None,
     title_key: str = "editor_title",
     consequence_key: str | None = None,
+    fresh_days: list[EditorDay] | None = None,
 ) -> str:
     t = STRINGS[lang]
     chip = _ownership_chip(
@@ -1309,7 +1348,16 @@ def _routine_editor_page(
         f'<p class="consequence">{t[consequence_key]}</p>' if consequence_key else ""
     )
     notice = f'<p class="error">{escape(error)}</p>' if error else ""
-    blocks = "".join(_editor_day(day, lang) for day in days) + _editor_day((None, "", ""), lang)
+    if fresh_days is not None:
+        notice += _fresh_version_block(fresh_days, lang)
+    # One spare blank block per weekday still off the plan, so a whole week
+    # can be written in a single save — and the Member gets one notice, not
+    # one per round-trip. The parser drops the blocks left blank.
+    used = {day[0] for day in days if day[0] is not None}
+    spares = max(1, 7 - len(used))
+    blocks = "".join(_editor_day(day, lang) for day in days) + "".join(
+        _editor_day((None, "", ""), lang) for _ in range(spares)
+    )
     # The stale-check stamp: the view's active Routine by default, but a
     # rejected save keeps the SUBMITTED stamp — rebuilding it from the fresh
     # view would let a retry slip past the stale check (review round 4).
@@ -1375,55 +1423,66 @@ def _presets_page(
     lang: str,
     next_path: str,
     error: str = "",
+    create_name: str = "",
 ) -> str:
-    """The Coach-only Presets index and copy-on-apply forms (issue #102)."""
+    """The Coach-only Presets index and copy-on-apply forms (issue #102).
+    A rejected create keeps the typed name in the form."""
     t = STRINGS[lang]
     notice = f'<p class="error">{escape(error)}</p>' if error else ""
-    create = f"""<section class="card">
+    create = f"""<section class="pcard">
 <h2>{t["create_preset"]}</h2>
 <form method="post" action="/presets">
-<label>{t["preset_name"]}
-<input type="text" name="name" maxlength="100" required>
+<label class="stack">{t["preset_name"]}
+<input type="text" name="name" value="{escape(create_name, quote=True)}" maxlength="100" required>
 </label> <button type="submit">{t["create_preset"]}</button>
 </form></section>"""
     if not presets:
-        cards = f'<p class="muted">{t["no_presets"]}</p>'
+        cards = f'<div class="emptystate"><h2>{t["no_presets"]}</h2></div>'
     else:
         cards = []
         for preset in presets:
             member_choices = "".join(
                 f'<label><input type="checkbox" name="member_ids" value="{member.id}">'
-                f" {escape(member.name)}</label> "
+                f"{escape(member.name)}</label>"
                 for member in members
             )
             if members:
                 apply_form = f"""<form method="post" action="/presets/{preset.id}/apply">
 <fieldset><legend>{t["apply_preset"]}</legend>
-<label><input type="checkbox" name="apply_all" value="1"> {t["apply_all"]}</label>
-<div>{member_choices}</div>
+<div class="pick"><label><input type="checkbox" name="apply_all" value="1">{t["apply_all"]}</label></div>
+<div class="pick">{member_choices}</div>
 <button type="submit">{t["apply"]}</button>
 </fieldset></form>"""
             else:
                 apply_form = f'<p class="muted">{t["no_members_to_apply"]}</p>'
-            if default_preset_id == preset.id:
-                default_form = (
-                    f'<p><span class="tag">{t["preset_default"]}</span> '
-                    f'<form method="post" action="/presets/{preset.id}/default">'
-                    f'<button type="submit">{t["clear_default_preset"]}</button></form></p>'
-                )
-            else:
-                default_form = (
-                    f'<form method="post" action="/presets/{preset.id}/default">'
-                    f'<button type="submit">{t["set_default_preset"]}</button></form>'
-                )
+            default_tag = (
+                f' <span class="tag">{t["preset_default"]}</span>'
+                if default_preset_id == preset.id
+                else ""
+            )
+            default_label = (
+                t["clear_default_preset"]
+                if default_preset_id == preset.id
+                else t["set_default_preset"]
+            )
+            default_form = (
+                f'<form method="post" action="/presets/{preset.id}/default">'
+                f'<button type="submit">{default_label}</button></form>'
+            )
+            # Retiring is quiet next to Apply — a browser confirm stands
+            # between one stray click and every Member keeping a copy of a
+            # plan the Coach meant to keep editing. No JS: it just submits,
+            # and retire stays reversible-in-spirit (copies survive).
             retire_form = (
-                f'<form method="post" action="/presets/{preset.id}/retire">'
+                f'<form method="post" action="/presets/{preset.id}/retire" '
+                f'onsubmit="return confirm(this.dataset.confirm)" '
+                f'data-confirm="{escape(t["retire_confirm"], quote=True)}">'
                 f'<button type="submit">{t["retire_preset"]}</button></form>'
             )
             cards.append(
-                f'<section class="card"><h2>{escape(preset.name)} '
-                f'<a href="/presets/{preset.id}/routine">{t["edit_preset"]}</a></h2>'
-                f"{default_form}{apply_form}{retire_form}</section>"
+                f'<section class="pcard"><h2>{escape(preset.name)}{default_tag} '
+                f'<a class="edit" href="/presets/{preset.id}/routine">{t["edit_preset"]}</a></h2>'
+                f'{apply_form}<div class="actions">{default_form}{retire_form}</div></section>'
             )
         cards = "".join(cards)
     body = f'<main class="editor-wrap">{notice}{create}{cards}</main>'
@@ -1700,6 +1759,7 @@ def build_app(
         if view is None:  # same rule as the Member page: the shared 404
             return _not_found()
         lang = _lang_of(request)
+        roster_view = _view_of(request)
         catalog = await store.catalog_exercises()
         response = web.Response(
             text=_routine_editor_page(
@@ -1709,6 +1769,8 @@ def build_app(
                 catalog,
                 lang,
                 request.rel_url.path_qs,
+                action=f"/members/{member_id}/routine?view={roster_view}",
+                back_href=f"/members/{member_id}?view={roster_view}",
             ),
             content_type="text/html",
         )
@@ -1734,6 +1796,7 @@ def build_app(
             return _not_found()
         lang = _lang_of(request)
         t = STRINGS[lang]
+        roster_view = _view_of(request)
 
         form = await request.post()
         base_raw = form.get("base_routine_id", "")
@@ -1749,6 +1812,7 @@ def build_app(
             status: int,
             days: list[EditorDay] | None = None,
             base: str | None = None,
+            show_fresh: bool = False,
         ) -> web.Response:
             view = await store.member_page(gym.id, member_id)
             assert view is not None  # roster_member above already scoped it
@@ -1763,9 +1827,12 @@ def build_app(
                     lang,
                     # The language toggle must not point at this POST-only
                     # path (it would 405 a GET) — aim it at the editor GET.
-                    f"/members/{member_id}/routine",
+                    f"/members/{member_id}/routine?view={roster_view}",
                     error=error,
                     base=base,
+                    action=f"/members/{member_id}/routine?view={roster_view}",
+                    back_href=f"/members/{member_id}?view={roster_view}",
+                    fresh_days=_days_from_view(view) if show_fresh else None,
                 ),
                 content_type="text/html",
             )
@@ -1790,8 +1857,12 @@ def build_app(
                 gym.id, member_id, coach_member.id, base_routine_id, workouts
             )
         except StaleRoutineError:
-            # The fresh version on the page; the Coach re-applies on top.
-            return await reject(t["stale_error"], 409)
+            # The fresh version renders read-only above the form, and the
+            # Coach's own edits survive in it (base=None re-stamps the fresh
+            # Routine, so saving again applies them on top, knowingly).
+            return await reject(
+                t["stale_error"], 409, days=_days_from_form(form), show_fresh=True
+            )
         except UnknownExercisesError as error:
             # Spanish and coach-facing like every other rejection — never
             # the raw English agent-tool message.
@@ -1814,7 +1885,7 @@ def build_app(
                     )
             except Exception:
                 logger.exception("failed to notify member %s of the routine save", member_id)
-        response = web.HTTPFound(f"/members/{member_id}")
+        response = web.HTTPFound(f"/members/{member_id}?view={roster_view}")
         set_session(response, coach_member.id, gym.id)  # sliding 90-day refresh
         raise response
 
@@ -1872,6 +1943,8 @@ def build_app(
                 lang,
                 "/presets",
                 error=error,
+                # The rejected name stays in the form — no retyping.
+                create_name=name if isinstance(name, str) else "",
             ),
             content_type="text/html",
         )
@@ -1940,6 +2013,7 @@ def build_app(
             status: int,
             days: list[EditorDay] | None = None,
             base: str | None = None,
+            show_fresh: bool = False,
         ) -> web.Response:
             fresh = await store.preset_master(preset.id)
             view = _preset_editor_view(preset, fresh)
@@ -1958,6 +2032,7 @@ def build_app(
                     back_href="/presets",
                     title_key="preset_editor_title",
                     consequence_key="preset_master_consequence",
+                    fresh_days=_days_from_view(view) if show_fresh else None,
                 ),
                 content_type="text/html",
             )
@@ -1979,7 +2054,11 @@ def build_app(
                 gym.id, preset.id, coach_member.id, base_routine_id, workouts
             )
         except StaleRoutineError:
-            return await reject(t["stale_error"], 409)
+            # Same contract as the Member editor: the Coach's edits survive
+            # in the form, the fresh master shows read-only above it.
+            return await reject(
+                t["stale_error"], 409, days=_days_from_form(form), show_fresh=True
+            )
         except UnknownExercisesError as error:
             message = t["unknown_exercises_error"].format(names=", ".join(error.names))
             return await reject(message, 400, days=_days_from_form(form), base=submitted_base)

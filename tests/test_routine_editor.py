@@ -252,7 +252,8 @@ async def test_a_web_save_replaces_the_routine_stamps_it_and_notifies_the_member
     )
 
     assert response.status == 302
-    assert response.headers["Location"] == f"/members/{member.id}"
+    # Back to the Member page, in the view the editor journey started from.
+    assert response.headers["Location"] == f"/members/{member.id}?view=table"
     active = await env.routines.active_routine(member.id)
     assert active["coach_authored"] is True
     assert active["created_by_name"] == "Coach Ana"
@@ -332,13 +333,18 @@ async def test_a_stale_web_save_is_refused_and_shows_the_fresh_version(env):
     assert response.status == 409
     text = await response.text()
     assert STALE_ERROR in text
-    # The fresh version is on the page, so the Coach re-applies on top of it.
+    # The fresh version is on the page read-only, and the Coach's own edits
+    # survive in the form — a refused save never destroys typed work.
     assert "Nuevo plan" in text
-    assert "Full body" not in text
+    assert "squat, 3, 8" in text
+    assert "Full body" in text
     # Nothing was written.
     active = await env.routines.active_routine(member.id)
     assert [w["name"] for w in active["workouts"]] == ["Nuevo plan"]
     assert env.notifier.sent == []
+    # The stamp re-arms against the fresh Routine, so saving again applies
+    # the kept edits on top of it, knowingly.
+    assert f'name="base_routine_id" value="{active["routine_id"]}"' in text
 
 
 async def test_unknown_exercises_are_rejected_with_nothing_saved(env):
