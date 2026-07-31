@@ -269,10 +269,12 @@ async def test_editing_a_preset_notifies_only_members_still_linked_to_it(env, mo
     assert response.status == 302
     assert "failed to notify member" in caplog.text
 
+    original_member_channel = env.store.member_channel
+
     async def no_channel(member_id):
         if member_id == linked.id:
             return None
-        return await env.store.member_channel(member_id)
+        return await original_member_channel(member_id)
 
     monkeypatch.setattr(env.store, "member_channel", no_channel)
     master = await env.routines.preset_master(preset_id)
