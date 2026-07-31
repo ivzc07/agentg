@@ -1,8 +1,9 @@
 """The linking conversation: Invite codes in, phrased replies out.
 
 Linking creates rows and switches tenancy, so *deciding* what happens
-(link, re-ask, switch, dead-end) stays a deterministic state machine per
-docs/spec.md §Onboarding & gym linking — never the LLM's call. But *saying*
+(link, re-ask, switch, reject a near-miss code, dead-end) stays a
+deterministic state machine per docs/spec.md §Onboarding & gym linking —
+never the LLM's call. But *saying*
 it no longer has to be fixed strings: each step hands the phraser an
 instruction (the facts, never invented) plus what the person just said, and
 the phraser turns that into one natural reply. The Agent only ever speaks
@@ -19,7 +20,14 @@ from dataclasses import dataclass, field
 from agentg.config import Settings
 from agentg.messages import IncomingMessage
 from agentg.models import Gym
-from agentg.linking_store import LinkedIdentity, LinkingStore
+from agentg.linking_store import (
+    COACH_CODE_PREFIX,
+    INVITE_CODE_ALPHABET,
+    INVITE_CODE_LENGTH,
+    LinkedIdentity,
+    LinkingStore,
+    normalize_invite_code,
+)
 
 DEAD_END_INSTRUCTION = (
     "They aren't linked to any gym yet and just sent something that isn't a "
@@ -27,6 +35,14 @@ DEAD_END_INSTRUCTION = (
     "works through partner gyms, and ask them to get their gym's invite link "
     "or QR code — the front desk or their coach has it — and tap it to get "
     "started."
+)
+CODE_NOT_FOUND_INSTRUCTION = (
+    "They aren't linked to any gym yet and just typed something that looks "
+    "like a gym invite code, but no gym matches it — most likely a typo. "
+    "Tell them warmly that this code didn't work, ask them to double-check "
+    "it character by character against what their gym gave them, and add "
+    "that if it still fails they can get a fresh invite link or QR code "
+    "from the gym's front desk or their coach."
 )
 NAME_CONFIRM_INSTRUCTION = (
     "They just linked to {gym} via their gym's invite code. Their profile "
@@ -160,6 +176,26 @@ def _looks_like_a_name(text: str) -> bool:
     return 0 < len(text.split()) <= MAX_NAME_WORDS
 
 
+def _looks_like_invite_code(text: str) -> bool:
+    """A near-miss code: typed like an invite code but matching no Gym.
+
+    Shape only — a single word from the code alphabet, one character off
+    the real length at most (a dropped or doubled char). Requiring a digit
+    keeps ordinary short messages ("gracias", "perfecto") out: generation
+    guarantees every real code carries one, Spanish words don't.
+    """
+    word = normalize_invite_code(text)
+    if word.startswith(COACH_CODE_PREFIX):
+        word = word[len(COACH_CODE_PREFIX):]
+    if len(word.split()) != 1:  # empty, or a sentence — not a typed code
+        return False
+    if not INVITE_CODE_LENGTH - 1 <= len(word) <= INVITE_CODE_LENGTH + 1:
+        return False
+    if any(ch not in INVITE_CODE_ALPHABET for ch in word):
+        return False
+    return any(ch.isdigit() for ch in word)
+
+
 @dataclass
 class _AwaitingName:
     gym_id: int
@@ -201,14 +237,14 @@ class Linking:
         if isinstance(pending, _AwaitingSwitch):
             return await self._confirm_switch(identity, msg, linked, pending)
 
-        # A typed Invite or coach code links too; any other unlinked text
-        # dead-ends.
+        # A typed Invite or coach code links too; a near-miss code is told
+        # so; any other unlinked text dead-ends.
         resolved = await self._gym_for_code(msg.text)
         if resolved is not None:
             gym, as_coach = resolved
             return await self._start_link(identity, msg, linked, gym, as_coach)
         if linked is None:
-            return await self.phraser(DEAD_END_INSTRUCTION, msg.text)
+            return await self._reply_unlinked_unknown(msg, msg.text)
         return None
 
     async def _gym_for_code(self, text: str) -> tuple[Gym, bool] | None:
@@ -234,6 +270,13 @@ class Linking:
             else:
                 instruction = LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name)
             return await self.phraser(instruction, msg.text)
+        return await self._reply_unlinked_unknown(msg, code)
+
+    async def _reply_unlinked_unknown(self, msg: IncomingMessage, candidate: str) -> str:
+        """Unlinked and nothing matched: a near-miss code (typed or tapped)
+        is told the code didn't work; anything else dead-ends."""
+        if _looks_like_invite_code(candidate):
+            return await self.phraser(CODE_NOT_FOUND_INSTRUCTION, msg.text)
         return await self.phraser(DEAD_END_INSTRUCTION, msg.text)
 
     async def _start_link(

@@ -25,6 +25,14 @@ def test_invite_codes_are_deep_link_safe_slugs():
     assert code.isalnum() and code == code.lower()
 
 
+def test_generated_invite_codes_always_carry_a_digit():
+    # The near-miss shape test (_looks_like_invite_code) requires a digit to
+    # tell typed codes from ordinary words; generation must guarantee one or
+    # ~7% of real codes would dead-end their own typos.
+    for _ in range(1000):
+        assert any(ch.isdigit() for ch in new_invite_code())
+
+
 async def test_created_gym_is_found_by_its_invite_code(store):
     gym = await store.create_gym("Iron Temple")
     found = await store.gym_by_invite_code(gym.invite_code)
