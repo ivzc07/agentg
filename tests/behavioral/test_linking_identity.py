@@ -426,6 +426,153 @@ def test_rather_than_ends_the_claimed_np():
     assert identity_drift("I'm a coach rather than a bot") is None
 
 
+# --- negation scopes, role-as-head, comma-sino ---
+
+
+def test_a_denial_scopes_over_a_following_coordination():
+    assert identity_drift("I'm not a bot or a link") is None
+    assert identity_drift("I'm not a bot and a link") is None
+    assert identity_drift("No soy un bot o un enlace") is None
+    assert identity_drift("I'm a coach not a bot or a link") is None
+    # but a contrast still reopens after a denial
+    drift = identity_drift("I'm not a bot but a link")
+    assert drift is not None and "link" in drift
+
+
+def test_the_role_must_head_its_own_noun_phrase():
+    assert identity_drift("I'm your coach and the front desk has your invite link") is None
+    assert identity_drift("Soy un entrenador y el gimnasio tiene el enlace de invitación") is None
+    assert identity_drift("I'm a coach and the invite link awaits") is None
+    assert identity_drift("I'm a coach and the link is below") is None
+    drift = identity_drift("I'm a coach and a bot")
+    assert drift is not None and "bot" in drift
+
+
+def test_a_comma_sino_after_a_fronted_no_is_a_corrective_claim():
+    drift = identity_drift("No soy un enlace, sino un bot de soporte.")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("No soy solo un entrenador, sino un bot.")
+    assert drift is not None and "bot" in drift
+
+
+# --- the combinatorial matrix: the grammar space, enumerated ---
+
+_EN = {
+    "v": "I'm",
+    "coach": "coach",
+    "drift_roles": ["bot", "link", "assistant"],
+    "det": "a",
+    "poss": "your",
+    "adj": "stupid",
+    "rel": "who helps",
+    "pp": "for the gym",
+    "adjunct": "today",
+    "conj": ["and", "or"],
+    "contr": ["but"],
+    "invite_join": "and here's the invite link",
+    "clause_obj": "and the front desk has your invite link",
+}
+_ES = {
+    "v": "Soy",
+    "coach": "entrenador",
+    "drift_roles": ["bot", "enlace", "asistente"],
+    "det": "un",
+    "poss": "tu",
+    "adj": "gran",
+    "rel": "que ayuda",
+    "pp": "para el gimnasio",
+    "adjunct": "hoy",
+    "conj": ["y", "o"],
+    "contr": ["pero", "sino"],
+    "invite_join": "y pide el enlace",
+    "clause_obj": "y el gimnasio tiene el enlace",
+}
+
+
+def _matrix_cases() -> list[tuple[str, bool]]:
+    """Every combination labeled by RULE INTENT: drift iff the phraser
+    identifies ITSELF as a forbidden role. Genuinely ambiguous shapes are
+    labeled clean (false negatives are acceptable; false positives break
+    the live sweep)."""
+    cases: list[tuple[str, bool]] = []
+    for lang in (_EN, _ES):
+        v, coach, det, poss = lang["v"], lang["coach"], lang["det"], lang["poss"]
+        roles = [(coach, False)] + [(r, True) for r in lang["drift_roles"]]
+        en = lang is _EN
+        deny = (lambda s: f"{v} not {s}") if en else (lambda s: f"No soy {s}")
+        for role, drift in roles:
+            np = f"{det} {role}"
+            cases += [
+                (f"{v} {np}", drift),
+                (f"{v} {poss} {role}", drift),
+                (f"{v} {det} {lang['adj']} {role}", drift),
+                (f"{v} {np} {lang['pp']}", drift),
+                (f"{v} {np} {lang['rel']}", drift),
+                (f"{v} {np} {lang['adjunct']}", drift),
+                (deny(np), False),  # a denial claims nothing
+            ]
+            # affirmers claim again
+            cases.append(
+                (f"{v} not only {np}" if en else f"No soy solo {np}", drift)
+            )
+            for conj in lang["conj"]:
+                cases += [
+                    (f"{v} {det} {coach} {conj} {np}", drift),
+                    # negation scopes over coordination (round 11)
+                    (deny(f"{det} {coach} {conj} {np}"), False),
+                    # a closed head is scored whatever follows
+                    (
+                        f"{v} {det} {coach} {conj} {np} {lang['conj'][0]} "
+                        f"{'here is the invite' if en else 'aquí está el enlace'}",
+                        drift,
+                    ),
+                ]
+            for contr in lang["contr"]:
+                cases += [
+                    (f"{v} {det} {coach} {contr} {np}", drift),
+                    (deny(f"{det} {coach} {contr} {np}"), drift),
+                    # a comma ends the clause — no cross-clause contrast
+                    # (except sino after a fronted No, covered below)
+                    (f"{v} {det} {coach}, {contr} {np}", False),
+                ]
+            # a drift role as object of the following clause is no claim
+            cases.append((f"{v} {det} {coach} {lang['invite_join']}", False))
+            cases.append((f"{v} {det} {coach} {lang['clause_obj']}", False))
+        # correctives and correlatives (English shapes)
+        if en:
+            for role, drift in roles:
+                np = f"a {role}"
+                cases += [
+                    (f"{v} not a {coach} just {np}", drift),
+                    (f"{v} not a {coach} only {np}", drift),
+                    (f"{v} a {coach} just {np}", drift),
+                    (f"{v} a {coach} rather than {np}", False),
+                    (f"{v} not a {coach} but rather {np}", drift),
+                    (f"{v} a {coach} but instead {np}", drift),
+                    (f"{v} not only a {coach} but {np}", drift),
+                    (f"{v} no {np}", False),
+                ]
+        else:
+            for role, drift in roles:
+                np = f"un {role}"
+                cases += [
+                    # comma + sino after a fronted No: the corrective claim
+                    (f"No soy un {coach}, sino {np}", drift),
+                    (f"No soy {np}, sino un {coach}", False),
+                    (f"No soy solo un {coach}, sino {np}", drift),
+                ]
+    return cases
+
+
+@pytest.mark.parametrize(
+    "sentence,expected",
+    _matrix_cases(),
+    ids=[s for s, _ in _matrix_cases()],
+)
+def test_the_identity_grammar_matrix(sentence, expected):
+    assert (identity_drift(sentence) is not None) is expected, sentence
+
+
 # --- the prompt pins the one identity ---
 
 
