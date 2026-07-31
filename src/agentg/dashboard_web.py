@@ -181,7 +181,7 @@ BASE_STYLE = """
 :root {
   --bg: #000; --surface: #131313; --surface-2: #1b1c1e;
   --line: #2a2b2d; --line-2: #3a3a3c;
-  --ink: #fff; --ink-2: #9a9a9a; --ink-3: #757579;
+  --ink: #fff; --ink-2: #9a9a9a; --ink-3: #85858a; /* AA (>=4.5:1) on bg AND surface */
   --mint: #6ef3a5; --mint-tint: #0f2a1c;
   --coral: #f58060; --coral-tint: #2b1712;
   --amber: #f2b84b; --amber-tint: #2a2110;
@@ -192,6 +192,9 @@ BASE_STYLE = """
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+/* Author display rules (.mcard is flex) must never beat the hidden
+   attribute the search filter relies on. */
+[hidden] { display: none !important; }
 html { background: var(--bg); }
 body { margin: 0; background: var(--bg); color: var(--ink);
   font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", sans-serif;
@@ -249,11 +252,22 @@ DOOR_STYLE = """
 
 # Every form disables its submit buttons once a submit is on its way —
 # a double-clicked Apply must not message every Member twice. The timeout
-# lets the click's own submit complete before the buttons grey out.
+# lets the click's own submit complete before the buttons grey out. A
+# cancelled confirm (the retire form) prevents the default but still
+# bubbles here — defaultPrevented keeps the button alive. And a page
+# restored from the back/forward cache comes back with its frozen DOM, so
+# pageshow re-arms what a past submit disabled.
 SUBMIT_GUARD_SCRIPT = """
 document.addEventListener("submit", function (e) {
+  if (e.defaultPrevented) return;
   var buttons = e.target.querySelectorAll("button[type=submit]");
   setTimeout(function () { buttons.forEach(function (b) { b.disabled = true; }); }, 0);
+});
+window.addEventListener("pageshow", function (e) {
+  if (!e.persisted) return;
+  document.querySelectorAll("form button[type=submit]").forEach(function (b) {
+    if (!b.closest("form[data-confirm]")) b.disabled = false;
+  });
 });
 """
 
@@ -398,7 +412,7 @@ ul#roster { list-style: none; padding: 0; margin: 0; }
 .row .t { font-size: 16px; font-weight: 600; letter-spacing: -0.01em;
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .row .t .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
-.row .meta { display: flex; gap: 4px 12px; color: var(--ink-2); font-size: 13px; margin-top: 2px; flex-wrap: wrap; }
+.row .meta, .mcard .meta { display: flex; gap: 4px 12px; color: var(--ink-2); font-size: 13px; margin-top: 2px; flex-wrap: wrap; }
 .away { white-space: nowrap; }
 .sev { white-space: nowrap; }
 .sev-amber { color: var(--amber); font-weight: 600; }
@@ -433,6 +447,15 @@ ul#roster { list-style: none; padding: 0; margin: 0; }
 .split { display: grid; grid-template-columns: 340px minmax(0, 1fr); align-items: start; }
 .split .rail { border-right: 1px solid var(--line); position: sticky; top: 47px;
   height: calc(100vh - 47px); overflow-y: auto; }
+/* The rail's sticky top assumes a one-row 46px header, so above the split
+   breakpoint the chrome must never wrap: the title truncates and the
+   search shrinks instead. */
+@media (min-width: 900px) {
+  header.top { flex-wrap: nowrap; }
+  header.top h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  header.top .count { white-space: nowrap; }
+  #search { flex: 0 1 200px; min-width: 90px; }
+}
 .split .pane { padding: 0 var(--gut) 40px; max-width: 60rem; }
 .split .pane-empty { display: grid; place-items: center; min-height: 60vh; }
 @media (max-width: 899px) {
@@ -472,6 +495,7 @@ a.edit:hover { border-color: var(--ink-2); }
 .card > ul { list-style: none; margin: 0; padding: 0; }
 .card > ul > li { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
 .note { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.tail summary { padding: 8px 0; }
 .pages { display: flex; gap: 16px; margin-top: 10px; align-items: baseline; }
 .pages a { font-size: 14px; padding: 8px 0; }
 .pages a:hover { text-decoration: underline; }
@@ -485,6 +509,8 @@ a.edit:hover { border-color: var(--ink-2); }
 .safety-banner form { margin: 0 0 0 auto; }
 .safety-banner button { background: #000; color: #fff; border: 0; }
 .safety-banner button:hover { background: #2a2a2a; }
+/* The global focus ring is white — invisible on this white block. */
+.safety-banner :focus-visible { outline-color: #000; }
 /* The Member's own words, left alone, tagged when not in the Coach's language. */
 .verbatim { border-left: 2px solid var(--line-2); padding-left: 8px; }
 .langtag { display: inline-block; white-space: nowrap; font-family: var(--mono); font-size: 10px;
@@ -524,7 +550,7 @@ def _seg(view: str, t: dict) -> str:
         f'{t[f"view_{v}"]}</a>'
         for v in VIEWS
     )
-    return f'<nav class="seg">{links}</nav>'
+    return f'<nav class="seg" aria-label="{escape(t["nav_views"], quote=True)}">{links}</nav>'
 
 
 def _chrome(
@@ -560,7 +586,7 @@ def _chrome(
 {seg}
 {search}
 <span class="spacer"></span>
-<nav class="quick">{quick("/presets", "presets")}{quick("/settings", "settings")}</nav>
+<nav class="quick" aria-label="{escape(t["nav_sections"], quote=True)}">{quick("/presets", "presets")}{quick("/settings", "settings")}</nav>
 {_lang_toggle(next_path, lang)}
 </header>"""
 
@@ -947,7 +973,7 @@ def _sessions_card(view: MemberPage, lang: str, roster_view: str) -> str:
             else ""
         )
         nav = (
-            f'<nav class="pages">{newer}'
+            f'<nav class="pages" aria-label="{escape(t["sessions"], quote=True)}">{newer}'
             f'<span class="muted">{t["page_x_of_y"].format(page=view.page, pages=view.pages)}</span>{older}</nav>'
         )
     return f'<section class="card" id="sessions"><h2>{t["sessions"]}</h2>{"".join(items)}{nav}</section>'

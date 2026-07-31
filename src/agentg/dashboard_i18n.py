@@ -92,6 +92,8 @@ STRINGS = {
         "missed_one": "1 día planificado sin sesión",
         "missed_n": "{n} días planificados sin sesión",
         "sorted_by_gap": "Ordenado por días sin venir",
+        "nav_views": "Vistas",
+        "nav_sections": "Secciones",
         "no_matches": "Ningún miembro coincide con la búsqueda.",
         "empty_roster_title": "Aún no hay miembros",
         "empty_roster_body": (
@@ -257,6 +259,8 @@ STRINGS = {
         "missed_one": "1 planned day missed",
         "missed_n": "{n} planned days missed",
         "sorted_by_gap": "Sorted by days away",
+        "nav_views": "Views",
+        "nav_sections": "Sections",
         "no_matches": "No member matches the search.",
         "empty_roster_title": "No members yet",
         "empty_roster_body": "Share the invite link from Settings to add the first one.",
