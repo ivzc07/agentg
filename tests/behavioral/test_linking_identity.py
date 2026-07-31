@@ -97,6 +97,29 @@ def test_a_punctuated_no_does_not_negate_the_claim():
     assert identity_drift("No soy un bot.") is None
 
 
+def test_a_clause_broken_no_does_not_negate_the_claim():
+    # Comma, colon, dash, or newline between them: a discourse "No", then
+    # the claim — all must flag.
+    for reply in (
+        "No, soy tu enlace.",
+        "No: soy tu enlace.",
+        "No - soy tu enlace.",
+        "No\nsoy tu enlace.",
+    ):
+        drift = identity_drift(reply)
+        assert drift is not None and "enlace" in drift, reply
+
+
+def test_a_fronted_no_never_negates_an_english_claim():
+    # English negation is post-verbal ("I am not"); a bare fronted "No"
+    # with no punctuation is a discourse marker, not a denial.
+    drift = identity_drift("No I am your link.")
+    assert drift is not None and "link" in drift
+    drift = identity_drift("No I am a bot.")
+    assert drift is not None and "bot" in drift
+    assert identity_drift("I am not a bot.") is None
+
+
 def test_the_identity_question_covers_the_gendered_role():
     # The live rubric must name every role the offline pin bans.
     assert "asistenta" in IDENTITY_QUESTION
@@ -211,6 +234,8 @@ async def test_live_phraser_holds_one_identity_across_calls_and_instructions():
         (linking.CODE_NOT_FOUND_INSTRUCTION, "XM7K29"),
         # The expired-code path from _confirm_name.
         (linking.LINK_EXPIRED_INSTRUCTION, "yes"),
+        # The happy-path name ask also carries no coach-identity wording.
+        (linking.NAME_ASK_INSTRUCTION.format(gym="Iron Temple"), "no"),
         # The fix must hold for the other linking instructions too.
         (
             linking.NAME_CONFIRM_INSTRUCTION.format(gym="Iron Temple", name="Ana García"),

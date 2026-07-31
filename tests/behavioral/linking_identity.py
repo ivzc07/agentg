@@ -46,9 +46,10 @@ _DETERMINERS = {
 }
 _NEGATIONS = {"no", "not"}
 _TRAILING_WORD = re.compile(r"(\w+)([^\w]*)$")
-# A negation only denies the claim it is glued to: sentence-ending
-# punctuation between it and the verb means it answered something else.
-_SENTENCE_END = re.compile(r"[.!?]")
+# A negation only denies the claim it is glued to: any clause break
+# (sentence punctuation, comma, colon, dash, newline) between it and the
+# verb means it answered something else.
+_CLAUSE_BREAK = re.compile(r"[,;.!?:\n—–]|(?<=\s)-(?=\s)")
 
 # Curly/typographic apostrophes read as ASCII so "I’m" is still a claim.
 _APOSTROPHES = str.maketrans("’‘ʼ", "'''")
@@ -58,18 +59,20 @@ def identity_drift(reply: str) -> str | None:
     """The drifting self-description in ``reply``, or ``None`` — but ONLY
     the exact pinned shape: claim verb + optional determiner + forbidden
     role ("Soy tu enlace", "I'm a bot"). Denials adjacent to the verb are
-    not claims — but a "No" closed by sentence-ending punctuation negates
-    nothing ("No. Soy tu enlace." flags). Anything more elaborate is the
-    live judge's job, by design."""
+    not claims — Spanish "No soy" glued to the verb (a "No" closed by any
+    clause break negates nothing); English negation is post-verbal only,
+    so a fronted "No" never denies an I-am claim ("No I am your link."
+    flags). Anything more elaborate is the live judge's job, by design."""
     reply = reply.translate(_APOSTROPHES)
     for match in _CLAIM.finditer(reply):
-        trailing = _TRAILING_WORD.search(reply[: match.start()])
-        if (
-            trailing is not None
-            and trailing.group(1).lower() in _NEGATIONS
-            and not _SENTENCE_END.search(trailing.group(2))
-        ):
-            continue
+        if match.group(1).lower() == "soy":
+            trailing = _TRAILING_WORD.search(reply[: match.start()])
+            if (
+                trailing is not None
+                and trailing.group(1).lower() in _NEGATIONS
+                and not _CLAUSE_BREAK.search(trailing.group(2))
+            ):
+                continue
         words = _WORD.findall(reply[match.end() :].lower())
         if words and words[0] in _NEGATIONS:
             continue
