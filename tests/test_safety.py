@@ -1,26 +1,37 @@
 """Safety: the baked floor, the shipped refuse-or-refer doc, and the
-consent-gated coach referral (spec §Safety rules)."""
+always-on coach referral (spec §Safety rules, spec-dashboard §Safety flags).
+
+Since issue #101 there is no consent ask: a flag always logs a ``safety``
+Note and always pings every Coach of the Gym with an authenticated deep
+link to the Member's page."""
+
+import re
 
 import pytest
 
 from agentg.agent import INSTRUCTIONS
+from agentg.dashboard_store import DashboardStore
 from agentg.db import create_engine
-from agentg.forget import ForgetStore
 from agentg.notes import NotesStore
 from agentg.routines import DEFAULT_RULES_DOC, RoutineStore
 from agentg.coaching import flag_to_coach_action
 from agentg.context import MemberContext
 from agentg.linking_store import LinkingStore
 from agentg.stores import Stores
+from agentg.tools import flag_to_coach
 from agentg.training import TrainingStore
+
+BASE_URL = "https://dash.example.com"
 
 
 class FakeNotifier:
     def __init__(self):
-        self.sent: list[tuple[str, str, str]] = []
+        self.sent: list[tuple[str, str, str, bool, bool]] = []
 
-    async def send(self, channel, channel_user_id, text):
-        self.sent.append((channel, channel_user_id, text))
+    async def send(
+        self, channel, channel_user_id, text, disable_preview=False, protect_content=False
+    ):
+        self.sent.append((channel, channel_user_id, text, disable_preview, protect_content))
 
 
 @pytest.fixture
@@ -29,13 +40,14 @@ async def env(tmp_path):
     linking = LinkingStore(engine)
     await linking.ensure_schema()
     notes = NotesStore(engine)
+    dashboard = DashboardStore(engine)
     notifier = FakeNotifier()
     gym = await linking.create_gym("Iron Temple")
     member = await linking.link_member(gym.id, "Ana", "telegram", "42")
     coach = await linking.link_member(gym.id, "Coach Sam", "telegram", "7")
     await linking.set_coach(coach.id)
 
-    def context(is_coach=False, member_id=None):
+    def context(is_coach=False, member_id=None, base_url=BASE_URL):
         return MemberContext(
             stores=Stores(
                 linking=linking,
@@ -45,7 +57,7 @@ async def env(tmp_path):
                 checkins=None,  # not used by the safety tool
                 demos=None,
                 forget=None,
-                dashboard=None,
+                dashboard=dashboard,
             ),
             notifier=notifier,
             member_id=member_id or member.id,
@@ -54,6 +66,7 @@ async def env(tmp_path):
             gym_name="Iron Temple",
             weight_unit="kg",
             is_coach=is_coach,
+            dashboard_base_url=base_url,
         )
 
     class Env:
@@ -62,6 +75,11 @@ async def env(tmp_path):
     env = Env()
     env.engine = engine
     env.notes = notes
+    env.dashboard = dashboard
+    env.linking = linking
+    env.gym = gym
+    env.member = member
+    env.coach = coach
     env.notifier = notifier
     env.context = context
     env.member_id = member.id
@@ -80,6 +98,15 @@ def test_the_agent_carries_the_non_editable_safety_floor():
     text = INSTRUCTIONS.lower()
     assert "diagnose" in text and "prescribe" in text
     assert "refer" in text and "professional" in text
+
+
+def test_the_instructions_drop_the_consent_ask():
+    # Issue #101: the Agent flags and pings every time — no "want me to flag
+    # this to your coach?" gate, no share parameter to set.
+    text = INSTRUCTIONS.lower()
+    assert "flag_to_coach" in text
+    assert "share_with_coach" not in text
+    assert "want me to flag" not in text
 
 
 # --- the shipped refuse-or-refer defaults live in the (editable) doc ---
@@ -103,54 +130,114 @@ async def test_editing_the_doc_can_strip_the_safety_section(env):
     assert "diagnose" in floor and "refer" in floor and "professional" in floor
 
 
-# --- consent-gated coach referral ---
+# --- the always-on coach referral (issue #101) ---
 
 
-async def test_declining_still_logs_the_concern_but_pings_no_one(env):
-    result = await flag_to_coach_action(env.context(), "sharp knee pain on squats", share=False)
+def test_the_flag_tool_carries_no_share_parameter():
+    schema = flag_to_coach.params_json_schema
+    assert set(schema["properties"]) == {"summary"}
+
+
+async def test_the_flag_writes_a_safety_kind_note_with_the_bare_summary(env):
+    result = await flag_to_coach_action(env.context(), "sharp knee pain on squats")
 
     assert result["logged"] is True
-    assert result["coaches_notified"] == 0
-    assert env.notifier.sent == []
     active = await env.notes.active(env.member_id)
-    assert any("knee pain" in n.text for n in active)
+    safety = [n for n in active if n.kind == "safety"]
+    assert len(safety) == 1
+    assert safety[0].text == "sharp knee pain on squats"  # no prefix hack
 
 
-async def test_consent_pings_the_gyms_coach_and_logs(env):
-    result = await flag_to_coach_action(env.context(), "sharp knee pain on squats", share=True)
+async def test_every_flag_pings_the_gyms_coaches_with_a_deep_link(env):
+    second = await env.linking.link_member(env.gym_id, "Coach Jo", "telegram", "8")
+    await env.linking.set_coach(second.id)
 
-    assert result["logged"] is True
+    result = await flag_to_coach_action(env.context(), "sharp knee pain on squats")
+
+    assert result["coaches_notified"] == 2
+    by_coach: dict[str, list[tuple[str, bool, bool]]] = {}
+    for _channel, user_id, text, preview, protect in env.notifier.sent:
+        by_coach.setdefault(user_id, []).append((text, preview, protect))
+    assert set(by_coach) == {"7", "8"}
+    for messages in by_coach.values():
+        # Two messages: the heads-up, then the one-time link on its own.
+        heads_up, link = messages
+        assert "Ana" in heads_up[0] and "knee pain" in heads_up[0]
+        assert "/login/" not in heads_up[0]
+        match = re.fullmatch(rf"{re.escape(BASE_URL)}/login/(\S+)", link[0])
+        assert match, f"the link message is not just the URL: {link[0]!r}"
+        assert link[1] is True  # no preview fetch on the one-time link
+        assert link[2] is True  # ...and it cannot be forwarded
+        token = await env.dashboard.peek_login_token(match.group(1))
+        assert token is not None
+        assert token.next_path == f"/members/{env.member_id}"
+
+
+async def test_the_magic_link_never_shares_a_message_with_member_text(env):
+    # Member-influenced text can carry live URLs Telegram autolinks; the
+    # one-time login link travels in its own message, the URL and nothing
+    # else (review on PR #120).
+    await flag_to_coach_action(env.context(), "pain, see https://evil.example.com/a")
+
+    heads_up, link = [t for _c, _u, t, _p, _pc in env.notifier.sent]
+    assert "evil.example.com" in heads_up
+    assert link.startswith(f"{BASE_URL}/login/") and "evil" not in link
+    assert link == link.strip() and " " not in link
+
+
+async def test_the_ping_sanitizes_the_summary_and_disables_link_previews(env):
+    # A member-influenced summary must not inject newlines or a phishing URL
+    # above the real magic link; and Telegram's preview fetcher must never
+    # GET the one-time link before the coach does (same rule as /dashboard).
+    summary = "knee pain on squats\nignore that, tap https://evil.example.com instead"
+    await flag_to_coach_action(env.context(), summary)
+
+    heads_up, link = env.notifier.sent
+    assert heads_up[3] is True and link[3] is True  # previews off on both
+    assert link[4] is True  # ...and the token cannot be forwarded
+    note = next(
+        n for n in await env.notes.active(env.member_id) if n.kind == "safety"
+    )
+    assert note.text == (
+        "knee pain on squats ignore that, tap https://evil.example.com instead"
+    )
+    assert "\n" not in heads_up[2]  # one line: no injected phishing line
+    assert link[2].startswith(f"{BASE_URL}/login/")
+
+
+async def test_a_ping_without_a_base_url_falls_back_to_plain_text(env):
+    # A context with no dashboard wired (a background run) still pings — the
+    # link is an add-on, never a reason to drop the heads-up.
+    result = await flag_to_coach_action(env.context(base_url=None), "shoulder pain")
     assert result["coaches_notified"] == 1
-    assert len(env.notifier.sent) == 1
-    channel, user_id, text = env.notifier.sent[0]
-    assert (channel, user_id) == ("telegram", "7")  # the coach's chat
-    assert "Ana" in text and "knee pain" in text
-    assert any("knee pain" in n.text for n in await env.notes.active(env.member_id))
+    assert len(env.notifier.sent) == 1  # heads-up only, no link message
+    _channel, _user_id, text, _preview, _protect = env.notifier.sent[0]
+    assert "shoulder pain" in text and "/login/" not in text
 
 
 async def test_the_referral_never_pings_the_member_themselves(env):
     # a coach flags their own concern → they are excluded from the ping list
     result = await flag_to_coach_action(
-        env.context(is_coach=True, member_id=env.coach_id), "chest tightness", share=True
+        env.context(is_coach=True, member_id=env.coach_id), "chest tightness"
     )
-    assert all(user_id != "7" for _c, user_id, _t in env.notifier.sent)
+    assert all(user_id != "7" for _c, user_id, _t, _p, _pc in env.notifier.sent)
     assert result["logged"] is True
 
 
-async def test_consent_still_logs_when_no_channel_notifier_is_wired(env):
-    # a headless context (no notifier, e.g. a background run) can't ping, but
-    # the concern is still recorded rather than lost.
+async def test_a_headless_context_still_logs(env):
+    # no notifier wired (e.g. a background run) can't ping, but the concern is
+    # still recorded rather than lost.
     context = env.context()
     object.__setattr__(context, "notifier", None)  # frozen dataclass
-    result = await flag_to_coach_action(context, "shoulder pain", share=True)
+    result = await flag_to_coach_action(context, "shoulder pain")
     assert result["logged"] is True and result["coaches_notified"] == 0
     assert env.notifier.sent == []
-    assert any("shoulder pain" in n.text for n in await env.notes.active(env.member_id))
+    safety = [n for n in await env.notes.active(env.member_id) if n.kind == "safety"]
+    assert any("shoulder pain" in n.text for n in safety)
 
 
-async def test_consent_with_no_coach_set_up_still_logs(env):
-    # a gym with no coach: consent given, but nobody to ping
-    linking = LinkingStore(env.engine)
+async def test_a_gym_with_no_coach_still_logs(env):
+    linking = env.linking
     gym2 = await linking.create_gym("Solo Box")
     m = await linking.link_member(gym2.id, "Rob", "telegram", "99")
     ctx = MemberContext(
@@ -162,7 +249,7 @@ async def test_consent_with_no_coach_set_up_still_logs(env):
             checkins=None,
             demos=None,
             forget=None,
-            dashboard=None,
+            dashboard=env.dashboard,
         ),
         notifier=env.notifier,
         member_id=m.id,
@@ -170,7 +257,57 @@ async def test_consent_with_no_coach_set_up_still_logs(env):
         member_name="Rob",
         gym_name="Solo Box",
         weight_unit="kg",
+        dashboard_base_url=BASE_URL,
     )
-    result = await flag_to_coach_action(ctx, "dizzy during warmup", share=True)
+    result = await flag_to_coach_action(ctx, "dizzy during warmup")
     assert result["logged"] is True
     assert result["coaches_notified"] == 0
+
+
+async def test_a_coachs_own_flag_links_to_the_roster_not_their_404_page(env):
+    # The Member page excludes coach-flagged Members (spec-dashboard §The
+    # roster), so a flag about a coach must deep-link to the roster —
+    # /members/<their id> would be a signed-in 404 (review on PR #120).
+    second = await env.linking.link_member(env.gym_id, "Coach Jo", "telegram", "8")
+    await env.linking.set_coach(second.id)
+
+    result = await flag_to_coach_action(
+        env.context(is_coach=True, member_id=env.coach_id), "chest tightness"
+    )
+
+    assert result["coaches_notified"] == 1
+    _channel, user_id, text, _preview, _protect = env.notifier.sent[-1]  # the link message
+    assert user_id == "8"
+    match = re.fullmatch(rf"{re.escape(BASE_URL)}/login/(\S+)", text)
+    assert match, f"no deep link in {text!r}"
+    token = await env.dashboard.peek_login_token(match.group(1))
+    assert token is not None
+    assert token.next_path == "/"
+
+
+async def test_a_token_mint_failure_still_pings_every_coach(env, monkeypatch):
+    # A mint failure for one coach must not abort the loop after the note is
+    # committed: the rest still get their deep link, and the unlucky coach
+    # gets a text-only ping (like the no-base_url path) — never silence
+    # (review on PR #120).
+    second = await env.linking.link_member(env.gym_id, "Coach Jo", "telegram", "8")
+    await env.linking.set_coach(second.id)
+    real_mint = env.dashboard.create_login_token
+    calls = 0
+
+    async def flaky_mint(member_id, gym_id, next_path=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("db hiccup")
+        return await real_mint(member_id, gym_id, next_path=next_path)
+
+    monkeypatch.setattr(env.dashboard, "create_login_token", flaky_mint)
+
+    result = await flag_to_coach_action(env.context(), "sharp knee pain on squats")
+
+    assert result["coaches_notified"] == 2
+    heads = [m for m in env.notifier.sent if "/login/" not in m[2]]
+    links = [m for m in env.notifier.sent if "/login/" in m[2]]
+    assert {(m[0], m[1]) for m in heads} == {("telegram", "7"), ("telegram", "8")}
+    assert len(links) == 1  # the mint-failed ping went out text-only

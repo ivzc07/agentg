@@ -414,16 +414,17 @@ async def show_demo(ctx: RunContextWrapper[MemberContext], exercise: str) -> dic
 
 @function_tool
 async def flag_to_coach(
-    ctx: RunContextWrapper[MemberContext], summary: str, share_with_coach: bool
+    ctx: RunContextWrapper[MemberContext], summary: str
 ) -> dict[str, Any]:
-    """Log a safety concern, and ping the gym's coaches only if the Member agrees.
+    """Log a safety concern and ping the gym's coaches — every time.
 
-    First ask "want me to flag this to your coach?"; pass share_with_coach=True
-    only on a clear yes, False on a no. Either way the concern is logged. Use
-    this for the consent-gated referrals in the rules doc (injuries, disordered-
-    eating red flags, anything you'd want a human to know).
+    Call this on a safety concern or a new injury or pain, with the bare
+    summary. There is no consent ask: the flag is always logged as a safety
+    note and the coaches are always pinged with a link to the Member's page.
+    Use this for the referrals in the rules doc (injuries, disordered-eating
+    red flags, anything you'd want a human to know).
     """
-    return await flag_to_coach_action(ctx.context, summary, share_with_coach)
+    return await flag_to_coach_action(ctx.context, summary)
 
 
 @function_tool

@@ -307,3 +307,101 @@ async def test_ensure_schema_adds_the_sets_exercise_index_to_a_legacy_db(tmp_pat
         ).first()
     assert index is not None
     await engine.dispose()
+
+
+def test_the_safety_flag_migration_columns_compile_on_postgres():
+    """The hand-written ALTER TABLEs must use types Postgres accepts.
+
+    SQLite happily takes DATETIME; Postgres has no such type — on deploy the
+    whole ensure_schema transaction would roll back and the process would
+    fail to boot (review on PR #120). Pin the DDL against the model's column
+    type as the PostgreSQL dialect compiles it."""
+    from sqlalchemy.dialects import postgresql
+
+    from agentg.linking_store import (
+        ADD_ACKNOWLEDGED_AT_DDL,
+        ADD_ACKNOWLEDGED_BY_DDL,
+        ADD_NEXT_PATH_DDL,
+    )
+    from agentg.models import MemberNote
+
+    dialect = postgresql.dialect()
+    model_type = MemberNote.__table__.c.acknowledged_at.type.compile(dialect=dialect)
+    assert model_type.startswith("TIMESTAMP")
+    assert model_type.split()[0] in ADD_ACKNOWLEDGED_AT_DDL
+    for ddl in (ADD_ACKNOWLEDGED_AT_DDL, ADD_ACKNOWLEDGED_BY_DDL, ADD_NEXT_PATH_DDL):
+        assert "DATETIME" not in ddl
+
+
+async def test_ensure_schema_adds_the_safety_flag_columns_to_a_legacy_db(tmp_path):
+    """A database that predates issue #101 gets the tick-off stamps and the
+    token next_path at startup, and the flag/tick-off queries work against
+    the upgraded schema (review on PR #120)."""
+    import sqlite3
+
+    from agentg.dashboard_store import DashboardStore
+    from agentg.notes import NotesStore
+
+    db_path = tmp_path / "legacy.db"
+    engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+    await LinkingStore(engine).ensure_schema()
+    await engine.dispose()
+    # Simulate the legacy schema. Done on a raw sync connection (FK
+    # enforcement off — our async engine runs with PRAGMA foreign_keys=ON).
+    # member_notes is rebuilt the old way: SQLite 3.50 refuses to DROP a
+    # column its own table-level FOREIGN KEY clause names, and the table is
+    # still empty here.
+    raw = sqlite3.connect(str(db_path))
+    raw.execute("DROP TABLE member_notes")
+    raw.execute(
+        """CREATE TABLE member_notes (
+            id INTEGER NOT NULL PRIMARY KEY,
+            gym_id INTEGER NOT NULL REFERENCES gyms (id),
+            member_id INTEGER NOT NULL REFERENCES members (id),
+            kind VARCHAR(20) NOT NULL,
+            text VARCHAR(400) NOT NULL,
+            created_at DATETIME NOT NULL,
+            retired_at DATETIME
+        )"""
+    )
+    raw.execute("CREATE INDEX ix_member_notes_member_id ON member_notes (member_id)")
+    raw.execute("ALTER TABLE dashboard_login_tokens DROP COLUMN next_path")
+    raw.commit()
+    raw.close()
+
+    engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+    store = LinkingStore(engine)
+    await store.ensure_schema()  # startup against the legacy schema
+
+    async with engine.begin() as conn:
+        note_columns = {
+            row[1] for row in await conn.execute(text("PRAGMA table_info(member_notes)"))
+        }
+        token_columns = {
+            row[1]
+            for row in await conn.execute(text("PRAGMA table_info(dashboard_login_tokens)"))
+        }
+    assert {"acknowledged_at", "acknowledged_by_member_id"} <= note_columns
+    assert "next_path" in token_columns
+
+    # The flag end-to-end against the upgraded schema: write, mark, tick.
+    gym = await store.create_gym("Iron Temple")
+    coach = await store.link_member(gym.id, "Coach Ana", "telegram", "1")
+    await store.set_coach(coach.id)
+    member = await store.link_member(gym.id, "Ana", "telegram", "42")
+    notes = NotesStore(engine)
+    dashboard = DashboardStore(engine)
+    flag = await notes.remember_safety(member.id, gym.id, "sharp knee pain")
+    rows, _ = await dashboard.roster(gym.id)
+    assert rows[0].has_safety_flag
+    ticked = await dashboard.acknowledge_flag(gym.id, member.id, flag.id, coach.id)
+    assert ticked is not None and ticked.acknowledged_by_member_id == coach.id
+    token = await dashboard.create_login_token(coach.id, gym.id, next_path="/members/2")
+    peeked = await dashboard.peek_login_token(token)
+    assert peeked is not None and peeked.next_path == "/members/2"
+
+    # Idempotent: a later startup changes nothing.
+    await store.ensure_schema()
+    rows, _ = await dashboard.roster(gym.id)
+    assert not rows[0].has_safety_flag
+    await engine.dispose()

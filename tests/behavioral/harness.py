@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -21,7 +21,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from agentg.agent import dynamic_instructions
 from agentg.dashboard import DashboardDoor
 from agentg.dashboard_store import Clock as DashboardClock
-from agentg.dashboard_store import DashboardStore
 from agentg.db import create_engine
 from agentg.linking import Linking
 from agentg.messages import IncomingMessage
@@ -53,7 +52,14 @@ class FakeNotifier:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str, str]] = []
 
-    async def send(self, channel: str, channel_user_id: str, text: str) -> None:
+    async def send(
+        self,
+        channel: str,
+        channel_user_id: str,
+        text: str,
+        disable_preview: bool = False,
+        protect_content: bool = False,
+    ) -> None:
         self.sent.append((channel, channel_user_id, text))
 
 
@@ -84,17 +90,18 @@ class ConversationHarness:
         dashboard_clock: DashboardClock | None = None,
     ) -> AsyncIterator["ConversationHarness"]:
         """Build the harness; with ``dashboard_base_url`` the runtime also
-        gets the dashboard door (``/dashboard`` -> magic link), minting and
-        redeeming tokens on ``dashboard_clock`` when one is given."""
+        gets the dashboard door (``/dashboard`` -> magic link). The injected
+        clock is ``clock``, or ``dashboard_clock`` as a shorthand for tests
+        whose only time-aware surface is the dashboard door."""
         set_tracing_disabled(True)
         engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'behavioral.db'}")
-        stores = Stores.from_engine(engine, clock=clock)
+        # Stores.from_engine wires the clock into every time-aware store —
+        # the DashboardStore included (flag expiry, token TTL).
+        stores = Stores.from_engine(
+            engine, clock=clock if clock is not None else dashboard_clock
+        )
         dashboard = None
         if dashboard_base_url is not None:
-            if dashboard_clock is not None:
-                stores = replace(
-                    stores, dashboard=DashboardStore(engine, clock=dashboard_clock)
-                )
             dashboard = DashboardDoor(stores.dashboard, dashboard_base_url)
         model = ScriptedModel()
         notifier = FakeNotifier()

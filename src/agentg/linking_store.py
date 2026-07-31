@@ -50,6 +50,22 @@ def normalize_invite_code(text: str) -> str:
     return text.strip().lower()
 
 
+# Safety flags (issue #101): the tick-off stamps on member_notes, and the
+# deep-link target on the magic-link tokens. Module-level so a test can pin
+# them against the model's column types as PostgreSQL compiles them —
+# TIMESTAMP, never DATETIME (SQLite accepts both; Postgres has no DATETIME).
+ADD_ACKNOWLEDGED_AT_DDL = (
+    "ALTER TABLE member_notes ADD COLUMN acknowledged_at TIMESTAMP"
+)
+ADD_ACKNOWLEDGED_BY_DDL = (
+    "ALTER TABLE member_notes ADD COLUMN acknowledged_by_member_id "
+    "INTEGER REFERENCES members(id)"
+)
+ADD_NEXT_PATH_DDL = (
+    "ALTER TABLE dashboard_login_tokens ADD COLUMN next_path VARCHAR(200)"
+)
+
+
 def _add_missing_columns(conn: Connection) -> None:
     """Schema evolution for deployed databases: ``create_all`` never alters
     existing tables, so columns and indexes added after first deploy are
@@ -100,6 +116,16 @@ def _add_missing_columns(conn: Connection) -> None:
                 "ON routines (member_id) WHERE is_active"
             )
         )
+    # Safety flags (issue #101): the tick-off stamps on member_notes, and the
+    # deep-link target on the magic-link tokens.
+    note_columns = {c["name"] for c in inspect(conn).get_columns("member_notes")}
+    if "acknowledged_at" not in note_columns:
+        conn.execute(text(ADD_ACKNOWLEDGED_AT_DDL))
+    if "acknowledged_by_member_id" not in note_columns:
+        conn.execute(text(ADD_ACKNOWLEDGED_BY_DDL))
+    token_columns = {c["name"] for c in inspect(conn).get_columns("dashboard_login_tokens")}
+    if "next_path" not in token_columns:
+        conn.execute(text(ADD_NEXT_PATH_DDL))
 
 
 @dataclass(frozen=True)
@@ -308,8 +334,8 @@ class LinkingStore:
         self, gym_id: int, exclude_member_id: int | None = None
     ) -> list[tuple[int, str, str, str]]:
         """The Gym's Coaches reachable on a channel, as
-        ``(member_id, name, channel, channel_user_id)`` — who a consented
-        safety referral gets pinged to."""
+        ``(member_id, name, channel, channel_user_id)`` — who a safety flag
+        gets pinged to."""
         async with self._sessions() as db:
             rows = (
                 await db.execute(

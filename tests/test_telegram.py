@@ -8,6 +8,7 @@ import pytest
 from agentg.channels.telegram import (
     ERROR_REPLY,
     MAX_MESSAGE_LENGTH,
+    TelegramNotifier,
     create_dispatcher,
     make_message_handler,
     parse_start_payload,
@@ -128,6 +129,42 @@ async def test_disable_preview_reply_sends_with_preview_off():
 
     _, kwargs = message.answer.await_args
     assert kwargs["link_preview_options"].is_disabled is True
+
+
+async def test_notifier_with_disable_preview_sends_with_preview_off():
+    # Safety-flag pings carry a one-time magic link: Telegram's preview
+    # fetcher must never GET it (same rule as the /dashboard reply).
+    bot = SimpleNamespace(send_message=AsyncMock())
+    await TelegramNotifier(bot).send(
+        "telegram", "7", "Heads-up…\nhttps://dash.example.com/login/abc",
+        disable_preview=True,
+    )
+
+    _, kwargs = bot.send_message.await_args
+    assert kwargs["link_preview_options"].is_disabled is True
+
+
+async def test_notifier_with_protect_content_marks_the_message_unforwardable():
+    # The one-time login token must not be forwardable (review on PR #120).
+    bot = SimpleNamespace(send_message=AsyncMock())
+    await TelegramNotifier(bot).send(
+        "telegram", "7", "https://dash.example.com/login/abc",
+        disable_preview=True,
+        protect_content=True,
+    )
+
+    _, kwargs = bot.send_message.await_args
+    assert kwargs["protect_content"] is True
+    assert kwargs["link_preview_options"].is_disabled is True
+
+
+async def test_notifier_leaves_previews_alone_by_default():
+    bot = SimpleNamespace(send_message=AsyncMock())
+    await TelegramNotifier(bot).send("telegram", "7", "missed legs Monday")
+
+    _, kwargs = bot.send_message.await_args
+    assert "link_preview_options" not in kwargs
+    assert "protect_content" not in kwargs
 
 
 async def test_after_send_runs_only_once_the_reply_text_is_out():

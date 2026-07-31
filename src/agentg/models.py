@@ -175,6 +175,10 @@ class DashboardLoginToken(Base):
     expires_at: Mapped[datetime] = mapped_column(TZDateTime())
     # NULL until redeemed; single-use is "used_at is NULL" at redeem time.
     used_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    # Where redemption lands: NULL is the roster; a safety-flag ping sets the
+    # Member's page so the same magic-link mechanism serves both entries
+    # (spec-dashboard §Access & identity).
+    next_path: Mapped[str | None] = mapped_column(String(200), default=None)
 
 
 class Session(Base):
@@ -222,10 +226,17 @@ class MemberNote(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
     member_id: Mapped[int] = mapped_column(ForeignKey("members.id"), index=True)
-    kind: Mapped[str] = mapped_column(String(20))  # injury/preference/goal/constraint/other
+    kind: Mapped[str] = mapped_column(String(20))  # injury/preference/goal/constraint/safety/other
     text: Mapped[str] = mapped_column(String(400))
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     retired_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    # Safety-flag handled state (spec-dashboard §Safety flags): who ticked
+    # the flag off and when. Acknowledging is not retiring — the Note stays
+    # live in the Agent's recall; NULL means no Coach has seen it yet.
+    acknowledged_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    acknowledged_by_member_id: Mapped[int | None] = mapped_column(
+        ForeignKey("members.id"), default=None
+    )
 
 
 class Routine(Base):

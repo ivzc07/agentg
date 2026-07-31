@@ -10,11 +10,11 @@ is three routes:
   Member in the right pane) — gated on the session cookie *and* a
   per-request ``is_coach`` re-check.
 - ``GET /members/<id>`` — the Member's page: the read-only training record
-  (issue #99) plus the Routine editor's entry point (issue #100). Opened
-  from Table or Cards it hides the switcher; with
-  ``?view=split`` it fills Split's right pane and the switcher stays. A
-  departed, forgotten, or mistyped id lands on one shared bare 404 — no
-  tombstone, no "this member left" wording.
+  (issue #99) with the safety-flag banner (issue #101) plus the Routine
+  editor's entry point (issue #100). Opened from Table or Cards it hides
+  the switcher; with ``?view=split`` it fills Split's right pane and the
+  switcher stays. A departed, forgotten, or mistyped id lands on one shared
+  bare 404 — no tombstone, no "this member left" wording.
 - ``GET /members/<id>/routine`` — the Routine editor: a structured
   weekday-to-exercises form whose header always carries the ownership chip
   (spec-dashboard §Routines & Presets).
@@ -24,6 +24,9 @@ is three routes:
   successful save messages the Member: their coach, named, plus the new
   plan. A running Session is never disturbed — the new plan simply applies
   from the next chat turn.
+- ``POST /members/<id>/flags/<note_id>/tick-off`` — the page's other write:
+  a Coach acknowledges a safety flag (who and when), which silences the
+  roster marker without retiring the Note.
 - ``GET /login/<token>`` — an interstitial that never spends the token, so
   a link-preview fetch (Telegram builds one unless the bot disables it)
   can't burn the one-time link; the browser auto-submits…
@@ -61,7 +64,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from html import escape
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import qrcode
 import qrcode.image.svg
@@ -225,10 +228,22 @@ def _lang_toggle(next_path: str) -> str:
 
 
 def _safe_next(raw: str | None) -> str:
-    """A redirect target that can only ever be a path on this dashboard."""
-    if raw and raw.startswith("/") and not raw.startswith("//"):
-        return raw
-    return "/"
+    """A redirect target that can only ever be a path on this dashboard.
+
+    The ONE guard both doors use (the magic-link redeem and the language
+    toggle). A plain startswith check is not enough: "/\\t/evil.com" passes
+    it, and yarl then normalizes the Location to the protocol-relative
+    //evil.com — an open redirect. Any control or whitespace character,
+    raw or percent-encoded, kills the path; so does anything that isn't a
+    single-leading-slash local path."""
+    if not raw:
+        return "/"
+    for candidate in (raw, unquote(raw)):
+        if any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in candidate):
+            return "/"
+        if not candidate.startswith("/") or candidate.startswith("//"):
+            return "/"
+    return raw
 
 
 # --- The shared chrome: segmented view control, search, toggle, settings ---
@@ -252,6 +267,7 @@ ul { list-style: none; padding: 0; margin: 1rem 0; }
 .away.sev-amber { color: #9a5b00; font-weight: 600; }
 .away.sev-red { color: #b3261e; font-weight: 600; }
 .tag { font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 1rem; background: #eee; color: #555; white-space: nowrap; }
+.tag-flag { background: #fde7e9; color: #b3261e; }
 #lapsed summary { cursor: pointer; color: #666; }
 /* Cards: severity bands plus the 4-week Mon-Sun day grid. */
 .band > h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: .06em; color: #5a6472; margin: 1.4rem 0 0.6rem; }
@@ -293,9 +309,14 @@ header.mhead .facts { color: #666; }
 .note { padding: 0.3rem 0; }
 .muted { color: #666; font-size: 0.9rem; }
 .tag { font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 1rem; background: #eee; color: #555; white-space: nowrap; }
+.tag-flag { background: #fde7e9; color: #b3261e; }
 .pages { display: flex; gap: 1rem; margin-top: 0.6rem; }
 .pages .muted { margin: 0 auto; }
 .tail summary { cursor: pointer; color: #666; }
+.safety-banner { border: 1px solid #b3261e; border-radius: 0.5rem; padding: 0.8rem 1rem; }
+.safety-banner h2 { color: #b3261e; }
+.safety-banner .flag { padding: 0.3rem 0; display: flex; gap: 0.8rem; align-items: baseline; flex-wrap: wrap; }
+.safety-banner form { margin: 0; }
 /* The Member's own words, left alone, tagged when not in the Coach's language. */
 .verbatim { border-left: 2px solid #e3e7ec; padding-left: 8px; }
 .langtag { display: inline-block; white-space: nowrap; font-size: 0.65rem; letter-spacing: .06em; text-transform: uppercase; color: #8a94a3; margin-left: 6px; }
@@ -361,6 +382,9 @@ def _roster_row(row: RosterRow, view: str, lang: str) -> str:
     if row.snoozed_until is not None:
         until = fmt_date(row.snoozed_until, lang)
         tags += f' <span class="tag">{t["snoozed_tag"].format(date=until)}</span>'
+    if row.has_safety_flag:
+        # A marker on the row, never a re-sort (spec-dashboard §Safety flags).
+        tags += f' <span class="tag tag-flag">{t["flag_tag"]}</span>'
     severity = f" sev-{row.severity}" if row.severity else ""
     return (
         f'<li class="row" data-name="{escape(row.name)}">'
@@ -429,6 +453,9 @@ def _member_card(row: RosterRow, cells: list[DayCell], lang: str) -> str:
     if row.snoozed_until is not None:
         until = fmt_date(row.snoozed_until, lang)
         tags += f' <span class="tag">{t["snoozed_tag"].format(date=until)}</span>'
+    if row.has_safety_flag:
+        # A marker on the card, never a re-sort (spec-dashboard §Safety flags).
+        tags += f' <span class="tag tag-flag">{t["flag_tag"]}</span>'
     severity = f" sev-{row.severity}" if row.severity else ""
     return f"""<div class="mcard" data-name="{escape(row.name)}">
 <div class="top-row"><a class="name" href="{_member_href(row.member_id, "cards")}">{escape(row.name)}</a>
@@ -503,9 +530,10 @@ def _split_placeholder(lang: str) -> str:
 
 # --- The Member page (issue #99, spec-dashboard §The Member page) ---
 #
-# Read-only: the Routine Edit entry point is a later ticket. One shape under
-# all three roster views; opened from Table or Cards the switcher hides,
-# in Split it stays.
+# Read-only apart from the safety-flag banner's Tick off (issue #101); the
+# Routine Edit entry point is a later ticket. One shape under all three
+# roster views; opened from Table or Cards the switcher hides, in Split it
+# stays.
 
 
 def _not_found() -> web.Response:
@@ -684,6 +712,45 @@ def _notes_card(view: MemberPage, lang: str) -> str:
     return f'<section class="card"><h2>{t["notes"]}</h2>{body}</section>'
 
 
+def _safety_banner(view: MemberPage, lang: str, roster_view: str) -> str:
+    """The safety-flag banner above the Member page's columns.
+
+    Open flags carry the Tick off action; acknowledged ones name the Coach
+    and the date (acknowledging is not retiring — the Note stays in the
+    Notes card too); an expired unacknowledged flag stays labelled
+    "expired, never seen" (spec-dashboard §Safety flags). The form keeps
+    the view the page was opened from, so ticking off never bounces a
+    Split or Cards Coach back to Table."""
+    if not view.safety_flags:
+        return ""
+    t = STRINGS[lang]
+    items = []
+    for flag in view.safety_flags:
+        text = f"<b>{escape(flag.text)}</b> · {fmt_date(flag.on, lang)}"
+        if flag.status == "open":
+            action = (
+                f'<form method="post" '
+                f'action="/members/{view.member_id}/flags/{flag.note_id}/tick-off'
+                f'?view={roster_view}">'
+                f'<button type="submit">{t["tick_off"]}</button></form>'
+            )
+        elif flag.status == "acknowledged":
+            who = flag.acknowledged_by or "—"
+            when = fmt_date(flag.acknowledged_on, lang) if flag.acknowledged_on else ""
+            action = (
+                f'<span class="muted">'
+                f'{t["flag_seen_by"].format(who=escape(who), date=when)}</span>'
+            )
+        else:
+            action = f'<span class="muted">{t["flag_expired_unseen"]}</span>'
+        items.append(f'<div class="flag">{text} {action}</div>')
+    return (
+        f'<section class="card safety-banner"><h2>{t["safety_section"]}</h2>'
+        + "".join(items)
+        + "</section>"
+    )
+
+
 def _member_content(view: MemberPage, lang: str, roster_view: str) -> str:
     """The one Member page body, shared by the standalone page and Split's
     right pane."""
@@ -705,6 +772,7 @@ def _member_content(view: MemberPage, lang: str, roster_view: str) -> str:
 <h1>{escape(view.name)}{tags}</h1>
 <div class="facts">{facts}</div>
 </header>
+{_safety_banner(view, lang, roster_view)}
 <div class="columns">
 <div class="col">
 {_routine_card(view, lang)}
@@ -1312,6 +1380,32 @@ def build_app(
         set_session(response, coach_member.id, gym.id)  # sliding 90-day refresh
         raise response
 
+    async def tick_off_flag(request: web.Request) -> web.Response:
+        """Tick a safety flag off: stamp who (this Coach) and when.
+
+        Acknowledging is not retiring — the Note stays live for the Agent.
+        Anything unreachable (unknown, foreign, non-safety, retired) gets
+        the shared 404."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        member, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+            note_id = int(request.match_info["note_id"])
+        except ValueError:
+            return _not_found()
+        note = await store.acknowledge_flag(gym.id, member_id, note_id, member.id)
+        if note is None:
+            return _not_found()
+        # Back to the Member's page, in the view it was opened from — Split
+        # must not drop the Coach out of the pane.
+        view = request.query.get("view", "table")
+        view = view if view in VIEWS else "table"
+        response = web.HTTPFound(f"/members/{member_id}?view={view}")
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        raise response
+
     async def settings(request: web.Request) -> web.Response:
         coach = await require_coach(request)
         if coach is None:
@@ -1401,7 +1495,10 @@ def build_app(
         token = await store.redeem_login_token(request.match_info["token"])
         if token is None:
             return web.Response(text=_bounce_page(), content_type="text/html")
-        response = web.HTTPFound("/")
+        # A safety-flag ping's token carries the Member's page as its
+        # landing; the shared local-path guard decides (anything fishy
+        # falls back to the roster).
+        response = web.HTTPFound(_safe_next(token.next_path))
         set_session(response, token.member_id, token.gym_id)
         raise response
 
@@ -1410,6 +1507,7 @@ def build_app(
     app.router.add_get("/members/{member_id}", member_page)
     app.router.add_get("/members/{member_id}/routine", routine_editor)
     app.router.add_post("/members/{member_id}/routine", routine_save)
+    app.router.add_post("/members/{member_id}/flags/{note_id}/tick-off", tick_off_flag)
     app.router.add_get("/settings", settings)
     app.router.add_post("/settings/regenerate-invite", regenerate_invite)
     app.router.add_post("/settings/regenerate-coach", regenerate_coach)

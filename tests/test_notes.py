@@ -93,3 +93,15 @@ async def test_active_notes_are_ordered_oldest_first(env):
 async def test_note_text_is_capped_not_rejected(env):
     note = await env.notes.remember(env.member_id, env.gym_id, "other", "x" * 1000)
     assert len(note.text) <= 400
+
+
+async def test_a_plain_remember_never_lands_a_safety_kind(env):
+    """``safety`` is reserved for the flag_to_coach referral path: a note
+    written any other way (a wrong tool call, prompt injection) would mark
+    the roster and the banner without any coach ever being pinged. Remap it
+    like any unknown kind (review on PR #120)."""
+    note = await env.notes.remember(env.member_id, env.gym_id, "safety", "chest pain")
+
+    assert note.kind == "other"
+    active = await env.notes.active(env.member_id)
+    assert [n.kind for n in active] == ["other"]

@@ -25,8 +25,11 @@ class MemberContext:
     # The Gym's IANA timezone — day boundaries (today, Gap) honour it (#95).
     timezone: str = "UTC"
     is_coach: bool = False
-    # Channel notifier for pinging a Gym's Coach on a consented safety referral.
+    # Channel notifier for pinging a Gym's Coaches on a safety flag.
     notifier: Notifier | None = None
+    # Public origin the safety-flag deep links point at (DASHBOARD_BASE_URL);
+    # None means no dashboard is wired and pings go out without a link.
+    dashboard_base_url: str | None = None
     # Exercises the Agent asked to demo this turn; the channel sends them
     # after the reply so the agent loop stays channel-agnostic (ADR 0001).
     demo_requests: list[str] = field(default_factory=list)

@@ -151,6 +151,12 @@ STRINGS = {
         "save_routine": "Guardar Rutina",
         "pick_day": "— día —",
         "workout_name_placeholder": "Nombre (p. ej. Piernas)",
+        # The safety-flag banner and roster marker (issue #101).
+        "flag_tag": "⚑ seguridad",
+        "safety_section": "⚑ Seguridad",
+        "tick_off": "Marcar como vista",
+        "flag_seen_by": "Vista por {who} el {date}",
+        "flag_expired_unseen": "caducada, nunca vista",
         # Settings screen.
         "settings_title": "Ajustes",
         "invite_section": "Enlace de invitación",
@@ -257,6 +263,12 @@ STRINGS = {
         "save_routine": "Save routine",
         "pick_day": "— day —",
         "workout_name_placeholder": "Name (e.g. Legs)",
+        # The safety-flag banner and roster marker (issue #101).
+        "flag_tag": "⚑ safety",
+        "safety_section": "⚑ Safety",
+        "tick_off": "Mark as seen",
+        "flag_seen_by": "Seen by {who} on {date}",
+        "flag_expired_unseen": "expired, never seen",
         # Settings screen.
         "settings_title": "Settings",
         "invite_section": "Invite link",

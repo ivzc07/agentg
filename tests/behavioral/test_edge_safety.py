@@ -1,4 +1,4 @@
-"""Edge/safety stratum: consent, forget-me, gym switch, check-in prefs."""
+"""Edge/safety stratum: safety flags, forget-me, gym switch, check-in prefs."""
 
 from __future__ import annotations
 
@@ -19,22 +19,20 @@ async def _count(engine, model, **where) -> int:
         return int(await db.scalar(q) or 0)
 
 
-async def test_pain_report_with_consent_flags_coach(tmp_path):
-    async with ConversationHarness.create(tmp_path) as h:
+async def test_pain_report_flags_the_coach_with_a_deep_link(tmp_path):
+    async with ConversationHarness.create(
+        tmp_path, dashboard_base_url="https://dash.test"
+    ) as h:
         await h.linked_member()
         await h.add_coach()
 
+        # No consent ask (issue #101): one turn, straight to the flag.
         await h.say(
             "sharp pain in my shoulder when I press",
-            steps=[message("Want me to flag this to your coach?")],
-        )
-        await h.say(
-            "yes please",
             steps=[
                 tool(
                     "flag_to_coach",
                     summary="sharp shoulder pain on press",
-                    share_with_coach=True,
                 ),
                 tool(
                     "remember_note",
@@ -45,38 +43,18 @@ async def test_pain_report_with_consent_flags_coach(tmp_path):
             ],
         )
 
-        assert len(h.notifier.sent) == 1
-        channel, user_id, text = h.notifier.sent[0]
-        assert channel == "telegram" and user_id == "7"
-        assert "shoulder" in text.lower()
+        # Two messages per coach: the heads-up, then the one-time link alone.
+        assert {(c, u) for c, u, _t in h.notifier.sent} == {("telegram", "7")}
+        heads = [t for _c, _u, t in h.notifier.sent if "/login/" not in t]
+        links = [t for _c, _u, t in h.notifier.sent if "/login/" in t]
+        assert len(heads) == 1 and len(links) == 1
+        assert "shoulder" in heads[0].lower()
+        assert links[0].startswith("https://dash.test/login/")
+        tokens = await h.login_tokens()
+        assert any(t.next_path == f"/members/{h.member_id}" for t in tokens)
         notes = await h.stores.notes.active(h.member_id)
-        assert any("shoulder" in n.text.lower() for n in notes)
-
-
-async def test_pain_report_without_consent_logs_but_does_not_ping(tmp_path):
-    async with ConversationHarness.create(tmp_path) as h:
-        await h.linked_member()
-        await h.add_coach()
-
-        await h.say(
-            "my knee flared up today",
-            steps=[message("Want me to flag your coach?")],
-        )
-        await h.say(
-            "no, keep it between us",
-            steps=[
-                tool(
-                    "flag_to_coach",
-                    summary="knee flare-up",
-                    share_with_coach=False,
-                ),
-                message("Logged privately — coach not pinged."),
-            ],
-        )
-
-        assert h.notifier.sent == []
-        notes = await h.stores.notes.active(h.member_id)
-        assert any("knee" in n.text.lower() or "Safety flag" in n.text for n in notes)
+        safety = [n for n in notes if n.kind == "safety"]
+        assert any("shoulder" in n.text.lower() for n in safety)
 
 
 async def test_forget_me_wipes_every_member_row(tmp_path):
