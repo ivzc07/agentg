@@ -28,6 +28,7 @@ from agentg.models import (
     MemberChannel,
     MemberNote,
     Routine,
+    RoutinePreset,
     Session,
     Set,
     Workout,
@@ -264,6 +265,7 @@ class MemberPage:
     snoozed_until: date | None
     routine: list[RoutineDayView]
     routine_id: int | None
+    routine_preset_name: str | None
     coach_authored: bool
     routine_author: str | None
     sessions: list[SessionView]
@@ -437,6 +439,7 @@ class DashboardStore:
                     .outerjoin(Workout, Workout.routine_id == Routine.id)
                     .where(
                         Routine.gym_id == gym_id,
+                        Routine.member_id.is_not(None),
                         Routine.member_id.in_(member_ids),
                         or_(
                             last_sess.c.anchor.is_(None),
@@ -463,6 +466,7 @@ class DashboardStore:
                     .join(last_sess, last_sess.c.member_id == Routine.member_id)
                     .where(
                         Routine.gym_id == gym_id,
+                        Routine.member_id.is_not(None),
                         Routine.member_id.in_(member_ids),
                         Routine.created_at <= last_sess.c.anchor,
                     )
@@ -577,6 +581,7 @@ class DashboardStore:
                     .outerjoin(Workout, Workout.routine_id == Routine.id)
                     .where(
                         Routine.gym_id == gym_id,
+                        Routine.member_id.is_not(None),
                         Routine.member_id.in_(member_ids),
                         Routine.created_at <= _utc_day(end + timedelta(days=2)),
                     )
@@ -704,6 +709,7 @@ class DashboardStore:
             snoozed_until=_active_snooze(member, today),
             routine=routine,
             routine_id=routine_dict["routine_id"] if routine_dict else None,
+            routine_preset_name=routine_dict["preset_name"] if routine_dict else None,
             coach_authored=routine_dict["coach_authored"] if routine_dict else False,
             routine_author=routine_dict["created_by_name"] if routine_dict else None,
             sessions=sessions,
@@ -761,6 +767,60 @@ class DashboardStore:
             coach_member_id,
             workouts,
             base_routine_id=base_routine_id,
+        )
+
+    async def presets(self, gym_id: int) -> list[RoutinePreset]:
+        return await self._routines.presets(gym_id)
+
+    async def create_preset(self, gym_id: int, name: str) -> RoutinePreset:
+        return await self._routines.create_preset(gym_id, name)
+
+    async def preset_for_gym(self, gym_id: int, preset_id: int) -> RoutinePreset | None:
+        async with self._sessions() as db:
+            return await db.scalar(
+                select(RoutinePreset).where(
+                    RoutinePreset.id == preset_id,
+                    RoutinePreset.gym_id == gym_id,
+                    RoutinePreset.retired_at.is_(None),
+                )
+            )
+
+    async def preset_members(self, gym_id: int) -> list[Member]:
+        """The live, non-coach roster eligible for copy-on-apply."""
+        async with self._sessions() as db:
+            return list(
+                await db.scalars(
+                    select(Member)
+                    .join(MemberChannel, MemberChannel.member_id == Member.id)
+                    .where(Member.gym_id == gym_id, Member.is_coach.is_(False))
+                    .order_by(Member.name, Member.id)
+                )
+            )
+
+    async def preset_master(self, preset_id: int) -> dict[str, Any] | None:
+        return await self._routines.preset_master(preset_id)
+
+    async def save_preset_master_from_web(
+        self,
+        gym_id: int,
+        preset_id: int,
+        coach_member_id: int,
+        base_routine_id: int | None,
+        workouts: list[Any],
+    ) -> Routine:
+        return await self._routines.save_preset_master(
+            preset_id,
+            gym_id,
+            coach_member_id,
+            workouts,
+            base_routine_id=base_routine_id,
+        )
+
+    async def apply_preset(
+        self, gym_id: int, preset_id: int, coach_member_id: int, member_ids: list[int]
+    ):
+        return await self._routines.apply_preset(
+            preset_id, gym_id, coach_member_id, member_ids
         )
 
     async def member_channel(self, member_id: int) -> tuple[str, str] | None:

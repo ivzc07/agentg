@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.catalog import find_exercise, normalize_exercise_name
-from agentg.models import Gym, Member, Routine, Workout, WorkoutExercise
+from agentg.models import Gym, Member, Routine, RoutinePreset, Workout, WorkoutExercise
 from agentg.timezones import local_date
 
 # The rules doc that ships with the product. A Gym gets its own editable copy
@@ -115,6 +115,23 @@ class UnknownExercisesError(ValueError):
             + ", ".join(names)
             + " — call list_exercises and pick exact catalog names"
         )
+
+
+class DuplicatePresetNameError(ValueError):
+    """A Gym already has a Preset with this reserved name (issue #102)."""
+
+
+class NoPresetMasterError(ValueError):
+    """A Preset cannot be applied until its Coach has saved a master."""
+
+
+@dataclass(frozen=True)
+class AppliedCopy:
+    """The saved structure for one Member after applying a Preset."""
+
+    member_id: int
+    workouts: list[WorkoutSpec]
+    routine_id: int
 
 
 class _ReplaceActive:
@@ -227,16 +244,181 @@ class RoutineStore:
                     "the active Routine changed since the editor loaded it"
                 ) from None
 
+    async def create_preset(self, gym_id: int, name: str) -> RoutinePreset:
+        """Create a live Preset identity; its name remains reserved after retirement."""
+        name = name.strip()
+        if not name:
+            raise ValueError("Preset name cannot be empty")
+        if len(name) > 100:
+            raise ValueError("Preset name cannot exceed 100 characters")
+        async with self._sessions() as db:
+            db.add(
+                RoutinePreset(
+                    gym_id=gym_id,
+                    name=name,
+                    created_at=self._clock(),
+                )
+            )
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                raise DuplicatePresetNameError(
+                    "a Preset with this name already exists in the Gym"
+                ) from None
+            return await db.scalar(
+                select(RoutinePreset).where(
+                    RoutinePreset.gym_id == gym_id, RoutinePreset.name == name
+                )
+            )
+
+    async def presets(self, gym_id: int) -> list[RoutinePreset]:
+        """Live Presets for a Gym, ordered by their reserved name."""
+        async with self._sessions() as db:
+            return list(
+                await db.scalars(
+                    select(RoutinePreset)
+                    .where(
+                        RoutinePreset.gym_id == gym_id,
+                        RoutinePreset.retired_at.is_(None),
+                    )
+                    .order_by(RoutinePreset.name)
+                )
+            )
+
+    async def save_preset_master(
+        self,
+        preset_id: int,
+        gym_id: int,
+        coach_member_id: int,
+        workouts: list[WorkoutSpec],
+        *,
+        base_routine_id: int | None,
+    ) -> Routine:
+        """Save a Preset's Member-less master in that Preset's scope."""
+        async with self._sessions() as db:
+            preset = await db.scalar(
+                select(RoutinePreset).where(
+                    RoutinePreset.id == preset_id,
+                    RoutinePreset.gym_id == gym_id,
+                    RoutinePreset.retired_at.is_(None),
+                )
+            )
+            if preset is None:
+                raise ValueError("unknown Preset")
+            try:
+                return await self._save(
+                    db,
+                    None,
+                    gym_id,
+                    workouts,
+                    coach_authored=True,
+                    created_by_member_id=coach_member_id,
+                    expected_active_id=base_routine_id,
+                    preset_id=preset_id,
+                )
+            except IntegrityError:
+                raise StaleRoutineError(
+                    "the Preset changed since the editor loaded it"
+                ) from None
+
+    async def preset_master(self, preset_id: int) -> dict[str, Any] | None:
+        """The active Member-less master, including a retired Preset's name."""
+        async with self._sessions() as db:
+            routine = await db.scalar(
+                select(Routine).where(
+                    Routine.preset_id == preset_id,
+                    Routine.member_id.is_(None),
+                    Routine.is_active.is_(True),
+                )
+            )
+            if routine is None:
+                return None
+            return await self._routine_dict(db, routine)
+
+    async def apply_preset(
+        self, preset_id: int, gym_id: int, coach_member_id: int, member_ids: list[int]
+    ) -> list[AppliedCopy]:
+        """Stamp a fresh coach-authored copy onto each requested Member."""
+        async with self._sessions() as db:
+            preset = await db.scalar(
+                select(RoutinePreset).where(
+                    RoutinePreset.id == preset_id,
+                    RoutinePreset.gym_id == gym_id,
+                    RoutinePreset.retired_at.is_(None),
+                )
+            )
+            if preset is None:
+                raise ValueError("unknown Preset")
+            master = await db.scalar(
+                select(Routine).where(
+                    Routine.preset_id == preset_id,
+                    Routine.member_id.is_(None),
+                    Routine.is_active.is_(True),
+                )
+            )
+            if master is None:
+                raise NoPresetMasterError("this Preset has no master Routine")
+            master_workouts = await self._workouts(db, master.id)
+            members = list(
+                await db.scalars(
+                    select(Member).where(
+                        Member.id.in_(member_ids),
+                        Member.gym_id == gym_id,
+                        Member.is_coach.is_(False),
+                    )
+                )
+            ) if member_ids else []
+            unique_member_ids = list(dict.fromkeys(member_ids))
+            if len(members) != len(unique_member_ids):
+                raise ValueError("all applied Members must be non-coaches in the Gym")
+
+        specs = [
+            WorkoutSpec(
+                weekday=workout["weekday"],
+                name=workout["name"],
+                exercises=[
+                    ExerciseSpec(exercise["exercise"], exercise["sets"], exercise["reps"])
+                    for exercise in workout["exercises"]
+                ],
+            )
+            for workout in master_workouts
+        ]
+        copies: list[AppliedCopy] = []
+        async with self._sessions() as db:
+            try:
+                for member_id in unique_member_ids:
+                    routine = await self._save(
+                        db,
+                        member_id,
+                        gym_id,
+                        specs,
+                        coach_authored=True,
+                        created_by_member_id=coach_member_id,
+                        expected_active_id=REPLACE_ACTIVE,
+                        preset_id=preset_id,
+                        commit=False,
+                    )
+                    copies.append(AppliedCopy(member_id, list(specs), routine.id))
+                await db.commit()
+            except IntegrityError:
+                raise StaleRoutineError(
+                    "the Member's Routine changed while applying the Preset"
+                ) from None
+        return copies
+
     async def _save(
         self,
         db: Any,
-        member_id: int,
+        member_id: int | None,
         gym_id: int,
         workouts: list[WorkoutSpec],
         *,
         coach_authored: bool,
         created_by_member_id: int | None,
         expected_active_id: int | None | _ReplaceActive,
+        preset_id: int | None = None,
+        commit: bool = True,
     ) -> Routine:
         """The writes of ``save_routine`` inside an already-open transaction.
 
@@ -261,12 +443,22 @@ class RoutineStore:
         if unknown:
             raise UnknownExercisesError(unknown)
 
+        is_master = member_id is None
+        if is_master and preset_id is None:
+            raise ValueError("a Member-less Routine needs a Preset")
+        scope = (
+            (Routine.member_id.is_(None), Routine.preset_id == preset_id)
+            if is_master
+            else (Routine.member_id == member_id,)
+        )
         if isinstance(expected_active_id, _ReplaceActive):
+            if is_master:
+                raise ValueError("Preset masters require an explicit base Routine")
             # Agent chat saves: replace whatever is active — except a
             # coach-written Routine, which generation must not overwrite.
             active = await db.scalar(
                 select(Routine).where(
-                    Routine.member_id == member_id, Routine.is_active.is_(True)
+                    *scope, Routine.is_active.is_(True)
                 )
             )
             if active is not None and active.coach_authored and not coach_authored:
@@ -282,7 +474,7 @@ class RoutineStore:
             # expect to find.
             active_id = await db.scalar(
                 select(Routine.id).where(
-                    Routine.member_id == member_id, Routine.is_active.is_(True)
+                    *scope, Routine.is_active.is_(True)
                 )
             )
             if active_id is not None:
@@ -301,7 +493,7 @@ class RoutineStore:
                     update(Routine)
                     .where(
                         Routine.id == expected_active_id,
-                        Routine.member_id == member_id,
+                        *scope,
                         Routine.is_active.is_(True),
                     )
                     .values(is_active=False)
@@ -315,6 +507,7 @@ class RoutineStore:
         routine = Routine(
             gym_id=gym_id,
             member_id=member_id,
+            preset_id=preset_id,
             is_active=True,
             coach_authored=coach_authored,
             created_by_member_id=created_by_member_id,
@@ -339,7 +532,8 @@ class RoutineStore:
                         reps=exercise_spec.reps,
                     )
                 )
-        await db.commit()
+        if commit:
+            await db.commit()
         return routine
 
     async def active_routine(self, member_id: int) -> dict[str, Any] | None:
@@ -351,19 +545,28 @@ class RoutineStore:
             )
             if routine is None:
                 return None
-            workouts = await self._workouts(db, routine.id)
-            author_name = None
-            if routine.created_by_member_id is not None:
-                author = await db.get(Member, routine.created_by_member_id)
-                # The stamp blanks if the Coach's row ever disappears — the
-                # chip degrades to plain "Coach-authored" (issue #91).
-                author_name = author.name if author is not None else None
-            return {
-                "routine_id": routine.id,
-                "coach_authored": routine.coach_authored,
-                "created_by_name": author_name,
-                "workouts": workouts,
-            }
+            return await self._routine_dict(db, routine)
+
+    async def _routine_dict(self, db: Any, routine: Routine) -> dict[str, Any]:
+        workouts = await self._workouts(db, routine.id)
+        author_name = None
+        if routine.created_by_member_id is not None:
+            author = await db.get(Member, routine.created_by_member_id)
+            # The stamp blanks if the Coach's row ever disappears — the
+            # chip degrades to plain "Coach-authored" (issue #91).
+            author_name = author.name if author is not None else None
+        preset_name = None
+        if routine.preset_id is not None:
+            preset = await db.get(RoutinePreset, routine.preset_id)
+            preset_name = preset.name if preset is not None else None
+        return {
+            "routine_id": routine.id,
+            "coach_authored": routine.coach_authored,
+            "created_by_name": author_name,
+            "preset_id": routine.preset_id,
+            "preset_name": preset_name,
+            "workouts": workouts,
+        }
 
     async def workout_for_weekday(self, member_id: int, weekday: int) -> dict[str, Any] | None:
         return self._pick_weekday(await self.active_routine(member_id), weekday)
