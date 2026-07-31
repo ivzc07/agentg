@@ -368,24 +368,33 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
     return [(entry["start"], entry["end"]) for entry in entries]
 
 
-def _leaks_in(text: str) -> set[str]:
+def _scan(text: str) -> tuple[set[str], set[str]]:
+    """(leaking terms, fully name-exempt terms) for one reading."""
     hits = [
         (term, match.start(), match.end())
         for term, pattern in _PATTERNS.items()
         for match in pattern.finditer(text)
     ]
     names = _exercise_name_spans(text, hits)
-    return {
+    leaks = {
         term
         for term, start, end in hits
         if not any(span_start <= start and end <= span_end for span_start, span_end in names)
     }
+    return leaks, {term for term, _, _ in hits} - leaks
 
 
 def find_english_leaks(reply: str) -> set[str]:
     """English training vocabulary found in a reply — empty means clean."""
-    leaks = _leaks_in(reply.translate(_NORMALIZE))
-    if any(cp in reply for cp in _BREAK_POINTS):
-        split = _HYPHEN_RUN.sub("-", reply.translate(_NORMALIZE_SPLIT))
-        leaks |= _leaks_in(split)
-    return leaks
+    glued_leaks, glued_exempt = _scan(reply.translate(_NORMALIZE))
+    if not any(cp in reply for cp in _BREAK_POINTS):
+        return glued_leaks
+    # A break point is glue or a separator, undecidable per character:
+    # judge both readings. A term leaking under either reading leaks —
+    # unless some reading resolves every occurrence of it into an
+    # allowlisted name, which proves the break point sat inside a
+    # legitimate name ("Muscle-up­s") rather than hiding goal vocab.
+    split_leaks, split_exempt = _scan(
+        _HYPHEN_RUN.sub("-", reply.translate(_NORMALIZE_SPLIT))
+    )
+    return (glued_leaks | split_leaks) - (glued_exempt | split_exempt)

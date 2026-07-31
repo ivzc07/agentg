@@ -437,6 +437,24 @@ def test_a_break_point_cannot_shatter_a_name(breaker: str):
     assert find_english_leaks(f"strength{breaker}-band-pull-apart") == set()
 
 
+@pytest.mark.parametrize("breaker", _BREAKERS)
+def test_a_break_point_inside_a_recognized_name_stays_clean(breaker: str):
+    # One reading resolving the whole occurrence into an allowlisted name
+    # proves the break point is name-internal, not vocab smuggling.
+    assert find_english_leaks(f"Muscle-up{breaker}s") == set()
+    assert find_english_leaks(f"bar-muscle-up{breaker}s") == set()
+    assert find_english_leaks(f"strength-band-pull-apart{breaker}s") == set()
+    assert find_english_leaks(f"strength band pull{breaker}apart") == set()
+    assert find_english_leaks(f"strength {breaker}band pull-apart") == set()
+    assert find_english_leaks(f"strength band{breaker} pull-apart") == set()
+
+
+def test_a_name_exemption_never_covers_a_separate_leak():
+    # The cross-reading exemption is per-occurrence in spirit: a clean
+    # name cannot launder the same word leaking elsewhere in the reply.
+    assert find_english_leaks("gana muscle y haz Muscle-up­s") == {"muscle"}
+
+
 def test_hypertrophy_is_a_leak():
     # Round-11 P2: the rules doc lists hipertrofia as a primary goal.
     assert (
