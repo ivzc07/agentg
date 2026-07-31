@@ -218,7 +218,8 @@ async def test_the_member_page_links_the_editor_and_shows_the_agent_chip(env):
     status, text = await env.get(f"/members/{member.id}")
 
     assert status == 200
-    assert f'href="/members/{member.id}/routine"' in text
+    # The Edit journey keeps the view it started from, like tick-off does.
+    assert f'href="/members/{member.id}/routine?view=table"' in text
     assert AGENT_CHIP in text
 
 

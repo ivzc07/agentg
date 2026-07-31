@@ -462,6 +462,7 @@ a.edit:hover { border-color: var(--ink-2); }
 .day { background: var(--surface); padding: 12px 14px; margin-bottom: 10px; }
 .day > b { font-family: var(--mono); text-transform: uppercase; font-size: 11px; letter-spacing: .14em;
   font-weight: 400; color: var(--ink-2); display: block; margin-bottom: 2px; }
+.day .dayname { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
 .card .day ul { list-style: none; margin: 8px 0 0; padding: 0; }
 .card .day li { padding: 5px 0; border-top: 1px solid var(--line); font-size: 14px; }
 .card .day li:first-child { border-top: 0; }
@@ -888,7 +889,7 @@ def _ownership_chip(
     return f'<span class="tag chip">{label}</span>'
 
 
-def _routine_card(view: MemberPage, lang: str) -> str:
+def _routine_card(view: MemberPage, lang: str, roster_view: str) -> str:
     t = STRINGS[lang]
     if not view.routine:
         body = f'<p class="muted">{t["no_routine"]}</p>'
@@ -900,13 +901,14 @@ def _routine_card(view: MemberPage, lang: str) -> str:
                 for name, sets, reps in day.exercises
             )
             days.append(
-                f'<div class="day"><b>{WEEKDAYS[lang][day.weekday]}</b> '
-                f"{escape(day.name)}<ul>{exercises}</ul></div>"
+                f'<div class="day"><b>{WEEKDAYS[lang][day.weekday]}</b>'
+                f'<span class="dayname">{escape(day.name)}</span><ul>{exercises}</ul></div>'
             )
         body = "".join(days)
+    # The Edit journey keeps the view it started from, like tick-off does.
     header = (
         f'<h2>{t["routine"]} {_ownership_chip(view.coach_authored, view.routine_author, lang, view.routine_preset_name)} '
-        f'<a class="edit" href="/members/{view.member_id}/routine">{t["edit"]}</a></h2>'
+        f'<a class="edit" href="/members/{view.member_id}/routine?view={roster_view}">{t["edit"]}</a></h2>'
     )
     return f'<section class="card">{header}{body}</section>'
 
@@ -932,14 +934,15 @@ def _sessions_card(view: MemberPage, lang: str, roster_view: str) -> str:
     nav = ""
     if view.pages > 1:
         # Pagination keeps the view the Member page was opened in, so Split
-        # never drops the Coach out of the pane.
+        # never drops the Coach out of the pane — and lands on #sessions so
+        # paging never teleports the Coach back to the top of the page.
         newer = (
-            f'<a href="/members/{view.member_id}?page={view.page - 1}&view={roster_view}">{t["newer_page"]}</a>'
+            f'<a href="/members/{view.member_id}?page={view.page - 1}&view={roster_view}#sessions">{t["newer_page"]}</a>'
             if view.page > 1
             else ""
         )
         older = (
-            f'<a href="/members/{view.member_id}?page={view.page + 1}&view={roster_view}">{t["older_page"]}</a>'
+            f'<a href="/members/{view.member_id}?page={view.page + 1}&view={roster_view}#sessions">{t["older_page"]}</a>'
             if view.page < view.pages
             else ""
         )
@@ -947,7 +950,7 @@ def _sessions_card(view: MemberPage, lang: str, roster_view: str) -> str:
             f'<nav class="pages">{newer}'
             f'<span class="muted">{t["page_x_of_y"].format(page=view.page, pages=view.pages)}</span>{older}</nav>'
         )
-    return f'<section class="card"><h2>{t["sessions"]}</h2>{"".join(items)}{nav}</section>'
+    return f'<section class="card" id="sessions"><h2>{t["sessions"]}</h2>{"".join(items)}{nav}</section>'
 
 
 def _weights_card(view: MemberPage, lang: str) -> str:
@@ -1036,29 +1039,34 @@ def _safety_banner(view: MemberPage, lang: str, roster_view: str) -> str:
 
 def _member_content(view: MemberPage, lang: str, roster_view: str) -> str:
     """The one Member page body, shared by the standalone page and Split's
-    right pane."""
+    right pane. Status chips live in their own row — never inside the
+    ``<h1>``, where a screen reader would announce them as the page name."""
     t = STRINGS[lang]
     tags = ""
     if view.lapsed:
-        tags += f' <span class="tag">{t["lapsed_tag"]}</span>'
+        tags += f'<span class="tag">{t["lapsed_tag"]}</span> '
     if view.snoozed_until is not None:
         until = fmt_date(view.snoozed_until, lang)
-        tags += f' <span class="tag">{t["snoozed_tag"].format(date=until)}</span>'
+        tags += f'<span class="tag">{t["snoozed_tag"].format(date=until)}</span> '
+    chips = f'<div class="chips">{tags.rstrip()}</div>' if tags else ""
     count = t["one_session"] if view.session_count == 1 else t["n_sessions"].format(n=view.session_count)
+    dot = '<span class="dot"></span>'
     facts = (
-        f"{t['member_since'].format(date=fmt_date(view.member_since, lang))} · {count}"
-        f" · {away_text(view.has_sessions, view.gap_days, lang)}"
+        f"{t['member_since'].format(date=fmt_date(view.member_since, lang))}{dot}{count}"
+        f"{dot}{away_text(view.has_sessions, view.gap_days, lang)}"
     )
     if view.last_session_on is not None:
-        facts += f" · {t['last_session'].format(date=fmt_date(view.last_session_on, lang))}"
+        facts += f"{dot}{t['last_session'].format(date=fmt_date(view.last_session_on, lang))}"
     return f"""<header class="mhead">
-<h1>{escape(view.name)}{tags}</h1>
+<span class="eyebrow">{t["member_eyebrow"]}</span>
+<h1>{escape(view.name)}</h1>
+{chips}
 <div class="facts">{facts}</div>
 </header>
 {_safety_banner(view, lang, roster_view)}
 <div class="columns">
 <div class="col">
-{_routine_card(view, lang)}
+{_routine_card(view, lang, roster_view)}
 {_sessions_card(view, lang, roster_view)}
 </div>
 <div class="col">
