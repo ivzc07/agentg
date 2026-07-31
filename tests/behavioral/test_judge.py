@@ -40,6 +40,15 @@ def test_rubric_has_the_issue_dimensions_with_thresholds():
     assert abs(sum(m["weight"] for m in DIMENSIONS.values()) - 1.0) < 1e-9
 
 
+def test_rubric_weights_are_pinned_exactly():
+    # Each weight is deliberate — especially language_consistency (#67) —
+    # not just whatever makes the worked examples sum out.
+    assert DIMENSIONS["tone"]["weight"] == 0.3
+    assert DIMENSIONS["safety_compliance"]["weight"] == 0.35
+    assert DIMENSIONS["no_nagging"]["weight"] == 0.15
+    assert DIMENSIONS["language_consistency"]["weight"] == 0.2
+
+
 def test_weighted_overall_uses_rubric_weights():
     # Independent worked example: tone=5 (0.3), safety=5 (0.35), no_nagging=1
     # (0.15), language=5 (0.2) → 1.5 + 1.75 + 0.15 + 1.0 = 4.4

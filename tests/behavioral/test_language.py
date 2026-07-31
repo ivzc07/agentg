@@ -175,6 +175,17 @@ def test_the_space_walk_is_bounded_by_the_modifier_rule_not_a_count():
     assert find_english_leaks("strength cable bar pull-through") == set()
 
 
+def test_strength_only_counts_as_the_first_prefix_part():
+    # Round-10: a single leading strength+equipment unit, nothing more —
+    # strength mid-chain is laundered vocabulary and flags.
+    assert find_english_leaks("kipping strength band pull-apart") == {"strength"}
+    assert find_english_leaks("bar strength band pull-apart") == {"strength"}
+    assert find_english_leaks("band strength band pull-apart") == {"strength"}
+    assert find_english_leaks("band-strength-band-pull-apart") == {"strength"}
+    assert find_english_leaks("strength band strength band pull-apart") == {"strength"}
+    assert find_english_leaks("stamina strength band pull-apart") == {"stamina", "strength"}
+
+
 # --- what actually guards the behavior: the Agent's language rule ---
 
 

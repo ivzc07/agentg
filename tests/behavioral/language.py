@@ -92,13 +92,15 @@ def _leads_with_equipment(token: str) -> bool:
 
 def _is_allowed_prefix(parts: list[str]) -> bool:
     # Every prefix part must be an equipment modifier or variant word;
-    # "strength" only immediately before an equipment part — a lexicon term
-    # glued to a core ("muscle-pull-up") is a leak, not a name.
+    # "strength" only as the FIRST part of a leading strength+equipment unit
+    # ("strength-band-pull-apart") — mid-chain strength ("band-strength-
+    # band-pull-apart") is laundered vocabulary and flags, as is any other
+    # lexicon term glued to a core ("muscle-pull-up").
     for i, part in enumerate(parts):
         if _is_equipment(part) or part in _VARIANT_WORDS:
             continue
         following = parts[i + 1] if i + 1 < len(parts) else ""
-        if part == "strength" and _is_equipment(following):
+        if part == "strength" and i == 0 and _is_equipment(following):
             continue
         return False
     return True
@@ -151,7 +153,15 @@ def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
         while k >= 0 and _HORIZONTAL_GAP_RE.fullmatch(text[tokens[k].end() : start]):
             word = tokens[k].group().lower()
             following = tokens[k + 1].group().lower()
-            if not _absorbable(word, following):
+            if word == "strength":
+                # A single leading strength+equipment unit: strength must be
+                # the FIRST token of the whitespace run before the core.
+                first_in_run = k == 0 or not _HORIZONTAL_GAP_RE.fullmatch(
+                    text[tokens[k - 1].end() : tokens[k].start()]
+                )
+                if not first_in_run or not _leads_with_equipment(following):
+                    break
+            elif not _absorbable(word, following):
                 break
             start = tokens[k].start()
             k -= 1
