@@ -53,7 +53,12 @@ class FakeNotifier:
         self.sent: list[tuple[str, str, str]] = []
 
     async def send(
-        self, channel: str, channel_user_id: str, text: str, disable_preview: bool = False
+        self,
+        channel: str,
+        channel_user_id: str,
+        text: str,
+        disable_preview: bool = False,
+        protect_content: bool = False,
     ) -> None:
         self.sent.append((channel, channel_user_id, text))
 

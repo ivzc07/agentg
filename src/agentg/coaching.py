@@ -122,22 +122,36 @@ async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]
         # Note, so a member-influenced summary can't smuggle a phishing URL
         # onto its own line above the real magic link.
         text = f"Heads-up from your member {c.member_name}: {note.text}"
+        link = None
         try:
             if c.dashboard_base_url is not None and c.stores.dashboard is not None:
                 token = await c.stores.dashboard.create_login_token(
                     coach_id, c.gym_id, next_path=next_path
                 )
-                text += f"\n{c.dashboard_base_url}/login/{token}"
+                link = f"{c.dashboard_base_url}/login/{token}"
         except Exception:
             # Mint failed for this coach: fall back to a text-only ping (the
             # no-base_url path) rather than dropping them — or worse, aborting
             # the loop so the remaining coaches are never pinged at all.
             logger.exception("failed to mint a dashboard link for coach %s", channel_user_id)
         try:
-            # No link preview: Telegram's fetcher would GET the one-time link
-            # before the coach does (and the token would land in its logs).
+            # No link preview on either message: Telegram's fetcher would GET
+            # the one-time link before the coach does (and the token would
+            # land in its logs).
             await c.notifier.send(channel, channel_user_id, text, disable_preview=True)
             notified += 1
         except Exception:
             logger.exception("failed to ping coach %s", channel_user_id)
+            continue
+        if link is None:
+            continue
+        try:
+            # The link travels alone: member-influenced text (which can carry
+            # live URLs Telegram autolinks) never shares a message with the
+            # one-time token, and protect_content keeps it unforwardable.
+            await c.notifier.send(
+                channel, channel_user_id, link, disable_preview=True, protect_content=True
+            )
+        except Exception:
+            logger.exception("failed to send the dashboard link to coach %s", channel_user_id)
     return {"logged": True, "coaches_notified": notified}

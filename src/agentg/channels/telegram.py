@@ -113,21 +113,25 @@ class TelegramNotifier:
         self._bot = bot
 
     async def send(
-        self, channel: str, channel_user_id: str, text: str, disable_preview: bool = False
+        self,
+        channel: str,
+        channel_user_id: str,
+        text: str,
+        disable_preview: bool = False,
+        protect_content: bool = False,
     ) -> None:
         if channel != CHANNEL:
             return
         for chunk in split_reply(text):
+            # Magic links: a preview fetch could spend a one-time token
+            # before the human taps it (same rule as the /dashboard reply),
+            # and protect_content keeps the token message unforwardable.
+            kwargs: dict = {}
             if disable_preview:
-                # Magic links: a preview fetch could spend a one-time token
-                # before the human taps it (same rule as the /dashboard reply).
-                await self._bot.send_message(
-                    chat_id=int(channel_user_id),
-                    text=chunk,
-                    link_preview_options=LinkPreviewOptions(is_disabled=True),
-                )
-            else:
-                await self._bot.send_message(chat_id=int(channel_user_id), text=chunk)
+                kwargs["link_preview_options"] = LinkPreviewOptions(is_disabled=True)
+            if protect_content:
+                kwargs["protect_content"] = True
+            await self._bot.send_message(chat_id=int(channel_user_id), text=chunk, **kwargs)
 
 
 class TelegramDemoSender:

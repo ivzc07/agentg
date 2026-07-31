@@ -43,11 +43,13 @@ async def test_pain_report_flags_the_coach_with_a_deep_link(tmp_path):
             ],
         )
 
-        assert len(h.notifier.sent) == 1
-        channel, user_id, text = h.notifier.sent[0]
-        assert channel == "telegram" and user_id == "7"
-        assert "shoulder" in text.lower()
-        assert "https://dash.test/login/" in text
+        # Two messages per coach: the heads-up, then the one-time link alone.
+        assert {(c, u) for c, u, _t in h.notifier.sent} == {("telegram", "7")}
+        heads = [t for _c, _u, t in h.notifier.sent if "/login/" not in t]
+        links = [t for _c, _u, t in h.notifier.sent if "/login/" in t]
+        assert len(heads) == 1 and len(links) == 1
+        assert "shoulder" in heads[0].lower()
+        assert links[0].startswith("https://dash.test/login/")
         tokens = await h.login_tokens()
         assert any(t.next_path == f"/members/{h.member_id}" for t in tokens)
         notes = await h.stores.notes.active(h.member_id)

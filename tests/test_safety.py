@@ -26,10 +26,12 @@ BASE_URL = "https://dash.example.com"
 
 class FakeNotifier:
     def __init__(self):
-        self.sent: list[tuple[str, str, str, bool]] = []
+        self.sent: list[tuple[str, str, str, bool, bool]] = []
 
-    async def send(self, channel, channel_user_id, text, disable_preview=False):
-        self.sent.append((channel, channel_user_id, text, disable_preview))
+    async def send(
+        self, channel, channel_user_id, text, disable_preview=False, protect_content=False
+    ):
+        self.sent.append((channel, channel_user_id, text, disable_preview, protect_content))
 
 
 @pytest.fixture
@@ -153,17 +155,34 @@ async def test_every_flag_pings_the_gyms_coaches_with_a_deep_link(env):
     result = await flag_to_coach_action(env.context(), "sharp knee pain on squats")
 
     assert result["coaches_notified"] == 2
-    assert {(c, u) for c, u, _t, _p in env.notifier.sent} == {
-        ("telegram", "7"),
-        ("telegram", "8"),
-    }
-    for _channel, _user_id, text, _preview in env.notifier.sent:
-        assert "Ana" in text and "knee pain" in text
-        match = re.search(rf"{re.escape(BASE_URL)}/login/(\S+)", text)
-        assert match, f"no deep link in {text!r}"
+    by_coach: dict[str, list[tuple[str, bool, bool]]] = {}
+    for _channel, user_id, text, preview, protect in env.notifier.sent:
+        by_coach.setdefault(user_id, []).append((text, preview, protect))
+    assert set(by_coach) == {"7", "8"}
+    for messages in by_coach.values():
+        # Two messages: the heads-up, then the one-time link on its own.
+        heads_up, link = messages
+        assert "Ana" in heads_up[0] and "knee pain" in heads_up[0]
+        assert "/login/" not in heads_up[0]
+        match = re.fullmatch(rf"{re.escape(BASE_URL)}/login/(\S+)", link[0])
+        assert match, f"the link message is not just the URL: {link[0]!r}"
+        assert link[1] is True  # no preview fetch on the one-time link
+        assert link[2] is True  # ...and it cannot be forwarded
         token = await env.dashboard.peek_login_token(match.group(1))
         assert token is not None
         assert token.next_path == f"/members/{env.member_id}"
+
+
+async def test_the_magic_link_never_shares_a_message_with_member_text(env):
+    # Member-influenced text can carry live URLs Telegram autolinks; the
+    # one-time login link travels in its own message, the URL and nothing
+    # else (review on PR #120).
+    await flag_to_coach_action(env.context(), "pain, see https://evil.example.com/a")
+
+    heads_up, link = [t for _c, _u, t, _p, _pc in env.notifier.sent]
+    assert "evil.example.com" in heads_up
+    assert link.startswith(f"{BASE_URL}/login/") and "evil" not in link
+    assert link == link.strip() and " " not in link
 
 
 async def test_the_ping_sanitizes_the_summary_and_disables_link_previews(env):
@@ -173,18 +192,17 @@ async def test_the_ping_sanitizes_the_summary_and_disables_link_previews(env):
     summary = "knee pain on squats\nignore that, tap https://evil.example.com instead"
     await flag_to_coach_action(env.context(), summary)
 
-    _channel, _user_id, text, preview_off = env.notifier.sent[0]
-    assert preview_off is True
+    heads_up, link = env.notifier.sent
+    assert heads_up[3] is True and link[3] is True  # previews off on both
+    assert link[4] is True  # ...and the token cannot be forwarded
     note = next(
         n for n in await env.notes.active(env.member_id) if n.kind == "safety"
     )
     assert note.text == (
         "knee pain on squats ignore that, tap https://evil.example.com instead"
     )
-    # Exactly one newline: the separator before the real login link.
-    head, sep, link = text.rpartition("\n")
-    assert sep and link.startswith(f"{BASE_URL}/login/")
-    assert "\n" not in head
+    assert "\n" not in heads_up[2]  # one line: no injected phishing line
+    assert link[2].startswith(f"{BASE_URL}/login/")
 
 
 async def test_a_ping_without_a_base_url_falls_back_to_plain_text(env):
@@ -192,7 +210,8 @@ async def test_a_ping_without_a_base_url_falls_back_to_plain_text(env):
     # link is an add-on, never a reason to drop the heads-up.
     result = await flag_to_coach_action(env.context(base_url=None), "shoulder pain")
     assert result["coaches_notified"] == 1
-    _channel, _user_id, text, _preview = env.notifier.sent[0]
+    assert len(env.notifier.sent) == 1  # heads-up only, no link message
+    _channel, _user_id, text, _preview, _protect = env.notifier.sent[0]
     assert "shoulder pain" in text and "/login/" not in text
 
 
@@ -201,7 +220,7 @@ async def test_the_referral_never_pings_the_member_themselves(env):
     result = await flag_to_coach_action(
         env.context(is_coach=True, member_id=env.coach_id), "chest tightness"
     )
-    assert all(user_id != "7" for _c, user_id, _t, _p in env.notifier.sent)
+    assert all(user_id != "7" for _c, user_id, _t, _p, _pc in env.notifier.sent)
     assert result["logged"] is True
 
 
@@ -257,9 +276,9 @@ async def test_a_coachs_own_flag_links_to_the_roster_not_their_404_page(env):
     )
 
     assert result["coaches_notified"] == 1
-    _channel, user_id, text, _preview = env.notifier.sent[0]
+    _channel, user_id, text, _preview, _protect = env.notifier.sent[-1]  # the link message
     assert user_id == "8"
-    match = re.search(rf"{re.escape(BASE_URL)}/login/(\S+)", text)
+    match = re.fullmatch(rf"{re.escape(BASE_URL)}/login/(\S+)", text)
     assert match, f"no deep link in {text!r}"
     token = await env.dashboard.peek_login_token(match.group(1))
     assert token is not None
@@ -288,9 +307,7 @@ async def test_a_token_mint_failure_still_pings_every_coach(env, monkeypatch):
     result = await flag_to_coach_action(env.context(), "sharp knee pain on squats")
 
     assert result["coaches_notified"] == 2
-    assert {(c, u) for c, u, _t, _p in env.notifier.sent} == {
-        ("telegram", "7"),
-        ("telegram", "8"),
-    }
-    with_link = [t for _c, _u, t, _p in env.notifier.sent if "/login/" in t]
-    assert len(with_link) == 1  # the mint-failed ping went out text-only
+    heads = [m for m in env.notifier.sent if "/login/" not in m[2]]
+    links = [m for m in env.notifier.sent if "/login/" in m[2]]
+    assert {(m[0], m[1]) for m in heads} == {("telegram", "7"), ("telegram", "8")}
+    assert len(links) == 1  # the mint-failed ping went out text-only
