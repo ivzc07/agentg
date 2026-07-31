@@ -219,6 +219,22 @@ def test_lexicon_compounds_before_a_chain_also_mark_strength_mid_chain():
     assert find_english_leaks("muscle-building strength band pull-apart") == {"muscle", "strength"}
 
 
+def test_a_name_internal_hit_does_not_mark_strength_mid_chain():
+    # Round-14 P1: only hits that survive as actual leaks count as preceding
+    # goal vocab — "muscle" inside "muscle-up" is name-internal, so the
+    # strength chain after it starts clean.
+    assert find_english_leaks("muscle-up strength band pull-apart") == set()
+    # …while the same word as an actual leak still marks it mid-chain.
+    assert find_english_leaks("muscle-gain strength band pull-apart") == {"muscle", "strength"}
+
+
+def test_multi_word_terms_match_typographic_dashes():
+    # Round-14 P2: en/em dashes are separators too.
+    assert find_english_leaks("tu objetivo es weight–loss") == {"weight loss"}
+    assert find_english_leaks("tu objetivo es weight—loss") == {"weight loss"}
+    assert find_english_leaks("weight–loss strength band pull-apart") == {"weight loss", "strength"}
+
+
 def test_hypertrophy_is_a_leak():
     # Round-11 P2: the rules doc lists hipertrofia as a primary goal.
     assert (

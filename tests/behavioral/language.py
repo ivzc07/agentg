@@ -43,10 +43,11 @@ ENGLISH_TRAINING_VOCAB: tuple[str, ...] = (
 )
 
 def _compile(term: str) -> re.Pattern[str]:
-    # Multi-word terms match any run of whitespace or hyphens between words,
-    # so "weight loss" catches "weight-loss", doubled spaces, tabs, newlines.
+    # Multi-word terms match any run of whitespace or dashes between words,
+    # so "weight loss" catches "weight-loss", "weight–loss", "weight—loss",
+    # doubled spaces, tabs, newlines.
     return re.compile(
-        r"\b" + r"[\s-]+".join(re.escape(part) for part in term.split()) + r"\b",
+        r"\b" + r"[\s–—-]+".join(re.escape(part) for part in term.split()) + r"\b",
         re.IGNORECASE,
     )
 
@@ -157,11 +158,13 @@ def _hyphen_parts(start: int, token_text: str) -> list[tuple[int, int, str]]:
     return parts
 
 
-def _lexicon_hit_overlaps(hits: list[tuple[str, int, int]], start: int, end: int) -> bool:
-    # Any lexicon hit intersecting the token's span — exact ends ("weight
+def _lexicon_hit_overlaps(
+    hits: list[tuple[str, int, int]], start: int, end: int
+) -> list[tuple[str, int, int]]:
+    # Lexicon hits intersecting the token's span — exact ends ("weight
     # loss") and prefix-shaped compounds ("muscle-gain", "stamina-focused")
     # alike.
-    return any(hit_start < end and hit_end > start for _, hit_start, hit_end in hits)
+    return [hit for hit in hits if hit[1] < end and hit[2] > start]
 
 
 def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tuple[int, int]]:
@@ -179,7 +182,8 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
     parts or an adjacent lexicon hit — makes it mid-chain, and the span
     starts after it."""
     tokens = list(_TOKEN_RE.finditer(text))
-    spans = []
+    # Pass 1: chains and mid-chain-strength cuts (position only).
+    entries: list[dict] = []
     for i, tok in enumerate(tokens):
         matched = _match_name_core(tok.group())
         if matched is None:
@@ -205,22 +209,45 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
             prefix = tok.group()[: len(form) - len(core) - 1]
             parts.extend(_hyphen_parts(tok.start(), prefix))
         # Strength is clean only as the FIRST chain part; cut the span after
-        # the last mid-chain strength (preceded by modifier parts, or by a
-        # lexicon hit overlapping the previous token — "weight loss",
-        # "stamina-endurance", "muscle-gain").
-        preceded_by_lexicon = (
-            first > 0
-            and _HORIZONTAL_GAP_RE.fullmatch(text[tokens[first - 1].end() : tokens[first].start()])
-            and _lexicon_hit_overlaps(hits, tokens[first - 1].start(), tokens[first - 1].end())
-        )
+        # the last mid-chain strength (preceded by modifier parts).
+        leading_strength = bool(parts) and parts[0][2] == "strength"
         cut = None
         for idx, (_, _, word) in enumerate(parts):
-            if word == "strength" and (idx > 0 or preceded_by_lexicon):
+            if word == "strength" and idx > 0:
                 cut = idx
         if cut is not None:
+            leading_strength = False
             start = parts[cut + 1][0] if cut + 1 < len(parts) else parts[cut][1]
-        spans.append((start, tok.end()))
-    return spans
+        entries.append(
+            {
+                "start": start,
+                "end": tok.end(),
+                "first": first,
+                "parts": parts,
+                "leading_strength": leading_strength,
+            }
+        )
+    base_spans = [(entry["start"], entry["end"]) for entry in entries]
+    # Pass 2: a chain-leading strength preceded by a SURVIVING lexicon hit —
+    # one no name span exempts — overlapping the previous token is mid-chain
+    # too ("stamina", "weight loss", "muscle-gain"). A name-internal hit
+    # ("muscle" inside "muscle-up") is not goal vocab and marks nothing.
+    for entry in entries:
+        if not entry["leading_strength"] or entry["first"] == 0:
+            continue
+        prev = tokens[entry["first"] - 1]
+        if not _HORIZONTAL_GAP_RE.fullmatch(text[prev.end() : tokens[entry["first"]].start()]):
+            continue
+        overlapping = _lexicon_hit_overlaps(hits, prev.start(), prev.end())
+        survives = [
+            hit
+            for hit in overlapping
+            if not any(span_start <= hit[1] and hit[2] <= span_end for span_start, span_end in base_spans)
+        ]
+        if survives:
+            parts = entry["parts"]
+            entry["start"] = parts[1][0] if len(parts) > 1 else parts[0][1]
+    return [(entry["start"], entry["end"]) for entry in entries]
 
 
 def find_english_leaks(reply: str) -> set[str]:
