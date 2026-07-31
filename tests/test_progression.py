@@ -57,6 +57,14 @@ def test_increment_kg_is_accepted_as_an_alias():
     assert parse_progression_rules("increment_kg: 1.25").increment == 1.25
 
 
+def test_the_default_rules_doc_parses_to_the_shipped_progression_defaults():
+    # the progression parameter lines are coach-editable and load-bearing
+    # (issue #68) — rewording the doc must not disturb them
+    from agentg.routines import DEFAULT_RULES_DOC
+
+    assert parse_progression_rules(DEFAULT_RULES_DOC) == ProgressionRules()
+
+
 @pytest.mark.parametrize(
     ("scheme", "top"),
     [("8-12", 12), ("5", 5), ("8", 8), ("12-15", 15), ("AMRAP", None), (None, None), ("", None)],

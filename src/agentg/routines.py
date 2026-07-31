@@ -34,9 +34,11 @@ DEFAULT_RULES_DOC = """\
 - Only prescribe exercises that exist in the Exercise catalog.
 
 ## Sets and reps (structure, never weights)
-- Strength goal: 3-5 sets of 3-6 reps on the main lifts.
-- General/hypertrophy goal: 3-4 sets of 8-12 reps.
-- Endurance goal: 2-3 sets of 12-20 reps.
+- Strength goal (fuerza): 3-5 sets of 3-6 reps on the main lifts.
+- General/hypertrophy goal (hipertrofia / masa muscular): 3-4 sets of 8-12 reps.
+- Endurance goal (resistencia): 2-3 sets of 12-20 reps.
+- Name the goal in the Member's language when you talk about it — the Spanish
+  terms above are there so a Spanish-speaking Member never hears the English.
 - Never prescribe a target weight — weights are derived from logged Sets.
 
 ## Injuries and limitations

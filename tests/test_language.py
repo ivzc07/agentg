@@ -49,6 +49,33 @@ def test_the_default_rules_doc_drops_the_disclaimer_section():
     assert "i'm an ai coach" not in doc
 
 
+# --- the default rules doc does not anchor goal vocabulary in English only ---
+
+
+def test_the_default_rules_doc_offers_spanish_goal_vocabulary():
+    # the doc is the Agent's nearest vocabulary anchor at intake (issue #68);
+    # every goal must carry its Spanish term so a Spanish-speaking Member
+    # never hears the English one
+    doc = DEFAULT_RULES_DOC.lower()
+    assert "fuerza" in doc  # strength
+    assert "hipertrofia" in doc  # general/hypertrophy
+    assert "resistencia" in doc  # endurance
+
+
+def test_the_default_rules_doc_still_maps_each_goal_to_its_sets_and_reps():
+    # the goal terms are load-bearing: generation keys the scheme off them,
+    # so each goal line must keep its sets and rep range unambiguous
+    doc = DEFAULT_RULES_DOC.lower()
+    assert "strength" in doc and "3-5 sets of 3-6 reps" in doc
+    assert "hypertrophy" in doc and "3-4 sets of 8-12 reps" in doc
+    assert "endurance" in doc and "2-3 sets of 12-20 reps" in doc
+    # each scheme sits on the same line as its goal — no detached numbers
+    lines = [line for line in doc.splitlines() if "goal" in line]
+    assert any("strength" in line and "3-5 sets of 3-6 reps" in line for line in lines)
+    assert any("hypertrophy" in line and "3-4 sets of 8-12 reps" in line for line in lines)
+    assert any("endurance" in line and "2-3 sets of 12-20 reps" in line for line in lines)
+
+
 # --- linking's phraser follows the same mirror-or-Spanish rule ---
 
 
