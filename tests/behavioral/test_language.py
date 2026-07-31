@@ -249,6 +249,27 @@ def test_dashed_prose_prefixes_block_the_strength_absorb():
     assert find_english_leaks("non strength band pull-apart") == set()
 
 
+def test_dash_before_a_glued_strength_chain_marks_it_mid_chain():
+    # Round-18 P1: a name unit whose FIRST part is strength, preceded by a
+    # dash separator, is blocked exactly like the bare absorb path.
+    assert find_english_leaks("non–strength-band-pull-apart") == {"strength"}
+    assert find_english_leaks("super–strength-band-pull-apart") == {"strength"}
+    assert find_english_leaks("kipping–strength-band-pull-apart") == {"strength"}
+    assert find_english_leaks("non–strength-band pull-apart") == {"strength"}
+    assert find_english_leaks("stamina–strength-band-pull-apart") == {"stamina", "strength"}
+    # …while the same unit at chain start stays clean.
+    assert find_english_leaks("strength-band-pull-apart") == set()
+
+
+def test_underscores_are_separators_too():
+    # Round-18 P2: \w includes "_", so \b boundaries dodged it — the
+    # normalization pass maps "_" to a space.
+    assert find_english_leaks("weight_loss") == {"weight loss"}
+    assert find_english_leaks("fat_loss") == {"fat", "fat loss"}
+    assert find_english_leaks("muscle_pull-ups") == {"muscle"}
+    assert find_english_leaks("weight_loss strength band pull-apart") == {"weight loss", "strength"}
+
+
 def test_dash_gap_joins_accept_exact_cores_only():
     # Round-17 P1: prefix+core joins across a dash gap are not names -
     # only EXACT allowlisted cores may be recognized across the gap.
@@ -308,10 +329,13 @@ _SEPARATOR_EXPECTED_DIFFS: dict[str, set[str]] = {}
 @pytest.mark.parametrize("base", _INVARIANT_BASES)
 @pytest.mark.parametrize("dash", _HYPHEN_VARIANTS)
 def test_hyphen_and_nbsp_invariance(base: str, dash: str):
-    # True hyphens and NBSP: swapping never changes the result.
+    # True hyphens, NBSP, and underscores: swapping never changes the result.
     expected = find_english_leaks(base)
     assert find_english_leaks(base.replace("-", dash)) == expected
     assert find_english_leaks(base.replace(" ", " ")) == expected
+
+
+    assert find_english_leaks(base.replace(" ", "_")) == expected
 
 
 @pytest.mark.parametrize("base", _INVARIANT_BASES)

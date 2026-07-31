@@ -62,14 +62,15 @@ def _compile(term: str) -> re.Pattern[str]:
 # (U+2013/U+2014/U+2015) are SEPARATORS, never chain links: they map to a
 # private placeholder that splits tokens and blocks chain absorption, with
 # one exception -- an allowlisted name core may be recognized across the
-# gap ("Muscle–up" == "Muscle-up"). NBSP maps to a plain space. All
+# gap ("Muscle–up" == "Muscle-up"). NBSP and "_" map to a plain space
+# ("_" is part of \w, so \b lexicon boundaries would dodge it). All
 # one-code-point-for-one, so offsets are unchanged.
 _DASH_GAP = ""
 
 _NORMALIZE = str.maketrans(
     {cp: "-" for cp in "‐‑‒−"}
     | {cp: _DASH_GAP for cp in "–—―"}
-    | {" ": " "}
+    | {" ": " ", "_": " "}
 )
 
 _PATTERNS = {term: _compile(term) for term in ENGLISH_TRAINING_VOCAB}
@@ -304,7 +305,16 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
         if not entry["leading_strength"] or entry["first"] == 0:
             continue
         prev_idx = entry["first"] - 1
-        if not _HORIZONTAL_GAP_RE.fullmatch(text[units[prev_idx][1] : units[entry["first"]][0]]):
+        gap_before = text[units[prev_idx][1] : units[entry["first"]][0]]
+        parts = entry["parts"]
+        # A dash separator right before a strength-led chain blocks its
+        # leading strength exactly like the bare absorb path
+        # ("non–strength-band-pull-apart" mirrors ASCII
+        # "non-strength-band-pull-apart", which is not a name at all).
+        if gap_before == _DASH_GAP:
+            entry["start"] = parts[1][0] if len(parts) > 1 else parts[0][1]
+            continue
+        if not _HORIZONTAL_GAP_RE.fullmatch(gap_before):
             continue
         # The preceding content is the whole dash-connected run before the
         # chain ("muscle–gain" marks strength mid-chain like ASCII
@@ -319,7 +329,6 @@ def _exercise_name_spans(text: str, hits: list[tuple[str, int, int]]) -> list[tu
             if not any(span_start <= hit[1] and hit[2] <= span_end for span_start, span_end in base_spans)
         ]
         if survives:
-            parts = entry["parts"]
             entry["start"] = parts[1][0] if len(parts) > 1 else parts[0][1]
     return [(entry["start"], entry["end"]) for entry in entries]
 
