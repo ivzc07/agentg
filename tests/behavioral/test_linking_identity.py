@@ -494,6 +494,37 @@ def test_a_definite_reopened_np_is_an_object_reference():
     assert drift is not None and "bot" in drift
 
 
+# --- the reopened-NP decision table is complete ---
+
+
+def test_a_reopened_np_that_is_a_clause_subject_is_clean():
+    assert identity_drift("I'm a coach and your invite link is below") is None
+    assert identity_drift("Soy un entrenador y tu enlace de invitación está abajo") is None
+    assert identity_drift("I'm a coach and a link will be sent") is None
+
+
+def test_demonstratives_are_claim_openers():
+    for reply in (
+        "I'm this bot",
+        "I'm that link",
+        "Soy este enlace",
+        "I'm a coach and that bot",
+        "I'm a coach and this bot",
+    ):
+        assert identity_drift(reply) is not None, reply
+    # "that" stays a relativizer after a collected head
+    drift = identity_drift("I'm a coach and a bot that is helpful")
+    assert drift is not None and "bot" in drift
+
+
+def test_ni_coordinates_under_denial_until_a_sino():
+    drift = identity_drift("No soy un entrenador ni un coach sino un bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("No soy un bot ni un enlace sino un asistente")
+    assert drift is not None and "asistente" in drift
+    assert identity_drift("No soy un bot ni un enlace") is None
+
+
 # --- the combinatorial matrix: the grammar space, enumerated ---
 
 _EN = {
@@ -502,6 +533,8 @@ _EN = {
     "drift_roles": ["bot", "link", "assistant"],
     "det": "a",
     "def": "the",
+    "demo": "that",
+    "verb_tail": "is below",
     "poss": "your",
     "adj": "stupid",
     "rel": "who helps",
@@ -523,6 +556,8 @@ _ES = {
     "drift_roles": ["bot", "enlace", "asistente"],
     "det": "un",
     "def": "el",
+    "demo": "este",
+    "verb_tail": "está abajo",
     "poss": "tu",
     "adj": "gran",
     "rel": "que ayuda",
@@ -618,6 +653,29 @@ def _matrix_cases() -> list[tuple[str, bool]]:
                     drift2,
                 )
             )
+        # opener x post-head class (round 13): none / relativizer / every
+        # preposition / verb-ish tail, for each opener type
+        opener_cases = [
+            (det, "indefinite"), (poss, "possessive"),
+            (lang["demo"], "demonstrative"), (lang["def"], "definite"),
+        ]
+        tails = (
+            [("", True), (lang["rel"], True)]
+            + [(p, True) for p in lang["pp_list"]]
+            + [(lang["verb_tail"], False)]
+        )
+        for opener, kind in opener_cases:
+            for tail, tail_drifts in tails:
+                for role2, drift2 in roles:
+                    expected = drift2 and (False if kind == "definite" else tail_drifts)
+                    np2 = f"{opener} {role2}"
+                    cases.append(
+                        (
+                            f"{v} {det} {coach} {lang['conj'][0]} "
+                            f"{np2}{' ' + tail if tail else ''}",
+                            expected,
+                        )
+                    )
         # correctives and correlatives (English shapes)
         if en:
             for role, drift in roles:
@@ -640,6 +698,9 @@ def _matrix_cases() -> list[tuple[str, bool]]:
                     (f"No soy un {coach}, sino {np}", drift),
                     (f"No soy {np}, sino un {coach}", False),
                     (f"No soy solo un {coach}, sino {np}", drift),
+                    # "ni" coordinates under denial until a sino (round 13)
+                    (f"No soy un {coach} ni {np} sino {np}", drift),
+                    (f"No soy {np} ni {np}", False),
                 ]
     return cases
 
