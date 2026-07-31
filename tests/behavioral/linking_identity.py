@@ -33,11 +33,14 @@ not any role word in the clause.
   coordination ("and"/"y"/"or"/"o" + role NP): "I'm not a coach but a
   bot", "I'm a coach just a bot", "I'm a coach and a bot" all drift. The
   reopened phrase is judged exactly like a primary one (same fillers,
-  same denial/affirmer handling, same drift scoring); only the clause
-  shape is gated — a finite verb on the right ("and here is the link",
-  "and the link IS below", "y el enlace… ESTÁ en recepción") makes it a
-  new clause, not a role NP, and an arbitrary later noun phrase is never
-  a claim either ("I'm not a coach who sends the link" reads clean).
+  same denial/affirmer handling, same drift scoring), then put through a
+  STRUCTURAL clause gate — after the role head, only preposition chains
+  and relative clauses keep it a noun phrase ("a link to the gym", "a
+  bot that is ready" drift); any other word is a verb, making the right
+  side a full clause and no claim ("and here is the link", "and the link
+  IS below", "y el enlace TE espera", "and the link WILL arrive" read
+  clean). An arbitrary later noun phrase is never a claim either ("I'm
+  not a coach who sends the link" reads clean).
 
 A coach claim needs no anchor to pass; unknown phrasing passes by default.
 The offline suite exercises the guard on canned replies; the live sweep
@@ -104,9 +107,12 @@ _ADVERBS = {
 # not only a bot", "no soy solo un bot" claim bot-hood).
 _AFFIRMERS = {"only", "just", "simply", "merely", "solo", "sólo", "simplemente"}
 
-# A finite copula on the right of a reopen makes it a new clause, not a
-# role NP ("and the link IS below", "y el enlace… ESTÁ en recepción").
-_CLAUSE_VERBS = {"is", "are", "es", "está", "estoy", "son"}
+# The two constituent classes a claimed noun phrase stops at, single-
+# sourced. A relative clause ("a bot WHO helps", "a bot THAT is ready")
+# still modifies the role; a preposition opens a PP ("a link TO the
+# gym", "un bot DEL gimnasio").
+_RELATIVIZERS = {"que", "who", "that", "which"}
+_PREPOSITIONS = {"to", "for", "with", "of", "de", "del", "con", "para", "en"}
 
 # Where the claimed noun phrase ends: a preposition, relativizer, or
 # contrast starts a new constituent, so what follows is not part of the
@@ -114,10 +120,7 @@ _CLAUSE_VERBS = {"is", "are", "es", "está", "estoy", "son"}
 # phrase), and "just"/"only" stop it when a determiner follows (opening
 # a corrective one) — otherwise they are pre-head modifiers INSIDE the
 # phrase ("the only bot", "your only link").
-_PHRASE_END = {
-    "to", "for", "with", "of", "de", "del", "con", "para", "en",
-    "que", "who", "that", "which", "but", "pero",
-}
+_PHRASE_END = _PREPOSITIONS | _RELATIVIZERS | {"but", "pero"}
 
 # After a phrase, exactly one more may open on a contrast, a corrective,
 # or a coordination ("but a bot", "just a link", "and a bot") — never on
@@ -173,6 +176,19 @@ def _skip_adverbs(tokens: list[str], i: int) -> int:
     return i
 
 
+def _skip_fillers_before_affirmer(tokens: list[str], i: int) -> int:
+    """Fillers may sit between "not"/"no" and its affirmer ("no yo solo",
+    "no realmente solo") — skip them, but stop AT an affirmer token so the
+    adjacency check can see it."""
+    while (
+        i < len(tokens)
+        and tokens[i] in _ADVERBS
+        and tokens[i] not in _AFFIRMERS
+    ):
+        i += 1
+    return i
+
+
 def _collect_phrase(tokens: list[str], i: int) -> tuple[list[str], int]:
     """The noun phrase after a determiner: everything up to a phrase-end
     token, a clause joiner conjunction, a mid-phrase denial, a corrective
@@ -194,29 +210,21 @@ def _collect_phrase(tokens: list[str], i: int) -> tuple[list[str], int]:
     return phrase, i
 
 
-def _parse_claim_phrase(
-    tokens: list[str], i: int, negated: bool
-) -> tuple[list[str], bool, int] | None:
+def _parse_claim_phrase(tokens: list[str], i: int) -> tuple[list[str], bool, int] | None:
     """ONE shared phrase parse, used by primary and reopened claims alike:
     fillers skipped, "not"/"no" applied (with the only/just/solo affirmer
-    exception), then a determiner-led or bare-role noun phrase. Returns
-    (phrase, negated, next_index), or None when no claim opens here."""
+    exception, adjacency seen through fillers), then a determiner-led or
+    bare-role noun phrase. Returns (phrase, negated, next_index), or None
+    when no claim opens here."""
     i = _skip_adverbs(tokens, i)
-    if i < len(tokens) and tokens[i] == "not":
-        if i + 1 < len(tokens) and tokens[i + 1] in _AFFIRMERS:
-            i += 2  # "not only/just/…" affirms the phrase that follows
-            negated = False
+    negated = False
+    if i < len(tokens) and tokens[i] in {"not", "no"}:
+        j = _skip_fillers_before_affirmer(tokens, i + 1)
+        if j < len(tokens) and tokens[j] in _AFFIRMERS:
+            i = j + 1  # "not only…", "no [yo] solo…" AFFIRM the phrase
         else:
-            negated = True
-            i += 1
-        i = _skip_adverbs(tokens, i)
-    elif i < len(tokens) and tokens[i] == "no":
-        if i + 1 < len(tokens) and tokens[i + 1] in _AFFIRMERS:
-            i += 2  # "no solo/simplemente…" affirms too
-            negated = False
-        else:
-            negated = True  # determiner "no": "I'm no bot"
-            i += 1
+            negated = True  # "I'm no bot", "No soy un bot"
+            i = j
         i = _skip_adverbs(tokens, i)
     if i >= len(tokens):
         return None
@@ -228,42 +236,61 @@ def _parse_claim_phrase(
     return None
 
 
+def _after_head_stays_an_np(phrase: list[str], tokens: list[str], i: int) -> bool:
+    """The STRUCTURAL clause gate for a reopened right side — no verb
+    word list. After the NP's last role token, only preposition chains
+    ("a link to the gym", "un bot del gimnasio") and relative clauses
+    ("a bot who helps", "a bot that is ready") keep it a noun phrase; any
+    other word there is a verb, making the right side a full clause
+    ("and the link IS below", "y el enlace TE espera…", "and the link
+    WILL arrive") — no claim."""
+    role_indexes = [idx for idx, token in enumerate(phrase) if _role_of(token)]
+    head = role_indexes[-1] if role_indexes else len(phrase) - 1
+    trailing = [*phrase[head + 1 :], *tokens[i:]]
+    j = 0
+    while j < len(trailing):
+        token = trailing[j]
+        if token in _RELATIVIZERS:
+            return True  # a relative clause modifies the role — stop scanning
+        if token not in _PREPOSITIONS:
+            return False
+        j += 1
+        while j < len(trailing) and trailing[j] in _DETERMINERS:
+            j += 1
+        if j < len(trailing):
+            j += 1  # the preposition's noun
+    return True
+
+
 def _reopened_phrase_drifts(tokens: list[str], i: int) -> bool:
     """The ONE phrase a contrast, corrective, or coordination may open —
     judged exactly like a primary claim (same fillers, same not/no +
-    affirmer handling, same drift scoring). Only the clause shape is
-    gated: a finite verb on the right ("and the link IS below", "y el
-    enlace… ESTÁ en recepción") makes it a new clause, not a role NP."""
-    start = i
-    parsed = _parse_claim_phrase(tokens, i, negated=False)
+    affirmer handling, same drift scoring), then put through the
+    structural clause gate."""
+    parsed = _parse_claim_phrase(tokens, i)
     if parsed is None:
         return False
-    phrase, negated, _ = parsed
+    phrase, negated, end = parsed
     if negated:
         return False
-    if any(token in _CLAUSE_VERBS for token in tokens[start:]):
+    if not any(_role_of(token) == "drift" for token in phrase):
         return False
-    return any(_role_of(token) == "drift" for token in phrase)
+    return _after_head_stays_an_np(phrase, tokens, end)
 
 
-def _segment_drifts(tokens: list[str], negated: bool = False) -> bool:
+def _segment_drifts(tokens: list[str]) -> bool:
     """Scan one clause segment (after the claim verb) for a determiner-led
-    noun phrase claiming a drift role. ``negated`` carries a Spanish
-    fronted "No" in as a synthetic "not": it denies the FIRST phrase, not
-    the whole segment ("No soy un entrenador pero un bot" still drifts)."""
-    if negated and tokens and tokens[0] in _AFFIRMERS:
-        negated = False  # "No soy solo un bot" affirms, like "not only"
+    noun phrase claiming a drift role."""
     i = 0
     continued = False  # a contrast/corrective/coordination opens one phrase
     while i < len(tokens):
-        parsed = _parse_claim_phrase(tokens, i, negated)
+        parsed = _parse_claim_phrase(tokens, i)
         if parsed is None:
             return False  # no claim here — bare objects read clean
         phrase, negated, i = parsed
         drifted = any(_role_of(token) == "drift" for token in phrase)
         if not negated and drifted:
             return True
-        negated = False  # the denial covered this phrase only
         stopper = tokens[i] if i < len(tokens) else None
         if stopper in {"not", "no"}:
             continue  # mid-phrase denial: the next phrase reads denied
@@ -280,14 +307,17 @@ def identity_drift(reply: str) -> str | None:
     reply = reply.translate(_APOSTROPHES)
     for match in _CLAIM.finditer(reply):
         verb = match.group(1).lower()
-        # A Spanish fronted "No soy" denies the first phrase (a synthetic
-        # "not"), not the whole segment: "No soy un entrenador pero un
-        # bot" still drifts on the contrast.
-        negated = verb == "soy" and _spanish_denial(reply, match.start())
         end = _CLAUSE_END.search(reply, match.end())
         segment_end = end.start() if end else len(reply)
         tokens = _words(reply[match.end() : segment_end])
-        if _segment_drifts(tokens, negated=negated):
+        # A Spanish fronted "No soy" becomes a synthetic "no" leading the
+        # segment: the shared parser then owns denial/affirmer adjacency
+        # for both languages ("No soy [yo] solo un bot" affirms, "No soy
+        # un entrenador pero un bot" drifts on the contrast, plain "No
+        # soy un bot" stays clean).
+        if verb == "soy" and _spanish_denial(reply, match.start()):
+            tokens = ["no"] + tokens
+        if _segment_drifts(tokens):
             return reply[match.start() : segment_end].strip()
     return None
 

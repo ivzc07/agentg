@@ -357,6 +357,34 @@ def test_a_reopened_np_is_judged_like_a_primary_one():
     assert identity_drift("I'm a coach and here is the link") is None
 
 
+# --- the clause gate is structural, not a word list ---
+
+
+def test_a_full_clause_on_the_right_is_clean_regardless_of_the_verb():
+    for reply in (
+        "Soy un entrenador y el enlace de invitación esta en recepción",  # no accent
+        "Soy un entrenador y el enlace estan en recepción",
+        "Soy un entrenador y el enlace te espera en recepción",
+        "I'm a coach and the link will arrive from your gym",
+        "I'm a coach and the link was below",
+    ):
+        assert identity_drift(reply) is None, reply
+
+
+def test_a_relative_clause_after_the_role_keeps_the_drift():
+    drift = identity_drift("I'm a coach and a bot that is helpful")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("I'm not a coach but a bot that is ready")
+    assert drift is not None and "bot" in drift
+
+
+def test_the_fronted_no_affirmer_check_survives_fillers():
+    drift = identity_drift("No soy yo solo un bot")
+    assert drift is not None and "bot" in drift
+    drift = identity_drift("No soy realmente solo un bot")
+    assert drift is not None and "bot" in drift
+
+
 # --- the prompt pins the one identity ---
 
 
