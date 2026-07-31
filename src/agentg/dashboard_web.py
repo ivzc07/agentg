@@ -166,20 +166,125 @@ SETS_MIN, SETS_MAX = 1, 99
 REGENERATE_CONFIRM = STRINGS["es"]["confirm_word"]
 
 
-def _page(title: str, body: str, extra: str = "", lang: str = "es") -> str:
+# --- The design tokens and shared shell (issue: the UX/UI redesign) ---
+#
+# One dark editorial language for every page, adopted from the parked
+# docs/prototypes/coach-dashboard-v3-dark.html ("the look is wanted"):
+# pure black ground, two flat surfaces, hairline rules instead of card
+# chrome, zero corner radius except pill chips, white as the loudest
+# accent, a mono-uppercase eyebrow as the one typographic signature, and
+# color reserved for training state — mint kept, coral missed/red, amber
+# slipping, purple extra. All values live here as custom properties; the
+# per-surface style blocks below only compose them.
+
+BASE_STYLE = """
+:root {
+  --bg: #000; --surface: #131313; --surface-2: #1b1c1e;
+  --line: #2a2b2d; --line-2: #3a3a3c;
+  --ink: #fff; --ink-2: #9a9a9a; --ink-3: #757579;
+  --mint: #6ef3a5; --mint-tint: #0f2a1c;
+  --coral: #f58060; --coral-tint: #2b1712;
+  --amber: #f2b84b; --amber-tint: #2a2110;
+  --purple: #8b7cf6; --purple-tint: #201e33;
+  --gut: 16px;
+  --mono: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  --t-fast: 120ms ease-out;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { background: var(--bg); }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased; }
+h1, h2, h3 { margin: 0; font-weight: 700; letter-spacing: -0.02em; }
+a { color: inherit; text-decoration: none; }
+p { margin: 0.6em 0; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.eyebrow { font-family: var(--mono); text-transform: uppercase; font-size: 11px; letter-spacing: .14em; color: var(--ink-2); display: block; }
+button { font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  background: var(--surface-2); color: var(--ink); border: 1px solid var(--line-2);
+  min-height: 44px; padding: 8px 16px;
+  transition: background var(--t-fast), border-color var(--t-fast); }
+button:hover { border-color: var(--ink-2); }
+button:disabled { opacity: .4; cursor: default; }
+.btn-primary { background: var(--ink); color: #000; border-color: var(--ink); }
+.btn-primary:hover { background: #e6e6e6; border-color: #e6e6e6; }
+.btn-primary.big { display: block; width: 100%; min-height: 55px; font-size: 16px; }
+input[type="text"], input[type="search"], select, textarea {
+  background: var(--surface-2); color: var(--ink); border: 1px solid var(--line-2);
+  font: inherit; min-height: 44px; padding: 8px 12px;
+  transition: border-color var(--t-fast); }
+input[type="text"]:hover, input[type="search"]:hover, select:hover, textarea:hover { border-color: var(--ink-2); }
+input[type="checkbox"] { accent-color: var(--mint); width: 16px; height: 16px; }
+code { font-family: var(--mono); font-size: 13px; background: var(--surface-2); padding: 6px 8px; overflow-wrap: anywhere; }
+summary { cursor: pointer; color: var(--ink-3); font-size: 13px; padding: 10px 0; }
+summary:hover { color: var(--ink-2); }
+.tag { display: inline-block; font-family: var(--mono); text-transform: uppercase; font-weight: 400;
+  font-size: 10px; letter-spacing: .12em; padding: 3px 7px; white-space: nowrap;
+  border: 1px solid var(--line-2); color: var(--ink-2); }
+.tag-flag { background: var(--ink); border-color: var(--ink); color: #000; font-weight: 700; }
+.tag-new { color: var(--ink); border-color: var(--ink-2); }
+.chip { color: var(--ink-2); }
+.error { background: var(--coral-tint); border: 1px solid var(--coral); color: var(--coral);
+  padding: 12px 14px; font-size: 14px; margin: 14px 0; }
+.muted { color: var(--ink-2); font-size: 13px; }
+.emptystate { padding: 70px 24px; text-align: center; }
+.emptystate h2 { font-size: 22px; margin-bottom: 8px; }
+.emptystate p { color: var(--ink-2); font-size: 15px; margin: 0; }
+.lang-toggle { white-space: nowrap; }
+.lang-toggle a { font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+  color: var(--ink-3); padding: 12px 6px; }
+.lang-toggle a:hover { color: var(--ink-2); }
+.lang-toggle a[aria-current="true"] { color: var(--ink); }
+"""
+
+# Login door and bounce pages: one centered column, one action.
+DOOR_STYLE = """
+.door { max-width: 26rem; margin: 18vh auto 0; padding: 0 var(--gut); text-align: center; }
+.door h1 { font-size: 22px; }
+.door p { color: var(--ink-2); font-size: 15px; }
+.door form { margin-top: 24px; }
+"""
+
+# Every form disables its submit buttons once a submit is on its way —
+# a double-clicked Apply must not message every Member twice. The timeout
+# lets the click's own submit complete before the buttons grey out.
+SUBMIT_GUARD_SCRIPT = """
+document.addEventListener("submit", function (e) {
+  var buttons = e.target.querySelectorAll("button[type=submit]");
+  setTimeout(function () { buttons.forEach(function (b) { b.disabled = true; }); }, 0);
+});
+"""
+
+
+def _document(
+    title: str, lang: str, body: str, *, styles: str = "", scripts: str = ""
+) -> str:
+    """The one page skeleton every surface renders through."""
+    script_html = f"<script>{SUBMIT_GUARD_SCRIPT}{scripts}</script>"
     return f"""<!DOCTYPE html>
 <html lang="{lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
+<style>{BASE_STYLE}{styles}</style>
 </head>
-<body style="font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem;">
+<body>
+{body}
+{script_html}
+</body>
+</html>"""
+
+
+def _page(title: str, body: str, extra: str = "", lang: str = "es") -> str:
+    content = f"""<div class="door">
 <h1>{title}</h1>
 <p>{body}</p>
 {extra}
-</body>
-</html>"""
+</div>"""
+    return _document(title, lang, content, styles=DOOR_STYLE)
 
 
 def _bounce_page() -> str:
@@ -190,7 +295,7 @@ def _interstitial_page(token: str) -> str:
     """A self-submitting POST form: one tap (or zero, with JS) for the human,
     a harmless GET for any link-preview fetcher."""
     form = f"""<form method="post" action="/login/{token}" id="go">
-<button type="submit" style="font-size: 1rem; padding: 0.6rem 1.2rem;">{INTERSTITIAL_BUTTON}</button>
+<button type="submit" class="btn-primary big">{INTERSTITIAL_BUTTON}</button>
 </form>
 <script>document.getElementById("go").submit();</script>"""
     return _page(INTERSTITIAL_TITLE, "", form)
@@ -225,15 +330,17 @@ def _lang_of(request: web.Request) -> str:
     return resolve_lang(request.cookies.get(LANG_COOKIE), request.headers.get("Accept-Language"))
 
 
-def _lang_toggle(next_path: str) -> str:
+def _lang_toggle(next_path: str, lang: str) -> str:
     """The EN/ES toggle in the chrome; both links round-trip through
-    ``/lang/<lang>`` and land back on the page the Coach was reading."""
+    ``/lang/<lang>`` and land back on the page the Coach was reading. The
+    language being read is the marked one."""
     target = quote(next_path, safe="")
-    return (
-        '<span class="lang-toggle">'
-        f'<a href="/lang/en?next={target}">EN</a> · '
-        f'<a href="/lang/es?next={target}">ES</a></span>'
+    links = " · ".join(
+        f'<a href="/lang/{code}?next={target}"'
+        f'{" aria-current=\"true\"" if code == lang else ""}>{code.upper()}</a>'
+        for code in ("en", "es")
     )
+    return f'<span class="lang-toggle">{links}</span>'
 
 
 def _safe_next(raw: str | None) -> str:
@@ -258,95 +365,152 @@ def _safe_next(raw: str | None) -> str:
 # --- The shared chrome: segmented view control, search, toggle, settings ---
 
 ROSTER_STYLE = """
-body { font-family: system-ui, sans-serif; max-width: 64rem; margin: 2rem auto; padding: 0 1rem; }
-body.split-view { max-width: none; margin: 0; padding: 0; }
-header.top { display: flex; align-items: baseline; gap: 1rem; flex-wrap: wrap; padding: 0.8rem 1rem; }
-header.top h1 { font-size: 1.25rem; margin: 0; }
-header.top .count { color: #666; }
-header.top .lang-toggle { font-size: 0.85rem; color: #666; white-space: nowrap; }
-.seg { display: inline-flex; background: #eef1f4; border-radius: 8px; padding: 3px; gap: 2px; }
-.seg a { color: #5a6472; text-decoration: none; padding: 4px 12px; border-radius: 6px; font-size: 0.9rem; }
-.seg a[aria-current="true"] { background: #fff; color: #14181f; box-shadow: 0 1px 2px rgba(20,24,31,.10); }
-#search { margin-left: auto; font-size: 1rem; padding: 0.3rem 0.6rem; }
-.roster-body { padding: 0 1rem; }
-ul { list-style: none; padding: 0; margin: 1rem 0; }
-.row { display: flex; align-items: baseline; gap: 0.6rem; padding: 0.45rem 0.2rem; border-bottom: 1px solid #eee; }
-.row a.name { font-weight: 600; color: inherit; }
-.row .away { margin-left: auto; color: #666; font-size: 0.9rem; white-space: nowrap; }
-.away.sev-amber { color: #9a5b00; font-weight: 600; }
-.away.sev-red { color: #b3261e; font-weight: 600; }
-.tag { font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 1rem; background: #eee; color: #555; white-space: nowrap; }
-.tag-flag { background: #fde7e9; color: #b3261e; }
-#lapsed summary { cursor: pointer; color: #666; }
+header.top { position: sticky; top: 0; z-index: 20; display: flex; align-items: center;
+  gap: 6px 14px; flex-wrap: wrap; min-height: 46px; padding: 6px var(--gut);
+  background: var(--bg); border-bottom: 1px solid var(--line); }
+header.top h1 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+header.top .count { color: var(--ink-2); font-size: 13px; }
+header.top .spacer { flex: 1; }
+.quick a { color: var(--ink-2); font-size: 14px; padding: 12px 6px; }
+.quick a:hover { color: var(--ink); }
+.quick a[aria-current="true"] { color: var(--ink); font-weight: 600; }
+.seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 999px; padding: 3px; gap: 2px; }
+.seg a { color: var(--ink-2); padding: 9px 16px; border-radius: 999px; font-size: 13px; font-weight: 500;
+  transition: color var(--t-fast); }
+.seg a:hover { color: var(--ink); }
+.seg a[aria-current="true"] { background: var(--ink); color: #000; }
+#search { min-height: 40px; width: 200px; font-size: 14px; }
+@media (max-width: 700px) { #search { flex: 1 1 100%; order: 9; width: auto; } }
+.countbar { display: flex; align-items: baseline; gap: 8px; padding: 10px var(--gut);
+  border-bottom: 1px solid var(--line); font-size: 14px; color: var(--ink-2); }
+.countbar b { color: var(--ink); font-weight: 600; }
+.roster-body { padding: 0 0 40px; }
+ul#roster { list-style: none; padding: 0; margin: 0; }
+#lapsed ul { list-style: none; padding: 0; margin: 0; }
+#lapsed summary { padding: 12px var(--gut); }
+.row { border-bottom: 1px solid var(--line); }
+.row > a { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 0 12px; align-items: center;
+  padding: 10px var(--gut); transition: background var(--t-fast); }
+.row > a:hover { background: #0b0b0b; }
+.row > a[aria-current="true"] { background: #0e0e0e; box-shadow: inset 2px 0 0 var(--ink); }
+.tile { width: 44px; height: 44px; background: var(--surface-2); display: grid; place-items: center;
+  font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+.row .t { font-size: 16px; font-weight: 600; letter-spacing: -0.01em;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.row .t .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.row .meta { display: flex; gap: 4px 12px; color: var(--ink-2); font-size: 13px; margin-top: 2px; flex-wrap: wrap; }
+.away { white-space: nowrap; }
+.sev { white-space: nowrap; }
+.sev-amber { color: var(--amber); font-weight: 600; }
+.sev-red { color: var(--coral); font-weight: 600; }
 /* Cards: severity bands plus the 4-week Mon-Sun day grid. */
-.band > h2 { font-size: 0.85rem; text-transform: uppercase; letter-spacing: .06em; color: #5a6472; margin: 1.4rem 0 0.6rem; }
-.band .count { color: #8a94a3; font-weight: 500; }
-.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
-.mcard { background: #fff; border: 1px solid #e3e7ec; border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.band { padding: 0 var(--gut); }
+.band > h2 { font-family: var(--mono); text-transform: uppercase; font-size: 11px; letter-spacing: .14em;
+  font-weight: 400; color: var(--ink-2); margin: 24px 0 10px; }
+.band-hot > h2 { color: var(--coral); }
+.band-warm > h2 { color: var(--amber); }
+.band .count { color: var(--ink-3); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.mcard { background: var(--surface); padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
 .mcard .top-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.mcard a.name { font-weight: 600; color: inherit; }
-.mcard .away { color: #666; font-size: 0.9rem; white-space: nowrap; }
-.daygrid { display: grid; grid-template-columns: repeat(7, 15px); gap: 3px; }
-.daygrid i { height: 15px; border-radius: 3px; background: #eef1f4; }
-.daygrid i.hit { background: #1f7a4d; }
-.daygrid i.miss { background: #b3261e; }
-.daygrid i.future { background: transparent; border: 1px dashed #e3e7ec; }
-.daygrid .wd { font-size: 9px; line-height: 1; text-align: center; color: #8a94a3; }
-.sparklab { font-size: 0.75rem; color: #8a94a3; }
+.mcard a.name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mcard a.name:hover { text-decoration: underline; }
+.mcard .away { color: var(--ink-2); font-size: 13px; }
+.daygrid { display: grid; grid-template-columns: repeat(7, 18px); gap: 4px; }
+.daygrid i { height: 18px; background: var(--surface-2); }
+.daygrid i.hit { background: var(--mint); }
+.daygrid i.miss { background: transparent; box-shadow: inset 0 0 0 2px var(--coral); }
+.daygrid i.future { background: transparent; border: 1px dashed var(--line-2); }
+.daygrid .wd { font-family: var(--mono); font-size: 11px; line-height: 1; text-align: center;
+  text-transform: uppercase; letter-spacing: .04em; color: var(--ink-2); }
+.sparklab { font-size: 12px; color: var(--ink-3); }
+.legend { display: flex; gap: 16px; padding: 18px var(--gut) 0; font-size: 12px; color: var(--ink-2); flex-wrap: wrap; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend i { width: 12px; height: 12px; background: var(--surface-2); }
+.legend i.l-hit { background: var(--mint); }
+.legend i.l-miss { background: transparent; box-shadow: inset 0 0 0 2px var(--coral); }
 /* Split: the roster never leaves. */
-.split { display: grid; grid-template-columns: 20rem minmax(0,1fr); align-items: start; }
-.split .rail { border-right: 1px solid #e3e7ec; min-height: calc(100vh - 4rem); padding: 0 1rem; }
-.split .pane { padding: 1.5rem 2rem; max-width: 60rem; }
-.split .pane-empty { display: grid; place-items: center; min-height: 60vh; color: #5a6472; }
+.split { display: grid; grid-template-columns: 340px minmax(0, 1fr); align-items: start; }
+.split .rail { border-right: 1px solid var(--line); position: sticky; top: 47px;
+  height: calc(100vh - 47px); overflow-y: auto; }
+.split .pane { padding: 0 var(--gut) 40px; max-width: 60rem; }
+.split .pane-empty { display: grid; place-items: center; min-height: 60vh; }
+@media (max-width: 899px) {
+  .split { grid-template-columns: 1fr; }
+  .split .rail { position: static; height: auto; max-height: 45vh; border-right: 0;
+    border-bottom: 1px solid var(--line); }
+}
 """
 
 MEMBER_STYLE = """
-body { font-family: system-ui, sans-serif; margin: 0; }
-.member-wrap { max-width: 60rem; margin: 2rem auto; padding: 0 1rem; }
-a.back { color: #666; text-decoration: none; }
-header.mhead h1 { font-size: 1.4rem; margin: 0.5rem 0 0.2rem; }
-header.mhead .facts { color: #666; }
-.columns { display: flex; gap: 2rem; flex-wrap: wrap; align-items: flex-start; }
+.member-wrap { max-width: 60rem; margin: 0 auto; padding: 0 var(--gut) 48px; }
+a.back { display: inline-block; color: var(--ink-2); font-size: 14px; padding: 12px 0; }
+a.back:hover { color: var(--ink); }
+header.mhead { padding: 8px 0 4px; }
+header.mhead h1 { font-size: 33px; line-height: 1.05; }
+header.mhead .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+header.mhead .facts { color: var(--ink-2); font-size: 14px; margin-top: 10px; }
+.dot { display: inline-block; width: 3px; height: 3px; border-radius: 50%; background: var(--ink-3);
+  vertical-align: middle; margin: 0 7px 2px; }
+.columns { display: flex; gap: 32px; flex-wrap: wrap; align-items: flex-start; }
 .col { flex: 1; min-width: 18rem; }
-.card { margin: 1rem 0; }
-.card h2 { font-size: 1rem; margin: 0 0 0.5rem; }
-.card ul { margin: 0.2rem 0 0.6rem; padding-left: 1.2rem; }
-.day b { text-transform: capitalize; }
-.sess { padding: 0.4rem 0; border-bottom: 1px solid #eee; }
-.sess .set { color: #333; font-size: 0.9rem; }
-.sess .said { color: #b3261e; font-size: 0.9rem; }
-.note { padding: 0.3rem 0; }
-.muted { color: #666; font-size: 0.9rem; }
-.tag { font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 1rem; background: #eee; color: #555; white-space: nowrap; }
-.tag-flag { background: #fde7e9; color: #b3261e; }
-.pages { display: flex; gap: 1rem; margin-top: 0.6rem; }
+.card { margin: 26px 0 0; }
+.card h2 { font-size: 20px; margin: 0 0 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+a.edit { font-size: 14px; font-weight: 600; letter-spacing: 0; border: 1px solid var(--line-2);
+  padding: 8px 14px; margin-left: auto; transition: border-color var(--t-fast); }
+a.edit:hover { border-color: var(--ink-2); }
+.day { background: var(--surface); padding: 12px 14px; margin-bottom: 10px; }
+.day > b { font-family: var(--mono); text-transform: uppercase; font-size: 11px; letter-spacing: .14em;
+  font-weight: 400; color: var(--ink-2); display: block; margin-bottom: 2px; }
+.card .day ul { list-style: none; margin: 8px 0 0; padding: 0; }
+.card .day li { padding: 5px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.card .day li:first-child { border-top: 0; }
+.sess { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.sess .set { color: var(--ink-2); font-size: 13px; padding: 2px 0; }
+.sess .said { color: var(--coral); font-size: 13px; }
+.card > ul { list-style: none; margin: 0; padding: 0; }
+.card > ul > li { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.note { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.pages { display: flex; gap: 16px; margin-top: 10px; align-items: baseline; }
+.pages a { font-size: 14px; padding: 8px 0; }
+.pages a:hover { text-decoration: underline; }
 .pages .muted { margin: 0 auto; }
-.tail summary { cursor: pointer; color: #666; }
-.safety-banner { border: 1px solid #b3261e; border-radius: 0.5rem; padding: 0.8rem 1rem; }
-.safety-banner h2 { color: #b3261e; }
-.safety-banner .flag { padding: 0.3rem 0; display: flex; gap: 0.8rem; align-items: baseline; flex-wrap: wrap; }
-.safety-banner form { margin: 0; }
+/* The loudest thing in the system is a white block, so the safety banner is one. */
+.safety-banner { background: var(--ink); color: #000; padding: 16px; margin-top: 20px; }
+.safety-banner h2 { color: #000; font-size: 20px; margin-bottom: 4px; }
+.safety-banner .flag { padding: 8px 0; display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; }
+.safety-banner .flag b { font-size: 16px; letter-spacing: -0.01em; }
+.safety-banner .muted { color: #555; }
+.safety-banner form { margin: 0 0 0 auto; }
+.safety-banner button { background: #000; color: #fff; border: 0; }
+.safety-banner button:hover { background: #2a2a2a; }
 /* The Member's own words, left alone, tagged when not in the Coach's language. */
-.verbatim { border-left: 2px solid #e3e7ec; padding-left: 8px; }
-.langtag { display: inline-block; white-space: nowrap; font-size: 0.65rem; letter-spacing: .06em; text-transform: uppercase; color: #8a94a3; margin-left: 6px; }
+.verbatim { border-left: 2px solid var(--line-2); padding-left: 8px; }
+.langtag { display: inline-block; white-space: nowrap; font-family: var(--mono); font-size: 10px;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); margin-left: 6px; }
 """
 
 SEARCH_SCRIPT = """
 // Live, name-only, accent-insensitive filter. It only hides rows — the Gap
-// sort never moves — and a lapsed match auto-expands the tail. Identical in
-// the three views (spec-dashboard §The roster).
+// sort never moves — and a lapsed match auto-expands the tail (a manually
+// opened tail is never slammed shut). Identical in the three views
+// (spec-dashboard §The roster).
 const box = document.getElementById("search");
 const lapsed = document.getElementById("lapsed");
+const nomatch = document.getElementById("no-matches");
 const norm = (s) => s.normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").toLowerCase();
 box.addEventListener("input", () => {
   const q = norm(box.value.trim());
   let lapsedHit = false;
+  let shown = 0;
   document.querySelectorAll("[data-name]").forEach((row) => {
     const hit = !q || norm(row.dataset.name).includes(q);
     row.hidden = !hit;
+    if (hit) shown += 1;
     if (hit && q && lapsed && lapsed.contains(row)) lapsedHit = true;
   });
-  if (lapsed) lapsed.open = lapsedHit;
+  if (lapsed && lapsedHit) lapsed.open = true;
+  if (nomatch) nomatch.hidden = shown > 0;
 });
 """
 
@@ -362,19 +526,41 @@ def _seg(view: str, t: dict) -> str:
     return f'<nav class="seg">{links}</nav>'
 
 
-def _chrome(gym_name: str, view: str, t: dict, next_path: str, count: int | None) -> str:
-    """The top bar: gym name, the view switcher with the search beside it,
-    the language toggle and Settings."""
+def _chrome(
+    gym_name: str,
+    t: dict,
+    next_path: str,
+    lang: str,
+    *,
+    view: str | None = None,
+    count: int | None = None,
+    active: str | None = None,
+) -> str:
+    """The top bar every screen shares: gym name, the view switcher with the
+    search beside it on roster pages (``view`` set), the Presets and
+    Settings links with an active state, and the language toggle."""
     count_html = (
         f'<span class="count">{t["members_count"].format(n=count)}</span>' if count is not None else ""
     )
+    seg = _seg(view, t) if view is not None else ""
+    search = (
+        f'<label class="sr" for="search">{t["search_placeholder"]}</label>'
+        f'<input id="search" type="search" placeholder="{t["search_placeholder"]}" autocomplete="off">'
+        if view is not None
+        else ""
+    )
+
+    def quick(href: str, key: str) -> str:
+        current = ' aria-current="true"' if active == key else ""
+        return f'<a href="{href}"{current}>{t[key]}</a>'
+
     return f"""<header class="top">
 <h1>{escape(gym_name)}</h1>{count_html}
-{_seg(view, t)}
-<input id="search" type="search" placeholder="{t["search_placeholder"]}" autocomplete="off">
-{_lang_toggle(next_path)}
-<a href="/presets">{t["presets"]}</a>
-<a href="/settings">{t["settings"]}</a>
+{seg}
+{search}
+<span class="spacer"></span>
+<nav class="quick">{quick("/presets", "presets")}{quick("/settings", "settings")}</nav>
+{_lang_toggle(next_path, lang)}
 </header>"""
 
 
@@ -384,7 +570,27 @@ def _member_href(member_id: int, view: str) -> str:
     return f"/members/{member_id}?view={view}"
 
 
-def _roster_row(row: RosterRow, view: str, lang: str) -> str:
+def _initials(name: str) -> str:
+    """The row tile's two-letter monogram."""
+    parts = name.split()
+    return "".join(part[0] for part in parts[:2]).upper() or "?"
+
+
+def _severity_text(row: RosterRow, lang: str) -> str:
+    """The severity sentence beside the away text — the count in words, so
+    urgency is never conveyed by color alone."""
+    if not row.severity:
+        return ""
+    t = STRINGS[lang]
+    label = (
+        t["missed_one"] if row.missed_days == 1 else t["missed_n"].format(n=row.missed_days)
+    )
+    return f'<span class="sev sev-{row.severity}">{label}</span>'
+
+
+def _roster_row(
+    row: RosterRow, view: str, lang: str, current_member_id: int | None = None
+) -> str:
     t = STRINGS[lang]
     tags = ""
     if row.is_new:
@@ -395,54 +601,76 @@ def _roster_row(row: RosterRow, view: str, lang: str) -> str:
     if row.has_safety_flag:
         # A marker on the row, never a re-sort (spec-dashboard §Safety flags).
         tags += f' <span class="tag tag-flag">{t["flag_tag"]}</span>'
-    severity = f" sev-{row.severity}" if row.severity else ""
+    current = ' aria-current="true"' if row.member_id == current_member_id else ""
+    # One physical line per row: the whole row is the link.
     return (
         f'<li class="row" data-name="{escape(row.name)}">'
-        f'<a class="name" href="{_member_href(row.member_id, view)}">{escape(row.name)}</a>{tags}'
-        f'<span class="away{severity}">{away_text(row.has_sessions, row.gap_days, lang)}</span></li>'
+        f'<a href="{_member_href(row.member_id, view)}"{current}>'
+        f'<span class="tile" aria-hidden="true">{escape(_initials(row.name))}</span>'
+        f'<span><span class="t"><span class="nm">{escape(row.name)}</span>{tags}</span>'
+        f'<span class="meta"><span class="away">{away_text(row.has_sessions, row.gap_days, lang)}</span>'
+        f"{_severity_text(row, lang)}</span></span></a></li>"
     )
 
 
-def _lapsed_section(lapsed: list[RosterRow], view: str, lang: str) -> str:
+def _lapsed_section(
+    lapsed: list[RosterRow], view: str, lang: str, current_member_id: int | None = None
+) -> str:
     """The collapsed tail, identical in the three views: out of the Gap sort
     and the counters, most-recently-active first (spec-dashboard §The
     roster)."""
     if not lapsed:
         return ""
     t = STRINGS[lang]
-    items = "".join(_roster_row(row, view, lang) for row in lapsed)
+    items = "".join(_roster_row(row, view, lang, current_member_id) for row in lapsed)
     return f"""<details id="lapsed">
 <summary>{t["lapsed_tail"].format(n=len(lapsed))}</summary>
 <ul>{items}</ul>
 </details>"""
 
 
+def _countbar(t: dict) -> str:
+    """The line that names the ordering, so the sort is never mysterious."""
+    return f'<div class="countbar">{t["sorted_by_gap"]}</div>'
+
+
+def _no_matches(t: dict) -> str:
+    """The search's zero-result line; the filter script unhides it."""
+    return f'<p id="no-matches" class="emptystate" hidden>{t["no_matches"]}</p>'
+
+
+def _empty_roster(t: dict) -> str:
+    """A brand-new gym: no Members at all — point at the invite link."""
+    return f"""<div class="emptystate">
+<h2>{t["empty_roster_title"]}</h2>
+<p>{t["empty_roster_body"]}</p>
+</div>"""
+
+
 def _roster_document(
     gym_name: str, view: str, lang: str, next_path: str, count: int | None, body: str, split: bool
 ) -> str:
     t = STRINGS[lang]
-    return f"""<!DOCTYPE html>
-<html lang="{lang}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{escape(gym_name)} — Dashboard</title>
-<style>{ROSTER_STYLE}{MEMBER_STYLE if split else ""}</style>
-</head>
-<body{" class=\"split-view\"" if split else ""}>
-{_chrome(gym_name, view, t, next_path, count)}
-{body}
-<script>{SEARCH_SCRIPT}</script>
-</body>
-</html>"""
+    styles = ROSTER_STYLE + (MEMBER_STYLE if split else "")
+    content = f"""{_chrome(gym_name, t, next_path, lang, view=view, count=count)}
+{body}"""
+    return _document(
+        f"{escape(gym_name)} — Dashboard", lang, content, styles=styles, scripts=SEARCH_SCRIPT
+    )
 
 
 def _table_page(
     gym_name: str, rows: list[RosterRow], lapsed: list[RosterRow], lang: str, next_path: str
 ) -> str:
-    items = "".join(_roster_row(row, "table", lang) for row in rows)
-    body = f"""<div class="roster-body">
+    t = STRINGS[lang]
+    if not rows and not lapsed:
+        body = f'<div class="roster-body">{_empty_roster(t)}</div>'
+    else:
+        items = "".join(_roster_row(row, "table", lang) for row in rows)
+        body = f"""{_countbar(t)}
+<div class="roster-body">
 <ul id="roster">{items}</ul>
+{_no_matches(t)}
 {_lapsed_section(lapsed, "table", lang)}
 </div>"""
     return _roster_document(gym_name, "table", lang, next_path, len(rows), body, split=False)
@@ -451,7 +679,9 @@ def _table_page(
 def _member_card(row: RosterRow, cells: list[DayCell], lang: str) -> str:
     """One Cards card: the shared markers and Gap text, plus the 4-week
     Mon–Sun day grid — one square per day, dashed for future days, judged
-    per date against the Routine active on it."""
+    per date against the Routine active on it. Hit squares fill mint;
+    missed squares are hollow coral rings, so the two never read by hue
+    alone."""
     t = STRINGS[lang]
     initials = "".join(f'<span class="wd">{w}</span>' for w in WEEKDAY_INITIALS[lang])
     squares = "".join(
@@ -466,13 +696,22 @@ def _member_card(row: RosterRow, cells: list[DayCell], lang: str) -> str:
     if row.has_safety_flag:
         # A marker on the card, never a re-sort (spec-dashboard §Safety flags).
         tags += f' <span class="tag tag-flag">{t["flag_tag"]}</span>'
-    severity = f" sev-{row.severity}" if row.severity else ""
+    severity = _severity_text(row, lang)
     return f"""<div class="mcard" data-name="{escape(row.name)}">
 <div class="top-row"><a class="name" href="{_member_href(row.member_id, "cards")}">{escape(row.name)}</a>
-<span class="away{severity}">{away_text(row.has_sessions, row.gap_days, lang)}</span></div>
-<div class="daygrid">{initials}{squares}</div>
+<span class="away">{away_text(row.has_sessions, row.gap_days, lang)}</span></div>
+{f'<div class="meta">{severity}</div>' if severity else ""}
+<div class="daygrid" aria-hidden="true">{initials}{squares}</div>
 <div class="sparklab">{t["grid_label"].format(n=GRID_WEEKS)}</div>
 {f"<div>{tags}</div>" if tags else ""}
+</div>"""
+
+
+def _legend(t: dict) -> str:
+    """What the day-grid squares mean, said once per Cards page."""
+    return f"""<div class="legend">
+<span><i class="l-hit"></i>{t["legend_hit"]}</span>
+<span><i class="l-miss"></i>{t["legend_miss"]}</span>
 </div>"""
 
 
@@ -486,27 +725,44 @@ def _cards_page(
 ) -> str:
     """The urgency bands — a reading of the same schedule-aware severity the
     Table colours with, never a new field: red needs you now, amber is
-    slipping, the rest are on track. The Gap sort holds inside each band."""
+    slipping, the rest are on track. A Member with no Routine yet sits in a
+    quiet fourth group instead of masquerading as on-track (the spec's
+    grey-new rule). The three severity bands always render — an empty hot
+    band saying 0 is good news, not a missing feature. The Gap sort holds
+    inside each band."""
     t = STRINGS[lang]
+    if not rows and not lapsed:
+        body = f'<div class="roster-body">{_empty_roster(t)}</div>'
+        return _roster_document(gym_name, "cards", lang, next_path, 0, body, split=False)
     bands: list[tuple[str, str, list[RosterRow]]] = [
         ("hot", t["band_hot"], []),
         ("warm", t["band_warm"], []),
         ("cool", t["band_cool"], []),
+        ("new", t["band_new"], []),
     ]
     for row in rows:
-        band = "hot" if row.severity == "red" else "warm" if row.severity == "amber" else "cool"
+        if row.severity == "red":
+            band = "hot"
+        elif row.severity == "amber":
+            band = "warm"
+        elif row.is_new:
+            band = "new"
+        else:
+            band = "cool"
         next(b for b in bands if b[0] == band)[2].append(row)
     sections = ""
     for band_id, title, members in bands:
-        if not members:
-            continue
+        if band_id == "new" and not members:
+            continue  # a transient group, not a permanent fixture
         cards = "".join(_member_card(row, grids.get(row.member_id, []), lang) for row in members)
-        sections += f"""<section class="band" id="band-{band_id}">
+        sections += f"""<section class="band band-{band_id}" id="band-{band_id}">
 <h2>{title} <span class="count">{len(members)}</span></h2>
-<div class="grid">{cards}</div>
+{f'<div class="grid">{cards}</div>' if members else ""}
 </section>"""
     body = f"""<div class="roster-body">
 {sections}
+{_legend(t)}
+{_no_matches(t)}
 {_lapsed_section(lapsed, "cards", lang)}
 </div>"""
     return _roster_document(gym_name, "cards", lang, next_path, len(rows), body, split=False)
@@ -519,15 +775,25 @@ def _split_page(
     pane: str,
     lang: str,
     next_path: str,
+    current_member_id: int | None = None,
 ) -> str:
     """Split: a permanent left rail with the roster, the right pane holding
     a Member page or the pick-a-member placeholder. The switcher (and the
-    search) stay visible with a Member open — nothing was left."""
-    items = "".join(_roster_row(row, "split", lang) for row in rows)
+    search) stay visible with a Member open — nothing was left. The rail
+    scrolls on its own, the open Member's row stays marked, and below 900px
+    the two columns stack (no back link: still nothing was left)."""
+    t = STRINGS[lang]
+    if not rows and not lapsed:
+        rail = _empty_roster(t)
+    else:
+        items = "".join(_roster_row(row, "split", lang, current_member_id) for row in rows)
+        rail = f"""{_countbar(t)}
+<ul id="roster">{items}</ul>
+{_no_matches(t)}
+{_lapsed_section(lapsed, "split", lang, current_member_id)}"""
     body = f"""<div class="split">
 <div class="rail">
-<ul id="roster">{items}</ul>
-{_lapsed_section(lapsed, "split", lang)}
+{rail}
 </div>
 <div class="pane">{pane}</div>
 </div>"""
@@ -535,7 +801,10 @@ def _split_page(
 
 
 def _split_placeholder(lang: str) -> str:
-    return f'<div class="pane-empty"><p>{STRINGS[lang]["pick_a_member"]}</p></div>'
+    return (
+        f'<div class="pane-empty"><div class="emptystate">'
+        f'<h2>{STRINGS[lang]["pick_a_member"]}</h2></div></div>'
+    )
 
 
 # --- The Member page (issue #99, spec-dashboard §The Member page) ---
@@ -800,26 +1069,22 @@ def _member_content(view: MemberPage, lang: str, roster_view: str) -> str:
 
 
 def _member_page(gym_name: str, view: MemberPage, roster_view: str, lang: str, next_path: str) -> str:
-    """The standalone Member page: the switcher (and the search) hide, and a
-    back link returns to the view the Member was opened from."""
+    """The standalone Member page: the switcher (and the search) hide per
+    the spec, but the rest of the chrome stays, and a back link returns to
+    the view the Member was opened from."""
     t = STRINGS[lang]
     back = f'<a class="back" href="/?view={roster_view}">{t["back_to_roster"]}</a>'
-    return f"""<!DOCTYPE html>
-<html lang="{lang}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{escape(view.name)} — {escape(gym_name)}</title>
-<style>{ROSTER_STYLE}{MEMBER_STYLE}</style>
-</head>
-<body>
+    content = f"""{_chrome(gym_name, t, next_path, lang)}
 <div class="member-wrap">
 {back}
-{_lang_toggle(next_path)}
 {_member_content(view, lang, roster_view)}
-</div>
-</body>
-</html>"""
+</div>"""
+    return _document(
+        f"{escape(view.name)} — {escape(gym_name)}",
+        lang,
+        content,
+        styles=ROSTER_STYLE + MEMBER_STYLE,
+    )
 
 
 # --- The Routine editor (issue #100, spec-dashboard §Routines & Presets) ---
@@ -993,12 +1258,18 @@ def routine_notice(coach_name: str, workouts: list[WorkoutSpec]) -> str:
 
 
 EDITOR_STYLE = """
-.day-edit { border: 1px solid #ddd; border-radius: 0.5rem; margin: 0.8rem 0; padding: 0.8rem; }
-.day-edit select, .day-edit input, .day-edit textarea { display: block; width: 100%; box-sizing: border-box; margin: 0.3rem 0; font: inherit; padding: 0.35rem 0.5rem; }
+.editor-wrap { max-width: 44rem; margin: 0 auto; padding: 0 var(--gut) 48px; }
+.editor-wrap header h1 { font-size: 22px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.day-edit { background: var(--surface); border: 0; margin: 12px 0; padding: 14px 16px; }
+.day-edit label { display: block; font-size: 13px; color: var(--ink-2); margin: 10px 0 0; }
+.day-edit select, .day-edit input, .day-edit textarea { display: block; width: 100%; margin: 4px 0 0; }
 .day-edit select { width: auto; }
-.day-edit textarea { font-family: ui-monospace, monospace; }
-.consequence { color: #666; font-size: 0.9rem; }
-.error { color: #b3261e; }
+.day-edit textarea { font-family: var(--mono); min-height: 96px; }
+.consequence { color: var(--ink-2); font-size: 14px; margin: 6px 0 0; }
+.editor-help { color: var(--ink-2); font-size: 13px; margin: 12px 0 4px; }
+.catalog { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0 10px; }
+.catchip { border: 1px solid var(--line-2); color: var(--ink-2); font-size: 12px; padding: 4px 8px; white-space: nowrap; }
+.fresh-version { background: var(--surface); padding: 4px 16px 12px; margin: 12px 0; }
 """
 
 
@@ -1039,15 +1310,8 @@ def _routine_editor_page(
     title = t[title_key].format(name=escape(view.name))
     action = action or f"/members/{view.member_id}/routine"
     back_href = back_href or f"/members/{view.member_id}"
-    return f"""<!DOCTYPE html>
-<html lang="{lang}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title} — {escape(gym_name)}</title>
-<style>{ROSTER_STYLE}{EDITOR_STYLE}</style>
-</head>
-<body>
+    content = f"""{_chrome(gym_name, t, next_path, lang)}
+<div class="editor-wrap">
 <a class="back" href="{back_href}">← {escape(view.name)}</a>
 <header>
 <h1>{title} {chip}</h1>
@@ -1056,19 +1320,23 @@ def _routine_editor_page(
 {notice}
 <form method="post" action="{action}">
 <input type="hidden" name="base_routine_id" value="{base}">
+<p class="editor-help">{t["editor_help"]}</p>
 <div id="days">
 {blocks}
 </div>
-<p class="muted">{t["editor_help"]}</p>
 <details>
 <summary>{t["catalog_label"]}</summary>
-<p class="muted">{escape(", ".join(catalog))}</p>
+<div class="catalog">{"".join(f'<span class="catchip">{escape(name)}</span>' for name in catalog)}</div>
 </details>
-<p><button type="submit">{t["save_routine"]}</button></p>
+<p><button type="submit" class="btn-primary big">{t["save_routine"]}</button></p>
 </form>
-<p>{_lang_toggle(next_path)}</p>
-</body>
-</html>"""
+</div>"""
+    return _document(
+        f"{title} — {escape(gym_name)}",
+        lang,
+        content,
+        styles=ROSTER_STYLE + MEMBER_STYLE + EDITOR_STYLE,
+    )
 
 
 def _preset_editor_view(preset: RoutinePreset, master: dict | None) -> RoutineEditorView:
@@ -1150,18 +1418,30 @@ def _presets_page(
                 f"{default_form}{apply_form}{retire_form}</section>"
             )
         cards = "".join(cards)
-    body = f"<main>{notice}{create}{cards}</main>"
-    return f"""<!DOCTYPE html>
-<html lang="{lang}"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{t["presets_title"]} — {escape(gym_name)}</title>
-<style>{ROSTER_STYLE}{EDITOR_STYLE}</style></head><body>
-{_chrome(gym_name, "table", t, next_path, None)}
-{body}
-</body></html>"""
+    body = f'<main class="editor-wrap">{notice}{create}{cards}</main>'
+    content = f"""{_chrome(gym_name, t, next_path, lang, active="presets")}
+{body}"""
+    return _document(
+        f'{t["presets_title"]} — {escape(gym_name)}',
+        lang,
+        content,
+        styles=ROSTER_STYLE + MEMBER_STYLE + EDITOR_STYLE,
+    )
 
 
 # --- The tenant Settings screen (spec-dashboard §Settings) ---
+
+SETTINGS_STYLE = """
+.settings-wrap { max-width: 36rem; margin: 0 auto; padding: 0 var(--gut) 48px; }
+.settings-wrap > h1 { font-size: 22px; padding: 18px 0 2px; }
+.setcard { background: var(--surface); padding: 18px; margin-top: 16px; }
+.setcard h2 { font-size: 17px; }
+.setcard p { color: var(--ink-2); font-size: 14px; }
+.setcard code { display: inline-block; color: var(--ink); max-width: 100%; }
+/* A QR must sit on white to scan — the one white block that is not a flag. */
+.qr { background: #fff; padding: 12px; width: 200px; margin: 12px 0; }
+.qr svg { display: block; width: 100%; height: auto; }
+"""
 
 
 def _copy_button(url: str, t: dict) -> str:
@@ -1174,64 +1454,78 @@ def _copy_button(url: str, t: dict) -> str:
 
 
 def _regenerate_form(action: str, warning: str, t: dict) -> str:
-    """A Regenerate button that stays disabled until the confirm word is
-    typed; the POST re-checks the word, so the confirm holds without JS."""
+    """A Regenerate button the page script keeps disabled until the confirm
+    word is typed. The script also applies the initial disable: without JS
+    the button stays live and the POST's own word check — the load-bearing
+    one — still refuses a wrong confirm."""
     word = t["confirm_word"]
     return f"""<form method="post" action="{action}" data-confirm="{word}">
 <p>{warning}</p>
 <p><label>{t["confirm_prompt"].format(word=word)}
 <input type="text" name="confirm" autocomplete="off" required></label>
-<button type="submit" disabled>{t["regenerate"]}</button></p>
+<button type="submit">{t["regenerate"]}</button></p>
 </form>"""
 
 
-SETTINGS_SCRIPT = """<script>
+SETTINGS_SCRIPT = """
 document.querySelectorAll("button.copy").forEach(function (button) {
   button.addEventListener("click", function () {
     // navigator.clipboard needs a secure context — plain-HTTP origins leave
     // it undefined — and writeText itself can reject (denied permission).
+    var restore = function () {
+      setTimeout(function () { button.textContent = button.dataset.idle; }, 2000);
+    };
+    button.dataset.idle = button.dataset.idle || button.textContent;
     if (!navigator.clipboard) {
       button.textContent = button.dataset.failed;
+      restore();
       return;
     }
     navigator.clipboard.writeText(button.dataset.copy).then(
-      function () { button.textContent = button.dataset.done; },
-      function () { button.textContent = button.dataset.failed; }
+      function () { button.textContent = button.dataset.done; restore(); },
+      function () { button.textContent = button.dataset.failed; restore(); }
     );
   });
 });
 document.querySelectorAll("form[data-confirm]").forEach(function (form) {
   var input = form.querySelector("input[name=confirm]");
   var submit = form.querySelector("button[type=submit]");
+  submit.disabled = true;
   input.addEventListener("input", function () {
     submit.disabled = input.value.trim().toLowerCase() !== form.dataset.confirm;
   });
 });
-</script>"""
+"""
 
 
 def _settings_page(gym: Gym, bot_username: str, lang: str, next_path: str, error: str = "") -> str:
     """The whole tenant Settings screen: two invite links and the gym name,
-    nothing else (spec-dashboard §Settings — no new settings)."""
+    nothing else (spec-dashboard §Settings — no new settings). One card per
+    concern."""
     t = STRINGS[lang]
     member_url = _invite_url(bot_username, gym.invite_code)
     coach_url = _invite_url(bot_username, gym.coach_invite_code or "")
-    notice = f'<p style="color: #b00;">{error}</p>' if error else ""
-    body = f"""{notice}
-<section id="invite">
+    # The error strings are the dashboard's own (confirm_mismatch carries
+    # markup), never user input — rendered as-is like every STRINGS value.
+    notice = f'<p class="error">{error}</p>' if error else ""
+    content = f"""{_chrome(gym.name, t, next_path, lang, active="settings")}
+<div class="settings-wrap">
+<h1>{t["settings_title"]}</h1>
+{notice}
+<section class="setcard" id="invite">
 <h2>{t["invite_section"]}</h2>
 <p>{t["invite_blurb"]} <b>{escape(gym.name)}</b>.</p>
 <p><code>{escape(member_url)}</code> {_copy_button(member_url, t)}</p>
-{_qr_svg(member_url)}
+<div class="qr">{_qr_svg(member_url)}</div>
 {_regenerate_form("/settings/regenerate-invite", t["invite_warning"], t)}
 </section>
-<section id="coach-link">
+<section class="setcard" id="coach-link">
 <h2>{t["coach_section"]}</h2>
 <p>{t["coach_blurb"]}</p>
 <p><code>{escape(coach_url)}</code> {_copy_button(coach_url, t)}</p>
 {_regenerate_form("/settings/regenerate-coach", t["coach_warning"], t)}
 </section>
-<section id="gym-name">
+<section class="setcard" id="gym-name">
 <h2>{t["gym_name_section"]}</h2>
 <p>{t["gym_name_help"]}</p>
 <form method="post" action="/settings/gym-name">
@@ -1240,10 +1534,15 @@ maxlength="{GYM_NAME_MAX_LENGTH}" required>
 <button type="submit">{t["save"]}</button></p>
 </form>
 </section>
-<p><a href="/">{t["back_to_dashboard"]}</a></p>
-<p>{_lang_toggle(next_path)}</p>
-{SETTINGS_SCRIPT}"""
-    return _page(f"{t['settings_title']} — {escape(gym.name)}", "", body, lang=lang)
+<p><a class="back" href="/">{t["back_to_dashboard"]}</a></p>
+</div>"""
+    return _document(
+        f"{t['settings_title']} — {escape(gym.name)}",
+        lang,
+        content,
+        styles=ROSTER_STYLE + MEMBER_STYLE + SETTINGS_STYLE,
+        scripts=SETTINGS_SCRIPT,
+    )
 
 
 def sign_session(member_id: int, gym_id: int, secret: str, now: datetime) -> str:
@@ -1353,7 +1652,9 @@ def build_app(
             # Split keeps the rail and the switcher with a Member open.
             rows, lapsed = await store.roster(gym.id)
             pane = _member_content(view, lang, roster_view)
-            text = _split_page(gym.name, rows, lapsed, pane, lang, next_path)
+            text = _split_page(
+                gym.name, rows, lapsed, pane, lang, next_path, current_member_id=member_id
+            )
         else:
             text = _member_page(gym.name, view, roster_view, lang, next_path)
         response = web.Response(text=text, content_type="text/html")
