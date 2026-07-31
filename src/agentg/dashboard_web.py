@@ -1648,6 +1648,7 @@ def build_app(
                     action=f"/presets/{preset.id}/routine",
                     back_href="/presets",
                     title_key="preset_editor_title",
+                    consequence_key="preset_master_consequence",
                 ),
                 content_type="text/html",
             )

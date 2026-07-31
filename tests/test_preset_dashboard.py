@@ -139,6 +139,24 @@ async def test_preset_master_editor_shows_its_own_consequence_not_the_member_war
     assert "Guardar actualiza a todos los miembros que siguen este Preset." in body
     assert CONSEQUENCE_LINE not in body
 
+    # The rejection re-render is the same page: a refused master save must
+    # not fall back to the Member's fork warning either.
+    refused = await env.client.post(
+        f"/presets/{preset_id}/routine",
+        data={
+            "base_routine_id": "999999",
+            "weekday": "0",
+            "workout_name": "X",
+            "exercises": "squat",
+        },
+        cookies=cookies(env),
+    )
+
+    assert refused.status == 409
+    body = await refused.text()
+    assert "Guardar actualiza a todos los miembros que siguen este Preset." in body
+    assert CONSEQUENCE_LINE not in body
+
 
 async def test_apply_multi_and_all_notifies_each_member_and_never_coach(env, caplog):
     preset_id = await create_master(env)
