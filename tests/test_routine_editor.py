@@ -20,6 +20,8 @@ from agentg.dashboard_web import (
     CONSEQUENCE_LINE,
     DUPLICATE_WEEKDAY_ERROR,
     EMPTY_WORKOUT_ERROR,
+    NAME_TOO_LONG_ERROR,
+    REPS_TOO_LONG_ERROR,
     SESSION_COOKIE,
     STALE_ERROR,
     UNDATED_BLOCK_ERROR,
@@ -40,8 +42,11 @@ BOUNCE_MARKER = "/dashboard"  # the bounce page tells you to send /dashboard
 class FakeNotifier:
     def __init__(self):
         self.sent: list[tuple[str, str, str]] = []
+        self.fail = False
 
     async def send(self, channel: str, channel_user_id: str, text: str) -> None:
+        if self.fail:
+            raise RuntimeError("telegram is down")
         self.sent.append((channel, channel_user_id, text))
 
 
@@ -781,3 +786,82 @@ async def test_ensure_schema_heals_dual_active_routines_before_the_index(tmp_pat
         with pytest.raises(IntegrityError):
             await db.flush()
     await engine.dispose()
+
+
+async def test_a_failing_notifier_never_turns_a_committed_save_into_a_500(env, caplog):
+    """The save commits first; the notice is best-effort. A raising notifier
+    (or a failed channel lookup) logs and still redirects — the acceptance
+    rule is that the Member's plan changes even if the message is lost."""
+    member = await env.add_member("Luis")
+    old = await env.give_routine(member)
+    env.notifier.fail = True
+
+    response = await env.save_via_web(
+        member.id, old.id, ("0", "Full body", "squat, 3, 8")
+    )
+
+    assert response.status == 302
+    active = await env.routines.active_routine(member.id)
+    assert active["coach_authored"] is True
+    assert [w["name"] for w in active["workouts"]] == ["Full body"]
+    assert "failed to notify member" in caplog.text
+
+
+async def test_a_failing_channel_lookup_never_turns_a_committed_save_into_a_500(
+    env, monkeypatch, caplog
+):
+    member = await env.add_member("Luis")
+    old = await env.give_routine(member)
+
+    async def broken_channel(member_id):
+        raise RuntimeError("database hiccup")
+
+    monkeypatch.setattr(env.store, "member_channel", broken_channel)
+
+    response = await env.save_via_web(
+        member.id, old.id, ("0", "Full body", "squat, 3, 8")
+    )
+
+    assert response.status == 302
+    active = await env.routines.active_routine(member.id)
+    assert active["coach_authored"] is True
+    assert "failed to notify member" in caplog.text
+
+
+async def test_an_overlong_workout_name_is_rejected(env):
+    """Workout.name is String(100): SQLite would hide an overflow, Postgres
+    would 500 on a DataError — the editor validates first."""
+    member = await env.add_member("Luis")
+    old = await env.give_routine(member)
+    long_name = "Piernas " + "x" * 100  # 108 chars
+
+    response = await env.save_via_web(
+        member.id, old.id, ("0", long_name, "squat, 4, 8-10")
+    )
+
+    assert response.status == 400
+    text = await response.text()
+    assert NAME_TOO_LONG_ERROR in text
+    assert long_name in text  # the Coach's edit stays on the page
+    active = await env.routines.active_routine(member.id)
+    assert active["routine_id"] == old.id
+    assert env.notifier.sent == []
+
+
+async def test_an_overlong_reps_token_is_rejected(env):
+    """WorkoutExercise.reps is String(40): same overflow guard."""
+    member = await env.add_member("Luis")
+    old = await env.give_routine(member)
+    long_reps = "8-12 con una progresión muy larga y detallada"  # 46 chars
+
+    response = await env.save_via_web(
+        member.id, old.id, ("0", "Piernas", f"squat, 4, {long_reps}")
+    )
+
+    assert response.status == 400
+    text = await response.text()
+    assert REPS_TOO_LONG_ERROR in text
+    assert long_reps in text
+    active = await env.routines.active_routine(member.id)
+    assert active["routine_id"] == old.id
+    assert env.notifier.sent == []

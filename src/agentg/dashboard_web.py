@@ -134,6 +134,13 @@ DUPLICATE_WEEKDAY_ERROR = STRINGS["es"]["duplicate_weekday_error"]
 BAD_WEEKDAY_ERROR = STRINGS["es"]["bad_weekday_error"]
 BAD_SETS_ERROR = STRINGS["es"]["bad_sets_error"]
 UNKNOWN_EXERCISES_ERROR = STRINGS["es"]["unknown_exercises_error"]
+NAME_TOO_LONG_ERROR = STRINGS["es"]["workout_name_too_long"]
+REPS_TOO_LONG_ERROR = STRINGS["es"]["reps_too_long"]
+
+# Column limits the editor enforces before save — SQLite would silently
+# accept an overflow, Postgres would answer with a DataError (a 500).
+WORKOUT_NAME_MAX_LENGTH = 100  # Workout.name String(100)
+REPS_MAX_LENGTH = 40  # WorkoutExercise.reps String(40)
 
 # The typed confirm gating both Regenerate buttons (spec-dashboard
 # §Settings): the word must be typed before the POST does anything, client-
@@ -847,12 +854,16 @@ def _parse_workouts(form: MultiDictProxy, lang: str) -> list[WorkoutSpec]:
                 except ValueError:
                     raise ValueError(t["bad_sets_error"]) from None
             reps = parts[2] if len(parts) > 2 and parts[2] else None
+            if reps is not None and len(reps) > REPS_MAX_LENGTH:
+                raise ValueError(t["reps_too_long"])
             exercises.append(ExerciseSpec(parts[0], sets, reps))
         if not exercises:
             # A picked weekday with no exercises is a mistake, not a rest
             # day — a day comes off the plan via the empty-day selector,
             # never by saving an empty Workout.
             raise ValueError(t["empty_workout_error"])
+        if len(name) > WORKOUT_NAME_MAX_LENGTH:
+            raise ValueError(t["workout_name_too_long"])
         specs.append(WorkoutSpec(weekday, name or WEEKDAYS[lang][weekday], exercises))
     return specs
 
@@ -1278,16 +1289,19 @@ def build_app(
             )
 
         if notifier is not None:
-            channel = await store.member_channel(member_id)
-            if channel is not None:
-                try:
+            # Best-effort, whole block: the save already committed, so any
+            # failure on the notify path — the channel lookup included —
+            # logs and still redirects. A lost message never eats a save.
+            try:
+                channel = await store.member_channel(member_id)
+                if channel is not None:
                     await notifier.send(
                         channel[0],
                         channel[1],
                         routine_notice(coach_member.name, workouts),
                     )
-                except Exception:
-                    logger.exception("failed to notify member %s of the routine save", member_id)
+            except Exception:
+                logger.exception("failed to notify member %s of the routine save", member_id)
         response = web.HTTPFound(f"/members/{member_id}")
         set_session(response, coach_member.id, gym.id)  # sliding 90-day refresh
         raise response

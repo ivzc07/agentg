@@ -137,6 +137,10 @@ STRINGS = {
             "Estos ejercicios no están en el catálogo: {names}. Escríbelos "
             "exactamente como aparecen en el catálogo."
         ),
+        "workout_name_too_long": "El nombre del día no puede pasar de 100 caracteres.",
+        "reps_too_long": (
+            "Las repeticiones no pueden pasar de 40 caracteres (p. ej. «8-12»)."
+        ),
         "editor_help": (
             "Un ejercicio por línea: nombre, series, repeticiones (series "
             "y repeticiones opcionales). Para quitar un día, vacía sus ejercicios y deja "
@@ -241,6 +245,8 @@ STRINGS = {
             "These exercises are not in the catalog: {names}. Type them exactly "
             "as they appear in the catalog."
         ),
+        "workout_name_too_long": "The workout name cannot exceed 100 characters.",
+        "reps_too_long": "Reps cannot exceed 40 characters (e.g. «8-12»).",
         "editor_help": (
             "One exercise per line: name, sets, reps (sets and reps optional). "
             "To remove a day, clear its exercises and leave its selector on «— day —»."
