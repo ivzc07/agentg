@@ -11,9 +11,11 @@ canned input.
 
 from __future__ import annotations
 
+import pytest
+
 from agentg.agent import INSTRUCTIONS
 from agentg.training import SEED_EXERCISES
-from behavioral.language import find_english_leaks
+from behavioral.language import ENGLISH_TRAINING_VOCAB, find_english_leaks
 
 # The reply observed on the dev bot (2026-07-28), verbatim from the issue.
 OBSERVED_LEAK = (
@@ -184,6 +186,79 @@ def test_strength_only_counts_as_the_first_prefix_part():
     assert find_english_leaks("band-strength-band-pull-apart") == {"strength"}
     assert find_english_leaks("strength band strength band pull-apart") == {"strength"}
     assert find_english_leaks("stamina strength band pull-apart") == {"stamina", "strength"}
+
+
+def test_strength_starting_a_chain_after_prose_is_name_internal():
+    # Round-11: ordinary prose before strength = chain start = clean.
+    assert find_english_leaks("Hoy toca strength band pull-apart") == set()
+    assert find_english_leaks("haz strength-band pull-apart") == set()
+
+
+def test_hypertrophy_is_a_leak():
+    # Round-11 P2: the rules doc lists hipertrofia as a primary goal.
+    assert (
+        find_english_leaks("¿Quieres ganar fuerza, hypertrophy, perder grasa...?")
+        == {"hypertrophy"}
+    )
+
+
+def test_the_lexicon_covers_the_rules_docs_goal_vocabulary():
+    # DEFAULT_RULES_DOC names its goals in English; each must be a flaggable leak.
+    for word in ("strength", "hypertrophy", "endurance"):
+        assert word in ENGLISH_TRAINING_VOCAB
+
+
+# --- the mandatory convergence matrix (round-11) ---
+#
+# Rule intent: a leak is goal vocabulary OUTSIDE a legitimate name. Ambiguity
+# policy: name-internal tokens are clean; anything adjacent-but-outside flags.
+# "strength" is name-internal only when it STARTS a name's modifier chain —
+# preceded by nothing, prose (Spanish), or punctuation. Preceded by a
+# name-modifier or by lexicon goal vocabulary, it is mid-chain vocab and
+# flags. A Spanish word glued INSIDE a hyphen chain breaks the name shape,
+# so the chain's strength is adjacent-outside and flags.
+
+_PREFIXES = ("none", "spanish", "modifier", "lexicon")
+_UNITS = ("spaced", "glued", "chain")
+_CORES = ("pull-apart", "muscle-up", "pull-aparts")  # singular + plural
+_SUFFIXES = ("none", "prose", "another-name")
+
+_PREFIX_TEXT = {"spanish": "toca", "modifier": "kipping", "lexicon": "stamina"}
+_SUFFIX_TEXT = {"none": "", "prose": " hoy", "another-name": " y dips"}
+
+
+def _matrix_text(prefix: str, unit: str, core: str, suffix: str) -> str:
+    body = {
+        "spaced": f"strength band {core}",
+        "glued": f"strength-band {core}",
+        "chain": f"strength-band-{core}",
+    }[unit]
+    if prefix != "none":
+        joiner = "-" if unit == "chain" else " "
+        body = f"{_PREFIX_TEXT[prefix]}{joiner}{body}"
+    return body + _SUFFIX_TEXT[suffix]
+
+
+def _matrix_expected(prefix: str, unit: str, core: str) -> set[str]:
+    leaks: set[str] = set()
+    if prefix == "lexicon":
+        leaks.add("stamina")
+    if prefix in {"modifier", "lexicon"} or (prefix == "spanish" and unit == "chain"):
+        leaks.add("strength")
+    if unit == "chain" and prefix != "none" and core == "muscle-up":
+        # the glued chain is broken by an invalid prefix part, so the whole
+        # token is not a name — its lexicon parts are adjacent-outside
+        leaks.add("muscle")
+    return leaks
+
+
+@pytest.mark.parametrize("suffix", _SUFFIXES)
+@pytest.mark.parametrize("core", _CORES)
+@pytest.mark.parametrize("unit", _UNITS)
+@pytest.mark.parametrize("prefix", _PREFIXES)
+def test_strength_modifier_matrix(prefix: str, unit: str, core: str, suffix: str):
+    text = _matrix_text(prefix, unit, core, suffix)
+    assert find_english_leaks(text) == _matrix_expected(prefix, unit, core), text
 
 
 # --- what actually guards the behavior: the Agent's language rule ---

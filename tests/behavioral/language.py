@@ -8,6 +8,15 @@ Agent's language rule covers them and nothing else. Allowlisted exercise-name
 shapes are exempt too ("Muscle-up", "strength band pull-apart"), but a hit
 next to one ("muscle pull-ups") or spelled with hyphens ("weight-loss")
 still flags.
+
+Ambiguity policy: name-internal tokens are clean; anything adjacent-but-
+outside flags. "strength" is name-internal only when it STARTS a name's
+modifier chain — preceded by nothing, by prose (a Spanish word), or by
+punctuation. Preceded by a name-modifier ("kipping strength band
+pull-apart") or by lexicon goal vocabulary ("stamina strength band
+pull-apart"), it is mid-chain vocabulary and flags. A non-modifier word
+glued INSIDE a hyphen chain ("toca-strength-band-pull-apart") breaks the
+name shape, so the chain's lexicon parts are adjacent-outside and flag.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ ENGLISH_TRAINING_VOCAB: tuple[str, ...] = (
     "bulking",
     "cutting",
     "lean",
+    "hypertrophy",
 )
 
 def _compile(term: str) -> re.Pattern[str]:
@@ -134,6 +144,20 @@ def _absorbable(word: str, following: str) -> bool:
     return _is_allowed_prefix(word.split("-"))
 
 
+def _is_lexicon(word: str) -> bool:
+    return any(pattern.fullmatch(word) for pattern in _PATTERNS.values())
+
+
+def _preceded_by_chain_content(tokens: list[re.Match[str]], k: int, text: str) -> bool:
+    # A strength-led token preceded (across a horizontal gap) by another
+    # name-modifier OR by lexicon goal vocabulary is mid-chain, not a chain
+    # start — prose before it means chain start.
+    if k == 0 or not _HORIZONTAL_GAP_RE.fullmatch(text[tokens[k - 1].end() : tokens[k].start()]):
+        return False
+    previous = tokens[k - 1].group().lower()
+    return _absorbable(previous, tokens[k].group().lower()) or _is_lexicon(previous)
+
+
 _HORIZONTAL_GAP_RE = re.compile(r"[ \t]+")
 
 
@@ -153,15 +177,11 @@ def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
         while k >= 0 and _HORIZONTAL_GAP_RE.fullmatch(text[tokens[k].end() : start]):
             word = tokens[k].group().lower()
             following = tokens[k + 1].group().lower()
-            if word == "strength":
-                # A single leading strength+equipment unit: strength must be
-                # the FIRST token of the whitespace run before the core.
-                first_in_run = k == 0 or not _HORIZONTAL_GAP_RE.fullmatch(
-                    text[tokens[k - 1].end() : tokens[k].start()]
-                )
-                if not first_in_run or not _leads_with_equipment(following):
-                    break
-            elif not _absorbable(word, following):
+            if not _absorbable(word, following):
+                break
+            # A strength-led token starts the chain only after prose,
+            # punctuation, or line start — never after a modifier or lexicon.
+            if word.split("-", 1)[0] == "strength" and _preceded_by_chain_content(tokens, k, text):
                 break
             start = tokens[k].start()
             k -= 1
