@@ -19,10 +19,12 @@ from agentg.dashboard_web import (
     BAD_SETS_ERROR,
     CONSEQUENCE_LINE,
     DUPLICATE_WEEKDAY_ERROR,
+    EMPTY_ROUTINE_ERROR,
     EMPTY_WORKOUT_ERROR,
     NAME_TOO_LONG_ERROR,
     REPS_TOO_LONG_ERROR,
     SESSION_COOKIE,
+    SETS_RANGE_ERROR,
     STALE_ERROR,
     UNDATED_BLOCK_ERROR,
     build_app,
@@ -862,6 +864,50 @@ async def test_an_overlong_reps_token_is_rejected(env):
     text = await response.text()
     assert REPS_TOO_LONG_ERROR in text
     assert long_reps in text
+    active = await env.routines.active_routine(member.id)
+    assert active["routine_id"] == old.id
+    assert env.notifier.sent == []
+
+
+async def test_out_of_range_sets_are_rejected(env):
+    """Sets must be 1..99: 0 and negatives are nonsense, and an unbounded
+    integer overflows at flush (OverflowError on SQLite, DataError on
+    Postgres) — the editor validates with the same Spanish 400 pattern."""
+    member = await env.add_member("Luis")
+    old = await env.give_routine(member)
+
+    for bad_sets in ("0", "-3", "9999999999999999999"):
+        response = await env.save_via_web(
+            member.id, old.id, ("0", "Piernas", f"squat, {bad_sets}, 8-10")
+        )
+        assert response.status == 400, bad_sets
+        text = await response.text()
+        assert SETS_RANGE_ERROR in text, bad_sets
+        assert f"squat, {bad_sets}, 8-10" in text  # the edit stays on the page
+        active = await env.routines.active_routine(member.id)
+        assert active["routine_id"] == old.id
+    assert env.notifier.sent == []
+
+
+async def test_an_empty_form_is_rejected_with_the_submitted_base_kept(env):
+    """No day-blocks at all: 400 with the empty-routine copy, nothing saved,
+    and the re-rendered form still carries the submitted base stamp so a
+    retry goes through the stale check like any other."""
+    member = await env.add_member("Luis")
+    old = await env.give_routine(member)
+
+    data = [("base_routine_id", str(old.id))]
+    response = await env.client.post(
+        f"/members/{member.id}/routine",
+        data=data,
+        cookies=env.cookies(),
+        allow_redirects=False,
+    )
+
+    assert response.status == 400
+    text = await response.text()
+    assert EMPTY_ROUTINE_ERROR in text
+    assert f'name="base_routine_id" value="{old.id}"' in text
     active = await env.routines.active_routine(member.id)
     assert active["routine_id"] == old.id
     assert env.notifier.sent == []

@@ -136,11 +136,15 @@ BAD_SETS_ERROR = STRINGS["es"]["bad_sets_error"]
 UNKNOWN_EXERCISES_ERROR = STRINGS["es"]["unknown_exercises_error"]
 NAME_TOO_LONG_ERROR = STRINGS["es"]["workout_name_too_long"]
 REPS_TOO_LONG_ERROR = STRINGS["es"]["reps_too_long"]
+SETS_RANGE_ERROR = STRINGS["es"]["sets_range_error"]
 
 # Column limits the editor enforces before save — SQLite would silently
 # accept an overflow, Postgres would answer with a DataError (a 500).
 WORKOUT_NAME_MAX_LENGTH = 100  # Workout.name String(100)
 REPS_MAX_LENGTH = 40  # WorkoutExercise.reps String(40)
+# Sets are small by nature; unbounded ints overflow at flush (OverflowError
+# on SQLite, DataError on Postgres).
+SETS_MIN, SETS_MAX = 1, 99
 
 # The typed confirm gating both Regenerate buttons (spec-dashboard
 # §Settings): the word must be typed before the POST does anything, client-
@@ -853,6 +857,8 @@ def _parse_workouts(form: MultiDictProxy, lang: str) -> list[WorkoutSpec]:
                     sets = int(parts[1])
                 except ValueError:
                     raise ValueError(t["bad_sets_error"]) from None
+                if not SETS_MIN <= sets <= SETS_MAX:
+                    raise ValueError(t["sets_range_error"])
             reps = parts[2] if len(parts) > 2 and parts[2] else None
             if reps is not None and len(reps) > REPS_MAX_LENGTH:
                 raise ValueError(t["reps_too_long"])

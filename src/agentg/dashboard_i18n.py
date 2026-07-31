@@ -141,6 +141,7 @@ STRINGS = {
         "reps_too_long": (
             "Las repeticiones no pueden pasar de 40 caracteres (p. ej. «8-12»)."
         ),
+        "sets_range_error": "Las series deben ser un número entre 1 y 99.",
         "editor_help": (
             "Un ejercicio por línea: nombre, series, repeticiones (series "
             "y repeticiones opcionales). Para quitar un día, vacía sus ejercicios y deja "
@@ -247,6 +248,7 @@ STRINGS = {
         ),
         "workout_name_too_long": "The workout name cannot exceed 100 characters.",
         "reps_too_long": "Reps cannot exceed 40 characters (e.g. «8-12»).",
+        "sets_range_error": "Sets must be a number between 1 and 99.",
         "editor_help": (
             "One exercise per line: name, sets, reps (sets and reps optional). "
             "To remove a day, clear its exercises and leave its selector on «— day —»."
