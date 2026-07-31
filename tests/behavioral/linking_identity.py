@@ -26,7 +26,12 @@ from __future__ import annotations
 import os
 import re
 
-from behavioral.judge import JudgeBackend, parse_judge_response
+from behavioral.judge import (
+    DEFAULT_JUDGE_MODEL,
+    JudgeBackend,
+    LiteLLMJudgeBackend,
+    parse_judge_response,
+)
 
 # The identities the phraser prompt names and bans.
 FORBIDDEN_ROLES = {"link", "enlace", "bot", "assistant", "asistente", "asistenta"}
@@ -98,6 +103,22 @@ async def judge_identity(backend: JudgeBackend, reply: str) -> tuple[bool, str]:
     payload = parse_judge_response(await backend.complete(system, user))
     entry = payload["identity"]
     return float(entry["score"]) >= IDENTITY_THRESHOLD, str(entry.get("evidence", ""))
+
+
+def judge_backend_from_env() -> LiteLLMJudgeBackend | None:
+    """The judge backend for the live sweep, or None when the API key the
+    judge's model actually needs is not configured — the caller skips.
+    The phraser's key alone must NOT light up the judge: the default
+    judge model is anthropic, and building a backend without its own key
+    fails at call time instead of skipping."""
+    model = os.environ.get("AGENTG_JUDGE_MODEL") or DEFAULT_JUDGE_MODEL
+    if model.startswith("anthropic/"):
+        key = os.environ.get("ANTHROPIC_API_KEY")
+    else:
+        key = os.environ.get("MODEL_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        return None
+    return LiteLLMJudgeBackend(model=model, api_key=key)
 
 
 def live_enabled() -> bool:

@@ -20,6 +20,7 @@ from behavioral.linking_identity import (
     IDENTITY_QUESTION,
     build_identity_prompt,
     identity_drift,
+    judge_backend_from_env,
     judge_identity,
     live_enabled,
 )
@@ -130,6 +131,36 @@ async def test_judge_identity_passes_an_anchored_reply():
     assert passed is True
 
 
+# --- the live judge backend is built from the key it will actually use ---
+
+
+def test_the_phrasers_key_alone_does_not_light_up_the_judge(monkeypatch):
+    # The default judge model is anthropic; with only the phraser's
+    # MODEL_API_KEY set, the backend must NOT be built (it would fail at
+    # call time instead of skipping).
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("AGENTG_JUDGE_MODEL", raising=False)
+    monkeypatch.setenv("MODEL_API_KEY", "agent-key")
+    assert judge_backend_from_env() is None
+
+
+def test_the_default_judge_model_uses_the_anthropic_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "judge-key")
+    monkeypatch.delenv("AGENTG_JUDGE_MODEL", raising=False)
+    backend = judge_backend_from_env()
+    assert backend is not None
+    assert backend.api_key == "judge-key"
+    assert backend.model.startswith("anthropic/")
+
+
+def test_a_judge_model_override_uses_the_matching_key(monkeypatch):
+    monkeypatch.setenv("AGENTG_JUDGE_MODEL", "openai/gpt-4o-mini")
+    monkeypatch.setenv("MODEL_API_KEY", "agent-key")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    backend = judge_backend_from_env()
+    assert backend is not None and backend.api_key == "agent-key"
+
+
 # --- the live phraser sweep (opt-in: needs network + both model keys) ---
 
 
@@ -140,11 +171,11 @@ async def test_live_phraser_holds_one_identity_across_calls_and_instructions():
         pytest.skip("set AGENTG_BEHAVIORAL_LIVE=1 to run the live phraser sweep")
     if not os.environ.get("MODEL_API_KEY"):
         pytest.skip("MODEL_API_KEY not configured (the phraser's model)")
-    if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("MODEL_API_KEY")):
-        pytest.skip("judge API key not configured")
+    backend = judge_backend_from_env()
+    if backend is None:
+        pytest.skip("judge API key not configured for the judge model")
 
     from agentg.config import DEFAULT_MODEL, Settings
-    from behavioral.judge import LiteLLMJudgeBackend
 
     settings = Settings(
         telegram_bot_token="",  # the phraser never touches Telegram
@@ -153,12 +184,14 @@ async def test_live_phraser_holds_one_identity_across_calls_and_instructions():
         database_url="",
     )
     phraser = linking.build_phraser(settings)
-    backend = LiteLLMJudgeBackend()
 
     cases = [
         # Two consecutive dead-end calls: the drift this issue observed.
         (linking.DEAD_END_INSTRUCTION, "hola"),
         (linking.DEAD_END_INSTRUCTION, "hola"),
+        # The near-miss invite-code path lacks the built-in coach-identity
+        # wording — the likeliest drift path.
+        (linking.CODE_NOT_FOUND_INSTRUCTION, "XM7K29"),
         # The fix must hold for the other linking instructions too.
         (
             linking.NAME_CONFIRM_INSTRUCTION.format(gym="Iron Temple", name="Ana García"),
