@@ -145,3 +145,38 @@ async def test_a_local_next_path_is_honoured(env):
 
     assert response.status == 302
     assert response.headers["Location"] == "/members/1"
+
+
+EVIL_NEXT_PATHS = [
+    "/\t/evil.com",
+    "/\n/evil.com",
+    "/\r/evil.com",
+    "/%09/evil.com",
+    "/%0a/evil.com",
+    "/%0d/evil.com",
+]
+
+
+@pytest.mark.parametrize("next_path", EVIL_NEXT_PATHS)
+async def test_a_control_char_next_path_redirects_to_the_roster(env, next_path):
+    """Control/whitespace chars (raw or percent-encoded) let "/\t/evil.com"
+    slip past a startswith guard; yarl then normalizes it to the
+    protocol-relative //evil.com — an open redirect (review on PR #120)."""
+    raw = await env.store.create_login_token(env.member.id, env.gym.id, next_path=next_path)
+
+    response = await env.client.post(f"/login/{raw}", allow_redirects=False)
+
+    assert response.status == 302
+    assert response.headers["Location"] == "/"
+
+
+@pytest.mark.parametrize("next_path", EVIL_NEXT_PATHS)
+async def test_the_language_toggle_rejects_a_control_char_next(env, next_path):
+    """The toggle's ``next`` takes the same guard as the magic-link redeem —
+    one shared helper (review on PR #120)."""
+    response = await env.client.get(
+        "/lang/en", params={"next": next_path}, allow_redirects=False
+    )
+
+    assert response.status == 302
+    assert response.headers["Location"] == "/"

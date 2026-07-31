@@ -64,7 +64,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from html import escape
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 import qrcode
 import qrcode.image.svg
@@ -228,10 +228,22 @@ def _lang_toggle(next_path: str) -> str:
 
 
 def _safe_next(raw: str | None) -> str:
-    """A redirect target that can only ever be a path on this dashboard."""
-    if raw and raw.startswith("/") and not raw.startswith("//"):
-        return raw
-    return "/"
+    """A redirect target that can only ever be a path on this dashboard.
+
+    The ONE guard both doors use (the magic-link redeem and the language
+    toggle). A plain startswith check is not enough: "/\\t/evil.com" passes
+    it, and yarl then normalizes the Location to the protocol-relative
+    //evil.com — an open redirect. Any control or whitespace character,
+    raw or percent-encoded, kills the path; so does anything that isn't a
+    single-leading-slash local path."""
+    if not raw:
+        return "/"
+    for candidate in (raw, unquote(raw)):
+        if any(ord(ch) < 0x21 or ord(ch) == 0x7F for ch in candidate):
+            return "/"
+        if not candidate.startswith("/") or candidate.startswith("//"):
+            return "/"
+    return raw
 
 
 # --- The shared chrome: segmented view control, search, toggle, settings ---
@@ -1484,11 +1496,9 @@ def build_app(
         if token is None:
             return web.Response(text=_bounce_page(), content_type="text/html")
         # A safety-flag ping's token carries the Member's page as its
-        # landing; anything that isn't a local path falls back to the roster.
-        target = token.next_path or "/"
-        if not target.startswith("/") or target.startswith("//"):
-            target = "/"
-        response = web.HTTPFound(target)
+        # landing; the shared local-path guard decides (anything fishy
+        # falls back to the roster).
+        response = web.HTTPFound(_safe_next(token.next_path))
         set_session(response, token.member_id, token.gym_id)
         raise response
 
