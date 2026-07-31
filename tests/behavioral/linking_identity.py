@@ -45,9 +45,10 @@ _DETERMINERS = {
     "a", "an", "the", "your", "my",
 }
 # Spanish pre-verbal negators of "ser" form a closed class — no, nunca,
-# jamás (accented or not), tampoco, ni, and ni siquiera (whose token
-# before the verb is "siquiera") — plus English "not".
-_NEGATIONS = {"no", "not", "nunca", "jamás", "jamas", "tampoco", "ni", "siquiera"}
+# jamás (accented or not), tampoco, ni — plus English "not". "ni
+# siquiera" negates too, but bare "siquiera" means "at least", so it is
+# handled by a two-token lookback, not this set.
+_NEGATIONS = {"no", "not", "nunca", "jamás", "jamas", "tampoco", "ni"}
 _TRAILING_WORD = re.compile(r"(\w+)([^\w]*)$")
 # A negation only denies the claim it is glued to: any clause break
 # (sentence punctuation, comma, colon, dash, newline) between it and the
@@ -56,6 +57,24 @@ _CLAUSE_BREAK = re.compile(r"[,;.!?:\n—–…]|(?<=\s)-(?=\s)")
 
 # Curly/typographic apostrophes read as ASCII so "I’m" is still a claim.
 _APOSTROPHES = str.maketrans("’‘ʼ", "'''")
+
+
+def _is_preverb_denial(prefix: str) -> bool:
+    """Whether the words right before a "soy" deny it: a negator token
+    glued to the verb (no clause break between them), where "siquiera"
+    counts only as the second half of "ni siquiera" — alone it means
+    "at least"."""
+    words = _WORD.findall(prefix.lower())
+    if not words:
+        return False
+    last = words[-1]
+    if last == "siquiera":
+        if len(words) < 2 or words[-2] != "ni":
+            return False
+    elif last not in _NEGATIONS:
+        return False
+    trailing = _TRAILING_WORD.search(prefix)
+    return trailing is not None and not _CLAUSE_BREAK.search(trailing.group(2))
 
 
 def identity_drift(reply: str) -> str | None:
@@ -68,14 +87,10 @@ def identity_drift(reply: str) -> str | None:
     flags). Anything more elaborate is the live judge's job, by design."""
     reply = reply.translate(_APOSTROPHES)
     for match in _CLAIM.finditer(reply):
-        if match.group(1).lower() == "soy":
-            trailing = _TRAILING_WORD.search(reply[: match.start()])
-            if (
-                trailing is not None
-                and trailing.group(1).lower() in _NEGATIONS
-                and not _CLAUSE_BREAK.search(trailing.group(2))
-            ):
-                continue
+        if match.group(1).lower() == "soy" and _is_preverb_denial(
+            reply[: match.start()]
+        ):
+            continue
         words = _WORD.findall(reply[match.end() :].lower())
         if words and words[0] in _NEGATIONS:
             continue
