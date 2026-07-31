@@ -78,15 +78,27 @@ def _equipment_base(word: str) -> str:
     return lowered[:-1] if lowered.endswith("s") else lowered  # plural ok
 
 
+def _is_equipment(word: str) -> bool:
+    """The ONE equipment-modifier predicate, shared by the space path and the
+    hyphen path."""
+    return _equipment_base(word) in _EQUIPMENT_MODIFIERS
+
+
+def _leads_with_equipment(token: str) -> bool:
+    # Plain equipment token, or a hyphen token whose first part is equipment
+    # ("band-pull-apart" counts as equipment-led for the strength check).
+    return _is_equipment(token.split("-", 1)[0])
+
+
 def _is_allowed_prefix(parts: list[str]) -> bool:
     # Every prefix part must be an equipment modifier or variant word;
     # "strength" only immediately before an equipment part — a lexicon term
     # glued to a core ("muscle-pull-up") is a leak, not a name.
     for i, part in enumerate(parts):
-        if _equipment_base(part) in _EQUIPMENT_MODIFIERS or part in _VARIANT_WORDS:
+        if _is_equipment(part) or part in _VARIANT_WORDS:
             continue
         following = parts[i + 1] if i + 1 < len(parts) else ""
-        if part == "strength" and _equipment_base(following) in _EQUIPMENT_MODIFIERS:
+        if part == "strength" and _is_equipment(following):
             continue
         return False
     return True
@@ -108,10 +120,22 @@ def _is_name_core(token: str) -> bool:
     return False
 
 
+def _absorbable(word: str, following: str) -> bool:
+    # A token the space path may absorb before a core: an equipment modifier;
+    # "strength" when the following token leads with equipment (plain
+    # "band" or equipment-led "band-pull-apart"); or a glued
+    # "strength-band(s)" token, which is that pair in one token.
+    if _is_equipment(word):
+        return True
+    if word == "strength" and _leads_with_equipment(following):
+        return True
+    return word.startswith("strength-") and _is_equipment(word.split("-", 1)[1])
+
+
 def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
     """Spans the catalog carve-out covers: an allowlisted name core plus at
-    most two immediately preceding equipment-modifier tokens. No right-side
-    absorption, no generic neighbor walking."""
+    most two immediately preceding modifier tokens. No right-side absorption,
+    no generic neighbor walking."""
     tokens = list(_TOKEN_RE.finditer(text))
     spans = []
     for i, tok in enumerate(tokens):
@@ -120,12 +144,10 @@ def _exercise_name_spans(text: str) -> list[tuple[int, int]]:
         start = tok.start()
         absorbed = 0
         k = i - 1
-        while k >= 0 and absorbed < 2 and text[tokens[k].end() : start] == " ":
+        while k >= 0 and absorbed < 2 and text[tokens[k].end() : start].isspace():
             word = tokens[k].group().lower()
             following = tokens[k + 1].group().lower()
-            if _equipment_base(word) not in _EQUIPMENT_MODIFIERS and not (
-                word == "strength" and _equipment_base(following) in _EQUIPMENT_MODIFIERS
-            ):
+            if not _absorbable(word, following):
                 break
             start = tokens[k].start()
             absorbed += 1

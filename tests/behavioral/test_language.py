@@ -133,6 +133,19 @@ def test_a_core_suffix_prefix_must_be_equipment_or_variant_words():
     assert find_english_leaks("muscle-building-pull-up") == {"muscle"}
 
 
+def test_mixed_space_and_hyphen_name_shapes_stay_clean():
+    # Round-7: the space path and hyphen path share one modifier predicate.
+    assert find_english_leaks("strength band-pull-apart") == set()
+    assert find_english_leaks("strength bar-muscle-up") == set()
+    assert find_english_leaks("strength ring-muscle-ups") == set()
+    assert find_english_leaks("strength cable-pull-through") == set()
+    assert find_english_leaks("strength-band pull-apart") == set()
+    assert find_english_leaks("strength-bands pull-apart") == set()
+    assert find_english_leaks("strength-band muscle-up") == set()
+    assert find_english_leaks("strength  band pull-apart") == set()  # double space
+    assert find_english_leaks("strength\tband pull-apart") == set()  # tab
+
+
 # --- what actually guards the behavior: the Agent's language rule ---
 
 
