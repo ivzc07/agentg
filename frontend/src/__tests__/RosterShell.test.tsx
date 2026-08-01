@@ -6,6 +6,7 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { RosterShell } from "../components/RosterShell";
 import { MemberPage } from "../components/MemberPage";
 import * as rosterApi from "../api/roster";
+import * as memberApi from "../api/member";
 import type { RosterResponse } from "../types/roster";
 
 vi.mock("../hooks/useT", () => ({
@@ -79,12 +80,39 @@ const makeResponse = (overrides: Partial<RosterResponse> = {}): RosterResponse =
   ...overrides,
 });
 
+const MOCK_MEMBER = {
+  member_id: 1,
+  name: "Alice",
+  member_since: "2026-06-01",
+  weight_unit: "kg",
+  session_count: 2,
+  gap_days: 3,
+  has_sessions: true,
+  last_session_on: "2026-07-12",
+  lapsed: false,
+  snoozed_until: null,
+  routine: [],
+  routine_id: null,
+  routine_preset_name: null,
+  coach_authored: false,
+  routine_author: null,
+  sessions: [],
+  page: 1,
+  pages: 1,
+  weights: [],
+  notes: [],
+  retired_notes: [],
+  safety_flags: [],
+};
+
 function renderShell(response: RosterResponse, initialEntries: string[] = ["/"]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
 
   vi.spyOn(rosterApi, "fetchRoster").mockResolvedValue(response);
+  // The MemberPage now fetches its own data via /api/members/{id}.
+  vi.spyOn(memberApi, "fetchMember").mockResolvedValue(MOCK_MEMBER);
 
   return render(
     <QueryClientProvider client={queryClient}>
