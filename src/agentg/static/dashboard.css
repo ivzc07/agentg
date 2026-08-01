@@ -370,10 +370,33 @@ a.edit:hover { border-color: var(--ink-2); }
   border-radius: var(--radius-md);
   box-shadow: var(--elevation-1-shadow);
   padding: 4px 16px 12px; margin: 12px 0; }
-/* Presets: one card per Preset, members picked as chips. */
-.pcard { background: var(--surface); padding: 16px; margin-top: 14px; }
+/* Presets: elevated cards (elevation-2), distinct default badge & actions. */
+.pcard {
+  background: var(--elevation-2-bg);
+  border: 1px solid var(--elevation-2-stroke);
+  box-shadow: var(--elevation-2-shadow);
+  border-radius: var(--radius-md);
+  padding: 20px;
+  margin-top: 16px;
+}
+.pcard.default {
+  border-color: var(--magenta);
+  box-shadow: var(--elevation-2-shadow), var(--glow-accent);
+}
 .pcard h2 { font-size: 17px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.pcard fieldset { border: 1px solid var(--line); padding: 10px 12px; margin: 12px 0 0; }
+.pcard .preset-badge {
+  display: inline-block;
+  font-family: var(--mono);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: .12em;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--magenta-tint);
+  color: var(--magenta);
+  border: 1px solid var(--magenta);
+}
+.pcard fieldset { border: 1px solid var(--elevation-0-stroke); border-radius: var(--radius-sm); padding: 12px 14px; margin: 14px 0 0; }
 .pcard legend { font-size: 13px; color: var(--ink-2); padding: 0 6px; }
 .pcard label.stack { display: block; font-size: 13px; color: var(--ink-2); margin: 8px 0; }
 .pcard label.stack input { display: block; margin-top: 4px; width: 100%; }
@@ -382,7 +405,23 @@ a.edit:hover { border-color: var(--ink-2); }
   display: inline-flex; gap: 8px; align-items: center; cursor: pointer;
   transition: border-color var(--t-fast), color var(--t-fast); }
 .pick label:hover { border-color: var(--ink-2); color: var(--ink); }
-.actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px;
+  border-top: 1px solid var(--elevation-0-stroke); }
+.actions button { min-height: 40px; padding: 7px 16px; font-size: 13px; }
+.actions .btn-retire { background: transparent; border-color: var(--coral); color: var(--coral); }
+.actions .btn-retire:hover { background: var(--coral-tint); border-color: var(--coral); }
+/* Create form matches the editor's block language. */
+.create-preset {
+  background: var(--elevation-1-bg);
+  border: 1px solid var(--elevation-1-stroke);
+  border-radius: var(--radius-md);
+  padding: 18px;
+  margin-top: 16px;
+}
+.create-preset h2 { font-size: 17px; margin-bottom: 12px; }
+.create-preset label { display: block; font-size: 13px; color: var(--ink-2); margin-bottom: 4px; }
+.create-preset input { display: block; width: 100%; margin-bottom: 12px; }
+.create-preset button { width: 100%; }
 
 .settings-wrap { max-width: 36rem; margin: 0 auto; padding: 0 var(--gut) 48px; }
 .settings-wrap > h1 { font-size: 22px; padding: 18px 0 2px; }
@@ -400,6 +439,16 @@ a.edit:hover { border-color: var(--ink-2); }
   .day-edit select { width: 100%; }
   .editor-wrap header h1 { font-size: 19px; }
   .btn-primary.big { min-height: 48px; font-size: 15px; }
+}
+/* --- Presets at 375px: full-width cards, stacked actions --- */
+@media (max-width: 600px) {
+  .pcard { padding: 14px; }
+  .pcard h2 { font-size: 16px; }
+  .actions { flex-direction: column; }
+  .actions button, .actions form { width: 100%; }
+  .actions form button { width: 100%; }
+  .create-preset { padding: 14px; }
+  .pick label { padding: 10px 14px; width: 100%; }
 }
 
 /* --- Reduced motion: kill every transition & animation --- */
