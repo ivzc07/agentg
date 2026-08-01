@@ -224,3 +224,132 @@ async def test_handle_message_compacts_before_running_the_agent(env, monkeypatch
     )
 
     assert history_sizes == [KEEP_RECENT + 1]  # compacted before the run
+
+
+# ---------------------------------------------------------------------------
+# Issue #165 — compaction survives failure and converges
+# ---------------------------------------------------------------------------
+
+
+class FailingSummarizer:
+    """A summarizer that raises an exception on every call."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, old_items, existing_notes):
+        self.calls.append((list(old_items), list(existing_notes)))
+        raise RuntimeError("summarizer unavailable")
+
+
+async def test_failing_summarizer_does_not_lose_history(env):
+    """When the summarizer raises, the old session items are preserved
+    because nothing is cleared before the summarizer is called."""
+    total = KEEP_RECENT + 5
+    original_items = over_budget_items(total)
+    await env.session.add_items(original_items)
+
+    with pytest.raises(RuntimeError, match="summarizer unavailable"):
+        await maybe_compact(
+            env.session,
+            FailingSummarizer(),
+            env.notes,
+            env.member_id,
+            env.gym_id,
+        )
+
+    # Old items are intact — no clear happened before the failed summarizer call
+    items = await env.session.get_items()
+    assert len(items) == total
+
+
+async def test_failing_summarizer_in_handle_message_does_not_block_reply(env, monkeypatch):
+    """A compaction failure is caught and the Member's message is still answered."""
+    import agentg.runtime as runtime_module
+    from types import SimpleNamespace
+
+    async def fake_run(agent, text, *, session, context=None):
+        return SimpleNamespace(final_output="ok")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+    await env.session.add_items(over_budget_items(KEEP_RECENT + 20))
+
+    # Replace the summarizer with one that always fails
+    env.runtime.summarizer = FailingSummarizer()
+
+    reply = await env.runtime.handle_message(
+        IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
+    )
+
+    # The reply still arrived — compaction failure didn't propagate
+    assert str(reply) == "ok"
+    # The summarizer was called (it tried)
+    assert len(env.runtime.summarizer.calls) == 1
+
+
+async def test_convergence_guard_skips_when_old_items_are_all_summaries(env):
+    """When the only items outside the recent window are previous summaries,
+    the summarizer is never called — there is nothing new to fold."""
+    # Seed: one summary + KEEP_RECENT fat items, still over budget
+    summary = {
+        "role": "assistant",
+        "content": "[Summary of earlier conversation]\nPrior training history.",
+    }
+    await env.session.add_items([summary] + over_budget_items(KEEP_RECENT))
+
+    summarizer = RecordingSummarizer()
+    compacted = await maybe_compact(
+        env.session, summarizer, env.notes, env.member_id, env.gym_id
+    )
+
+    # The only item outside the recent window is a summary — skip.
+    assert compacted is False
+    assert summarizer.calls == []
+
+
+async def test_previously_written_summary_not_sent_to_summarizer(env):
+    """When old items include both a previous summary and fresh turns,
+    only the fresh turns are sent to the summarizer — the summary is
+    preserved at the front of history and never re-summarized."""
+    summary = {
+        "role": "assistant",
+        "content": "[Summary of earlier conversation]\nPrior training history.",
+    }
+    # Two fresh old items + KEEP_RECENT recent, all fat
+    fresh_old = over_budget_items(2)
+    await env.session.add_items([summary] + fresh_old + over_budget_items(KEEP_RECENT))
+
+    summarizer = RecordingSummarizer()
+    compacted = await maybe_compact(
+        env.session, summarizer, env.notes, env.member_id, env.gym_id
+    )
+
+    assert compacted is True
+    assert len(summarizer.calls) == 1
+    # Only the fresh items were sent to the summarizer — not the summary
+    old_sent, _ = summarizer.calls[0]
+    assert len(old_sent) == 2  # only the 2 fresh items, not the summary
+    # The previous summary is preserved at the front of history
+    items = await env.session.get_items()
+    assert "Summary of earlier conversation" in str(items[0])
+    # The new summary is the second item
+    assert "Summary of earlier conversation" in str(items[1])
+    # Total: old summary + new summary + KEEP_RECENT recent
+    assert len(items) == 2 + KEEP_RECENT
+
+
+async def test_convergence_guard_still_compacts_fresh_content(env):
+    """When old items contain non-summary turns, compaction proceeds —
+    the guard only blocks when there is nothing fresh to fold."""
+    await env.session.add_items(over_budget_items(KEEP_RECENT + 5))
+    summarizer = RecordingSummarizer()
+
+    compacted = await maybe_compact(
+        env.session, summarizer, env.notes, env.member_id, env.gym_id
+    )
+
+    assert compacted is True
+    assert len(summarizer.calls) == 1
+    # All 5 old items were fresh — all sent to summarizer
+    old_sent, _ = summarizer.calls[0]
+    assert len(old_sent) == 5

@@ -25,10 +25,9 @@ logger = logging.getLogger(__name__)
 # tokenizer dependency). Compact when the estimate exceeds ~70% of the
 # budget history may occupy, so we fire well before the attention cliff
 # (issue #54). KEEP_RECENT is an item floor — the live exchange is never
-# folded away even when tokens are high. The floor outranks the budget: if
-# the newest KEEP_RECENT items alone exceed COMPACT_AT_TOKENS, history stays
-# over budget and every message re-triggers a compaction attempt (one
-# summarizer call each) that folds only the few aged-out items.
+# folded away even when tokens are high. When the only items outside the
+# recent window are previous summaries, compaction skips — it has nothing
+# new to fold and would only re-summarize its own output (issue #165).
 HISTORY_TOKEN_BUDGET = 12_000
 COMPACT_AT_TOKENS = (HISTORY_TOKEN_BUDGET * 7) // 10  # 8_400 ≈ 70%
 KEEP_RECENT = 20
@@ -73,16 +72,28 @@ async def maybe_compact(
     if len(items) <= KEEP_RECENT:
         return False  # nothing outside the live-exchange floor to fold
     old, recent = items[:-KEEP_RECENT], items[-KEEP_RECENT:]
+    # Separate previous summaries from fresh content.  Summaries are never
+    # fed back into the summarizer — re-summarizing a summary loses fidelity.
+    # When there is no fresh content to fold we skip the summarizer call
+    # entirely (convergence guard, issue #165).
+    old_summaries = [it for it in old if "Summary of earlier conversation" in str(it)]
+    to_summarize = [it for it in old if "Summary of earlier conversation" not in str(it)]
+    if not to_summarize:
+        return False
     existing = [note.text for note in await notes.active(member_id)]
-    result = await summarizer(old, existing)
+    result = await summarizer(to_summarize, existing)
     for kind, text in result.notes:  # durables first — deletion comes after
         await notes.remember(member_id, gym_id, kind, text)
     summary_item = {
         "role": "assistant",
         "content": f"[Summary of earlier conversation]\n{result.summary}",
     }
+    new_items = old_summaries + [summary_item] + recent
+    # Write the replacement before clearing the old items.  If add_items
+    # raises, the old history is still intact (issue #165).
+    await session.add_items(new_items)
     await session.clear_session()
-    await session.add_items([summary_item] + recent)
+    await session.add_items(new_items)
     return True
 
 

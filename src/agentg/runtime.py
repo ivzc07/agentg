@@ -92,9 +92,12 @@ class AgentRuntime:
             # Any reply resets the check-in rhythm and revives a lapsed Member.
             await self.stores.checkins.reset_rhythm(linked.member.id)
             session = self.session_for_member(linked.member.id)
-            await maybe_compact(
-                session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
-            )
+            try:
+                await maybe_compact(
+                    session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
+                )
+            except Exception:
+                logger.exception("compaction failed for member %d", linked.member.id)
             context = self.member_context(linked)
             result = await Runner.run(
                 self.agent,
