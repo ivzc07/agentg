@@ -6,11 +6,13 @@ one process may poll a given bot token at a time (single replica).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ChatAction
 from aiogram.types import FSInputFile, LinkPreviewOptions, Message
 
 from agentg.demo_media import SentAnimation
@@ -61,6 +63,23 @@ def split_reply(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
     return chunks
 
 
+# Module-level so tests can shorten the refresh interval without waiting
+# for a full production cycle (Telegram expires the action after ~5 s).
+_TYPING_REFRESH_INTERVAL: float = 4.5
+
+
+async def _keep_typing(bot: Bot, chat_id: int) -> None:
+    """Send the typing action repeatedly so Telegram never expires it.
+
+    Telegram's typing indicator lasts ~5 seconds; this coroutine refreshes it
+    every ``_TYPING_REFRESH_INTERVAL`` seconds until cancelled.  The caller
+    must cancel the task (and await the cancellation) to stop the indicator.
+    """
+    while True:
+        await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        await asyncio.sleep(_TYPING_REFRESH_INTERVAL)
+
+
 def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[None]]:
     async def on_text(message: Message) -> None:
         if message.from_user is None or message.text is None:
@@ -73,25 +92,39 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
             link_code=parse_start_payload(message.text),
             is_group=message.chat.type != "private",
         )
+        # Send the first typing action synchronously so it lands before the
+        # Agent starts work, then keep refreshing in the background (Telegram
+        # expires the action after ~5 s).
+        await message.bot.send_chat_action(
+            chat_id=message.chat.id, action=ChatAction.TYPING
+        )
+        typing_task = asyncio.create_task(_keep_typing(message.bot, message.chat.id))
         try:
-            reply = await reply_fn(incoming)
-        except Exception:
-            logger.exception("agent loop failed for sender %s", message.from_user.id)
-            await message.answer(ERROR_REPLY)
-            return
-        for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
-            if reply.disable_preview:  # keep the call shape unchanged otherwise
-                await message.answer(
-                    chunk, link_preview_options=LinkPreviewOptions(is_disabled=True)
-                )
-            else:
-                await message.answer(chunk)
-        # Follow-up media (demo animations) lands beneath the reply text.
-        if reply.after_send is not None:
             try:
-                await reply.after_send()
+                reply = await reply_fn(incoming)
             except Exception:
-                logger.exception("post-reply delivery failed for sender %s", message.from_user.id)
+                logger.exception("agent loop failed for sender %s", message.from_user.id)
+                await message.answer(ERROR_REPLY)
+                return
+            for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
+                if reply.disable_preview:  # keep the call shape unchanged otherwise
+                    await message.answer(
+                        chunk, link_preview_options=LinkPreviewOptions(is_disabled=True)
+                    )
+                else:
+                    await message.answer(chunk)
+            # Follow-up media (demo animations) lands beneath the reply text.
+            if reply.after_send is not None:
+                try:
+                    await reply.after_send()
+                except Exception:
+                    logger.exception("post-reply delivery failed for sender %s", message.from_user.id)
+        finally:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
 
     return on_text
 

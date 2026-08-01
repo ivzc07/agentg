@@ -18,13 +18,17 @@ from agentg.messages import Reply
 
 
 class FakeMessage:
-    def __init__(self, user_id=42, text="hi", full_name="Ana García", chat_type="private"):
+    def __init__(self, user_id=42, text="hi", full_name="Ana García", chat_type="private",
+                 chat_id=77, bot_send_chat_action=None):
         self.from_user = (
             SimpleNamespace(id=user_id, full_name=full_name) if user_id is not None else None
         )
-        self.chat = SimpleNamespace(type=chat_type)
+        self.chat = SimpleNamespace(type=chat_type, id=chat_id)
         self.text = text
         self.answer = AsyncMock()
+        self.bot = SimpleNamespace(
+            send_chat_action=bot_send_chat_action or AsyncMock()
+        )
 
 
 @pytest.mark.parametrize(
@@ -208,3 +212,108 @@ def test_split_counts_utf16_units_the_way_telegram_does():
 def test_dispatcher_registers_one_message_handler():
     dispatcher = create_dispatcher(AsyncMock())
     assert len(dispatcher.message.handlers) == 1
+
+
+# ── typing indicator ────────────────────────────────────────────────────
+
+
+async def test_typing_indicator_sent_before_agent_work():
+    """The typing action must be the first thing sent — before reply_fn runs."""
+    order = []
+
+    bot_send_chat_action = AsyncMock(
+        side_effect=lambda *a, **k: order.append("typing")
+    )
+
+    async def reply_fn(msg):
+        order.append("agent")
+        return Reply("ok")
+
+    message = FakeMessage(bot_send_chat_action=bot_send_chat_action)
+    await make_message_handler(reply_fn)(message)
+
+    # Typing must appear before the Agent does any work.
+    assert order[0] == "typing"
+    assert "typing" in order
+    assert "agent" in order
+
+
+async def test_typing_indicator_refreshes_during_turn():
+    """Telegram expires the typing action after ~5 s; the handler must
+    refresh it while the Agent is still working."""
+    import asyncio
+
+    from agentg.channels import telegram as tmod
+
+    async def slow_agent(msg):
+        await asyncio.sleep(0.15)
+        return Reply("done")
+
+    bot_send_chat_action = AsyncMock()
+    message = FakeMessage(bot_send_chat_action=bot_send_chat_action)
+
+    # Shorten the refresh interval so the test sees refreshes without
+    # waiting for a full production cycle.
+    saved = tmod._TYPING_REFRESH_INTERVAL
+    tmod._TYPING_REFRESH_INTERVAL = 0.04
+    try:
+        await make_message_handler(slow_agent)(message)
+    finally:
+        tmod._TYPING_REFRESH_INTERVAL = saved
+
+    # At least one send (the initial burst) + one refresh.
+    assert bot_send_chat_action.await_count >= 2, (
+        f"expected >= 2 typing refreshes, got {bot_send_chat_action.await_count}"
+    )
+
+    # Every call must use the action='typing' parameter.
+    for call_args in bot_send_chat_action.await_args_list:
+        assert call_args.kwargs.get("action") == "typing"
+
+
+async def test_typing_indicator_stops_after_reply():
+    """Once the reply is sent the typing indicator must not fire again."""
+    import asyncio
+
+    send_count = 0
+
+    bot_send_chat_action = AsyncMock()
+
+    async def reply_fn(msg):
+        return Reply("all good")
+
+    message = FakeMessage(bot_send_chat_action=bot_send_chat_action)
+    await make_message_handler(reply_fn)(message)
+
+    final_count = bot_send_chat_action.await_count
+
+    # Wait a bit — no more typing actions should arrive.
+    await asyncio.sleep(0.15)
+
+    assert bot_send_chat_action.await_count == final_count, (
+        "typing indicator leaked after reply was sent"
+    )
+
+
+async def test_typing_indicator_stops_on_agent_failure():
+    """A failure inside the Agent still clears the typing indicator."""
+    import asyncio
+
+    bot_send_chat_action = AsyncMock()
+
+    async def reply_fn(msg):
+        raise RuntimeError("model unavailable")
+
+    message = FakeMessage(bot_send_chat_action=bot_send_chat_action)
+    await make_message_handler(reply_fn)(message)
+
+    final_count = bot_send_chat_action.await_count
+
+    # The typing indicator must stop after the error.
+    await asyncio.sleep(0.15)
+
+    assert bot_send_chat_action.await_count == final_count, (
+        "typing indicator leaked after agent failure"
+    )
+    # The error reply must still be delivered.
+    message.answer.assert_awaited_once_with(ERROR_REPLY)
