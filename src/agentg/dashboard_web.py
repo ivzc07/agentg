@@ -462,6 +462,22 @@ def _severity_text(row: RosterRow, lang: str) -> str:
     return f'<span class="sev sev-{row.severity}">{label}</span>'
 
 
+def _row_gap_html(has_sessions: bool, gap_days: int, lang: str) -> str:
+    """Gap text with a large bold numeral for roster rows.
+
+    When there is a numeric gap the number renders as ``<span class="numeral">N</span>``
+    so the ``.row .numeral`` CSS rule (gradient, large mono numeral) applies.
+    """
+    t = STRINGS[lang]
+    if not has_sessions:
+        return t["no_sessions_yet"]
+    if gap_days == 0:
+        return t["trained_today"]
+    if gap_days == 1:
+        return f'<span class="numeral">1</span> {t["gap_label_one"]}'
+    return f'<span class="numeral">{gap_days}</span> {t["gap_label"]}'
+
+
 def _roster_row(
     row: RosterRow, view: str, lang: str, current_member_id: int | None = None
 ) -> str:
@@ -482,7 +498,7 @@ def _roster_row(
         f'<a href="{_member_href(row.member_id, view)}"{current}>'
         f'<span class="tile" aria-hidden="true">{escape(_initials(row.name))}</span>'
         f'<span><span class="t"><span class="nm">{escape(row.name)}</span>{tags}</span>'
-        f'<span class="meta"><span class="away">{away_text(row.has_sessions, row.gap_days, lang)}</span>'
+        f'<span class="meta"><span class="away">{_row_gap_html(row.has_sessions, row.gap_days, lang)}</span>'
         f"{_severity_text(row, lang)}</span></span></a></li>"
     )
 
