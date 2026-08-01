@@ -5,6 +5,7 @@ import { MotionConfig } from "framer-motion";
 import { fetchSession, SessionAuthError } from "./api/session";
 import { RosterShell } from "./components/RosterShell";
 import { MemberPage } from "./components/MemberPage";
+import { RoutineEditor } from "./components/RoutineEditor";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -63,6 +64,10 @@ export function Dashboard() {
                 stays mounted and the member fills the right pane; in
                 Table/Cards view the member renders full-page. */}
             <Route path="members/:memberId" element={<MemberPage />} />
+            <Route
+              path="members/:memberId/routine"
+              element={<RoutineEditor />}
+            />
           </Route>
         </Routes>
       </BrowserRouter>
