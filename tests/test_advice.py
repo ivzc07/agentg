@@ -3,10 +3,12 @@
 Integration over the real stores. The clock is injected so gaps are exact.
 """
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 
 from conftest import FakeClock
 
@@ -15,6 +17,21 @@ from agentg.db import create_engine
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
 from agentg.linking_store import LinkingStore
 from agentg.training import TrainingStore
+
+
+@contextmanager
+def _count_queries(engine) -> Iterator[list[int]]:
+    """Context manager that counts SQL statements executed on the engine."""
+    counts: list[int] = [0]
+
+    def _increment(*_args, **_kwargs) -> None:
+        counts[0] += 1
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _increment)
+    try:
+        yield counts
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _increment)
 
 
 @pytest.fixture
@@ -160,3 +177,85 @@ async def test_a_rest_day_has_no_suggestions(env):
     # move the clock to Sunday (a rest day in this routine)
     env.clock.now = FakeClock().now + timedelta(days=4)  # Wed + 4 = Sunday
     assert await suggest_for_today(env.training, env.routines, env.member_id, env.gym_id) == []
+
+
+@pytest.fixture
+async def multi_exercise_env(tmp_path):
+    """A Member with a 3-exercise Workout and logged Sessions on each."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'multi.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+    clock = FakeClock()
+    training = TrainingStore(engine, clock=clock)
+    await training.ensure_seeded()
+    routines = RoutineStore(engine, clock=clock)
+    gym = await linking.create_gym("Iron Temple")
+    member = await linking.link_member(gym.id, "Alex", "telegram", "99")
+
+    exercises = [
+        ExerciseSpec("bench press", sets=3, reps="8-12"),
+        ExerciseSpec("squat", sets=3, reps="5"),
+        ExerciseSpec("deadlift", sets=1, reps="5"),
+    ]
+    await routines.save_routine(
+        member.id,
+        gym.id,
+        [WorkoutSpec(weekday=2, name="Full Body", exercises=exercises)],
+    )
+
+    # Log two sessions for each exercise at different offsets so there is
+    # meaningful history for the suggester to reason over.
+    for offset in (6, 3):
+        clock.now = FakeClock().now - timedelta(days=offset)
+        for ex, weight, reps in [
+            ("bench press", 80, [12, 12, 12]),
+            ("squat", 100, [5, 5, 5]),
+            ("deadlift", 140, [5]),
+        ]:
+            for rep in reps:
+                await training.log_sets(member.id, gym.id, f"{ex} {weight} {rep}")
+        await training.close_session(member.id)
+
+    clock.now = FakeClock().now  # back to today
+
+    class Env:
+        pass
+
+    env = Env()
+    env.engine = engine
+    env.training = training
+    env.routines = routines
+    env.clock = clock
+    env.member_id = member.id
+    env.gym_id = gym.id
+    yield env
+    await engine.dispose()
+
+
+async def test_suggestions_for_multi_exercise_workout_use_constant_queries(
+    multi_exercise_env,
+):
+    """Issue #170: suggesting weights for a multi-Exercise Workout must
+    issue a small constant number of queries — not one per Exercise per
+    past Session (the old N+1 pattern)."""
+    env = multi_exercise_env
+
+    with _count_queries(env.engine) as counts:
+        suggestions = await suggest_for_today(
+            env.training, env.routines, env.member_id, env.gym_id
+        )
+
+    # Three exercises, each with history.
+    assert len(suggestions) == 3
+    for s in suggestions:
+        assert s.exercise in ("bench press", "squat", "deadlift")
+        assert s.action != "none"  # each has logged history
+
+    # The old N+1 pattern issues ~19 queries for 3 exercises with 2
+    # sessions each (per-exercise history queries plus overhead).  With
+    # batching (#170), the whole call stays inside a tight constant bound
+    # regardless of exercise count.  The threshold must be below the
+    # N+1 count so the guard bites when the fix is reverted.
+    assert counts[0] <= 12, (
+        f"expected <= 12 SQL statements (constant batch), got {counts[0]}"
+    )

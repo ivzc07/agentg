@@ -7,12 +7,13 @@ gap math and the auto-close timeout are testable.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from agentg.catalog import find_exercise, find_or_create_exercise, normalize_exercise_name
@@ -372,38 +373,97 @@ class TrainingStore:
         open Session (today, in progress) is excluded so a suggestion for now
         never reads from itself.
         """
+        result = await self.exercise_history_batch(member_id, [exercise], limit)
+        return result.get(exercise, [])
+
+    async def exercise_history_batch(
+        self, member_id: int, exercises: list[str], limit: int
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Like ``exercise_history`` but for multiple Exercises at once.
+
+        Gathers the same information in a small constant number of queries
+        instead of one per Exercise per past Session (issue #170).
+        """
         async with self._sessions() as db:
-            resolved = await self._find_exercise(db, _normalize(exercise))
-            if resolved is None:
-                return []
-            session_ids = list(
-                await db.scalars(
-                    select(Session.id)
-                    .join(Set, Set.session_id == Session.id)
+            # Resolve every exercise name to an id in one pass over the
+            # catalog (the catalog stays small — issue #162 will index it).
+            all_exercises = list(await db.scalars(select(Exercise)))
+            name_to_id: dict[str, int] = {}
+            for ex_name in exercises:
+                norm = _normalize(ex_name)
+                found = False
+                for row in all_exercises:
+                    if row.name == norm:
+                        name_to_id[ex_name] = row.id
+                        found = True
+                        break
+                if not found:
+                    for row in all_exercises:
+                        if norm in [a for a in row.aliases.split(",") if a]:
+                            name_to_id[ex_name] = row.id
+                            break
+            ex_ids = list(name_to_id.values())
+            result: dict[str, list[dict[str, Any]]] = {
+                ex: [] for ex in exercises
+            }
+            if not ex_ids:
+                return result
+
+            # One query: all sets for all requested Exercises in the Member's
+            # closed Sessions, most-recent-first so the per-Exercise limit
+            # is applied in Python.
+            rows = list(
+                await db.execute(
+                    select(
+                        Set.session_id,
+                        Set.exercise_id,
+                        Set.weight,
+                        Set.reps,
+                        Session.started_at,
+                    )
+                    .join(Session, Set.session_id == Session.id)
                     .where(
                         Session.member_id == member_id,
                         Session.closed_at.is_not(None),
-                        Set.exercise_id == resolved.id,
+                        Set.exercise_id.in_(ex_ids),
                     )
-                    .group_by(Session.id)
-                    .order_by(func.max(Session.started_at).desc())
-                    .limit(limit)
+                    .order_by(Session.started_at.desc())
                 )
             )
-            history: list[dict[str, Any]] = []
-            for session_id in session_ids:
-                rows = list(
-                    await db.scalars(
-                        select(Set)
-                        .where(Set.session_id == session_id, Set.exercise_id == resolved.id)
-                        .order_by(Set.id)
-                    )
-                )
-                weights = [row.weight for row in rows if row.weight is not None]
-                top_weight = max(weights) if weights else None
-                top_reps = [row.reps for row in rows if row.weight == top_weight]
-                history.append({"top_weight": top_weight, "top_reps": top_reps})
-            return history
+
+            # Group by exercise, then by session; enforce the per-Exercise
+            # limit on the grouped sessions (most-recent-first from the
+            # ordering above).
+            ex_sessions: dict[int, dict[int, dict[str, Any]]] = defaultdict(dict)
+            for session_id, ex_id, weight, reps, started_at in rows:
+                if session_id not in ex_sessions[ex_id]:
+                    ex_sessions[ex_id][session_id] = {
+                        "started_at": started_at,
+                        "weight_reps": [],
+                    }
+                ex_sessions[ex_id][session_id]["weight_reps"].append((weight, reps))
+
+            id_to_names: dict[int, list[str]] = defaultdict(list)
+            for ex_name, ex_id in name_to_id.items():
+                id_to_names[ex_id].append(ex_name)
+            for ex_id, sessions in ex_sessions.items():
+                sorted_sessions = sorted(
+                    sessions.items(),
+                    key=lambda kv: kv[1]["started_at"],
+                    reverse=True,
+                )[:limit]
+                history: list[dict[str, Any]] = []
+                for _session_id, data in sorted_sessions:
+                    weights = [w for w, _r in data["weight_reps"] if w is not None]
+                    top_weight = max(weights) if weights else None
+                    top_reps = [
+                        r for w, r in data["weight_reps"] if w == top_weight
+                    ]
+                    history.append({"top_weight": top_weight, "top_reps": top_reps})
+                for ex_name in id_to_names[ex_id]:
+                    result[ex_name] = history
+
+            return result
 
     def _add_sets(
         self,
