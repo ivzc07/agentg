@@ -62,6 +62,8 @@ async def test_anonymous_visit_bounces_to_the_friendly_page(env):
     assert response.status == 200
     text = await response.text()
     assert BOUNCE_MARKER in text and "Iron Temple" not in text
+    # Issue #139: the bounce page uses the same card language.
+    assert 'class="door"' in text and 'class="card"' in text
 
 
 async def test_the_full_login_flow_signs_the_coach_in(env):
@@ -71,7 +73,10 @@ async def test_the_full_login_flow_signs_the_coach_in(env):
     # link-preview guard: a fetcher only ever GETs).
     response = await env.client.get(f"/login/{raw}")
     assert response.status == 200
-    assert 'method="post"' in (await response.text())
+    text = await response.text()
+    assert 'method="post"' in text
+    # Issue #139: the door pages use the same card language as the inside.
+    assert 'class="door"' in text and 'class="card"' in text
     assert await env.store.peek_login_token(raw) is not None
 
     # POST redeems: one redirect home, one session cookie.

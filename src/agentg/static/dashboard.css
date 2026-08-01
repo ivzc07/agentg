@@ -91,10 +91,13 @@ summary:hover { color: var(--ink-2); }
 .lang-toggle a:hover { color: var(--ink-2); }
 .lang-toggle a[aria-current="true"] { color: var(--ink); }
 
+/* Door pages — same card language as the rest of the dashboard. */
 .door { max-width: 26rem; margin: 18vh auto 0; padding: 0 var(--gut); text-align: center; }
-.door h1 { font-size: 22px; }
-.door p { color: var(--ink-2); font-size: 15px; }
-.door form { margin-top: 24px; }
+.door .card { background: var(--elevation-1-bg); border: 1px solid var(--elevation-0-stroke);
+  box-shadow: var(--elevation-1-shadow); padding: 32px 24px; text-align: center; }
+.door .card h1 { font-size: 22px; }
+.door .card p { color: var(--ink-2); font-size: 15px; }
+.door .card form { margin-top: 24px; }
 
 header.top { position: sticky; top: 0; z-index: 20; display: flex; align-items: center;
   gap: 6px 14px; flex-wrap: wrap; min-height: 46px; padding: 6px var(--gut);
@@ -425,10 +428,20 @@ a.edit:hover { border-color: var(--ink-2); }
 
 .settings-wrap { max-width: 36rem; margin: 0 auto; padding: 0 var(--gut) 48px; }
 .settings-wrap > h1 { font-size: 22px; padding: 18px 0 2px; }
-.setcard { background: var(--surface); padding: 18px; margin-top: 16px; }
+/* Distinct card blocks: elevation-2 with shadow and hairline stroke. */
+.setcard { background: var(--elevation-2-bg); border: 1px solid var(--elevation-2-stroke);
+  box-shadow: var(--elevation-2-shadow); padding: 20px; margin-top: 16px; }
 .setcard h2 { font-size: 17px; }
 .setcard p { color: var(--ink-2); font-size: 14px; }
 .setcard code { display: inline-block; color: var(--ink); max-width: 100%; }
+/* Consequential actions: magenta left accent so regenerations read as risky. */
+.setcard.consequential { border-left: 3px solid var(--magenta); }
+.setcard.consequential h2 { color: var(--magenta); }
+/* Typed-confirm input: subtle glow when focused to signal the gravity. */
+.setcard.consequential input[name="confirm"]:focus {
+  border-color: var(--magenta); box-shadow: var(--glow-accent); }
+/* Done notice inside a settings card keeps its own padding. */
+.settings-wrap > .notice-ok { margin: 16px 0 0; }
 /* A QR must sit on white to scan — the one white block that is not a flag. */
 .qr { background: #fff; padding: 12px; width: 200px; margin: 12px 0; }
 .qr svg { display: block; width: 100%; height: auto; }
@@ -451,6 +464,14 @@ a.edit:hover { border-color: var(--ink-2); }
   .pick label { padding: 10px 14px; width: 100%; }
 }
 
+/* Settings cards: the QR block must not overflow at 375px. */
+@media (max-width: 420px) {
+  .setcard { padding: 14px; }
+  .setcard code { font-size: 12px; padding: 4px 6px; }
+  .qr { width: 100%; max-width: 200px; }
+  .setcard form p { display: flex; flex-direction: column; gap: 8px; }
+  .setcard form p input[type="text"] { width: 100%; }
+}
 /* --- Reduced motion: kill every transition & animation --- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
