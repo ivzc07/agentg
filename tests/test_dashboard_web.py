@@ -195,6 +195,41 @@ async def test_the_language_toggle_rejects_a_control_char_next(env, next_path):
     assert response.headers["Location"] == "/"
 
 
+# --- /api/login/{token} peek (issue #153) ---
+
+
+async def test_api_login_peek_valid_token(env):
+    """A valid unspent token returns {valid: true} without spending it."""
+    raw = await env.store.create_login_token(env.member.id, env.gym.id)
+
+    response = await env.client.get(f"/api/login/{raw}")
+
+    assert response.status == 200
+    assert response.content_type == "application/json"
+    data = json.loads(await response.text())
+    assert data["valid"] is True
+
+    # Token is still redeemable (peek didn't spend it)
+    assert await env.store.peek_login_token(raw) is not None
+
+
+async def test_api_login_peek_used_token(env):
+    """A used token returns {valid: false}."""
+    raw = await env.store.create_login_token(env.member.id, env.gym.id)
+    await env.store.redeem_login_token(raw)
+
+    response = await env.client.get(f"/api/login/{raw}")
+    data = json.loads(await response.text())
+    assert data["valid"] is False
+
+
+async def test_api_login_peek_unknown_token(env):
+    """An unknown token returns {valid: false}, not a 404."""
+    response = await env.client.get("/api/login/no-such-token")
+    data = json.loads(await response.text())
+    assert data["valid"] is False
+
+
 # --- /api/session JSON contract (issue #155) ---
 
 
@@ -872,3 +907,48 @@ async def test_spa_fallback_static_assets_still_served(spa_env):
     assert response.status == 200
     text = await response.text()
     assert "stub" in text
+
+
+# --- SPA login shell (issue #153) ---
+
+
+async def test_spa_login_shell_serves_without_auth(spa_env):
+    """GET /dashboard/login/:token serves the SPA shell without requiring auth."""
+    response = await spa_env.client.get("/dashboard/login/test-token-42")
+
+    assert response.status == 200
+    text = await response.text()
+    assert "window.__I18N__" in text
+    assert 'id="root"' in text
+
+
+async def test_spa_login_shell_injects_default_language(spa_env):
+    """The login shell injects i18n with the no-signal default (Spanish)."""
+    response = await spa_env.client.get("/dashboard/login/test-token-42")
+
+    assert response.status == 200
+    text = await response.text()
+    # Spanish is the default — "Ajustes" is in the bootstrap
+    assert "Ajustes" in text
+
+
+async def test_spa_login_shell_respects_language_cookie(spa_env):
+    """The login shell uses the language cookie when set."""
+    response = await spa_env.client.get(
+        "/dashboard/login/test-token-42",
+        cookies={"agentg_dashboard_lang": "en"},
+    )
+
+    assert response.status == 200
+    text = await response.text()
+    # English is set via the cookie
+    assert "Settings" in text
+
+
+async def test_spa_login_shell_no_cookie_set(spa_env):
+    """Unlike the authenticated shell, the login shell does NOT set a
+    session cookie — there is no session to slide."""
+    response = await spa_env.client.get("/dashboard/login/test-token-42")
+
+    assert response.status == 200
+    assert SESSION_COOKIE not in response.cookies
