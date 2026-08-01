@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fetchSession } from "../api/session";
+import { fetchSession, SessionAuthError } from "../api/session";
 
 describe("fetchSession", () => {
   beforeEach(() => {
@@ -17,21 +17,22 @@ describe("fetchSession", () => {
     expect(data).toEqual({ name: "Ana", gym: "Iron Temple" });
   });
 
-  it("throws on a 401 response", async () => {
+  it("throws SessionAuthError on a 401 response", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
       ok: false,
       status: 401,
     } as Response);
 
-    await expect(fetchSession()).rejects.toThrow("/api/session: 401");
+    await expect(fetchSession()).rejects.toBeInstanceOf(SessionAuthError);
   });
 
-  it("throws on a 500 response", async () => {
+  it("throws a generic Error (not SessionAuthError) on a 500 response", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
       ok: false,
       status: 500,
     } as Response);
 
     await expect(fetchSession()).rejects.toThrow("/api/session: 500");
+    await expect(fetchSession()).rejects.not.toBeInstanceOf(SessionAuthError);
   });
 });

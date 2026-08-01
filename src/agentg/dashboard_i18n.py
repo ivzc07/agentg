@@ -79,6 +79,8 @@ STRINGS = {
         "snoozed_tag": "en pausa hasta el {date}",
         "lapsed_tag": "se perdió",
         "no_sessions_yet": "Aún sin sesiones",
+        "roster_error": "No se pudo cargar el roster.",
+        "roster_retry": "Reintentar",
         "trained_today": "entrenó hoy",
         "one_day_away": "1 día sin venir",
         "days_away": "{n} días sin venir",
@@ -249,6 +251,7 @@ STRINGS = {
         ),
         "settings_load_error": "No se pudieron cargar los ajustes.",
         "nav_dashboard": "Dashboard",
+        "save_failed": "No se pudo guardar — intentá de nuevo.",
     },
     "en": {
         "settings": "Settings",
@@ -263,6 +266,8 @@ STRINGS = {
         "snoozed_tag": "paused until {date}",
         "lapsed_tag": "lapsed",
         "no_sessions_yet": "No sessions yet",
+        "roster_error": "Couldn't load the roster.",
+        "roster_retry": "Retry",
         "trained_today": "trained today",
         "one_day_away": "1 day away",
         "days_away": "{n} days away",
@@ -423,6 +428,7 @@ STRINGS = {
         ),
         "settings_load_error": "Could not load settings.",
         "nav_dashboard": "Dashboard",
+        "save_failed": "Could not save — try again.",
     },
 }
 
@@ -479,16 +485,10 @@ def away_text(has_sessions: bool, gap_days: int, lang: str) -> str:
 # bien, mal, canso, no) break the tie the other way.
 
 _ES_WORDS = frozenset(
-    "el la los las de del que un una con por para mi mis su sus se al no "
-    "quiero puedo solo antes después hacer muy más cuando porque entrenar "
-    "dolor pero también tiene estoy lo es son está me duele siento mucho "
-    "bien mal canso".split()
+    ["el", "la", "los", "las", "de", "del", "que", "un", "una", "con", "por", "para", "mi", "mis", "su", "sus", "se", "al", "no", "quiero", "puedo", "solo", "antes", "después", "hacer", "muy", "más", "cuando", "porque", "entrenar", "dolor", "pero", "también", "tiene", "estoy", "lo", "es", "son", "está", "me", "duele", "siento", "mucho", "bien", "mal", "canso"]
 )
 _EN_WORDS = frozenset(
-    "the and to of in is it i me i'm my can want only before with for on at "
-    "not hates will them train pain week but also have has am are was were "
-    "would could should this that these those from after when what who "
-    "help i'll i've i'd im".split()
+    ["the", "and", "to", "of", "in", "is", "it", "i", "me", "i'm", "my", "can", "want", "only", "before", "with", "for", "on", "at", "not", "hates", "will", "them", "train", "pain", "week", "but", "also", "have", "has", "am", "are", "was", "were", "would", "could", "should", "this", "that", "these", "those", "from", "after", "when", "what", "who", "help", "i'll", "i've", "i'd", "im"]
 )
 _ES_ACCENTS = re.compile(r"[áéíóúñ¿¡]")
 _WORDS = re.compile(r"[a-záéíóúñü]+(?:'[a-z]+)?")
