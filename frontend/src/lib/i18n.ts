@@ -41,4 +41,3 @@ export function getDecimalMark(): string {
   // Fallback: period.
   return ".";
 }
-}
