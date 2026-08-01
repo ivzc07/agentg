@@ -74,6 +74,12 @@ async def test_a_coach_sees_both_links_and_exactly_one_qr(env):
     assert "<svg" in invite_section
     assert "<svg" not in coach_section
 
+    # Issue #139: five distinct card blocks — invite+QR, regenerate-invite,
+    # coach-link, regenerate-coach, gym-name — with the regenerate cards
+    # carrying the consequential accent.
+    assert page.count('class="setcard') == 5
+    assert page.count('class="setcard consequential') == 2
+
     # Both regenerates sit behind the typed confirm, and the gym name is
     # editable — nothing else is on the screen: exactly three forms, whose
     # only inputs are the two confirms and the name. (A raw substring check

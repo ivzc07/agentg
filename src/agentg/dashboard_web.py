@@ -241,11 +241,12 @@ def _document(
 
 
 def _page(title: str, body: str, extra: str = "", lang: str = "es") -> str:
-    content = f"""<div class="door">
-<h1>{title}</h1>
-<p>{body}</p>
-{extra}
-</div>"""
+    inner = f"""<h1>{title}</h1>"""
+    if body:
+        inner += f"<p>{body}</p>"
+    if extra:
+        inner += extra
+    content = f"""<div class="door"><div class="card">{inner}</div></div>"""
     return _document(title, lang, content)
 
 
@@ -1460,9 +1461,9 @@ document.querySelectorAll("form[data-confirm]").forEach(function (form) {
 def _settings_page(
     gym: Gym, bot_username: str, lang: str, next_path: str, error: str = "", success: str = ""
 ) -> str:
-    """The whole tenant Settings screen: two invite links and the gym name,
-    nothing else (spec-dashboard §Settings — no new settings). One card per
-    concern."""
+    """The whole tenant Settings screen: two invite links, two regenerations,
+    and the gym name — each a distinct card block (spec-dashboard §Settings,
+    issue #139)."""
     t = STRINGS[lang]
     member_url = _invite_url(bot_username, gym.invite_code)
     coach_url = _invite_url(bot_username, gym.coach_invite_code or "")
@@ -1478,12 +1479,18 @@ def _settings_page(
 <p>{t["invite_blurb"]} <b>{escape(gym.name)}</b>.</p>
 <p><code>{escape(member_url)}</code> {_copy_button(member_url, t)}</p>
 <div class="qr">{_qr_svg(member_url)}</div>
+</section>
+<section class="setcard consequential" id="regenerate-invite">
+<h2>{t["regenerate"]}: {t["invite_section"].lower()}</h2>
 {_regenerate_form("/settings/regenerate-invite", t["invite_warning"], t)}
 </section>
 <section class="setcard" id="coach-link">
 <h2>{t["coach_section"]}</h2>
 <p>{t["coach_blurb"]}</p>
 <p><code>{escape(coach_url)}</code> {_copy_button(coach_url, t)}</p>
+</section>
+<section class="setcard consequential" id="regenerate-coach">
+<h2>{t["regenerate"]}: {t["coach_section"].lower()}</h2>
 {_regenerate_form("/settings/regenerate-coach", t["coach_warning"], t)}
 </section>
 <section class="setcard" id="gym-name">
