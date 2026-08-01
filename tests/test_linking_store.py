@@ -513,3 +513,53 @@ async def test_ensure_schema_adds_default_preset_to_a_legacy_gym(tmp_path):
         columns = {row[1] for row in await conn.execute(text("PRAGMA table_info(gyms)"))}
     assert "default_preset_id" in columns
     await engine.dispose()
+
+
+async def test_ensure_schema_adds_gym_scoped_fk_indexes_to_a_legacy_db(tmp_path):
+    """A database that predates issue #178 gets indexes on members.gym_id
+    and member_channels.member_id / gym_id at startup."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'legacy-fk.db'}")
+    store = LinkingStore(engine)
+    await store.ensure_schema()
+
+    # Drop the FK indexes to simulate a pre-#178 database.
+    async with engine.begin() as conn:
+        for name in ("ix_members_gym_id", "ix_member_channels_member_id",
+                     "ix_member_channels_gym_id"):
+            await conn.execute(text(f"DROP INDEX IF EXISTS {name}"))
+
+    await store.ensure_schema()
+
+    async with engine.begin() as conn:
+        indexes = {
+            row[1]
+            for row in await conn.execute(
+                text("SELECT type, name FROM sqlite_master WHERE type = 'index'")
+            )
+        }
+    for name in ("ix_members_gym_id", "ix_member_channels_member_id",
+                 "ix_member_channels_gym_id"):
+        assert name in indexes, f"{name} should have been created by ensure_schema"
+
+    # Idempotent: a later startup changes nothing.
+    await store.ensure_schema()
+    await engine.dispose()
+
+
+async def test_gym_scoped_fk_indexes_are_present_on_a_fresh_schema(tmp_path):
+    """A brand-new database gets the FK indexes from create_all (model defs)."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'fresh.db'}")
+    store = LinkingStore(engine)
+    await store.ensure_schema()
+
+    async with engine.begin() as conn:
+        indexes = {
+            row[1]
+            for row in await conn.execute(
+                text("SELECT type, name FROM sqlite_master WHERE type = 'index'")
+            )
+        }
+    for name in ("ix_members_gym_id", "ix_member_channels_member_id",
+                 "ix_member_channels_gym_id"):
+        assert name in indexes, f"{name} should be present on a fresh schema"
+    await engine.dispose()

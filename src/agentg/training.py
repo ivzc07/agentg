@@ -445,6 +445,7 @@ class TrainingStore:
             select(Session)
             .where(Session.member_id == member_id, Session.closed_at.is_(None))
             .order_by(Session.started_at.desc())
+            .limit(1)
         )
         if session is None:
             return None
