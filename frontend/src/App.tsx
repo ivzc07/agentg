@@ -5,6 +5,7 @@ import { MotionConfig } from "framer-motion";
 import { fetchSession, SessionAuthError } from "./api/session";
 import { RosterShell } from "./components/RosterShell";
 import { MemberPage } from "./components/MemberPage";
+import { RoutineEditor } from "./components/RoutineEditor";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -61,6 +62,11 @@ export function Dashboard() {
           {/* A member loaded directly (not from the Split rail) — the full
               member screen, without roster chrome around it. */}
           <Route path="members/:memberId" element={<MemberPage />} />
+          {/* The Routine editor, reached from the Member page. */}
+          <Route
+            path="members/:memberId/routine"
+            element={<RoutineEditor />}
+          />
           {/* Unknown deep links: get the coach back to the roster. */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

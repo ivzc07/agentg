@@ -8,6 +8,10 @@ ownership chip (Agent-managed with its consequence line before the first
 save, named Coach-authored after), the fresh version on a refused save,
 and the chat notice the Member gets — their coach, named, plus the new
 plan.
+
+Web-layer tests for the JSON API replacement live in test_routine_api.py
+(issue #151); the server-HTML editor covered here still ships until the
+SPA cutover in #154.
 """
 
 import pytest
@@ -1062,3 +1066,25 @@ async def test_without_the_header_the_save_still_redirects(env):
 
     assert response.status == 302
     assert response.headers["Location"] == f"/members/{member.id}?view=table"
+
+
+# --- Flag-off regression: the member page Edit link must work ---
+
+
+async def test_member_page_edit_link_is_200_with_flag_off(env):
+    """The member page renders an Edit link to the server-HTML Routine
+    editor.  When spa_enabled is False (production today) that link must
+    answer 200 — the SPA cutover is #154's job, not #151's."""
+    member = await env.add_member("Luis")
+    await env.give_routine(member)
+
+    # Fetch the member page and confirm its Edit link.
+    status, body = await env.get("/members/{}".format(member.id))
+    assert status == 200
+    assert 'href="/members/{}/routine'.format(member.id) in body
+
+    # Follow the Edit link.
+    status, _ = await env.get(
+        "/members/{}/routine?view=table".format(member.id)
+    )
+    assert status == 200
