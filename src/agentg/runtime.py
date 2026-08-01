@@ -100,7 +100,10 @@ class AgentRuntime:
         )
 
     async def handle_message(self, msg: IncomingMessage) -> Reply:
-        async with self._locks[(msg.channel, msg.channel_user_id)]:
+        lock = self._locks[(msg.channel, msg.channel_user_id)]
+        await lock.acquire()
+        lock_transferred = False
+        try:
             linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
             reply = await self.linking.handle(msg, linked)
             if reply is not None:
@@ -120,9 +123,18 @@ class AgentRuntime:
             context = self.member_context(linked)
 
             if self.stream_replies:
-                return self._streamed_reply(msg, context, session)
+                # Transfer lock ownership to the stream wrapper.
+                # It releases the lock when the stream is exhausted (or errors
+                # part-way) so that concurrent messages from the same identity
+                # cannot race the session or interleave reply chunks.
+                reply = self._streamed_reply(msg, context, session, _lock=lock)
+                lock_transferred = True
+                return reply
             else:
                 return await self._blocking_reply(msg, context, session)
+        finally:
+            if not lock_transferred:
+                lock.release()
 
     async def _blocking_reply(
         self, msg: IncomingMessage, context: MemberContext, session: SQLAlchemySession
@@ -138,10 +150,19 @@ class AgentRuntime:
         return self._wrap_with_demos(text, context, msg.channel, msg.channel_user_id)
 
     def _streamed_reply(
-        self, msg: IncomingMessage, context: MemberContext, session: SQLAlchemySession
+        self,
+        msg: IncomingMessage,
+        context: MemberContext,
+        session: SQLAlchemySession,
+        _lock: asyncio.Lock | None = None,
     ) -> Reply:
         """Streaming path: returns a Reply whose ``.stream`` async generator
-        yields accumulated text at sentence boundaries as the Agent generates."""
+        yields accumulated text at sentence boundaries as the Agent generates.
+
+        When ``_lock`` is passed (the production path) it is held for the
+        entire life of the stream — released only when the stream is exhausted
+        or errors — so that concurrent messages from the same identity cannot
+        race the session or interleave reply chunks."""
         result = Runner.run_streamed(
             self.agent,
             msg.text,
@@ -149,6 +170,8 @@ class AgentRuntime:
             context=context,
         )
         stream = _stream_text(result)
+        if _lock is not None:
+            stream = _hold_lock(stream, _lock)
         after_send = self._after_send_for_demos(context, msg.channel, msg.channel_user_id)
         return Reply("", stream=stream, after_send=after_send)
 
@@ -220,6 +243,20 @@ def _is_sentence_boundary(text: str, last_sent: str) -> bool:
             continue  # first chunk too short; keep scanning
         return True
     return False
+
+
+async def _hold_lock(
+    inner: AsyncIterator[str], lock: asyncio.Lock,
+) -> AsyncIterator[str]:
+    """Yield every chunk from ``inner``, then release ``lock``.
+
+    If the inner stream raises, the lock is released before the exception
+    propagates — the same guarantee ``async with lock`` would give."""
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        lock.release()
 
 
 async def _stream_text(result: "RunResultStreaming") -> AsyncIterator[str]:

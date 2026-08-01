@@ -87,6 +87,7 @@ async def _deliver_streamed(
     message: Message,
     reply: Reply,
     typing_task: asyncio.Task[None],
+    sender_id: int,
 ) -> None:
     """Stream reply chunks: first yield → new message, later yields → edits.
 
@@ -144,7 +145,7 @@ async def _deliver_streamed(
                         sent = await message.answer(part)
                         sent_messages[i] = sent
     except Exception:
-        logger.exception("streaming delivery failed for sender %s", message.from_user.id)
+        logger.exception("streaming delivery failed for sender %s", sender_id)
         if not sent_messages:
             sent_messages[-1] = await message.answer(ERROR_REPLY)
     finally:
@@ -167,7 +168,7 @@ async def _deliver_streamed(
             await reply.after_send()
         except Exception:
             logger.exception(
-                "post-reply delivery failed for sender %s", message.from_user.id
+                "post-reply delivery failed for sender %s", sender_id
             )
 
 
@@ -207,7 +208,7 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
                 # boundaries.  Sentence-granularity respects Telegram's rate
                 # limits — no per-token edits.
                 await _deliver_streamed(
-                    message, reply, typing_task
+                    message, reply, typing_task, message.from_user.id
                 )
                 # typing_task already cancelled inside _deliver_streamed
                 return

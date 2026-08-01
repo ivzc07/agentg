@@ -575,3 +575,117 @@ async def test_long_streamed_reply_full_text_delivered():
     assert any(overflow in d for d in delivered), (
         f"overflow chunk {overflow!r} not found in answers: {[d[:50] for d in delivered]}"
     )
+
+
+# ── concurrent same-member messages must not interleave ──────────────────
+
+
+async def test_concurrent_same_member_messages_are_serialized(tmp_path):
+    """Two rapid messages from the same Member do not interleave their turns.
+
+    The per-identity lock (``runtime.py:71-73``) must span the entire
+    streaming turn — from ``run_streamed`` through stream consumption —
+    so that a second message from the same identity cannot race the
+    session or interleave reply chunks.
+
+    Revert-proof: without the lock held for the full stream lifetime,
+    ``run_streamed`` for the second message starts before the first
+    stream finishes, and the capture order shows interleaving.
+
+    Uses explicit events to force timing: t1 enters the stream and pauses;
+    t2 tries to start while t1 is paused.  With the lock fix t2 cannot
+    enter until t1 finishes; without it t2 enters immediately.
+    """
+    import agentg.runtime as runtime_module
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'conc.db'}")
+    stores = Stores.from_engine(engine)
+    runtime = AgentRuntime(
+        agent=object(),
+        engine=engine,
+        stores=stores,
+        linking=Linking(stores.linking, unused_phraser),
+        summarizer=None,
+        stream_replies=True,
+    )
+    await runtime.ensure_schema()
+    gym = await stores.linking.create_gym("Iron Temple")
+    await stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    capture: list[str] = []
+    _seq = 0
+
+    # Synchronization: t1 pauses mid-stream, t2 tries to go, then we see.
+    t1_paused = asyncio.Event()
+    t1_continue = asyncio.Event()
+
+    class FakeStreamResult:
+        def __init__(self, label):
+            self._label = label
+
+        async def stream_events(self):
+            from agents.stream_events import RawResponsesStreamEvent
+
+            capture.append(f"enter:{self._label}")
+            text = f"{self._label}. First sentence here. Second sentence."
+            for i, char in enumerate(text):
+                yield RawResponsesStreamEvent(
+                    type="raw_response_event",
+                    data=_text_delta(char, i),
+                )
+                if i == 5 and self._label == "1":
+                    # Pause mid-stream so t2 can try to start.
+                    t1_paused.set()
+                    await t1_continue.wait()
+            capture.append(f"leave:{self._label}")
+
+    def fake_run_streamed(*args, **kwargs):
+        nonlocal _seq
+        _seq += 1
+        return FakeStreamResult(str(_seq))
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(runtime_module.Runner, "run_streamed", fake_run_streamed)
+
+    async def full_turn(text):
+        reply = await runtime.handle_message(
+            IncomingMessage(channel="telegram", channel_user_id="42", text=text)
+        )
+        assert reply.stream is not None
+        async for _ in reply.stream:
+            pass
+        capture.append(f"consumed:{text}")
+
+    t1 = asyncio.create_task(full_turn("first"))
+
+    # Wait for t1 to enter the stream and pause.
+    await t1_paused.wait()
+
+    # Now t1 is mid-stream (paused).  Launch t2.
+    t2 = asyncio.create_task(full_turn("second"))
+
+    # Give t2 a moment to try to enter.
+    await asyncio.sleep(0.05)
+
+    # Check that t2 has NOT entered (blocked by the lock in the fix).
+    # With the fix: enter:2 should NOT be in capture yet.
+    # Without the fix: enter:2 IS in capture (interleaved).
+    has_enter2 = "enter:2" in capture
+
+    # Release t1 so both can finish.
+    t1_continue.set()
+    await asyncio.gather(t1, t2)
+
+    assert not has_enter2, (
+        f"second turn entered before first turn finished: {capture}"
+    )
+
+    # Sanity-check: both turns completed.
+    assert "enter:1" in capture
+    assert "leave:1" in capture
+    assert "enter:2" in capture
+    assert "leave:2" in capture
+    assert "consumed:first" in capture
+    assert "consumed:second" in capture
+
+    await engine.dispose()
