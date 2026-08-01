@@ -76,6 +76,7 @@ from multidict import MultiDictProxy
 
 from agentg.checkin_sweep import Notifier
 from agentg.dashboard_i18n import (
+    DECIMAL_MARK,
     LANG_COOKIE,
     LANG_COOKIE_TTL_SECONDS,
     LANGS,
@@ -2542,6 +2543,140 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
+    # --- /api/members/{id} JSON endpoint (issue #150) ---
+
+    def _serialise_member_page(view: MemberPage) -> dict:
+        """Serialize a ``MemberPage`` to JSON — no domain logic, just
+        shape translation. Dates become ISO strings."""
+        return {
+            "member_id": view.member_id,
+            "name": view.name,
+            "member_since": view.member_since.isoformat(),
+            "weight_unit": view.weight_unit,
+            "session_count": view.session_count,
+            "gap_days": view.gap_days,
+            "has_sessions": view.has_sessions,
+            "last_session_on": view.last_session_on.isoformat() if view.last_session_on else None,
+            "lapsed": view.lapsed,
+            "snoozed_until": view.snoozed_until.isoformat() if view.snoozed_until else None,
+            "routine": [
+                {
+                    "weekday": day.weekday,
+                    "name": day.name,
+                    "exercises": [
+                        {"name": name, "sets": sets, "reps": reps}
+                        for name, sets, reps in day.exercises
+                    ],
+                }
+                for day in view.routine
+            ],
+            "routine_id": view.routine_id,
+            "routine_preset_name": view.routine_preset_name,
+            "coach_authored": view.coach_authored,
+            "routine_author": view.routine_author,
+            "sessions": [
+                {
+                    "on": session.on.isoformat(),
+                    "sets": [
+                        {"exercise": name, "weight": weight, "reps": reps, "note": note}
+                        for name, weight, reps, note in session.sets
+                    ],
+                }
+                for session in view.sessions
+            ],
+            "page": view.page,
+            "pages": view.pages,
+            "weights": [
+                {
+                    "exercise": w.exercise,
+                    "weight": w.weight,
+                    "reps": w.reps,
+                    "on": w.on.isoformat(),
+                }
+                for w in view.weights
+            ],
+            "notes": [
+                {
+                    "kind": n.kind,
+                    "text": n.text,
+                    "on": n.on.isoformat(),
+                    "retired_on": n.retired_on.isoformat() if n.retired_on else None,
+                }
+                for n in view.notes
+            ],
+            "retired_notes": [
+                {
+                    "kind": n.kind,
+                    "text": n.text,
+                    "on": n.on.isoformat(),
+                    "retired_on": n.retired_on.isoformat() if n.retired_on else None,
+                }
+                for n in view.retired_notes
+            ],
+            "safety_flags": [
+                {
+                    "note_id": f.note_id,
+                    "text": f.text,
+                    "on": f.on.isoformat(),
+                    "status": f.status,
+                    "acknowledged_on": f.acknowledged_on.isoformat() if f.acknowledged_on else None,
+                    "acknowledged_by": f.acknowledged_by,
+                }
+                for f in view.safety_flags
+            ],
+        }
+
+    async def api_member(request: web.Request) -> web.Response:
+        """``GET /api/members/{id}`` — cookie-auth via ``require_coach``;
+        returns the full Member page as JSON. Unauthenticated answers 401;
+        unknown/ghost/coach answers 404. No domain logic moves into the
+        web layer — this endpoint serializes what the store already computes."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        _, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+            if not 0 < member_id < 2**63:
+                return web.json_response({"error": "not found"}, status=404)
+        except (ValueError, OverflowError):
+            return web.json_response({"error": "not found"}, status=404)
+        try:
+            page = int(request.query.get("page", "1"))
+        except ValueError:
+            page = 1
+        view = await store.member_page(gym.id, member_id, page=page)
+        if view is None:
+            return web.json_response({"error": "not found"}, status=404)
+        body = _serialise_member_page(view)
+        response = web.json_response(body)
+        set_session(response, coach[0].id, gym.id)  # sliding 90-day refresh
+        return response
+
+    # --- /api/members/{id}/flags/{note_id}/tick-off JSON endpoint (issue #150) ---
+
+    async def api_tick_off_flag(request: web.Request) -> web.Response:
+        """``POST /api/members/{id}/flags/{note_id}/tick-off`` —
+        acknowledge a safety flag via the JSON API. Same store call as the
+        server-HTML path; returns JSON confirming the acknowledgement."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+            note_id = int(request.match_info["note_id"])
+            if not (0 < member_id < 2**63 and 0 < note_id < 2**63):
+                return web.json_response({"error": "not found"}, status=404)
+        except (ValueError, OverflowError):
+            return web.json_response({"error": "not found"}, status=404)
+        note = await store.acknowledge_flag(gym.id, member_id, note_id, member.id)
+        if note is None:
+            return web.json_response({"error": "not found"}, status=404)
+        response = web.json_response({"note_id": note.id, "acknowledged": True})
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
     # --- /api/seed dev/demo data endpoint (issue #149) ---
 
     # --- SPA shell and static assets (issue #155, ADR 0004) ---
@@ -2573,7 +2708,11 @@ def build_app(
         html = index_path.read_text(encoding="utf-8")
         # Inject window.__I18N__ before the first script tag so the React
         # app can read it synchronously on mount.
-        i18n_json = json.dumps(t, ensure_ascii=False)
+        i18n_payload: dict = dict(t)
+        i18n_payload["_months"] = list(MONTHS[lang])
+        i18n_payload["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
+        i18n_payload["_decimal_mark"] = DECIMAL_MARK[lang]
+        i18n_json = json.dumps(i18n_payload, ensure_ascii=False)
         # Escape <, U+2028, and U+2029 so no string value can close the
         # <script> tag early or inject a line separator (ADR 0004 §i18n 7a).
         safe_json = (
@@ -2641,9 +2780,15 @@ def build_app(
         # (issue #151).
         app.router.add_get("/api/members/{member_id}/routine", api_member_routine_get)
         app.router.add_put("/api/members/{member_id}/routine", api_member_routine_put)
+        # /api/members/{id} and tick-off are the SPA's member-page JSON
+        # endpoints (issue #150).
+        app.router.add_get("/api/members/{member_id}", api_member)
+        app.router.add_post(
+            "/api/members/{member_id}/flags/{note_id}/tick-off", api_tick_off_flag
+        )
         if not (resolved_dist / "assets").is_dir():
             logger.warning(
-                "SPA enabled but %s missing — serve /dashboard with a 503; "
+                "SPA enabled but %s missing — not serving /dashboard; "
                 "run `npm run build` in frontend/",
                 resolved_dist / "assets",
             )

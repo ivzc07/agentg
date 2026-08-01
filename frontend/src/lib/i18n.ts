@@ -17,3 +17,28 @@ export function getWeekdays(): string[] {
   // Fallback: English.
   return ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 }
+
+/** The twelve month abbreviations for the active language. */
+export function getMonths(): string[] {
+  const raw = getI18N()["_months"];
+  if (Array.isArray(raw)) return raw as string[];
+  // Fallback: Spanish (the product's no-signal default).
+  return ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+}
+
+/** The seven weekday initials (Mon first) for the active language. */
+export function getWeekdayInitials(): string[] {
+  const raw = getI18N()["_weekday_initials"];
+  if (Array.isArray(raw)) return raw as string[];
+  // Fallback: English.
+  return ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+}
+
+/** The decimal mark for the active language (e.g. "." for en, "," for es). */
+export function getDecimalMark(): string {
+  const raw = getI18N()["_decimal_mark"];
+  if (typeof raw === "string") return raw;
+  // Fallback: period.
+  return ".";
+}
+}
