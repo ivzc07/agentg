@@ -1,6 +1,5 @@
 import { useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { useT } from "../hooks/useT";
 
 /** Validate a login token via the peek endpoint. */
 async function peekToken(token: string): Promise<boolean> {
@@ -24,7 +23,6 @@ async function peekToken(token: string): Promise<boolean> {
  * session cookie.
  */
 export function LoginPage() {
-  const t = useT();
   const { token = "" } = useParams<{ token: string }>();
 
   const { data: valid, isLoading } = useQuery({
@@ -48,7 +46,7 @@ export function LoginPage() {
       <div className="flex items-center justify-center min-h-screen bg-bg">
         <div className="door max-w-md mx-auto px-gut text-center">
           <div className="card bg-elevation-1 border border-elevation-1-stroke rounded-sm p-8 space-y-4">
-            <h1 className="text-[20px] font-semibold">{t("done_saved") ? t("done_saved").replace("Guardado.", "Este enlace ya no sirve") : "Este enlace ya no sirve"}</h1>
+            <h1 className="text-[20px] font-semibold">Este enlace ya no sirve</h1>
             <p className="text-[14px] text-ink-2">
               Los enlaces al dashboard caducan y solo se pueden usar una vez.
               Envía <b>/dashboard</b> a tu bot en Telegram para recibir uno

@@ -198,11 +198,11 @@ async def test_the_language_toggle_rejects_a_control_char_next(env, next_path):
 # --- /api/login/{token} peek (issue #153) ---
 
 
-async def test_api_login_peek_valid_token(env):
+async def test_api_login_peek_valid_token(spa_env):
     """A valid unspent token returns {valid: true} without spending it."""
-    raw = await env.store.create_login_token(env.member.id, env.gym.id)
+    raw = await spa_env.store.create_login_token(spa_env.member.id, spa_env.gym.id)
 
-    response = await env.client.get(f"/api/login/{raw}")
+    response = await spa_env.client.get(f"/api/login/{raw}")
 
     assert response.status == 200
     assert response.content_type == "application/json"
@@ -210,22 +210,22 @@ async def test_api_login_peek_valid_token(env):
     assert data["valid"] is True
 
     # Token is still redeemable (peek didn't spend it)
-    assert await env.store.peek_login_token(raw) is not None
+    assert await spa_env.store.peek_login_token(raw) is not None
 
 
-async def test_api_login_peek_used_token(env):
+async def test_api_login_peek_used_token(spa_env):
     """A used token returns {valid: false}."""
-    raw = await env.store.create_login_token(env.member.id, env.gym.id)
-    await env.store.redeem_login_token(raw)
+    raw = await spa_env.store.create_login_token(spa_env.member.id, spa_env.gym.id)
+    await spa_env.store.redeem_login_token(raw)
 
-    response = await env.client.get(f"/api/login/{raw}")
+    response = await spa_env.client.get(f"/api/login/{raw}")
     data = json.loads(await response.text())
     assert data["valid"] is False
 
 
-async def test_api_login_peek_unknown_token(env):
+async def test_api_login_peek_unknown_token(spa_env):
     """An unknown token returns {valid: false}, not a 404."""
-    response = await env.client.get("/api/login/no-such-token")
+    response = await spa_env.client.get("/api/login/no-such-token")
     data = json.loads(await response.text())
     assert data["valid"] is False
 
@@ -513,6 +513,10 @@ async def test_flag_off_dashboard_unaffected(env):
     # /api/seed is removed from the HTTP surface entirely — 404 in all configs.
     seed = await env.client.post("/api/seed", cookies={SESSION_COOKIE: cookie})
     assert seed.status == 404
+
+    # /api/login/{token} peek is flag-gated — 404 when the flag is off (issue #153, review).
+    peek = await env.client.get("/api/login/no-such-token")
+    assert peek.status == 404
 
     # SPA shell route is not registered.
     response = await env.client.get(SPA_SHELL_ROUTE)

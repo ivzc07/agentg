@@ -100,7 +100,7 @@ export function SettingsPage() {
   if (error || !data) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[200px] text-coral gap-4 px-gut">
-        <p>{t("no_sessions_yet") /* fallback: couldn't load settings */}</p>
+        <p>{t("settings_load_error")}</p>
       </div>
     );
   }
@@ -138,17 +138,17 @@ export function SettingsPage() {
 
         {/* Success toasts */}
         {inviteRegenerated && (
-          <p className="text-[14px] text-[#4ade80] bg-[#4ade80]/10 border border-[#4ade80]/30 px-4 py-2 rounded-sm">
+          <p className="text-[14px] text-success bg-success/10 border border-success/30 px-4 py-2 rounded-sm">
             {t("done_link_regenerated")}
           </p>
         )}
         {coachRegenerated && (
-          <p className="text-[14px] text-[#4ade80] bg-[#4ade80]/10 border border-[#4ade80]/30 px-4 py-2 rounded-sm">
+          <p className="text-[14px] text-success bg-success/10 border border-success/30 px-4 py-2 rounded-sm">
             {t("done_link_regenerated")}
           </p>
         )}
         {gymNameSaved && (
-          <p className="text-[14px] text-[#4ade80] bg-[#4ade80]/10 border border-[#4ade80]/30 px-4 py-2 rounded-sm">
+          <p className="text-[14px] text-success bg-success/10 border border-success/30 px-4 py-2 rounded-sm">
             {t("done_saved")}
           </p>
         )}
@@ -194,7 +194,7 @@ export function SettingsPage() {
               aria-label={t("copy")}
             >
               {copiedKey === "invite" ? (
-                <Check className="w-3.5 h-3.5 text-[#4ade80]" />
+                <Check className="w-3.5 h-3.5 text-success" />
               ) : (
                 <Copy className="w-3.5 h-3.5" />
               )}
@@ -249,7 +249,7 @@ export function SettingsPage() {
                 className="flex items-center gap-1.5 px-4 py-2 bg-magenta text-bg font-semibold text-[14px] rounded-sm hover:bg-magenta/90 disabled:opacity-40 disabled:cursor-default transition-colors duration-fast"
               >
                 {regenerateInviteMutation.isPending ? (
-                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <RefreshCw className="w-4 h-4 motion-safe:animate-spin" />
                 ) : null}
                 {t("regenerate")}
               </button>
@@ -278,7 +278,7 @@ export function SettingsPage() {
               aria-label={t("copy")}
             >
               {copiedKey === "coach" ? (
-                <Check className="w-3.5 h-3.5 text-[#4ade80]" />
+                <Check className="w-3.5 h-3.5 text-success" />
               ) : (
                 <Copy className="w-3.5 h-3.5" />
               )}
@@ -327,7 +327,7 @@ export function SettingsPage() {
                 className="flex items-center gap-1.5 px-4 py-2 bg-magenta text-bg font-semibold text-[14px] rounded-sm hover:bg-magenta/90 disabled:opacity-40 disabled:cursor-default transition-colors duration-fast"
               >
                 {regenerateCoachMutation.isPending ? (
-                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <RefreshCw className="w-4 h-4 motion-safe:animate-spin" />
                 ) : null}
                 {t("regenerate")}
               </button>

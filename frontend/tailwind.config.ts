@@ -46,6 +46,11 @@ export default {
           DEFAULT: "#8b7cf6",
           tint: "#201e33",
         },
+        // Success (positive confirmation, e.g. copy / save / regenerate)
+        success: {
+          DEFAULT: "#4ade80",
+          tint: "#0a1c10",
+        },
         // Ink
         ink: {
           DEFAULT: "#fff",

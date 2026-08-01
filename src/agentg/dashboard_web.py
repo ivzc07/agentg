@@ -2316,19 +2316,17 @@ def build_app(
         if coach is None:
             return web.json_response({"error": "unauthorized"}, status=401)
         member, gym = coach
-        # Re-fetch the gym row so the response reflects the latest state
-        # (invite codes may have been regenerated mid-session by another Coach).
-        async with store._sessions() as db:
-            from agentg.models import Gym as GymModel
-            gym_fresh = await db.get(GymModel, gym.id)
-        invite_url = _invite_url(bot_username, gym_fresh.invite_code)
-        coach_url = _invite_url(bot_username, gym_fresh.coach_invite_code or "")
+        # require_coach → coach_identity already SELECTs Member+Gym in the
+        # same request, so the Gym row here is fresh — no stale read (the
+        # re-fetch was redundant).  Serialize what the store computed.
+        invite_url = _invite_url(bot_username, gym.invite_code)
+        coach_url = _invite_url(bot_username, gym.coach_invite_code or "")
         response = web.json_response({
-            "gym_name": gym_fresh.name,
-            "invite_code": gym_fresh.invite_code,
+            "gym_name": gym.name,
+            "invite_code": gym.invite_code,
             "invite_url": invite_url,
             "qr_svg": _qr_svg(invite_url),
-            "coach_invite_code": gym_fresh.coach_invite_code,
+            "coach_invite_code": gym.coach_invite_code,
             "coach_invite_url": coach_url,
             "bot_username": bot_username,
         })
@@ -2573,9 +2571,12 @@ def build_app(
     app.router.add_get("/lang/{lang}", set_language)
     app.router.add_get("/login/{token}", login_form)
     app.router.add_post("/login/{token}", login_redeem)
-    app.router.add_get("/api/login/{token}", api_login_peek)
     app.router.add_static("/static/", STATIC_DIR)
     if spa_enabled:
+        # /api/login/{token} peek is SPA-only — serves the interstitial's
+        # token validation without spending the token.  Flag-gated so the
+        # flag-off rollback contract holds.
+        app.router.add_get("/api/login/{token}", api_login_peek)
         # /api/roster is the SPA's JSON endpoint — it has no server-HTML
         # consumer, so flag-gating it keeps the prod surface minimal.
         app.router.add_get("/api/roster", api_roster)

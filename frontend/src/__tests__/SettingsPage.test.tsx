@@ -33,6 +33,7 @@ const MOCK_I18N: Record<string, string> = {
   settings: "Ajustes",
   nav_sections: "Secciones",
   presets: "Presets",
+  settings_load_error: "Could not load settings.",
 };
 
 const MOCK_SETTINGS = {
@@ -183,9 +184,9 @@ describe("SettingsPage", () => {
 
     renderWithProviders(<SettingsPage />);
 
-    // Error state shows fallback text
+    // Error state shows the real copy, not a roster empty-state string
     await waitFor(() => {
-      expect(screen.getByText(/no_sessions_yet/)).toBeDefined();
+      expect(screen.getByText("Could not load settings.")).toBeDefined();
     });
   });
 });
