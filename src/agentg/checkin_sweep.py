@@ -79,28 +79,31 @@ async def run_sweep(
     """Run one pass. Returns how many proactive messages were sent."""
     sent = 0
     for row in await checkin_store.sweep_rows():
-        now_local = _gym_now(row, now_utc)
-        today = now_local.date()
-
-        # Clear an expired snooze so state reflects reality going forward.
-        if row.state == "snoozed" and row.snoozed_until is not None and row.snoozed_until <= today:
-            await checkin_store.wake_from_snooze(row.member_id)
-
-        data = await _build_data(row, now_local, training, routines)
-        decision = decide_checkin(now_local, data)
-        if decision.action == "none" or decision.message is None:
-            continue
         try:
-            await notifier.send(row.channel, row.channel_user_id, decision.message)
+            now_local = _gym_now(row, now_utc)
+            today = now_local.date()
+
+            # Clear an expired snooze so state reflects reality going forward.
+            if row.state == "snoozed" and row.snoozed_until is not None and row.snoozed_until <= today:
+                await checkin_store.wake_from_snooze(row.member_id)
+
+            data = await _build_data(row, now_local, training, routines)
+            decision = decide_checkin(now_local, data)
+            if decision.action == "none" or decision.message is None:
+                continue
+            try:
+                await notifier.send(row.channel, row.channel_user_id, decision.message)
+            except Exception:
+                logger.exception("failed to send check-in to member %s", row.member_id)
+                continue
+            sent += 1
+            # Best-effort: a crash between the send and the record could re-nudge
+            # next day. The frequency cap bounds the blast radius (never worse than
+            # one extra nudge), so no idempotency key is warranted at this scale.
+            if decision.action == "winddown":
+                await checkin_store.lapse(row.member_id)
+            else:
+                await checkin_store.record_nudge(row.member_id, today)
         except Exception:
-            logger.exception("failed to send check-in to member %s", row.member_id)
-            continue
-        sent += 1
-        # Best-effort: a crash between the send and the record could re-nudge
-        # next day. The frequency cap bounds the blast radius (never worse than
-        # one extra nudge), so no idempotency key is warranted at this scale.
-        if decision.action == "winddown":
-            await checkin_store.lapse(row.member_id)
-        else:
-            await checkin_store.record_nudge(row.member_id, today)
+            logger.exception("failed to process check-in for member %s", row.member_id)
     return sent
