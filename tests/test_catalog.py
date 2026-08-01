@@ -117,3 +117,22 @@ async def test_find_or_create_resolves_by_alias(catalog_db):
     async with async_sessionmaker(catalog_db)() as db:
         found = await find_or_create_exercise(db, "dl")
         assert found.name == "deadlift"
+
+
+async def test_percent_wildcard_input_does_not_match(catalog_db):
+    """LIKE wildcard '%' in user input must not match all exercises."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    async with async_sessionmaker(catalog_db)() as db:
+        found = await find_exercise(db, "%")
+        assert found is None
+
+
+async def test_underscore_wildcard_input_does_not_match(catalog_db):
+    """LIKE wildcard '_' in user input must not match via alias substring."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    async with async_sessionmaker(catalog_db)() as db:
+        # 'd_' should not match 'dl' (deadlift alias)
+        found = await find_exercise(db, "d_")
+        assert found is None

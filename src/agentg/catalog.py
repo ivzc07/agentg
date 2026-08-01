@@ -27,7 +27,7 @@ async def find_exercise(db: AsyncSession, norm: str) -> Exercise | None:
         select(Exercise).where(
             or_(
                 Exercise.name == norm,
-                func.concat(',', Exercise.aliases, ',').contains(',' + norm + ','),
+                func.concat(',', Exercise.aliases, ',').contains(',' + norm + ',', autoescape=True),
             )
         )
     )
