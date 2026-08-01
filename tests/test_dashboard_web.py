@@ -17,6 +17,8 @@ from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
+from agentg.models import Routine
+from agentg.routines import ExerciseSpec, WorkoutSpec
 from conftest import FakeClock
 
 SECRET = "test-secret"
@@ -308,10 +310,17 @@ async def test_spa_shell_trailing_slash_serves_authenticated(spa_env):
 
 
 async def test_spa_index_html_not_served_unauthenticated(spa_env):
-    """``/dashboard/index.html`` must not be fetchable without a cookie — the
-    static handler must be scoped to /dashboard/assets/, not the whole dist."""
+    """``/dashboard/index.html`` must not hand out the built bundle without a
+    cookie: the static handler is scoped to /dashboard/assets/, so the path
+    falls through to the deep-link catch-all (issue #149) and an anonymous
+    caller gets the same bounce page every other dashboard URL gives them."""
     response = await spa_env.client.get("/dashboard/index.html")
-    assert response.status == 404
+
+    assert response.status == 200
+    text = await response.text()
+    # Not the bundle off disk, and no bootstrap payload for an anonymous caller.
+    assert 'id="root"' not in text
+    assert "window.__I18N__" not in text
 
 
 async def test_spa_shell_injects_i18n_strings(spa_env):
@@ -445,18 +454,30 @@ async def test_spa_enabled_no_dist_builds_app(tmp_path, monkeypatch):
 
 
 async def test_flag_off_dashboard_unaffected(env):
-    """With the spa flag off (default), the existing dashboard is unchanged
-    and the SPA routes are not registered."""
+    """With the spa flag off (default), the existing dashboard is unchanged.
+    The SPA routes (/dashboard*, /api/roster, /api/seed) must not be reachable
+    so that the rollback guarantee holds."""
     cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
 
-    # The classic dashboard still renders.
+    # The server-HTML dashboard at / is served, not the SPA shell.
     response = await env.client.get("/", cookies={SESSION_COOKIE: cookie})
-
     assert response.status == 200
     text = await response.text()
     assert "Iron Temple" in text
     assert "window.__I18N__" not in text
     assert 'id="root"' not in text
+
+    # /dashboard is flag-gated — 404 when the flag is off.
+    dash = await env.client.get("/dashboard", cookies={SESSION_COOKIE: cookie})
+    assert dash.status == 404
+
+    # /api/roster is flag-gated — 404 when the flag is off.
+    roster = await env.client.get("/api/roster", cookies={SESSION_COOKIE: cookie})
+    assert roster.status == 404
+
+    # /api/seed is removed from the HTTP surface entirely — 404 in all configs.
+    seed = await env.client.post("/api/seed", cookies={SESSION_COOKIE: cookie})
+    assert seed.status == 404
 
     # SPA shell route is not registered.
     response = await env.client.get(SPA_SHELL_ROUTE)
@@ -601,3 +622,347 @@ async def test_spa_dist_override_packaged_layout(tmp_path, monkeypatch):
             assert "window.__I18N__" in text
     finally:
         await engine.dispose()
+
+
+# --- /api/roster JSON contract (issue #149) ---
+# The roster JSON endpoint is flag-gated behind spa_enabled, so all
+# tests in this section use ``spa_env`` (the env fixture with the flag on).
+
+
+async def test_api_roster_returns_json_shape(spa_env):
+    """An authenticated coach's GET /api/roster returns the expected JSON shape."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    assert response.content_type == "application/json"
+    data = json.loads(await response.text())
+    assert "active" in data
+    assert "lapsed" in data
+    assert "counts" in data
+    assert "sortedBy" in data
+    assert data["sortedBy"] == "gap_days"
+    assert isinstance(data["active"], list)
+    assert isinstance(data["lapsed"], list)
+    assert "active" in data["counts"]
+    assert "lapsed" in data["counts"]
+
+
+async def test_api_roster_rejects_unauthenticated(spa_env):
+    """Without a valid session cookie /api/roster answers 401."""
+    response = await spa_env.client.get("/api/roster")
+    assert response.status == 401
+
+
+async def test_api_roster_rejects_forged_cookie(spa_env):
+    """A forged session cookie does not open /api/roster."""
+    forged = sign_session(spa_env.member.id, spa_env.gym.id, "wrong-secret", spa_env.clock())
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: forged}
+    )
+    assert response.status == 401
+
+
+async def test_api_roster_active_rows_have_required_fields(spa_env):
+    """Every active roster row carries the fields the React screen needs."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    # Add a non-coach member so the roster has at least one row.
+    _member2 = await spa_env.linking.link_member(spa_env.gym.id, "Ben", "telegram", "99")
+
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    assert len(data["active"]) >= 1
+    row = data["active"][0]
+    required = [
+        "member_id", "name", "gap_days", "has_sessions", "is_new",
+        "snoozed_until", "missed_days", "severity", "has_safety_flag",
+        "attendance",
+    ]
+    for field in required:
+        assert field in row, f"missing field: {field}"
+    # attendance is a list of {on, state} cells
+    assert isinstance(row["attendance"], list)
+    if row["attendance"]:
+        cell = row["attendance"][0]
+        assert "on" in cell
+        assert "state" in cell
+
+
+async def test_api_roster_lapsed_split(spa_env):
+    """Lapsed members appear in the lapsed tail, not the active list."""
+    from agentg.checkin import LAPSED
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    member2 = await spa_env.linking.link_member(spa_env.gym.id, "Ben", "telegram", "99")
+    # Set the member as lapsed.
+    async with spa_env.store._sessions() as db:
+        from agentg.models import Member
+        m = await db.get(Member, member2.id)
+        m.checkin_state = LAPSED
+        await db.commit()
+
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    lapsed_ids = [row["member_id"] for row in data["lapsed"]]
+    assert member2.id in lapsed_ids
+    active_ids = [row["member_id"] for row in data["active"]]
+    assert member2.id not in active_ids
+    assert data["counts"]["lapsed"] == len(data["lapsed"])
+
+
+async def test_api_roster_sorted_by_gap_desc(spa_env):
+    """Active rows are sorted by gap_days descending (largest gap first).
+
+    Seeds members with distinct known last-session dates so the sort order
+    is concretely verifiable — a monotonicity-only assert would not catch
+    an accidentally reversed sort."""
+    from datetime import UTC, datetime, timedelta
+
+    from agentg.models import Session
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    now = datetime.now(UTC)
+
+    # Create two members with sessions at different dates to establish
+    # distinct gap_days.  Zoe last trained 5 days ago, Alex 2 days ago,
+    # so descending sort must put Zoe first (gap=5) then Alex (gap=2).
+    m_zoe = await spa_env.linking.link_member(spa_env.gym.id, "Zoe", "telegram", "100")
+    m_alex = await spa_env.linking.link_member(spa_env.gym.id, "Alex", "telegram", "101")
+
+    async with spa_env.store._sessions() as db:
+        db.add(Session(
+            gym_id=spa_env.gym.id,
+            member_id=m_zoe.id,
+            started_at=now - timedelta(days=5),
+            closed_at=now - timedelta(days=5, hours=-1),
+        ))
+        db.add(Session(
+            gym_id=spa_env.gym.id,
+            member_id=m_alex.id,
+            started_at=now - timedelta(days=2),
+            closed_at=now - timedelta(days=2, hours=-1),
+        ))
+        await db.commit()
+
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    gaps = [row["gap_days"] for row in data["active"]]
+    assert gaps == sorted(gaps, reverse=True), f"not sorted desc: {gaps}"
+    # Concretely: Zoe (gap 5) then Alex (gap 2) in descending order.
+    active_names = [row["name"] for row in data["active"]]
+    zoe_idx = active_names.index("Zoe")
+    alex_idx = active_names.index("Alex")
+    assert zoe_idx < alex_idx, f"Zoe (gap=5) must precede Alex (gap=2), got {active_names}"
+    # When gap ties, alphabetical by name (lowercase) breaks the tie.
+    same_gap_rows = [row for row in data["active"] if row["gap_days"] == gaps[0]]
+    if len(same_gap_rows) > 1:
+        names = [row["name"].lower() for row in same_gap_rows]
+        assert names == sorted(names), f"tie-break failed: {names}"
+
+
+async def test_api_roster_severity_is_null_for_new_members(spa_env):
+    """Members with no active Routine have severity=None (the grey-new rule)."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    member2 = await spa_env.linking.link_member(spa_env.gym.id, "New Kid", "telegram", "102")
+
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    new_row = next((r for r in data["active"] if r["member_id"] == member2.id), None)
+    assert new_row is not None
+    assert new_row["is_new"] is True
+    assert new_row["severity"] is None
+
+
+async def test_api_roster_snoozed_shows_until_date(spa_env):
+    """A snoozed member carries snoozed_until; severity is None while snoozed."""
+    from datetime import date, timedelta
+
+    from agentg.checkin import SNOOZED
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    member2 = await spa_env.linking.link_member(spa_env.gym.id, "Resting", "telegram", "103")
+    future = date.today() + timedelta(days=5)
+    async with spa_env.store._sessions() as db:
+        from agentg.models import Member
+        m = await db.get(Member, member2.id)
+        m.checkin_state = SNOOZED
+        m.snoozed_until = future
+        await db.commit()
+
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    snoozed_row = next((r for r in data["active"] if r["member_id"] == member2.id), None)
+    assert snoozed_row is not None
+    assert snoozed_row["snoozed_until"] == future.isoformat()
+    assert snoozed_row["severity"] is None
+
+
+async def test_api_roster_severity_and_attendance_from_known_history(spa_env):
+    """A member with a back-dated Routine and 3+ missed planned days
+    comes back with severity="red", non-zero missed_days, and a
+    non-empty attendance grid — the actual values the Cards view
+    renders, not just key presence (issue #149, PR review)."""
+    from datetime import UTC, datetime, timedelta
+
+    from agentg.models import Exercise, Session
+    from sqlalchemy import select as sa_select
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    now = spa_env.clock()  # the FakeClock's fixed instant
+    today = now.date()
+
+    member = await spa_env.linking.link_member(spa_env.gym.id, "Zoe", "telegram", "200")
+
+    # Give Zoe a session 8 days ago — so gap is large enough.
+    exercise_names = ["bench press", "deadlift", "squat"]
+    async with spa_env.store._sessions() as db:
+        for name in exercise_names:
+            existing = await db.scalar(
+                sa_select(Exercise).where(Exercise.name == name)
+            )
+            if existing is None:
+                db.add(Exercise(name=name))
+        db.add(Session(
+            gym_id=spa_env.gym.id,
+            member_id=member.id,
+            started_at=now - timedelta(days=8),
+            closed_at=now - timedelta(days=8, hours=-1),
+        ))
+        await db.commit()
+
+    # Create a M/W/F Routine back-dated to 20 days ago so it governs
+    # the window from the anchor (8 days ago) through yesterday.
+    await spa_env.store.save_routine_from_web(
+        spa_env.gym.id, member.id, spa_env.member.id, None,
+        [
+            WorkoutSpec(0, "Push", [ExerciseSpec("bench press", 4, "8-10")]),
+            WorkoutSpec(2, "Pull", [ExerciseSpec("deadlift", 4, "5")]),
+            WorkoutSpec(4, "Legs", [ExerciseSpec("squat", 4, "8-10")]),
+        ],
+    )
+    # Back-date the Routine so its weekdays land in the severity window.
+    async with spa_env.store._sessions() as db:
+        active = await db.scalar(
+            sa_select(Routine).where(
+                Routine.member_id == member.id,
+                Routine.is_active.is_(True),
+            )
+        )
+        active.created_at = datetime.combine(
+            today - timedelta(days=20),
+            datetime.min.time(),
+            tzinfo=UTC,
+        )
+        await db.commit()
+
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    zoe_row = next((r for r in data["active"] if r["member_id"] == member.id), None)
+    assert zoe_row is not None
+
+    # The member has a known history: last session 8 days ago, M/W/F
+    # Routine back-dated to 20 days ago.  With >= 3 missed planned
+    # days, severity must be "red" — the exact value, not just a key.
+    assert zoe_row["severity"] == "red", f"expected red, got {zoe_row['severity']}"
+    assert zoe_row["missed_days"] > 0, "missed_days must be non-zero"
+
+    # The attendance grid must hold actual cells, not an empty list.
+    assert isinstance(zoe_row["attendance"], list)
+    assert len(zoe_row["attendance"]) > 0, "attendance grid must be non-empty"
+    # At least one cell is a miss (planned weekday with no session).
+    assert any(
+        c["state"] == "miss" for c in zoe_row["attendance"]
+    ), "grid must include at least one miss cell"
+    # At least one cell is a hit (the session 8 days ago).
+    assert any(
+        c["state"] == "hit" for c in zoe_row["attendance"]
+    ), "grid must include at least one hit cell"
+
+
+async def test_api_roster_slides_session_cookie(spa_env):
+    """A successful /api/roster call refreshes the 90-day session cookie."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    assert SESSION_COOKIE in response.cookies
+
+
+# --- /api/seed is not an HTTP endpoint (issue #149, review) ---
+
+
+async def test_api_seed_not_an_http_endpoint(spa_env):
+    """/api/seed was removed from the HTTP surface — it returns 404 even
+    with the SPA flag on.  Use ``python -m agentg.scripts.seed_demo`` instead."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    response = await spa_env.client.post(
+        "/api/seed", cookies={SESSION_COOKIE: cookie}
+    )
+    assert response.status == 404
+
+
+# --- SPA fallback for React Router deep links (issue #149) ---
+
+
+async def test_spa_fallback_serves_shell_for_deep_links(spa_env):
+    """GET /dashboard/members/1 serves the SPA shell, not a 404 (issue #149)."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        "/dashboard/members/1", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    text = await response.text()
+    assert "window.__I18N__" in text
+    assert 'id="root"' in text
+
+
+async def test_spa_fallback_requires_auth(spa_env):
+    """The SPA fallback also requires authentication."""
+    response = await spa_env.client.get("/dashboard/members/1")
+    assert response.status == 200
+    text = await response.text()
+    assert BOUNCE_MARKER in text
+
+
+async def test_spa_fallback_static_assets_still_served(spa_env):
+    """The SPA fallback does not shadow static asset routes."""
+    response = await spa_env.client.get("/dashboard/assets/index.js")
+    assert response.status == 200
+    text = await response.text()
+    assert "stub" in text

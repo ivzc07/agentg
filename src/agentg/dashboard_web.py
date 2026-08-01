@@ -2296,6 +2296,52 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
+    # --- /api/roster JSON endpoint (issue #149) ---
+
+    async def api_roster(request: web.Request) -> web.Response:
+        """``GET /api/roster`` — cookie-auth via ``require_coach``; returns
+        the roster as JSON: active rows, lapsed tail, counts, and the sort
+        key. Unauthenticated answers 401.
+
+        Each row carries its attendance grid (4-week day cells) so the
+        Cards view renders with one round-trip. No domain logic moves into
+        the web layer — this endpoint serializes what the store already
+        computes."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        rows, lapsed = await store.roster(gym.id)
+        member_ids = [row.member_id for row in rows] + [row.member_id for row in lapsed]
+        grids = await store.attendance(gym.id, member_ids) if member_ids else {}
+
+        def serialise(row: RosterRow) -> dict:
+            cells = grids.get(row.member_id, [])
+            return {
+                "member_id": row.member_id,
+                "name": row.name,
+                "gap_days": row.gap_days,
+                "has_sessions": row.has_sessions,
+                "is_new": row.is_new,
+                "snoozed_until": row.snoozed_until.isoformat() if row.snoozed_until else None,
+                "missed_days": row.missed_days,
+                "severity": row.severity,
+                "has_safety_flag": row.has_safety_flag,
+                "attendance": [{"on": c.on.isoformat(), "state": c.state} for c in cells],
+            }
+
+        body = {
+            "active": [serialise(row) for row in rows],
+            "lapsed": [serialise(row) for row in lapsed],
+            "counts": {"active": len(rows), "lapsed": len(lapsed)},
+            "sortedBy": "gap_days",
+        }
+        response = web.json_response(body)
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    # --- /api/seed dev/demo data endpoint (issue #149) ---
+
     # --- SPA shell and static assets (issue #155, ADR 0004) ---
 
     resolved_dist = spa_dist or _FRONTEND_DIST
@@ -2345,6 +2391,16 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
+    async def spa_catchall(request: web.Request) -> web.Response:
+        """SPA fallback: serve the shell for any unmatched ``/dashboard/*`` path
+        so React Router deep links resolve on a cold load (issue #149).
+
+        Real bundle files are served by the ``/dashboard/assets/`` static mount
+        registered ahead of this route; everything else is a client-side route,
+        and the shell it gets is the authenticated one.
+        """
+        return await spa_shell(request)
+
     app = web.Application()
     app.router.add_get("/", home)
     # /api/session is registered unconditionally — the JSON session-info
@@ -2371,6 +2427,9 @@ def build_app(
     app.router.add_post("/login/{token}", login_redeem)
     app.router.add_static("/static/", STATIC_DIR)
     if spa_enabled:
+        # /api/roster is the SPA's JSON endpoint — it has no server-HTML
+        # consumer, so flag-gating it keeps the prod surface minimal.
+        app.router.add_get("/api/roster", api_roster)
         if not (resolved_dist / "assets").is_dir():
             logger.warning(
                 "SPA enabled but %s missing — not serving /dashboard; "
@@ -2380,9 +2439,13 @@ def build_app(
         else:
             app.router.add_get(SPA_MOUNT, spa_shell)
             app.router.add_get(f"{SPA_MOUNT}/", spa_shell)
+            # Assets first: the catch-all below would otherwise swallow them.
             app.router.add_static(
                 f"{SPA_MOUNT}/assets/", resolved_dist / "assets"
             )
+            # Every other /dashboard/* path is a React Router deep link, so it
+            # gets the authenticated shell (issue #149).
+            app.router.add_get(f"{SPA_MOUNT}/{{tail:.*}}", spa_catchall)
     return app
 
 

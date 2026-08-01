@@ -15,6 +15,11 @@ const { fetchSession, SessionAuthError } = vi.hoisted(() => ({
 
 vi.mock("../api/session", () => ({ fetchSession, SessionAuthError }));
 
+// The roster screen behind the router does its own fetch; this suite is about
+// Dashboard's session states, so keep the roster empty and predictable.
+const { fetchRoster } = vi.hoisted(() => ({ fetchRoster: vi.fn() }));
+vi.mock("../api/roster", () => ({ fetchRoster }));
+
 // Import Dashboard (the inner component) directly so we control QueryClient.
 import { Dashboard } from "../App";
 
@@ -65,14 +70,69 @@ describe("Dashboard", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
-  it("renders the Shell on a successful fetch", async () => {
+  it("renders the roster screen on a successful fetch", async () => {
     fetchSession.mockResolvedValue({ name: "Ana", gym: "Iron Temple" });
+    fetchRoster.mockResolvedValue({
+      active: [],
+      lapsed: [],
+      counts: { active: 0, lapsed: 0 },
+      sortedBy: "gap_days",
+    });
     window.__I18N__ = { member_eyebrow: "member", settings: "Settings" };
+    // The router mounts with basename="/dashboard", the URL aiohttp serves it at.
+    window.history.pushState({}, "", "/dashboard/");
 
     renderDashboard();
 
+    // The signed-in gym reaches the roster chrome, and none of the failure
+    // branches above are showing.
     expect(await screen.findByText("Iron Temple")).toBeInTheDocument();
-    // "Ana" appears in both the header and main content.
-    expect(screen.getAllByText("Ana").length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText("Not signed in.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Something went wrong loading your session."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("redirects unknown deep links to the roster", async () => {
+    fetchSession.mockResolvedValue({ name: "Ana", gym: "Iron Temple" });
+    fetchRoster.mockResolvedValue({
+      active: [
+        {
+          member_id: 1,
+          name: "Zoe",
+          gap_days: 3,
+          has_sessions: true,
+          is_new: false,
+          snoozed_until: null,
+          missed_days: 2,
+          severity: "amber",
+          has_safety_flag: false,
+          attendance: [],
+        },
+      ],
+      lapsed: [],
+      counts: { active: 1, lapsed: 0 },
+      sortedBy: "gap_days",
+    });
+    window.__I18N__ = {
+      members_count: "Members ({n})",
+      member_eyebrow: "member",
+      settings: "Settings",
+      search_placeholder: "Search by name",
+      nav_views: "Views",
+      nav_sections: "Sections",
+      presets: "Presets",
+      sorted_by_gap: "Sorted by days away",
+      view_table: "Table",
+      view_cards: "Cards",
+      view_split: "Split",
+    };
+    // Unknown deep link — the catch-all must redirect to /.
+    window.history.pushState({}, "", "/dashboard/settings");
+
+    renderDashboard();
+
+    // After redirect, the roster (Iron Temple heading) is visible.
+    expect(await screen.findByText("Iron Temple")).toBeInTheDocument();
   });
 });

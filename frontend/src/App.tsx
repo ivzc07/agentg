@@ -1,7 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { MotionConfig } from "framer-motion";
 import { fetchSession, SessionAuthError } from "./api/session";
-import { Shell } from "./components/Shell";
+import { RosterShell } from "./components/RosterShell";
+import { MemberPage } from "./components/MemberPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -48,7 +51,22 @@ export function Dashboard() {
     );
   }
 
-  return <Shell name={data.name} gym={data.gym} />;
+  return (
+    <MotionConfig reducedMotion="user">
+      <BrowserRouter basename="/dashboard">
+        <Routes>
+          {/* The roster in table, cards, or split view.  Split keeps the
+              rail and renders the member inline, not via a deep link. */}
+          <Route path="/" element={<RosterShell name={data.name} gym={data.gym} />} />
+          {/* A member loaded directly (not from the Split rail) — the full
+              member screen, without roster chrome around it. */}
+          <Route path="members/:memberId" element={<MemberPage />} />
+          {/* Unknown deep links: get the coach back to the roster. */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </BrowserRouter>
+    </MotionConfig>
+  );
 }
 
 export default function App() {
