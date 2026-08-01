@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1536,6 +1537,12 @@ def verify_session(value: str, secret: str, now: datetime) -> tuple[int, int] | 
         return None
 
 
+# The directory where the Vite-built React bundle lives.
+_FRONTEND_DIST = Path(__file__).parent.parent.parent / "frontend" / "dist"
+# The hidden route the SPA shell mounts at (ADR 0004 §Migration 5b).
+SPA_MOUNT = "/dashboard"
+
+
 def build_app(
     store: DashboardStore,
     linking: LinkingStore,
@@ -1545,6 +1552,8 @@ def build_app(
     secure_cookies: bool = True,
     clock: Clock = _utcnow,
     notifier: Notifier | None = None,
+    spa_enabled: bool = False,
+    spa_dist: Path | None = None,
 ) -> web.Application:
     def set_session(response: web.StreamResponse, member_id: int, gym_id: int) -> None:
         response.set_cookie(
@@ -2274,8 +2283,74 @@ def build_app(
         set_session(response, token.member_id, token.gym_id)
         raise response
 
+    # --- /api/session JSON endpoint (issue #155) ---
+
+    async def api_session(request: web.Request) -> web.Response:
+        """``GET /api/session`` — cookie-auth via ``require_coach``; returns
+        the Coach's name and gym as JSON. Unauthenticated answers 401."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        response = web.json_response({"name": member.name, "gym": gym.name})
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    # --- SPA shell and static assets (issue #155, ADR 0004) ---
+
+    resolved_dist = spa_dist or _FRONTEND_DIST
+
+    async def spa_shell(request: web.Request) -> web.Response:
+        """Serve the Vite-built React bundle shell with ``window.__I18N__``
+        bootstrap injected (ADR 0004 §i18n 7a). Only reachable when the
+        ``spa_enabled`` flag is on."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+
+        index_path = resolved_dist / "index.html"
+        if not index_path.exists():
+            return web.Response(
+                text="SPA bundle not built — run `npm run build` in frontend/",
+                status=503,
+                content_type="text/plain",
+            )
+
+        html = index_path.read_text(encoding="utf-8")
+        # Inject window.__I18N__ before the first script tag so the React
+        # app can read it synchronously on mount.
+        i18n_json = json.dumps(t, ensure_ascii=False)
+        # Escape <, U+2028, and U+2029 so no string value can close the
+        # <script> tag early or inject a line separator (ADR 0004 §i18n 7a).
+        safe_json = (
+            i18n_json.replace("<", "\\u003c")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
+        i18n_script = f"<script>window.__I18N__ = {safe_json};</script>"
+        # Insert after <head> (if present) or at the start of <body>.
+        if "</head>" in html:
+            html = html.replace("</head>", f"{i18n_script}\n</head>")
+        elif "<body" in html:
+            body_start = html.index("<body")
+            body_close = html.index(">", body_start) + 1
+            html = html[:body_close] + i18n_script + html[body_close:]
+        else:
+            html = i18n_script + html
+
+        response = web.Response(text=html, content_type="text/html")
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
     app = web.Application()
     app.router.add_get("/", home)
+    # /api/session is registered unconditionally — the JSON session-info
+    # endpoint is tiny and useful for any non-SPA consumer (CLI scripts,
+    # health-check probes) so there is no value in gating it behind the flag.
+    app.router.add_get("/api/session", api_session)
     app.router.add_get("/members/{member_id}", member_page)
     app.router.add_get("/members/{member_id}/routine", routine_editor)
     app.router.add_post("/members/{member_id}/routine", routine_save)
@@ -2295,6 +2370,19 @@ def build_app(
     app.router.add_get("/login/{token}", login_form)
     app.router.add_post("/login/{token}", login_redeem)
     app.router.add_static("/static/", STATIC_DIR)
+    if spa_enabled:
+        if not (resolved_dist / "assets").is_dir():
+            logger.warning(
+                "SPA enabled but %s missing — not serving /dashboard; "
+                "run `npm run build` in frontend/",
+                resolved_dist / "assets",
+            )
+        else:
+            app.router.add_get(SPA_MOUNT, spa_shell)
+            app.router.add_get(f"{SPA_MOUNT}/", spa_shell)
+            app.router.add_static(
+                f"{SPA_MOUNT}/assets/", resolved_dist / "assets"
+            )
     return app
 
 
