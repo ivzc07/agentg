@@ -102,6 +102,12 @@ class AgentRuntime:
                 session=session,
                 context=context,
             )
+            # Issue #166: delete_my_data clears the session during the turn,
+            # but the runner persists this turn's items afterwards — the tool
+            # call and goodbye survive the wipe.  Clear again so nothing
+            # remains.
+            if context.forgotten:
+                await session.clear_session()
             text = str(result.final_output)
             sender = self.demo_sender
             if sender is None or not context.demo_requests:

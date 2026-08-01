@@ -95,6 +95,10 @@ async def test_forget_me_wipes_every_member_row(tmp_path):
         assert await _count(h._engine, MemberNote, member_id=member_id) == 0
         assert await _count(h._engine, Routine, member_id=member_id) == 0
         assert await h.stores.linking.identity_for("telegram", "42") is None
+        # Issue #166: the SDK session must be residue-free — no tool call or
+        # goodbye lingering after the wipe.
+        session = h.runtime.session_for_member(member_id)
+        assert await session.get_items() == []
 
 
 async def test_forget_me_declined_leaves_data_intact(tmp_path):
