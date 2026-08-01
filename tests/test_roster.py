@@ -143,7 +143,7 @@ async def test_the_page_renders_rows_tags_and_the_collapsed_tail(env):
     # Tags and row text.
     assert "nuevo" in text
     assert f"en pausa hasta el {fmt_date(until, 'es')}" in text
-    assert "5 días sin venir" in text
+    assert '<span class="numeral">5</span> días sin venir' in text
     assert "Aún sin sesiones" in text
     # The tail is collapsed by default and labelled with its size.
     assert '<details id="lapsed">' in text

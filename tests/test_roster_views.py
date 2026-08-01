@@ -257,3 +257,77 @@ async def test_the_header_count_is_wired_for_live_filtering(env):
         assert 'id="members-count"' in text
         assert 'data-total="2"' in text
         assert 'data-fmt="{shown} de {total}"' in text
+
+
+# --- fragment-level rendering (issue #135 fix) ---
+
+
+async def test_roster_row_gap_renders_a_numeral_span(env):
+    """The per-row Gap (days away) renders as a large bold numeral, not
+    prose — the ``.row .numeral`` CSS rule applies (issue #135)."""
+    member = await env.add_member("Beto")
+    await env.train(member, days_ago=5)
+    await env.give_routine(member)
+
+    text = await env.page("/?view=table")
+
+    assert '<span class="numeral">5</span>' in text
+    assert 'días sin venir' in text
+
+
+async def test_countbar_renders_a_numeral_span(env):
+    """The countbar count renders as a large bold numeral."""
+    await env.add_member("Luis")
+    await env.add_member("Ana")
+
+    text = await env.page("/?view=table")
+
+    assert '<span class="numeral">2</span>' in text
+    assert 'class="countbar"' in text
+
+
+async def test_gap_numeral_on_cards_view(env):
+    """The per-row Gap numeral appears in the Table (and Split rail), not
+    inside member cards — cards use their own ``.mcard .away`` styling."""
+    member = await env.add_member("Cerca")
+    await env.train(member, days_ago=1)
+    await env.give_routine(member)
+    # Also add a second member so the countbar numeral fires.
+    await env.add_member("Otro")
+
+    text = await env.page("/?view=table")
+
+    # Table rows carry the numeral.
+    assert '<span class="numeral">1</span>' in text
+    assert 'día sin venir' in text
+
+
+async def test_cards_section_chip_spans_exist(env):
+    """Each severity band heading carries a chip-icon span."""
+    red = await env.add_member("Rojo")
+    await env.give_planned_routine(red, weekdays=[0, 1], days_ago=10)
+    amber = await env.add_member("Ambar")
+    await env.give_planned_routine(amber, weekdays=[6], days_ago=10)
+
+    text = await env.page("/?view=cards")
+
+    assert 'id="band-hot"' in text
+    assert 'id="band-warm"' in text
+    assert 'id="band-cool"' in text
+    # Every band heading has a chip-icon.
+    assert text.count('class="chip-icon"') >= 3
+
+
+async def test_elevation_classes_on_rows_and_cards(env):
+    """Rows and cards carry elevation-1 background/shadow/stroke classes
+    from the CSS token scale."""
+    await env.add_member("Luis")
+    await env.give_routine(await env.add_member("Ana"))
+
+    table = await env.page("/?view=table")
+    cards = await env.page("/?view=cards")
+
+    # Table rows use elevation-1 styling.
+    assert 'class="row"' in table
+    # Cards use mcard with elevation-1 styling.
+    assert 'class="mcard"' in cards
