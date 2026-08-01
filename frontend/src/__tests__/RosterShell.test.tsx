@@ -2,8 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { RosterShell } from "../components/RosterShell";
+import { MemberPage } from "../components/MemberPage";
 import * as rosterApi from "../api/roster";
 import type { RosterResponse } from "../types/roster";
 
@@ -48,6 +49,9 @@ vi.mock("../hooks/useT", () => ({
       sr_missed: "missed {date}",
       // Split
       pick_a_member: "Pick a member",
+      // Member page
+      member_eyebrow: "Member",
+      back_to_roster: "Back to roster",
     };
     return strings[key] ?? key;
   },
@@ -75,7 +79,7 @@ const makeResponse = (overrides: Partial<RosterResponse> = {}): RosterResponse =
   ...overrides,
 });
 
-function renderShell(response: RosterResponse) {
+function renderShell(response: RosterResponse, initialEntries: string[] = ["/"]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -84,8 +88,13 @@ function renderShell(response: RosterResponse) {
 
   return render(
     <QueryClientProvider client={queryClient}>
-      <MemoryRouter>
-        <RosterShell name="Coach" gym="Iron Temple" />
+      <MemoryRouter initialEntries={initialEntries}>
+        <Routes>
+          <Route element={<RosterShell name="Coach" gym="Iron Temple" />}>
+            <Route index />
+            <Route path="members/:memberId" element={<MemberPage />} />
+          </Route>
+        </Routes>
       </MemoryRouter>
     </QueryClientProvider>
   );
@@ -218,6 +227,32 @@ describe("RosterShell", () => {
 
     await waitFor(() => {
       expect(screen.getByText("Pick a member")).toBeInTheDocument();
+    });
+  });
+
+  it("renders member in split pane when a rail member is clicked", async () => {
+    const user = userEvent.setup();
+    renderShell(
+      makeResponse({
+        active: [makeMember(1, { name: "Alice", attendance: [] })],
+        counts: { active: 1, lapsed: 0 },
+      }),
+      ["/members/1"],
+    );
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Split")).toBeInTheDocument();
+    });
+
+    // Switch to split view.
+    await user.click(screen.getByLabelText("Split"));
+
+    await waitFor(() => {
+      // The member name appears both in the rail link and in the pane heading.
+      const aliceNodes = screen.getAllByText("Alice");
+      expect(aliceNodes.length).toBeGreaterThanOrEqual(2);
+      // The MemberPage back link is present, confirming the pane rendered.
+      expect(screen.getByText(/←/)).toBeInTheDocument();
     });
   });
 

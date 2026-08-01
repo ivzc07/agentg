@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useParams, Outlet } from "react-router-dom";
 import { Search, LayoutList, LayoutGrid, Columns2, Users } from "lucide-react";
 import { fetchRoster } from "../api/roster";
 import type { RosterView } from "../types/roster";
@@ -8,6 +9,7 @@ import { useT } from "../hooks/useT";
 import { RosterTable } from "./RosterTable";
 import { RosterCards } from "./RosterCards";
 import { RosterSplit } from "./RosterSplit";
+import type { RosterOutletContext } from "./MemberPage";
 
 interface RosterShellProps {
   /** The coach's name from /api/session. */
@@ -27,6 +29,8 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
   const [view, setView] = useState<RosterView>("table");
   const [query, setQuery] = useState("");
   const [lapsedOpen, setLapsedOpen] = useState(false);
+  const { memberId } = useParams<{ memberId: string }>();
+  const selectedMemberId = memberId != null ? Number(memberId) : undefined;
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["roster"],
@@ -68,6 +72,10 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
   const empty = data.active.length === 0 && data.lapsed.length === 0;
   const noMatch =
     !empty && filtered.active.length === 0 && filtered.lapsed.length === 0;
+
+  const outletContext: RosterOutletContext = {
+    members: data.active.concat(data.lapsed),
+  };
 
   return (
     <div className="min-h-screen bg-bg text-ink font-sans antialiased">
@@ -173,7 +181,19 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
             )}
 
             {/* Active roster */}
-            {!noMatch && (
+            {!noMatch && selectedMemberId != null ? (
+              /* Nested route: /members/:id.  In Split view the rail stays
+                 mounted and the member fills the right pane; in Table/Cards
+                 the member renders full-page. */
+              view === "split" ? (
+                <RosterSplit
+                  members={filtered.active}
+                  selectedMemberId={selectedMemberId}
+                />
+              ) : (
+                <Outlet context={outletContext} />
+              )
+            ) : (
               <>
                 {view === "table" && <RosterTable members={filtered.active} />}
                 {view === "cards" && <RosterCards members={filtered.active} />}

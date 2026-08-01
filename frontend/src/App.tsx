@@ -55,8 +55,15 @@ export function Dashboard() {
     <MotionConfig reducedMotion="user">
       <BrowserRouter basename="/dashboard">
         <Routes>
-          <Route index element={<RosterShell name={data.name} gym={data.gym} />} />
-          <Route path="members/:memberId" element={<MemberPage />} />
+          <Route element={<RosterShell name={data.name} gym={data.gym} />}>
+            {/* Index: the roster in table, cards, or split view
+                (with an empty right pane in Split). */}
+            <Route index />
+            {/* Nested: a member in the outlet.  In Split view the rail
+                stays mounted and the member fills the right pane; in
+                Table/Cards view the member renders full-page. */}
+            <Route path="members/:memberId" element={<MemberPage />} />
+          </Route>
         </Routes>
       </BrowserRouter>
     </MotionConfig>

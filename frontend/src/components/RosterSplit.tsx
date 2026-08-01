@@ -1,16 +1,20 @@
-import { Link } from "react-router-dom";
+import { Link, Outlet, useParams } from "react-router-dom";
 import type { RosterMember } from "../types/roster";
 import { initials, gapText } from "./roster-utils";
 import { useT } from "../hooks/useT";
+import type { RosterOutletContext } from "./MemberPage";
 
 interface RosterSplitProps {
   members: RosterMember[];
-  /** The member_id of the member open in the right pane, if any. */
+  /** The member_id of the member open in the right pane, if any.
+   *  When not provided via props it is read from the :memberId route param. */
   selectedMemberId?: number;
 }
 
-export function RosterSplit({ members, selectedMemberId }: RosterSplitProps) {
+export function RosterSplit({ members, selectedMemberId: propId }: RosterSplitProps) {
   const t = useT();
+  const { memberId: paramId } = useParams<{ memberId: string }>();
+  const selectedMemberId = propId ?? (paramId != null ? Number(paramId) : undefined);
 
   return (
     <div className="split flex flex-col lg:flex-row gap-0 min-h-0">
@@ -33,7 +37,7 @@ export function RosterSplit({ members, selectedMemberId }: RosterSplitProps) {
           {members.map((member) => (
             <li key={member.member_id} data-name={member.name}>
               <Link
-                to={`/members/${member.member_id}`}
+                to={`members/${member.member_id}`}
                 className={`flex items-center gap-3 px-gut py-2.5 hover:bg-elevation-1 transition-colors duration-fast border-b border-elevation-0-stroke ${
                   member.member_id === selectedMemberId
                     ? "bg-elevation-1 border-l-2 border-l-magenta"
@@ -61,9 +65,11 @@ export function RosterSplit({ members, selectedMemberId }: RosterSplitProps) {
         </ul>
       </div>
 
-      {/* Right pane: placeholder when no member is selected */}
+      {/* Right pane: renders via nested route outlet */}
       <div className="pane flex-1 min-h-0 lg:overflow-y-auto">
-        {!selectedMemberId && (
+        {selectedMemberId != null ? (
+          <Outlet context={{ members } satisfies RosterOutletContext} />
+        ) : (
           <div className="pane-empty flex items-center justify-center min-h-[200px]">
             <div className="emptystate text-center">
               <h2 className="text-[18px] font-semibold text-ink-2">
@@ -72,8 +78,6 @@ export function RosterSplit({ members, selectedMemberId }: RosterSplitProps) {
             </div>
           </div>
         )}
-        {/* When a member is selected, the MemberPage component renders here
-            via React Router's nested route — see App.tsx. */}
       </div>
     </div>
   );

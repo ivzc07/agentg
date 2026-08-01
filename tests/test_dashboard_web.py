@@ -447,18 +447,30 @@ async def test_spa_enabled_no_dist_builds_app(tmp_path, monkeypatch):
 
 
 async def test_flag_off_dashboard_unaffected(env):
-    """With the spa flag off (default), the existing dashboard is unchanged
-    and the SPA routes are not registered."""
+    """With the spa flag off (default), the existing dashboard is unchanged.
+    The SPA routes (/dashboard*, /api/roster, /api/seed) must not be reachable
+    so that the rollback guarantee holds."""
     cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
 
-    # The classic dashboard still renders.
+    # The server-HTML dashboard at / is served, not the SPA shell.
     response = await env.client.get("/", cookies={SESSION_COOKIE: cookie})
-
     assert response.status == 200
     text = await response.text()
     assert "Iron Temple" in text
     assert "window.__I18N__" not in text
     assert 'id="root"' not in text
+
+    # /dashboard is flag-gated — 404 when the flag is off.
+    dash = await env.client.get("/dashboard", cookies={SESSION_COOKIE: cookie})
+    assert dash.status == 404
+
+    # /api/roster is flag-gated — 404 when the flag is off.
+    roster = await env.client.get("/api/roster", cookies={SESSION_COOKIE: cookie})
+    assert roster.status == 404
+
+    # /api/seed is removed from the HTTP surface entirely — 404 in all configs.
+    seed = await env.client.post("/api/seed", cookies={SESSION_COOKIE: cookie})
+    assert seed.status == 404
 
     # SPA shell route is not registered.
     response = await env.client.get(SPA_SHELL_ROUTE)
@@ -598,13 +610,15 @@ async def test_spa_dist_override_packaged_layout(tmp_path, monkeypatch):
 
 
 # --- /api/roster JSON contract (issue #149) ---
+# The roster JSON endpoint is flag-gated behind spa_enabled, so all
+# tests in this section use ``spa_env`` (the env fixture with the flag on).
 
 
-async def test_api_roster_returns_json_shape(env):
+async def test_api_roster_returns_json_shape(spa_env):
     """An authenticated coach's GET /api/roster returns the expected JSON shape."""
-    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
-    response = await env.client.get(
+    response = await spa_env.client.get(
         "/api/roster", cookies={SESSION_COOKIE: cookie}
     )
 
@@ -622,29 +636,29 @@ async def test_api_roster_returns_json_shape(env):
     assert "lapsed" in data["counts"]
 
 
-async def test_api_roster_rejects_unauthenticated(env):
+async def test_api_roster_rejects_unauthenticated(spa_env):
     """Without a valid session cookie /api/roster answers 401."""
-    response = await env.client.get("/api/roster")
+    response = await spa_env.client.get("/api/roster")
     assert response.status == 401
 
 
-async def test_api_roster_rejects_forged_cookie(env):
+async def test_api_roster_rejects_forged_cookie(spa_env):
     """A forged session cookie does not open /api/roster."""
-    forged = sign_session(env.member.id, env.gym.id, "wrong-secret", env.clock())
-    response = await env.client.get(
+    forged = sign_session(spa_env.member.id, spa_env.gym.id, "wrong-secret", spa_env.clock())
+    response = await spa_env.client.get(
         "/api/roster", cookies={SESSION_COOKIE: forged}
     )
     assert response.status == 401
 
 
-async def test_api_roster_active_rows_have_required_fields(env):
+async def test_api_roster_active_rows_have_required_fields(spa_env):
     """Every active roster row carries the fields the React screen needs."""
-    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
     # Add a non-coach member so the roster has at least one row.
-    member2 = await env.linking.link_member(env.gym.id, "Ben", "telegram", "99")
+    member2 = await spa_env.linking.link_member(spa_env.gym.id, "Ben", "telegram", "99")
 
-    response = await env.client.get(
+    response = await spa_env.client.get(
         "/api/roster", cookies={SESSION_COOKIE: cookie}
     )
 
@@ -667,21 +681,21 @@ async def test_api_roster_active_rows_have_required_fields(env):
         assert "state" in cell
 
 
-async def test_api_roster_lapsed_split(env):
+async def test_api_roster_lapsed_split(spa_env):
     """Lapsed members appear in the lapsed tail, not the active list."""
     from agentg.checkin import LAPSED
 
-    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
-    member2 = await env.linking.link_member(env.gym.id, "Ben", "telegram", "99")
+    member2 = await spa_env.linking.link_member(spa_env.gym.id, "Ben", "telegram", "99")
     # Set the member as lapsed.
-    async with env.store._sessions() as db:
+    async with spa_env.store._sessions() as db:
         from agentg.models import Member
         m = await db.get(Member, member2.id)
         m.checkin_state = LAPSED
         await db.commit()
 
-    response = await env.client.get(
+    response = await spa_env.client.get(
         "/api/roster", cookies={SESSION_COOKIE: cookie}
     )
 
@@ -694,15 +708,41 @@ async def test_api_roster_lapsed_split(env):
     assert data["counts"]["lapsed"] == len(data["lapsed"])
 
 
-async def test_api_roster_sorted_by_gap_desc(env):
-    """Active rows are sorted by gap_days descending (largest gap first)."""
-    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
+async def test_api_roster_sorted_by_gap_desc(spa_env):
+    """Active rows are sorted by gap_days descending (largest gap first).
 
-    # Create two members with a session each to establish gaps.
-    m1 = await env.linking.link_member(env.gym.id, "Zoe", "telegram", "100")
-    m2 = await env.linking.link_member(env.gym.id, "Alex", "telegram", "101")
+    Seeds members with distinct known last-session dates so the sort order
+    is concretely verifiable — a monotonicity-only assert would not catch
+    an accidentally reversed sort."""
+    from datetime import UTC, datetime, timedelta
 
-    response = await env.client.get(
+    from agentg.models import Session
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    now = datetime.now(UTC)
+
+    # Create two members with sessions at different dates to establish
+    # distinct gap_days.  Zoe last trained 5 days ago, Alex 2 days ago,
+    # so descending sort must put Zoe first (gap=5) then Alex (gap=2).
+    m_zoe = await spa_env.linking.link_member(spa_env.gym.id, "Zoe", "telegram", "100")
+    m_alex = await spa_env.linking.link_member(spa_env.gym.id, "Alex", "telegram", "101")
+
+    async with spa_env.store._sessions() as db:
+        db.add(Session(
+            gym_id=spa_env.gym.id,
+            member_id=m_zoe.id,
+            started_at=now - timedelta(days=5),
+            closed_at=now - timedelta(days=5, hours=-1),
+        ))
+        db.add(Session(
+            gym_id=spa_env.gym.id,
+            member_id=m_alex.id,
+            started_at=now - timedelta(days=2),
+            closed_at=now - timedelta(days=2, hours=-1),
+        ))
+        await db.commit()
+
+    response = await spa_env.client.get(
         "/api/roster", cookies={SESSION_COOKIE: cookie}
     )
 
@@ -710,6 +750,11 @@ async def test_api_roster_sorted_by_gap_desc(env):
     data = json.loads(await response.text())
     gaps = [row["gap_days"] for row in data["active"]]
     assert gaps == sorted(gaps, reverse=True), f"not sorted desc: {gaps}"
+    # Concretely: Zoe (gap 5) then Alex (gap 2) in descending order.
+    active_names = [row["name"] for row in data["active"]]
+    zoe_idx = active_names.index("Zoe")
+    alex_idx = active_names.index("Alex")
+    assert zoe_idx < alex_idx, f"Zoe (gap=5) must precede Alex (gap=2), got {active_names}"
     # When gap ties, alphabetical by name (lowercase) breaks the tie.
     same_gap_rows = [row for row in data["active"] if row["gap_days"] == gaps[0]]
     if len(same_gap_rows) > 1:
@@ -717,13 +762,13 @@ async def test_api_roster_sorted_by_gap_desc(env):
         assert names == sorted(names), f"tie-break failed: {names}"
 
 
-async def test_api_roster_severity_is_null_for_new_members(env):
+async def test_api_roster_severity_is_null_for_new_members(spa_env):
     """Members with no active Routine have severity=None (the grey-new rule)."""
-    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
-    member2 = await env.linking.link_member(env.gym.id, "New Kid", "telegram", "102")
+    member2 = await spa_env.linking.link_member(spa_env.gym.id, "New Kid", "telegram", "102")
 
-    response = await env.client.get(
+    response = await spa_env.client.get(
         "/api/roster", cookies={SESSION_COOKIE: cookie}
     )
 
@@ -735,24 +780,24 @@ async def test_api_roster_severity_is_null_for_new_members(env):
     assert new_row["severity"] is None
 
 
-async def test_api_roster_snoozed_shows_until_date(env):
+async def test_api_roster_snoozed_shows_until_date(spa_env):
     """A snoozed member carries snoozed_until; severity is None while snoozed."""
     from datetime import date, timedelta
 
     from agentg.checkin import SNOOZED
 
-    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
-    member2 = await env.linking.link_member(env.gym.id, "Resting", "telegram", "103")
+    member2 = await spa_env.linking.link_member(spa_env.gym.id, "Resting", "telegram", "103")
     future = date.today() + timedelta(days=5)
-    async with env.store._sessions() as db:
+    async with spa_env.store._sessions() as db:
         from agentg.models import Member
         m = await db.get(Member, member2.id)
         m.checkin_state = SNOOZED
         m.snoozed_until = future
         await db.commit()
 
-    response = await env.client.get(
+    response = await spa_env.client.get(
         "/api/roster", cookies={SESSION_COOKIE: cookie}
     )
 
@@ -764,16 +809,29 @@ async def test_api_roster_snoozed_shows_until_date(env):
     assert snoozed_row["severity"] is None
 
 
-async def test_api_roster_slides_session_cookie(env):
+async def test_api_roster_slides_session_cookie(spa_env):
     """A successful /api/roster call refreshes the 90-day session cookie."""
-    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
-    response = await env.client.get(
+    response = await spa_env.client.get(
         "/api/roster", cookies={SESSION_COOKIE: cookie}
     )
 
     assert response.status == 200
     assert SESSION_COOKIE in response.cookies
+
+
+# --- /api/seed is not an HTTP endpoint (issue #149, review) ---
+
+
+async def test_api_seed_not_an_http_endpoint(spa_env):
+    """/api/seed was removed from the HTTP surface — it returns 404 even
+    with the SPA flag on.  Use ``python -m agentg.scripts.seed_demo`` instead."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    response = await spa_env.client.post(
+        "/api/seed", cookies={SESSION_COOKIE: cookie}
+    )
+    assert response.status == 404
 
 
 # --- SPA fallback for React Router deep links (issue #149) ---
