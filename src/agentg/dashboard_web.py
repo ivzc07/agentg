@@ -174,7 +174,7 @@ REGENERATE_CONFIRM = STRINGS["es"]["confirm_word"]
 # pure black ground, two flat surfaces, hairline rules instead of card
 # chrome, zero corner radius except pill chips, white as the loudest
 # accent, a mono-uppercase eyebrow as the one typographic signature, and
-# color reserved for training state — mint kept, coral missed/red, amber
+# color reserved for training state — magenta kept, coral missed/red, amber
 # slipping, purple extra. All values live here as custom properties; the
 # per-surface style blocks below only compose them.
 
@@ -552,7 +552,7 @@ def _table_page(
 def _member_card(row: RosterRow, cells: list[DayCell], lang: str) -> str:
     """One Cards card: the shared markers and Gap text, plus the 4-week
     Mon–Sun day grid — one square per day, dashed for future days, judged
-    per date against the Routine active on it. Hit squares fill mint;
+    per date against the Routine active on it. Hit squares fill magenta;
     missed squares are hollow coral rings, so the two never read by hue
     alone."""
     t = STRINGS[lang]
