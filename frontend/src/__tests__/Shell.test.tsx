@@ -8,7 +8,6 @@ describe("Shell", () => {
     window.__I18N__ = {
       member_eyebrow: "member",
       settings: "Settings",
-      search_placeholder: "Search by name",
     };
   });
 
@@ -29,13 +28,5 @@ describe("Shell", () => {
     expect(screen.getByText("member")).toBeInTheDocument();
     // The settings label resolves from window.__I18N__.
     expect(screen.getByText(/Settings/)).toBeInTheDocument();
-  });
-
-  it("renders the search placeholder from i18n", () => {
-    render(<Shell name="Ana" gym="Iron Temple" />);
-
-    // Verify window.__I18N__ is accessible.
-    expect(window.__I18N__).toBeDefined();
-    expect(window.__I18N__?.search_placeholder).toBe("Search by name");
   });
 });

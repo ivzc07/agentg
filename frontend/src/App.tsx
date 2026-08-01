@@ -12,7 +12,7 @@ const queryClient = new QueryClient({
   },
 });
 
-function Dashboard() {
+export function Dashboard() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["session"],
     queryFn: fetchSession,

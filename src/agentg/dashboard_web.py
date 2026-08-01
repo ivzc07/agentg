@@ -2320,7 +2320,14 @@ def build_app(
         # Inject window.__I18N__ before the first script tag so the React
         # app can read it synchronously on mount.
         i18n_json = json.dumps(t, ensure_ascii=False)
-        i18n_script = f"<script>window.__I18N__ = {i18n_json};</script>"
+        # Escape <, U+2028, and U+2029 so no string value can close the
+        # <script> tag early or inject a line separator (ADR 0004 §i18n 7a).
+        safe_json = (
+            i18n_json.replace("<", "\\u003c")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
+        i18n_script = f"<script>window.__I18N__ = {safe_json};</script>"
         # Insert after <head> (if present) or at the start of <body>.
         if "</head>" in html:
             html = html.replace("</head>", f"{i18n_script}\n</head>")
@@ -2361,8 +2368,18 @@ def build_app(
     app.router.add_post("/login/{token}", login_redeem)
     app.router.add_static("/static/", STATIC_DIR)
     if spa_enabled:
-        app.router.add_get(SPA_MOUNT, spa_shell)
-        app.router.add_static(f"{SPA_MOUNT}/", _FRONTEND_DIST)
+        if not _FRONTEND_DIST.is_dir():
+            logger.warning(
+                "SPA enabled but %s missing — serve /dashboard with a 503; "
+                "run `npm run build` in frontend/",
+                _FRONTEND_DIST,
+            )
+        else:
+            app.router.add_get(SPA_MOUNT, spa_shell)
+            app.router.add_get(f"{SPA_MOUNT}/", spa_shell)
+            app.router.add_static(
+                f"{SPA_MOUNT}/assets/", _FRONTEND_DIST / "assets"
+            )
     return app
 
 

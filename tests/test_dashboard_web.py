@@ -231,13 +231,11 @@ async def test_api_session_rejects_forged_cookie(env):
 # --- SPA serving (issue #155) ---
 
 
-@pytest.fixture
-async def spa_env(tmp_path):
-    """A test app with dashboard_spa_enabled=True and a stub built bundle."""
-    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+SPA_SHELL_ROUTE = "/dashboard"
 
-    # Create a stub built bundle so the SPA route finds assets.
-    dist_dir = Path(__file__).parent.parent / "frontend" / "dist"
+
+def _write_stub_dist(dist_dir: Path) -> None:
+    """Write a minimal stub bundle under *dist_dir* so the SPA routes find it."""
     dist_dir.mkdir(parents=True, exist_ok=True)
     (dist_dir / "index.html").write_text(
         '<!DOCTYPE html><html><head><title>SPA</title></head>'
@@ -247,6 +245,19 @@ async def spa_env(tmp_path):
     (dist_dir / "assets").mkdir(exist_ok=True)
     (dist_dir / "assets" / "index.js").write_text("// stub", encoding="utf-8")
     (dist_dir / "assets" / "index.css").write_text("/* stub */", encoding="utf-8")
+
+
+@pytest.fixture
+async def spa_env(tmp_path, monkeypatch):
+    """A test app with dashboard_spa_enabled=True and a stub built bundle
+    under *tmp_path* so nothing touches the real ``frontend/dist/``."""
+    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+
+    stub_dist = tmp_path / "dist"
+    _write_stub_dist(stub_dist)
+    monkeypatch.setattr(
+        "agentg.dashboard_web._FRONTEND_DIST", stub_dist
+    )
 
     app = build_app(
         store,
@@ -260,9 +271,6 @@ async def spa_env(tmp_path):
     async with TestClient(TestServer(app)) as client:
         yield SimpleEnv(clock, linking, store, client, gym, member)
     await engine.dispose()
-
-
-SPA_SHELL_ROUTE = "/dashboard"
 
 
 async def test_spa_shell_serves_authenticated(spa_env):
@@ -279,6 +287,27 @@ async def test_spa_shell_serves_authenticated(spa_env):
     assert "window.__I18N__" in text
     # The root div is present for React to mount into.
     assert 'id="root"' in text
+
+
+async def test_spa_shell_trailing_slash_serves_authenticated(spa_env):
+    """The trailing-slash URL (Vite's canonical origin) also serves the shell."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        f"{SPA_SHELL_ROUTE}/", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    text = await response.text()
+    assert "window.__I18N__" in text
+    assert 'id="root"' in text
+
+
+async def test_spa_index_html_not_served_unauthenticated(spa_env):
+    """``/dashboard/index.html`` must not be fetchable without a cookie — the
+    static handler must be scoped to /dashboard/assets/, not the whole dist."""
+    response = await spa_env.client.get("/dashboard/index.html")
+    assert response.status == 404
 
 
 async def test_spa_shell_injects_i18n_strings(spa_env):
@@ -322,6 +351,51 @@ async def test_spa_shell_injects_es_i18n_strings(spa_env):
     assert "Ajustes" in text
 
 
+async def test_spa_shell_escapes_script_close_tag(tmp_path, monkeypatch):
+    """A ``</script>`` string in STRINGS must not close the injection tag early."""
+    import agentg.dashboard_web as dashboard_web
+
+    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+    stub_dist = tmp_path / "dist"
+    _write_stub_dist(stub_dist)
+    monkeypatch.setattr(dashboard_web, "_FRONTEND_DIST", stub_dist)
+    # Push a </script> string into the en dict (mutate and restore).
+    from agentg.dashboard_i18n import STRINGS
+
+    original_settings = STRINGS["en"]["settings"]
+    STRINGS["en"]["settings"] = "</script><script>alert(1)</script>"
+    try:
+        app = build_app(
+            store,
+            linking,
+            session_secret=SECRET,
+            bot_username="testbot",
+            secure_cookies=False,
+            clock=clock,
+            spa_enabled=True,
+        )
+        async with TestClient(TestServer(app)) as client:
+            cookie = sign_session(member.id, gym.id, SECRET, clock())
+            response = await client.get(
+                SPA_SHELL_ROUTE,
+                cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "en"},
+            )
+            text = await response.text()
+            # The raw </script> and </script must not appear in the
+            # injection payload — < was escaped to \u003c.
+            assert "</script>" in text  # the closing tag still exists
+            # The payload between window.__I18N__ = and the closing </script>
+            # must not contain a raw </script>.
+            before_close = text.split("window.__I18N__", 1)[1].split("</script>", 1)[0]
+            assert "</script>" not in before_close
+            assert "<script>" not in before_close
+            # The escaped < appears as \u003c in the JSON.
+            assert "\\u003c/script>" in text
+    finally:
+        STRINGS["en"]["settings"] = original_settings
+        await engine.dispose()
+
+
 async def test_spa_shell_rejects_unauthenticated(spa_env):
     """Without a cookie the SPA shell answers the same bounce page."""
     response = await spa_env.client.get(SPA_SHELL_ROUTE)
@@ -332,27 +406,63 @@ async def test_spa_shell_rejects_unauthenticated(spa_env):
 
 
 async def test_spa_serves_static_assets(spa_env):
-    """The built assets are served as static files."""
+    """The built assets are served under ``/dashboard/assets/``."""
     response = await spa_env.client.get("/dashboard/assets/index.js")
     assert response.status == 200
     text = await response.text()
     assert "stub" in text
 
 
+async def test_spa_enabled_no_dist_builds_app(tmp_path, monkeypatch):
+    """With the flag on and no ``dist/`` directory the app builds without
+    crashing and the shell route returns a 503."""
+    import agentg.dashboard_web as dashboard_web
+
+    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+    missing = tmp_path / "no-such-dist"
+    monkeypatch.setattr(dashboard_web, "_FRONTEND_DIST", missing)
+    try:
+        app = build_app(
+            store,
+            linking,
+            session_secret=SECRET,
+            bot_username="testbot",
+            secure_cookies=False,
+            clock=clock,
+            spa_enabled=True,
+        )
+        async with TestClient(TestServer(app)) as client:
+            cookie = sign_session(member.id, gym.id, SECRET, clock())
+            # The shell route is not registered — aiohttp falls back to 404.
+            response = await client.get(
+                SPA_SHELL_ROUTE, cookies={SESSION_COOKIE: cookie}
+            )
+            assert response.status == 404
+    finally:
+        await engine.dispose()
+
+
 async def test_flag_off_dashboard_unaffected(env):
-    """With the spa flag off (default), the existing dashboard is byte-for-byte
-    the same — no new route leaks in."""
-    # Sign in and verify the classic dashboard renders.
+    """With the spa flag off (default), the existing dashboard is unchanged
+    and the SPA routes are not registered."""
     cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
 
+    # The classic dashboard still renders.
     response = await env.client.get("/", cookies={SESSION_COOKIE: cookie})
 
     assert response.status == 200
     text = await response.text()
-    # The server-HTML dashboard is served, not the SPA shell.
     assert "Iron Temple" in text
     assert "window.__I18N__" not in text
     assert 'id="root"' not in text
+
+    # SPA shell route is not registered.
+    response = await env.client.get(SPA_SHELL_ROUTE)
+    assert response.status == 404
+
+    # Bundle asset route is not registered.
+    response = await env.client.get("/dashboard/assets/index.js")
+    assert response.status == 404
 
 
 async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
@@ -378,6 +488,11 @@ async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
     assert settings.dashboard_spa_enabled is True
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+    stub_dist = tmp_path / "dist"
+    _write_stub_dist(stub_dist)
+    monkeypatch.setattr(
+        "agentg.dashboard_web._FRONTEND_DIST", stub_dist
+    )
     try:
         # The clock is the only thing run()'s call site cannot supply, so the
         # app is built through the production helper and only the clock is
@@ -393,14 +508,6 @@ async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
             settings,
             bot_username="testbot",
             notifier=None,
-        )
-        # Create stub dist so the SPA route resolves.
-        dist_dir = Path(__file__).parent.parent / "frontend" / "dist"
-        dist_dir.mkdir(parents=True, exist_ok=True)
-        (dist_dir / "index.html").write_text(
-            '<!DOCTYPE html><html><head><title>SPA</title></head>'
-            '<body><div id="root"></div></body></html>',
-            encoding="utf-8",
         )
         async with TestClient(TestServer(app)) as client:
             cookie = sign_session(member.id, gym.id, SECRET, clock())

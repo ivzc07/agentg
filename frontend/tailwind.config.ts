@@ -61,9 +61,9 @@ export default {
         pill: "999px",
       },
       boxShadow: {
-        "elevation-1": "0 1px 3px rgba(0,0,0,0.4)",
-        "elevation-2": "0 2px 8px rgba(0,0,0,0.5)",
-        "elevation-3": "0 4px 16px rgba(0,0,0,0.6)",
+        "shadow-1": "0 1px 3px rgba(0,0,0,0.4)",
+        "shadow-2": "0 2px 8px rgba(0,0,0,0.5)",
+        "shadow-3": "0 4px 16px rgba(0,0,0,0.6)",
         "glow-accent": "0 0 10px rgba(244, 114, 167, 0.35)",
         "glow-accent-strong": "0 0 20px rgba(244, 114, 167, 0.55)",
       },
