@@ -37,16 +37,21 @@ def _css_text() -> str:
     return CSS_PATH.read_text(encoding="utf-8")
 
 
-def _media_blocks(css: str) -> dict[int, str]:
-    """Return {max_width_px: block_body} for all max-width media queries.
+def _media_blocks(css: str) -> dict[tuple[int, int], str]:
+    """Return {(max_width_px, index): block_body} for all max-width media
+    queries.
 
     Uses depth-aware brace counting so multi-rule media blocks are captured
-    as a single body."""
+    as a single body.  Each distinct @media block gets its own index so
+    duplicate breakpoints are never merged."""
     css = _strip_comments(css)
-    blocks: dict[int, str] = {}
+    blocks: dict[tuple[int, int], str] = {}
     pattern = re.compile(r"@media\s*\(max-width:\s*(\d+)px\)\s*\{")
+    counts: dict[int, int] = {}
     for m in pattern.finditer(css):
         width = int(m.group(1))
+        idx = counts.get(width, 0)
+        counts[width] = idx + 1
         body_start = m.end()
         depth = 1
         pos = body_start
@@ -57,13 +62,47 @@ def _media_blocks(css: str) -> dict[int, str]:
                 depth -= 1
                 if depth == 0:
                     body = css[body_start:pos].strip()
-                    if width in blocks:
-                        blocks[width] = blocks[width] + " " + body
-                    else:
-                        blocks[width] = body
+                    blocks[(width, idx)] = body
                     break
             pos += 1
     return blocks
+
+
+def _find_selector_rule_bodies(block_body: str, selector: str) -> list[str]:
+    """Return the inner bodies of every exact rule for *selector* within
+    *block_body*.
+
+    Handles selector lists (``.foo, .bar { ... }``) and duplicate rules.
+    The match is exact so ``.setcard`` does not match ``.setcard code``."""
+    # Match the selector as a whole item in a selector list: it must be
+    # followed (after optional whitespace) by either { or ,.
+    pattern = re.compile(
+        r'(?<![.\w#-])' + re.escape(selector) + r'(?=\s*[,{])'
+    )
+    bodies: list[str] = []
+    for m in pattern.finditer(block_body):
+        # Walk forward from end of match to find the opening {.
+        pos = m.end()
+        while pos < len(block_body):
+            ch = block_body[pos]
+            if ch == '{':
+                body_start = pos + 1
+                depth = 1
+                pos = body_start
+                while depth > 0 and pos < len(block_body):
+                    if block_body[pos] == '{':
+                        depth += 1
+                    elif block_body[pos] == '}':
+                        depth -= 1
+                        if depth == 0:
+                            bodies.append(block_body[body_start:pos].strip())
+                            break
+                    pos += 1
+                break
+            elif ch == '}':
+                break  # malformed — bail on this match
+            pos += 1
+    return bodies
 
 
 # ── WCAG 2.1 relative luminance and contrast ratio ───────────────────
@@ -649,24 +688,33 @@ class Test375pxBar:
 
         failures: list[str] = []
         for max_width, selector, decl_fragment, desc in self._PER_SCREEN_RULES:
-            if max_width not in blocks:
+            matching = [(k, v) for k, v in blocks.items() if k[0] == max_width]
+            if not matching:
                 failures.append(
                     f"{desc}: no @media (max-width: {max_width}px) block found"
                 )
                 continue
-            block = blocks[max_width]
-            if selector not in block:
-                failures.append(
-                    f"{desc}: selector '{selector}' not found in "
-                    f"@media (max-width: {max_width}px)"
-                )
-                continue
-            if decl_fragment not in block:
-                failures.append(
-                    f"{desc}: declaration '{decl_fragment}' not found in "
-                    f"@media (max-width: {max_width}px)"
-                )
-                continue
+            found = False
+            for _key, block_body in matching:
+                for rule_body in _find_selector_rule_bodies(block_body, selector):
+                    if decl_fragment in rule_body:
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                # Pinpoint *why* the triple failed.
+                sel_in_any = any(selector in body for _, body in matching)
+                if sel_in_any:
+                    failures.append(
+                        f"{desc}: selector '{selector}' found as substring "
+                        f"but not as exact rule in @media (max-width: {max_width}px)"
+                    )
+                else:
+                    failures.append(
+                        f"{desc}: selector '{selector}' not found in "
+                        f"@media (max-width: {max_width}px)"
+                    )
         if failures:
             pytest.fail("\n".join(failures))
 
@@ -711,7 +759,7 @@ class Test375pxBar:
             "", css, flags=re.DOTALL,
         )
         blocks = _media_blocks(mutilated)
-        assert 899 not in blocks, (
+        assert not any(w == 899 for w, _ in blocks), (
             "Sanity check failed: 899px block should be gone after removal"
         )
 
