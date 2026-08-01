@@ -79,6 +79,8 @@ STRINGS = {
         "snoozed_tag": "en pausa hasta el {date}",
         "lapsed_tag": "se perdió",
         "no_sessions_yet": "Aún sin sesiones",
+        "roster_error": "No se pudo cargar el roster.",
+        "roster_retry": "Reintentar",
         "trained_today": "entrenó hoy",
         "one_day_away": "1 día sin venir",
         "days_away": "{n} días sin venir",
@@ -250,6 +252,7 @@ STRINGS = {
         "presets_loading": "Cargando…",
         "presets_error": "Algo salió mal al cargar tus presets.",
         "presets_retry": "Reintentar",
+        "save_failed": "No se pudo guardar — intentá de nuevo.",
     },
     "en": {
         "settings": "Settings",
@@ -264,6 +267,8 @@ STRINGS = {
         "snoozed_tag": "paused until {date}",
         "lapsed_tag": "lapsed",
         "no_sessions_yet": "No sessions yet",
+        "roster_error": "Couldn't load the roster.",
+        "roster_retry": "Retry",
         "trained_today": "trained today",
         "one_day_away": "1 day away",
         "days_away": "{n} days away",
@@ -425,6 +430,7 @@ STRINGS = {
         "presets_loading": "Loading…",
         "presets_error": "Something went wrong loading your presets.",
         "presets_retry": "Retry",
+        "save_failed": "Could not save — try again.",
     },
 }
 

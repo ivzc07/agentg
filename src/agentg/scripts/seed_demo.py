@@ -20,7 +20,7 @@ from agentg.config import Settings
 from agentg.dashboard_store import DashboardStore
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
-from agentg.models import Exercise, Gym, Member, MemberNote, Session, Set
+from agentg.models import Exercise, Gym, Member, MemberNote, Routine, Session, Set
 from agentg.routines import ExerciseSpec, WorkoutSpec
 
 
@@ -85,7 +85,7 @@ async def seed_demo_data(
     for i, md in enumerate(member_defs):
         # Create member and channel
         member = await linking.link_member(
-            gym_id, md["name"], "telegram", f"demo-{i:04d}"
+            gym_id, md["name"], "telegram", f"demo-g{gym_id}-{i:04d}"
         )
         created_members += 1
 
@@ -120,7 +120,7 @@ async def seed_demo_data(
                     {"exercise": "calf raise", "sets": 3, "reps": "15"},
                 ]},
             ]
-            await store.save_routine_from_web(
+            routine = await store.save_routine_from_web(
                 gym_id, member.id, coach_member_id, None, [
                     _spec_from_dict(w) for w in workouts_data
                 ]
@@ -133,6 +133,19 @@ async def seed_demo_data(
                 days_ago = gap_days + s * 2 + (s % 3)  # stagger sessions
                 session_date = today - timedelta(days=days_ago)
                 session_dates.append(session_date)
+
+            # Back-date the Routine so it governs the period from the
+            # first session to yesterday, putting planned weekdays inside
+            # the severity window (issue #149, PR review).
+            oldest_session = min(session_dates)
+            async with store.session() as db:
+                routine_row = await db.get(Routine, routine.id)
+                routine_row.created_at = datetime.combine(
+                    oldest_session - timedelta(days=1),
+                    datetime.min.time(),
+                    tzinfo=UTC,
+                )
+                await db.commit()
 
             for sd in session_dates:
                 started = datetime.combine(
@@ -213,6 +226,15 @@ async def _run(gym_id: int, coach_member_id: int) -> int:
         coach = await db.get(Member, coach_member_id)
         if coach is None:
             print(f"Coach member {coach_member_id} not found.", file=sys.stderr)
+            return 1
+        if coach.gym_id != gym_id:
+            print(
+                f"Coach member {coach_member_id} belongs to gym {coach.gym_id}, not {gym_id}.",
+                file=sys.stderr,
+            )
+            return 1
+        if not coach.is_coach:
+            print(f"Member {coach_member_id} is not a coach.", file=sys.stderr)
             return 1
 
     result = await seed_demo_data(store, linking, gym_id, coach_member_id)

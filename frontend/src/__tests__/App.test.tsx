@@ -92,4 +92,47 @@ describe("Dashboard", () => {
       screen.queryByText("Something went wrong loading your session."),
     ).not.toBeInTheDocument();
   });
+
+  it("redirects unknown deep links to the roster", async () => {
+    fetchSession.mockResolvedValue({ name: "Ana", gym: "Iron Temple" });
+    fetchRoster.mockResolvedValue({
+      active: [
+        {
+          member_id: 1,
+          name: "Zoe",
+          gap_days: 3,
+          has_sessions: true,
+          is_new: false,
+          snoozed_until: null,
+          missed_days: 2,
+          severity: "amber",
+          has_safety_flag: false,
+          attendance: [],
+        },
+      ],
+      lapsed: [],
+      counts: { active: 1, lapsed: 0 },
+      sortedBy: "gap_days",
+    });
+    window.__I18N__ = {
+      members_count: "Members ({n})",
+      member_eyebrow: "member",
+      settings: "Settings",
+      search_placeholder: "Search by name",
+      nav_views: "Views",
+      nav_sections: "Sections",
+      presets: "Presets",
+      sorted_by_gap: "Sorted by days away",
+      view_table: "Table",
+      view_cards: "Cards",
+      view_split: "Split",
+    };
+    // Unknown deep link — the catch-all must redirect to /.
+    window.history.pushState({}, "", "/dashboard/settings");
+
+    renderDashboard();
+
+    // After redirect, the roster (Iron Temple heading) is visible.
+    expect(await screen.findByText("Iron Temple")).toBeInTheDocument();
+  });
 });
