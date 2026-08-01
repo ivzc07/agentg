@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
-import { MemberPage, MemberPageContent } from "../components/MemberPage";
+import { MemberPage, MemberPageContent, MemberPane } from "../components/MemberPage";
 import * as memberApi from "../api/member";
 import type { MemberPageData } from "../types/member";
 
@@ -53,6 +53,7 @@ vi.mock("../hooks/useT", () => ({
       tick_off: "Tick off",
       flag_seen_by: "Seen by {who} on {date}",
       flag_expired_unseen: "expired, never seen",
+      save_failed: "Failed to save.",
     };
     return strings[key] ?? key;
   },
@@ -165,6 +166,34 @@ function renderPage(data: MemberPageData) {
   );
 }
 
+function renderPane(data: MemberPageData) {
+  const t = mockT;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>
+        <MemberPane data={data} t={t} />
+      </MemoryRouter>
+    </QueryClientProvider>
+  );
+}
+
+function renderPageContent(data: MemberPageData, rosterView?: string) {
+  const t = mockT;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter>
+        <MemberPageContent data={data} t={t} rosterView={rosterView} />
+      </MemoryRouter>
+    </QueryClientProvider>
+  );
+}
+
 function renderPageWithRouter(
   initialEntries: string[] = ["/members/1"]
 ) {
@@ -201,12 +230,20 @@ describe("MemberPage", () => {
     expect(screen.getByText("Member")).toBeInTheDocument();
   });
 
-  it("shows the back link", () => {
+  it("shows the back link defaulting to /", () => {
     renderPage(makeMember());
     const links = screen.getAllByRole("link");
     const backLink = links.find((l) => l.textContent?.includes("← All members"));
     expect(backLink).toBeInTheDocument();
     expect(backLink).toHaveAttribute("href", "/");
+  });
+
+  it("preserves the roster view in the back link", () => {
+    renderPageContent(makeMember(), "cards");
+    const links = screen.getAllByRole("link");
+    const backLink = links.find((l) => l.textContent?.includes("← All members"));
+    expect(backLink).toBeInTheDocument();
+    expect(backLink).toHaveAttribute("href", "/?view=cards");
   });
 
   it("renders the routine card with exercises", () => {
@@ -385,6 +422,15 @@ describe("MemberPage", () => {
     renderPage(makeMember({ routine_preset_name: "Beginner Plan" }));
     expect(screen.getByText(/Preset: Beginner Plan/)).toBeInTheDocument();
   });
+
+  // [P2] Split pane renders bare content, no chrome
+  it("MemberPane renders the member body without page chrome", () => {
+    renderPane(makeMember());
+    // Body content is present
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("Alice");
+    // No sticky header / back link chrome
+    expect(screen.queryByText("← All members")).not.toBeInTheDocument();
+  });
 });
 
 describe("MemberPage (fetch integration)", () => {
@@ -398,7 +444,26 @@ describe("MemberPage (fetch integration)", () => {
     renderPageWithRouter(["/members/42"]);
 
     expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent("Bob");
-    expect(memberApi.fetchMember).toHaveBeenCalledWith(42);
+    expect(memberApi.fetchMember).toHaveBeenCalledWith(42, 1);
+  });
+
+  // [P1] Pagination: the ?page search param is read and passed to fetchMember
+  it("reads page from URL search params and passes to fetchMember", async () => {
+    const page2Data = makeMember({ name: "PageTwo", page: 2, pages: 3 });
+    vi.spyOn(memberApi, "fetchMember").mockResolvedValue(page2Data);
+    renderPageWithRouter(["/members/1?page=2"]);
+
+    expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent("PageTwo");
+    expect(memberApi.fetchMember).toHaveBeenCalledWith(1, 2);
+  });
+
+  it("defaults to page 1 when no page param is present", async () => {
+    const data = makeMember({ name: "Default" });
+    vi.spyOn(memberApi, "fetchMember").mockResolvedValue(data);
+    renderPageWithRouter(["/members/1"]);
+
+    expect(await screen.findByRole("heading", { level: 1 })).toHaveTextContent("Default");
+    expect(memberApi.fetchMember).toHaveBeenCalledWith(1, 1);
   });
 
   it("shows loading state while fetching", () => {
@@ -447,5 +512,78 @@ describe("MemberPage (fetch integration)", () => {
     await user.click(screen.getByText("Tick off"));
 
     expect(tickSpy).toHaveBeenCalledWith(1, 1);
+  });
+
+  // [P3] Tick-off error state: save_failed is in STRINGS and the error text renders
+  it("shows the save_failed error when tick-off rejects", async () => {
+    const data = makeMember({
+      safety_flags: [
+        {
+          note_id: 1,
+          text: "Bad form",
+          on: "2026-07-10",
+          status: "open",
+          acknowledged_on: null,
+          acknowledged_by: null,
+        },
+      ],
+    });
+    vi.spyOn(memberApi, "fetchMember").mockResolvedValue(data);
+    vi.spyOn(memberApi, "tickOffFlag").mockRejectedValue(new Error("Server error"));
+
+    const user = userEvent.setup();
+    renderPageWithRouter(["/members/1"]);
+
+    expect(await screen.findByText("Tick off")).toBeInTheDocument();
+    await user.click(screen.getByText("Tick off"));
+
+    expect(await screen.findByText("Failed to save.")).toBeInTheDocument();
+  });
+});
+
+// [P2] i18n months and weekday initials read from window.__I18N__
+describe("i18n months and weekdays", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("uses Spanish month abbreviations from window.__I18N__", () => {
+    window.__I18N__ = {
+      _months: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"],
+      _weekday_initials: ["lu", "ma", "mi", "ju", "vi", "sá", "do"],
+    };
+    renderPage(makeMember({ member_since: "2026-07-15" }));
+    // July = "jul" in Spanish
+    expect(screen.getByText(/15 jul 2026/)).toBeInTheDocument();
+  });
+
+  it("uses Spanish weekday initials in routine", () => {
+    window.__I18N__ = {
+      _months: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"],
+      _weekday_initials: ["lu", "ma", "mi", "ju", "vi", "sá", "do"],
+    };
+    // weekday 1 = Tuesday = "ma" in Spanish
+    renderPage(makeMember({ routine: [{ weekday: 1, name: "Legs", exercises: [{ name: "squat", sets: 4, reps: "8-10" }] }] }));
+    expect(screen.getByText("ma")).toBeInTheDocument();
+  });
+
+  it("uses English month abbreviations from window.__I18N__", () => {
+    window.__I18N__ = {
+      _months: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+      _weekday_initials: ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"],
+    };
+    renderPage(makeMember({ member_since: "2026-07-15" }));
+    // July = "Jul" in English
+    expect(screen.getByText(/15 Jul 2026/)).toBeInTheDocument();
+  });
+
+  it("uses English weekday initials in routine", () => {
+    window.__I18N__ = {
+      _months: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+      _weekday_initials: ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"],
+    };
+    // weekday 1 = Tuesday = "Tu" in English
+    renderPage(makeMember({ routine: [{ weekday: 1, name: "Legs", exercises: [{ name: "squat", sets: 4, reps: "8-10" }] }] }));
+    expect(screen.getByText("Tu")).toBeInTheDocument();
   });
 });

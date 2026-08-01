@@ -75,6 +75,7 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
 
   const outletContext: RosterOutletContext = {
     members: data.active.concat(data.lapsed),
+    rosterView: view,
   };
 
   return (

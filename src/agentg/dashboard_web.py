@@ -79,6 +79,7 @@ from agentg.dashboard_i18n import (
     LANG_COOKIE,
     LANG_COOKIE_TTL_SECONDS,
     LANGS,
+    MONTHS,
     NOTE_KIND_LABELS,
     STRINGS,
     WEEKDAY_INITIALS,
@@ -2498,7 +2499,10 @@ def build_app(
         html = index_path.read_text(encoding="utf-8")
         # Inject window.__I18N__ before the first script tag so the React
         # app can read it synchronously on mount.
-        i18n_json = json.dumps(t, ensure_ascii=False)
+        i18n_payload: dict = dict(t)
+        i18n_payload["_months"] = list(MONTHS[lang])
+        i18n_payload["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
+        i18n_json = json.dumps(i18n_payload, ensure_ascii=False)
         # Escape <, U+2028, and U+2029 so no string value can close the
         # <script> tag early or inject a line separator (ADR 0004 §i18n 7a).
         safe_json = (

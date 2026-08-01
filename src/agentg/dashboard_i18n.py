@@ -247,6 +247,7 @@ STRINGS = {
             "¿Retirar este Preset? Los miembros conservan su copia, pero el "
             "Preset ya no se podrá editar ni aplicar."
         ),
+        "save_failed": "No se pudo guardar — intentá de nuevo.",
     },
     "en": {
         "settings": "Settings",
@@ -419,6 +420,7 @@ STRINGS = {
             "Retire this preset? Members keep their copies, but the preset "
             "can no longer be edited or applied."
         ),
+        "save_failed": "Could not save — try again.",
     },
 }
 

@@ -1,6 +1,7 @@
-import { useParams, Link } from "react-router-dom";
+import { useParams, useSearchParams, Link, useOutletContext } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useT } from "../hooks/useT";
+import { getMonths, getWeekdayInitials } from "../lib/i18n";
 import { fetchMember, MemberNotFoundError, tickOffFlag } from "../api/member";
 import type { MemberPageData, SafetyFlag } from "../types/member";
 import type { RosterMember } from "../types/roster";
@@ -8,20 +9,15 @@ import type { RosterMember } from "../types/roster";
 /** Context provided by RosterShell via <Outlet />. */
 export interface RosterOutletContext {
   members: RosterMember[];
+  rosterView: string;
 }
 
-/** Format a date string for display. Uses the server-provided language via
- *  the existing fmt_date pattern. For the SPA, we render ISO dates as
- *  locale-appropriate strings; the bootstrap i18n doesn't carry date
- *  formatters, so we use Intl for now. */
-function fmtDate(iso: string, _t: (key: string) => string): string {
-  // We format dates in a compact dd mmm yyyy style.
+/** Format a date string for display. Uses months from the server-injected
+ *  i18n bootstrap (``_months`` in ``window.__I18N__``). */
+function fmtDate(iso: string): string {
   const d = new Date(iso + "T00:00:00");
   const day = d.getDate();
-  const months = [
-    "ene", "feb", "mar", "abr", "may", "jun",
-    "jul", "ago", "sep", "oct", "nov", "dic",
-  ];
+  const months = getMonths();
   const month = months[d.getMonth()];
   return `${day} ${month} ${d.getFullYear()}`;
 }
@@ -63,7 +59,7 @@ function SafetyBanner({
             <div className="flag-body min-w-0">
               <b className="text-[14px] block">{flag.text}</b>
               <div className="flag-meta text-[12px] text-ink-3 mt-0.5">
-                {fmtDate(flag.on, t)}
+                {fmtDate(flag.on)}
               </div>
             </div>
             {flag.status === "open" ? (
@@ -81,7 +77,7 @@ function SafetyBanner({
                   .replace("{who}", flag.acknowledged_by ?? "—")
                   .replace(
                     "{date}",
-                    flag.acknowledged_on ? fmtDate(flag.acknowledged_on, t) : ""
+                    flag.acknowledged_on ? fmtDate(flag.acknowledged_on) : ""
                   )}
               </span>
             ) : (
@@ -94,7 +90,7 @@ function SafetyBanner({
       </div>
       {tickOff.isError && (
         <p className="text-coral text-[13px] mt-2">
-          {t("save_failed") ?? "Failed to acknowledge flag."}
+          {t("save_failed")}
         </p>
       )}
     </section>
@@ -108,7 +104,7 @@ function RoutineCard({
   data: MemberPageData;
   t: (key: string) => string;
 }) {
-  const weekdays = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+  const weekdays = getWeekdayInitials();
 
   return (
     <section className="card card-elevated rounded-sm border border-elevation-0-stroke bg-elevation-1 p-4">
@@ -210,7 +206,7 @@ function SessionsCard({
 
             return (
               <div key={i} className="sess">
-                <b className="text-[13px]">{fmtDate(session.on, t)}</b>{" "}
+                <b className="text-[13px]">{fmtDate(session.on)}</b>{" "}
                 <span className="muted text-[12px] text-ink-3">{headline}</span>
                 {Array.from(collapsed.entries()).map(
                   ([key, { weight, repsList, notes }]) => {
@@ -298,7 +294,7 @@ function WeightsCard({
                 {fmtWeight(w.weight, data.weight_unit)}
               </span>{" "}
               × {w.reps.join(",")}{" "}
-              <span className="muted text-ink-3">· {fmtDate(w.on, t)}</span>
+              <span className="muted text-ink-3">· {fmtDate(w.on)}</span>
             </li>
           ))}
         </ul>
@@ -328,7 +324,7 @@ function NotesCard({
               <span className="tag text-[10px] mr-1">{note.kind}</span>
               {note.text}{" "}
               <span className="muted text-ink-3">
-                · {fmtDate(note.on, t)}
+                · {fmtDate(note.on)}
               </span>
             </div>
           ))}
@@ -344,7 +340,7 @@ function NotesCard({
                   <span className="muted text-ink-3">
                     · {t("retired_on").replace(
                       "{date}",
-                      note.retired_on ? fmtDate(note.retired_on, t) : ""
+                      note.retired_on ? fmtDate(note.retired_on) : ""
                     )}
                   </span>
                 </div>
@@ -357,17 +353,153 @@ function NotesCard({
   );
 }
 
+/** Bare member body — headline, chips, facts, safety banner, cards.
+ *  Used in Split's right pane and as the core of the standalone page. */
+export function MemberPane({
+  data,
+  t,
+}: {
+  data: MemberPageData;
+  t: (key: string) => string;
+}) {
+  // Status chips
+  const chips: string[] = [];
+  if (data.lapsed) chips.push(t("lapsed_tag"));
+  if (data.snoozed_until) {
+    chips.push(
+      t("snoozed_tag").replace(
+        "{date}",
+        fmtDate(data.snoozed_until)
+      )
+    );
+  }
+
+  // Facts line
+  const countLabel =
+    data.session_count === 1
+      ? t("one_session")
+      : t("n_sessions").replace("{n}", String(data.session_count));
+
+  const gapLabel = !data.has_sessions
+    ? t("no_sessions_yet")
+    : data.gap_days === 0
+      ? t("trained_today")
+      : data.gap_days === 1
+        ? t("one_day_away")
+        : t("days_away").replace("{n}", String(data.gap_days));
+
+  const factsParts = [
+    t("member_since").replace("{date}", fmtDate(data.member_since)),
+    countLabel,
+    gapLabel,
+  ];
+  if (data.last_session_on) {
+    factsParts.push(
+      t("last_session").replace("{date}", fmtDate(data.last_session_on))
+    );
+  }
+
+  return (
+    <>
+      {/* Headline */}
+      <span className="eyebrow">{t("member_eyebrow")}</span>
+      <h1 className="text-[28px] leading-tight mt-1">{data.name}</h1>
+
+      {/* Status chips */}
+      {chips.length > 0 && (
+        <div className="chips flex gap-2 mt-2">
+          {chips.map((chip, i) => (
+            <span key={i} className="tag text-[10px]">
+              {chip}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Facts line */}
+      <div className="facts text-[13px] text-ink-2 mt-3 flex flex-wrap gap-x-3 gap-y-1">
+        {factsParts.map((part, i) => (
+          <span key={i}>
+            {i > 0 && (
+              <span className="mx-1.5 text-ink-3" aria-hidden="true">·</span>
+            )}
+            {part}
+          </span>
+        ))}
+      </div>
+
+      {/* Safety banner */}
+      <div className="mt-5">
+        <SafetyBanner
+          flags={data.safety_flags}
+          memberId={data.member_id}
+          t={t}
+        />
+      </div>
+
+      {/* Two-column layout */}
+      <div className="columns grid grid-cols-1 md:grid-cols-2 gap-5 mt-5">
+        <div className="col flex flex-col gap-5">
+          <RoutineCard data={data} t={t} />
+          <SessionsCard data={data} t={t} />
+        </div>
+        <div className="col flex flex-col gap-5">
+          <WeightsCard data={data} t={t} />
+          <NotesCard data={data} t={t} />
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** Standalone member page — wraps MemberPane in chrome (sticky header,
+ *  back link, min-h-screen) for the full-page route. */
+export function MemberPageContent({
+  data,
+  t,
+  rosterView,
+}: {
+  data: MemberPageData;
+  t: (key: string) => string;
+  rosterView?: string;
+}) {
+  const backTo = rosterView ? `/?view=${rosterView}` : "/";
+
+  return (
+    <div className="min-h-screen bg-bg text-ink font-sans antialiased">
+      {/* Sticky header with back link */}
+      <header className="sticky top-0 z-20 flex items-center gap-2 min-h-[46px] px-gut py-1.5 bg-elevation-0 border-b border-elevation-0-stroke shadow-elevation-1">
+        <Link
+          to={backTo}
+          className="text-[13px] text-ink-2 hover:text-ink transition-colors duration-fast"
+        >
+          ← {t("back_to_roster")}
+        </Link>
+      </header>
+
+      <main className="max-w-2xl mx-auto px-gut py-6">
+        <MemberPane data={data} t={t} />
+      </main>
+    </div>
+  );
+}
+
 /** Full member page — fetches from /api/members/{id} and renders
  *  Routine / Sessions / Weights / Notes cards plus safety flags.
  *  Works in Split's right pane and as a standalone deep link. */
 export function MemberPage() {
   const { memberId } = useParams<{ memberId: string }>();
+  const [sp] = useSearchParams();
   const t = useT();
   const id = memberId != null ? Number(memberId) : 0;
+  const page = Number(sp.get("page") ?? 1);
+
+  const outlet = useOutletContext<RosterOutletContext | undefined>();
+  const rosterView = outlet?.rosterView ?? "table";
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ["member", id],
-    queryFn: () => fetchMember(id),
+    queryKey: ["member", id, page],
+    queryFn: () => fetchMember(id, page),
     enabled: id > 0,
     staleTime: 30_000,
   });
@@ -402,118 +534,11 @@ export function MemberPage() {
     );
   }
 
-  return (
-    <MemberPageContent data={data} t={t} />
-  );
-}
-
-/** Render the member page content from fetched data (also exported for
- *  tests to use directly without mocking fetch). */
-export function MemberPageContent({
-  data,
-  t,
-}: {
-  data: MemberPageData;
-  t: (key: string) => string;
-}) {
-  // Status chips
-  const chips: string[] = [];
-  if (data.lapsed) chips.push(t("lapsed_tag"));
-  if (data.snoozed_until) {
-    chips.push(
-      t("snoozed_tag").replace(
-        "{date}",
-        fmtDate(data.snoozed_until, t)
-      )
-    );
-  }
-
-  // Facts line
-  const countLabel =
-    data.session_count === 1
-      ? t("one_session")
-      : t("n_sessions").replace("{n}", String(data.session_count));
-
-  const gapLabel = !data.has_sessions
-    ? t("no_sessions_yet")
-    : data.gap_days === 0
-      ? t("trained_today")
-      : data.gap_days === 1
-        ? t("one_day_away")
-        : t("days_away").replace("{n}", String(data.gap_days));
-
-  const factsParts = [
-    t("member_since").replace("{date}", fmtDate(data.member_since, t)),
-    countLabel,
-    gapLabel,
-  ];
-  if (data.last_session_on) {
-    factsParts.push(
-      t("last_session").replace("{date}", fmtDate(data.last_session_on, t))
-    );
+  if (rosterView === "split") {
+    return <MemberPane data={data} t={t} />;
   }
 
   return (
-    <div className="min-h-screen bg-bg text-ink font-sans antialiased">
-      {/* Sticky header with back link */}
-      <header className="sticky top-0 z-20 flex items-center gap-2 min-h-[46px] px-gut py-1.5 bg-elevation-0 border-b border-elevation-0-stroke shadow-elevation-1">
-        <Link
-          to="/"
-          className="text-[13px] text-ink-2 hover:text-ink transition-colors duration-fast"
-        >
-          ← {t("back_to_roster")}
-        </Link>
-      </header>
-
-      <main className="max-w-2xl mx-auto px-gut py-6">
-        {/* Headline */}
-        <span className="eyebrow">{t("member_eyebrow")}</span>
-        <h1 className="text-[28px] leading-tight mt-1">{data.name}</h1>
-
-        {/* Status chips */}
-        {chips.length > 0 && (
-          <div className="chips flex gap-2 mt-2">
-            {chips.map((chip, i) => (
-              <span key={i} className="tag text-[10px]">
-                {chip}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Facts line */}
-        <div className="facts text-[13px] text-ink-2 mt-3 flex flex-wrap gap-x-3 gap-y-1">
-          {factsParts.map((part, i) => (
-            <span key={i}>
-              {i > 0 && (
-                <span className="mx-1.5 text-ink-3" aria-hidden="true">·</span>
-              )}
-              {part}
-            </span>
-          ))}
-        </div>
-
-        {/* Safety banner */}
-        <div className="mt-5">
-          <SafetyBanner
-            flags={data.safety_flags}
-            memberId={data.member_id}
-            t={t}
-          />
-        </div>
-
-        {/* Two-column layout */}
-        <div className="columns grid grid-cols-1 md:grid-cols-2 gap-5 mt-5">
-          <div className="col flex flex-col gap-5">
-            <RoutineCard data={data} t={t} />
-            <SessionsCard data={data} t={t} />
-          </div>
-          <div className="col flex flex-col gap-5">
-            <WeightsCard data={data} t={t} />
-            <NotesCard data={data} t={t} />
-          </div>
-        </div>
-      </main>
-    </div>
+    <MemberPageContent data={data} t={t} rosterView={rosterView} />
   );
 }

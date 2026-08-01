@@ -279,8 +279,9 @@ describe("RosterShell", () => {
       // The member name appears both in the rail link and in the pane heading.
       const aliceNodes = screen.getAllByText("Alice");
       expect(aliceNodes.length).toBeGreaterThanOrEqual(2);
-      // The MemberPage back link is present, confirming the pane rendered.
-      expect(screen.getByText(/←/)).toBeInTheDocument();
+      // The MemberPage pane heading is present, confirming the pane rendered
+      // (no chrome / back-link in split — that belongs to the standalone page).
+      expect(screen.getByText("Member")).toBeInTheDocument();
     });
   });
 

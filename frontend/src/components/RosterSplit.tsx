@@ -68,7 +68,7 @@ export function RosterSplit({ members, selectedMemberId: propId }: RosterSplitPr
       {/* Right pane: renders via nested route outlet */}
       <div className="pane flex-1 min-h-0 lg:overflow-y-auto">
         {selectedMemberId != null ? (
-          <Outlet context={{ members } satisfies RosterOutletContext} />
+          <Outlet context={{ members, rosterView: "split" } satisfies RosterOutletContext} />
         ) : (
           <div className="pane-empty flex items-center justify-center min-h-[200px]">
             <div className="emptystate text-center">
