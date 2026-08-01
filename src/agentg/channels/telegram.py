@@ -63,23 +63,6 @@ def split_reply(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
     return chunks
 
 
-def _cap_text(text: str, limit: int = MAX_MESSAGE_LENGTH) -> str:
-    """Truncate text to fit Telegram's UTF-16 character limit.
-
-    Used by the streaming path where a single growing message cannot be
-    split across multiple chunks like ``split_reply`` does.
-    """
-    units = 0
-    result: list[str] = []
-    for char in text:
-        weight = 2 if ord(char) > 0xFFFF else 1
-        if units + weight > limit:
-            break
-        result.append(char)
-        units += weight
-    return "".join(result)
-
-
 # Module-level so tests can shorten the refresh interval without waiting
 # for a full production cycle (Telegram expires the action after ~5 s).
 _TYPING_REFRESH_INTERVAL: float = 4.5
@@ -110,41 +93,60 @@ async def _deliver_streamed(
     Cancels the typing indicator after the first chunk lands so the Member
     sees the reply start right away.  Demo animations land after the stream
     is exhausted, preserving the existing ordering guarantee.
+
+    Long replies (exceeding ``MAX_MESSAGE_LENGTH``) are split across
+    multiple messages using ``split_reply`` so no text is silently dropped
+    and every message edit changes the visible text (avoiding Telegram's
+    "message is not modified" error and the duplicate-message burst it
+    caused).
     """
     assert reply.stream is not None
-    sent_message: Message | None = None
+    sent_messages: dict[int, Message] = {}  # chunk index → sent message
+    last_sent_by_index: dict[int, str] = {}  # chunk index → last text sent
+    last_yielded: str = ""
     try:
         async for chunk in reply.stream:
-            stripped = _cap_text(chunk.strip().replace("**", ""))
-            if sent_message is None:
-                # First chunk — cancel typing so it doesn't linger.
-                typing_task.cancel()
-                try:
-                    await typing_task
-                except asyncio.CancelledError:
-                    pass
-                if not stripped:
+            stripped = chunk.strip().replace("**", "")
+            if not stripped or stripped == last_yielded:
+                continue
+            last_yielded = stripped
+            chunks = split_reply(stripped)
+            first_ever = len(sent_messages) == 0
+            for i, part in enumerate(chunks):
+                if part == last_sent_by_index.get(i):
                     continue
-                if reply.disable_preview:
-                    sent_message = await message.answer(
-                        stripped,
-                        link_preview_options=LinkPreviewOptions(is_disabled=True),
-                    )
+                last_sent_by_index[i] = part
+                existing = sent_messages.get(i)
+                if existing is None:
+                    # New chunk — send as a fresh message.
+                    if first_ever and i == 0:
+                        typing_task.cancel()
+                        try:
+                            await typing_task
+                        except asyncio.CancelledError:
+                            pass
+                    if i == 0 and reply.disable_preview:
+                        sent = await message.answer(
+                            part,
+                            link_preview_options=LinkPreviewOptions(is_disabled=True),
+                        )
+                    else:
+                        sent = await message.answer(part)
+                    sent_messages[i] = sent
                 else:
-                    sent_message = await message.answer(stripped)
-            else:
-                if not stripped:
-                    continue
-                # Edit the existing message with the growing text.
-                try:
-                    await sent_message.edit_text(stripped)
-                except Exception:
-                    logger.debug("edit_text failed, sending as new message", exc_info=True)
-                    sent_message = await message.answer(stripped)
+                    # Existing chunk grew — edit it in place.
+                    try:
+                        await existing.edit_text(part)
+                    except Exception:
+                        logger.debug(
+                            "edit_text failed, sending as new message", exc_info=True
+                        )
+                        sent = await message.answer(part)
+                        sent_messages[i] = sent
     except Exception:
         logger.exception("streaming delivery failed for sender %s", message.from_user.id)
-        if sent_message is None:
-            sent_message = await message.answer(ERROR_REPLY)
+        if not sent_messages:
+            sent_messages[-1] = await message.answer(ERROR_REPLY)
     finally:
         # Ensure typing is always cancelled.
         if not typing_task.done():
@@ -156,7 +158,7 @@ async def _deliver_streamed(
 
     # If nothing was delivered (empty stream, all-whitespace, or error before
     # any chunk), send the fallback so the Member isn't left in silence.
-    if sent_message is None:
+    if not sent_messages:
         await message.answer(EMPTY_REPLY_FALLBACK)
 
     # Follow-up media lands beneath the final reply text.

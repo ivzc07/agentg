@@ -17,7 +17,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from agents import Agent, Runner
 from agents.extensions.memory import SQLAlchemySession
@@ -25,6 +27,9 @@ from agents.stream_events import RawResponsesStreamEvent
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from openai.types.responses import ResponseTextDeltaEvent
+
+if TYPE_CHECKING:
+    from agents.result import RunResultStreaming
 
 from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
