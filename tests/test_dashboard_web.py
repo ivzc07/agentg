@@ -362,6 +362,51 @@ async def test_spa_shell_injects_es_i18n_strings(spa_env):
     assert "Ajustes" in text
 
 
+async def test_spa_shell_injects_i18n_arrays_en(spa_env):
+    """The SPA shell injects _weekdays, _months, and _weekday_initials for en."""
+    from agentg.dashboard_i18n import WEEKDAYS, MONTHS, WEEKDAY_INITIALS
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        SPA_SHELL_ROUTE,
+        cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "en"},
+    )
+
+    text = await response.text()
+    assert "window.__I18N__" in text
+    # Parse the injected payload.
+    before_close = text.split("window.__I18N__", 1)[1].split("</script>", 1)[0]
+    payload = json.loads(before_close.split(" = ", 1)[1].rstrip(";"))
+
+    assert payload["_weekdays"] == list(WEEKDAYS["en"])
+    assert payload["_months"] == list(MONTHS["en"])
+    assert payload["_weekday_initials"] == list(WEEKDAY_INITIALS["en"])
+
+
+async def test_spa_shell_injects_i18n_arrays_es(spa_env):
+    """The SPA shell injects _weekdays, _months, and _weekday_initials for es."""
+    from agentg.dashboard_i18n import WEEKDAYS, MONTHS, WEEKDAY_INITIALS
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        SPA_SHELL_ROUTE,
+        cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "es"},
+    )
+
+    text = await response.text()
+    assert "window.__I18N__" in text
+    # Parse the injected payload.
+    before_close = text.split("window.__I18N__", 1)[1].split("</script>", 1)[0]
+    payload = json.loads(before_close.split(" = ", 1)[1].rstrip(";"))
+
+    assert payload["_weekdays"] == list(WEEKDAYS["es"])
+    assert "miércoles" in payload["_weekdays"]
+    assert payload["_months"] == list(MONTHS["es"])
+    assert payload["_weekday_initials"] == list(WEEKDAY_INITIALS["es"])
+
+
 async def test_spa_shell_escapes_script_close_tag(tmp_path, monkeypatch):
     """A ``</script>`` string in STRINGS must not close the injection tag early."""
     import agentg.dashboard_web as dashboard_web

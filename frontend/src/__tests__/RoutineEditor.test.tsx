@@ -3,6 +3,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
+import fs from "node:fs";
+import path from "node:path";
 import { RoutineEditor } from "../components/RoutineEditor";
 
 const EN_BOOTSTRAP = {
@@ -96,8 +98,8 @@ describe("RoutineEditor", () => {
     );
 
     renderEditor("/members/1/routine");
-    // The Loader2 renders with animate-spin
-    const loaderContainer = document.querySelector(".animate-spin");
+    // The Loader2 renders with motion-safe:animate-spin
+    const loaderContainer = document.querySelector("[class*='animate-spin']");
     expect(loaderContainer).not.toBeNull();
   });
 
@@ -424,6 +426,35 @@ describe("RoutineEditor", () => {
       // Falls back to English weekday names.
       expect(screen.getAllByText("Wednesday").length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText("Friday").length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // Reduced-motion: every animation class must be guarded (issue #151, review 3).
+  describe("reduced-motion guard", () => {
+    it("every animate-spin and transition- class in RoutineEditor is prefixed with motion-safe:", () => {
+      const src = fs.readFileSync(
+        path.resolve(__dirname, "..", "components", "RoutineEditor.tsx"),
+        "utf-8",
+      );
+      // Find every className="..." containing animate-spin or transition-
+      // and assert each has motion-safe: before the animation class.
+      const re = /className="([^"]*)"/g;
+      let match;
+      const violations: string[] = [];
+      while ((match = re.exec(src)) !== null) {
+        const classes = match[1];
+        const hasAnim = /\banimate-spin\b/.test(classes);
+        const hasTrans = /\btransition-/.test(classes);
+        if (hasAnim || hasTrans) {
+          const guarded =
+            (!hasAnim || /\bmotion-safe:animate-spin\b/.test(classes)) &&
+            (!hasTrans || /\bmotion-safe:transition-/.test(classes));
+          if (!guarded) {
+            violations.push(classes);
+          }
+        }
+      }
+      expect(violations).toEqual([]);
     });
   });
 });

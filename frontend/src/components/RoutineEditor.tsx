@@ -240,7 +240,7 @@ export function RoutineEditor() {
   if (isLoading) {
     return (
       <div className="min-h-screen bg-bg flex items-center justify-center">
-        <Loader2 className="w-6 h-6 animate-spin text-ink-2" />
+        <Loader2 className="w-6 h-6 motion-safe:animate-spin text-ink-2" />
       </div>
     );
   }
@@ -274,7 +274,7 @@ export function RoutineEditor() {
       <header className="sticky top-0 z-20 flex items-center gap-2 min-h-[46px] px-gut py-1.5 bg-elevation-0 border-b border-elevation-0-stroke shadow-elevation-1">
         <Link
           to={`/members/${id}`}
-          className="text-[13px] text-ink-2 hover:text-ink transition-colors duration-fast"
+          className="text-[13px] text-ink-2 hover:text-ink motion-safe:transition-colors duration-fast"
         >
           ← {data.name}
         </Link>
@@ -429,7 +429,7 @@ export function RoutineEditor() {
                         remove(dayIndex);
                         setFeedback(null);
                       }}
-                      className="flex-shrink-0 p-1.5 rounded-lg text-ink-2 hover:text-[#f87171] hover:bg-elevation-2 transition-colors duration-fast"
+                      className="flex-shrink-0 p-1.5 rounded-lg text-ink-2 hover:text-[#f87171] hover:bg-elevation-2 motion-safe:transition-colors duration-fast"
                       aria-label={t("remove_day")}
                     >
                       <Trash2 className="w-4 h-4" />
@@ -470,7 +470,7 @@ export function RoutineEditor() {
             <button
               type="button"
               onClick={addDay}
-              className="mt-4 flex items-center gap-1.5 text-[14px] text-ink-2 hover:text-ink transition-colors duration-fast"
+              className="mt-4 flex items-center gap-1.5 text-[14px] text-ink-2 hover:text-ink motion-safe:transition-colors duration-fast"
             >
               <Plus className="w-4 h-4" />
               {t("add_day")}
@@ -488,7 +488,7 @@ export function RoutineEditor() {
                 {data.catalog.map((name) => (
                   <span
                     key={name}
-                    className="inline-block text-[13px] px-2 py-0.5 rounded-full bg-elevation-1 border border-elevation-0-stroke text-ink-2 cursor-pointer hover:text-ink hover:border-ink-3 transition-colors duration-fast"
+                    className="inline-block text-[13px] px-2 py-0.5 rounded-full bg-elevation-1 border border-elevation-0-stroke text-ink-2 cursor-pointer hover:text-ink hover:border-ink-3 motion-safe:transition-colors duration-fast"
                     onClick={() => {
                       // Find first empty exercise in the form and fill it
                       const allExercises = document.querySelectorAll<HTMLInputElement>(
@@ -526,10 +526,10 @@ export function RoutineEditor() {
             <button
               type="submit"
               disabled={saveMutation.isPending}
-              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-magenta text-white text-[14px] font-medium hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-fast"
+              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-magenta text-white text-[14px] font-medium hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed motion-safe:transition-all duration-fast"
             >
               {saveMutation.isPending && (
-                <Loader2 className="w-4 h-4 animate-spin" />
+                <Loader2 className="w-4 h-4 motion-safe:animate-spin" />
               )}
               {t("save_routine")}
             </button>
@@ -635,7 +635,7 @@ function ExerciseList({
                 }
               }}
               disabled={fields.length <= 1}
-              className="flex-shrink-0 p-1.5 mt-0.5 rounded-lg text-ink-2 hover:text-[#f87171] hover:bg-elevation-2 disabled:opacity-30 disabled:cursor-not-allowed transition-colors duration-fast"
+              className="flex-shrink-0 p-1.5 mt-0.5 rounded-lg text-ink-2 hover:text-[#f87171] hover:bg-elevation-2 disabled:opacity-30 disabled:cursor-not-allowed motion-safe:transition-colors duration-fast"
               aria-label={t("remove_exercise")}
             >
               <Trash2 className="w-4 h-4" />
@@ -648,7 +648,7 @@ function ExerciseList({
       <button
         type="button"
         onClick={() => append(defaultExercise())}
-        className="flex items-center gap-1 text-[13px] text-ink-2 hover:text-ink transition-colors duration-fast mt-1"
+        className="flex items-center gap-1 text-[13px] text-ink-2 hover:text-ink motion-safe:transition-colors duration-fast mt-1"
       >
         <Plus className="w-3.5 h-3.5" />
         {t("add_exercise")}
