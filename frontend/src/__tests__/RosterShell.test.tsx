@@ -279,8 +279,11 @@ describe("RosterShell", () => {
       // The member name appears both in the rail link and in the pane heading.
       const aliceNodes = screen.getAllByText("Alice");
       expect(aliceNodes.length).toBeGreaterThanOrEqual(2);
-      // The MemberPage pane heading is present, confirming the pane rendered
-      // (no chrome / back-link in split — that belongs to the standalone page).
+      // The eyebrow renders in both the bare pane and the chrome, so it
+      // cannot distinguish them.  Assert what MUST be absent in split:
+      // the back-link and the standalone page chrome.
+      expect(screen.queryByText(/← /)).not.toBeInTheDocument();
+      // The member eyebrow is still there inside the bare pane.
       expect(screen.getByText("Member")).toBeInTheDocument();
     });
   });
