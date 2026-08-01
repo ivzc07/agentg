@@ -261,9 +261,9 @@ async def test_typing_indicator_refreshes_during_turn():
         tmod._TYPING_REFRESH_INTERVAL = saved
 
     # The agent sleeps 0.15 s with a 0.04 s refresh interval, so the loop
-    # should fire at least three refreshes on top of the initial burst.
-    assert bot_send_chat_action.await_count >= 4, (
-        f"expected >= 4 typing sends, got {bot_send_chat_action.await_count}"
+    # should fire at least two refreshes on top of the initial send.
+    assert bot_send_chat_action.await_count >= 3, (
+        f"expected >= 3 typing sends, got {bot_send_chat_action.await_count}"
     )
 
     # Every call must use the action='typing' parameter.
@@ -273,15 +273,32 @@ async def test_typing_indicator_refreshes_during_turn():
 
 async def test_typing_indicator_stops_after_reply():
     """Once the reply is sent the typing indicator must not fire again."""
+    from agentg.channels import telegram as tmod
+
     bot_send_chat_action = AsyncMock()
 
     async def reply_fn(msg):
+        # Yield long enough for the typing task to wake from its first sleep,
+        # send a refresh, and enter its loop body — so cancellation actually
+        # interrupts a running task.
+        await asyncio.sleep(0.03)
         return Reply("all good")
 
     message = FakeMessage(bot_send_chat_action=bot_send_chat_action)
-    await make_message_handler(reply_fn)(message)
+
+    saved = tmod._TYPING_REFRESH_INTERVAL
+    tmod._TYPING_REFRESH_INTERVAL = 0.01
+    try:
+        await make_message_handler(reply_fn)(message)
+    finally:
+        tmod._TYPING_REFRESH_INTERVAL = saved
 
     final_count = bot_send_chat_action.await_count
+
+    # The typing task must have run its loop at least once before cancellation.
+    assert final_count >= 2, (
+        f"typing task never entered its refresh loop, got {final_count} calls"
+    )
 
     # Wait a bit — no more typing actions should arrive.
     await asyncio.sleep(0.15)
@@ -293,15 +310,32 @@ async def test_typing_indicator_stops_after_reply():
 
 async def test_typing_indicator_stops_on_agent_failure():
     """A failure inside the Agent still clears the typing indicator."""
+    from agentg.channels import telegram as tmod
+
     bot_send_chat_action = AsyncMock()
 
     async def reply_fn(msg):
+        # Yield long enough for the typing task to wake from its first sleep,
+        # send a refresh, and enter its loop body — so cancellation actually
+        # interrupts a running task.
+        await asyncio.sleep(0.03)
         raise RuntimeError("model unavailable")
 
     message = FakeMessage(bot_send_chat_action=bot_send_chat_action)
-    await make_message_handler(reply_fn)(message)
+
+    saved = tmod._TYPING_REFRESH_INTERVAL
+    tmod._TYPING_REFRESH_INTERVAL = 0.01
+    try:
+        await make_message_handler(reply_fn)(message)
+    finally:
+        tmod._TYPING_REFRESH_INTERVAL = saved
 
     final_count = bot_send_chat_action.await_count
+
+    # The typing task must have run its loop at least once before cancellation.
+    assert final_count >= 2, (
+        f"typing task never entered its refresh loop, got {final_count} calls"
+    )
 
     # The typing indicator must stop after the error.
     await asyncio.sleep(0.15)

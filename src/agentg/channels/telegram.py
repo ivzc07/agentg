@@ -76,11 +76,11 @@ async def _keep_typing(bot: Bot, chat_id: int) -> None:
     must cancel the task (and await the cancellation) to stop the indicator.
     """
     while True:
+        await asyncio.sleep(_TYPING_REFRESH_INTERVAL)
         try:
             await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
         except Exception:
             logger.debug("typing refresh failed", exc_info=True)
-        await asyncio.sleep(_TYPING_REFRESH_INTERVAL)
 
 
 def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[None]]:
@@ -97,7 +97,7 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
         )
         # Send the first typing action synchronously so it lands before the
         # Agent starts work, then keep refreshing in the background (Telegram
-        # expires the action after ~5 s).  The initial send is fire-and-forget
+        # expires the action after ~5 s).  The initial send is failure-tolerant
         # — a transient failure must never gate the reply.
         try:
             await message.bot.send_chat_action(
