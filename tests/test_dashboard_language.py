@@ -178,8 +178,8 @@ async def test_the_member_page_translates_chrome_dates_relative_time_and_decimal
     joined = member.created_at.date()
     assert f"Member since {fmt_date(joined, 'en')}" in en
     assert f"Miembro desde {fmt_date(joined, 'es')}" in es
-    # Relative time.
-    assert "2 days away" in en and "2 días sin venir" in es
+    # Relative time (the gap number is wrapped in a numeral span).
+    assert 'numeral-sm">2</span> days away' in en and 'numeral-sm">2</span> días sin venir' in es
     # The decimal mark.
     assert "62.5 kg" in en and "62,5 kg" in es
 

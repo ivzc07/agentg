@@ -129,7 +129,7 @@ async def test_the_page_shows_header_routine_sessions_weights_and_notes(env):
     assert "Luis" in text
     assert f"Miembro desde {fmt_date(member.created_at.date(), 'es')}" in text
     assert "2 sesiones" in text
-    assert "2 días sin venir" in text
+    assert 'numeral-sm">2</span> días sin venir' in text
     assert "última sesión" in text
     # Routine: pinned weekday names and the set/rep scheme.
     assert "Rutina" in text
