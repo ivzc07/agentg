@@ -58,7 +58,7 @@ async def env(tmp_path):
 
 
 async def test_a_queued_demo_is_sent_after_the_reply(env, monkeypatch):
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         # the show_demo tool would append the resolved exercise name
         context.demo_requests.append("goblet squat")
         return SimpleNamespace(final_output="on its way — knees out, chest tall!")
@@ -76,7 +76,7 @@ async def test_a_queued_demo_is_sent_after_the_reply(env, monkeypatch):
 
 
 async def test_no_send_when_nothing_was_queued(env, monkeypatch):
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         return SimpleNamespace(final_output="hey!")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)

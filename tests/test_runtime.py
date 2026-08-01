@@ -72,7 +72,7 @@ async def test_turns_in_one_conversation_never_interleave(runtime, monkeypatch):
     running: set[str] = set()
     overlapped = []
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         if session.session_id in running:
             overlapped.append(text)
         running.add(session.session_id)
@@ -101,7 +101,7 @@ async def test_reset_rhythm_is_deferred_past_the_reply(runtime, monkeypatch):
     """reset_rhythm must not block the LLM call — it fires after_send."""
     events: list[str] = []
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         events.append("llm")
         return SimpleNamespace(final_output="ok")
 
@@ -135,7 +135,7 @@ async def test_reset_rhythm_is_deferred_past_the_reply(runtime, monkeypatch):
 
 async def test_deferred_reset_rhythm_still_revives_lapsed_members(runtime, monkeypatch):
     """A lapsed Member is revived after the reply, not before."""
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         return SimpleNamespace(final_output="welcome back!")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)

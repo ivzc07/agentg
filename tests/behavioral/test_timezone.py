@@ -30,9 +30,18 @@ def _tool_payloads(h: ConversationHarness) -> str:
     )
 
 
-def _instructions(h: ConversationHarness) -> str:
-    """Every system prompt the model saw (each carries the member snapshot)."""
-    return "\n".join(call["system_instructions"] or "" for call in h.model.calls)
+def _snapshot(h: ConversationHarness) -> str:
+    """The developer-message snapshot the model saw, injected via
+    call_model_input_filter at the end of each model call's input (#175)."""
+    parts: list[str] = []
+    for call in h.model.calls:
+        items = call["input"]
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and item.get("role") == "developer":
+                parts.append(str(item.get("content", "")))
+    return "\n".join(parts)
 
 
 async def test_late_evening_session_counts_on_the_local_day_in_the_gap(tmp_path):
@@ -62,7 +71,7 @@ async def test_late_evening_session_counts_on_the_local_day_in_the_gap(tmp_path)
         assert "days_since_last_session': 2" in payloads
         assert "2026-07-13" in payloads
         # The snapshot the Agent speaks from agrees.
-        assert "Last Session: 2 days ago (2026-07-13)" in _instructions(h)
+        assert "Last Session: 2 days ago (2026-07-13)" in _snapshot(h)
         # End state via Stores: same local-day gap.
         days, last = await h.stores.training.latest_session_info(h.member_id)
         assert days == 2
@@ -85,10 +94,10 @@ async def test_snapshot_today_and_todays_workout_are_gym_local(tmp_path):
 
         await h.say("hey", steps=[message("Hola.")])
 
-        instructions = _instructions(h)
-        assert "Today is 2026-07-13." in instructions  # not the UTC Jul 14
-        assert "Piernas" in instructions  # Monday's Workout locally…
-        assert "Push" not in instructions  # …though UTC says Tuesday
+        snapshot = _snapshot(h)
+        assert "Today is 2026-07-13." in snapshot  # not the UTC Jul 14
+        assert "Piernas" in snapshot  # Monday's Workout locally…
+        assert "Push" not in snapshot  # …though UTC says Tuesday
 
 
 async def test_sweep_fires_the_fallback_nudge_on_the_local_gap(tmp_path):
