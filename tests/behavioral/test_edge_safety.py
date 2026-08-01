@@ -81,13 +81,15 @@ async def test_forget_me_wipes_every_member_row(tmp_path):
             "forget me",
             steps=[message("This permanently erases everything — sure?")],
         )
-        await h.say(
+        reply = await h.say(
             "yes, delete everything",
             steps=[
                 tool("delete_my_data", confirm=True),
                 message("Goodbye — you're wiped."),
             ],
         )
+        # Issue #166 acceptance criterion: goodbye reaches the Member.
+        assert "Goodbye" in reply
 
         assert await _count(h._engine, Member, id=member_id) == 0
         assert await _count(h._engine, MemberChannel, member_id=member_id) == 0

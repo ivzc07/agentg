@@ -96,18 +96,22 @@ class AgentRuntime:
                 session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
             )
             context = self.member_context(linked)
-            result = await Runner.run(
-                self.agent,
-                msg.text,
-                session=session,
-                context=context,
-            )
-            # Issue #166: delete_my_data clears the session during the turn,
-            # but the runner persists this turn's items afterwards — the tool
-            # call and goodbye survive the wipe.  Clear again so nothing
-            # remains.
-            if context.forgotten:
-                await session.clear_session()
+            try:
+                result = await Runner.run(
+                    self.agent,
+                    msg.text,
+                    session=session,
+                    context=context,
+                )
+            finally:
+                # Issue #166: delete_my_data clears the session during the
+                # turn, but the runner persists this turn's items afterwards —
+                # the tool call and goodbye survive the wipe.  Clear again so
+                # nothing remains.  Run in finally so a mid-turn error (API,
+                # MaxTurnsExceeded) doesn't skip the clear after the domain
+                # wipe has already committed.
+                if context.forgotten:
+                    await session.clear_session()
             text = str(result.final_output)
             sender = self.demo_sender
             if sender is None or not context.demo_requests:
