@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 HISTORY_TOKEN_BUDGET = 12_000
 COMPACT_AT_TOKENS = (HISTORY_TOKEN_BUDGET * 7) // 10  # 8_400 ≈ 70%
 KEEP_RECENT = 20
+# When summaries already exist, skip compaction unless a meaningful number of
+# fresh items have aged out of the recent window.  This prevents re-compacting
+# on every message once the recent-item floor alone exceeds the budget (issue #165).
+MIN_FRESH_TO_SUMMARIZE = 2
 
 
 @dataclass(frozen=True)
@@ -43,6 +47,47 @@ class SessionLike(Protocol):  # the SDK session surface compaction touches
     async def get_items(self, limit: int | None = None) -> list[Any]: ...
     async def clear_session(self) -> None: ...
     async def add_items(self, items: list[Any]) -> None: ...
+
+
+async def _replace_items_atomically(session: Any, new_items: list[Any]) -> None:
+    """Replace all session items with *new_items* in a single transaction.
+
+    The SDK's ``clear_session`` + ``add_items`` pattern runs in two separate
+    transactions, so a crash or failure between them destroys the entire
+    conversation.  This helper uses the engine directly to delete old rows
+    and insert new ones atomically — either both happen or neither does
+    (issue #165).
+    """
+    from sqlalchemy import delete, insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    engine = session.engine
+    messages = session._messages
+    sessions = session._sessions
+
+    serialized = [
+        json.dumps(item, ensure_ascii=True, separators=(",", ":"))
+        for item in new_items
+    ]
+
+    async with engine.begin() as conn:
+        # Idempotent session-row upsert (matches add_items behaviour).
+        await conn.execute(
+            sqlite_insert(sessions)
+            .values(session_id=session.session_id)
+            .on_conflict_do_nothing()
+        )
+        # Delete every existing message for this session …
+        await conn.execute(
+            delete(messages).where(messages.c.session_id == session.session_id)
+        )
+        # … and write the replacement set in the same transaction.
+        if serialized:
+            payload = [
+                {"session_id": session.session_id, "message_data": item}
+                for item in serialized
+            ]
+            await conn.execute(insert(messages), payload)
 
 
 Summarizer = Callable[[list[Any], list[str]], Awaitable[CompactionSummary]]
@@ -80,6 +125,12 @@ async def maybe_compact(
     to_summarize = [it for it in old if "Summary of earlier conversation" not in str(it)]
     if not to_summarize:
         return False
+    # When summaries already exist and only a trivial number of fresh items
+    # have aged out of the recent window, skip compaction.  Without this
+    # guard a long-running member whose recent-item floor alone exceeds the
+    # budget re-triggers compaction on every single message (issue #165).
+    if old_summaries and len(to_summarize) < MIN_FRESH_TO_SUMMARIZE:
+        return False
     existing = [note.text for note in await notes.active(member_id)]
     result = await summarizer(to_summarize, existing)
     for kind, text in result.notes:  # durables first — deletion comes after
@@ -88,12 +139,20 @@ async def maybe_compact(
         "role": "assistant",
         "content": f"[Summary of earlier conversation]\n{result.summary}",
     }
+    # Prevent unbounded summary accumulation: when prior compactions have
+    # already left multiple summary items, merge them into one so the
+    # history floor does not grow without bound (issue #165).
+    if len(old_summaries) > 1:
+        merged = "\n\n".join(
+            s.get("content", str(s)) if isinstance(s, dict) else str(s)
+            for s in old_summaries
+        )
+        old_summaries = [{"role": "assistant", "content": merged}]
     new_items = old_summaries + [summary_item] + recent
-    # Write the replacement before clearing the old items.  If add_items
-    # raises, the old history is still intact (issue #165).
-    await session.add_items(new_items)
-    await session.clear_session()
-    await session.add_items(new_items)
+    # Single-transaction replacement: the old items are only deleted after
+    # the new items are committed — a crash cannot leave an empty session
+    # (issue #165).
+    await _replace_items_atomically(session, new_items)
     return True
 
 
