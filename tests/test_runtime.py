@@ -31,6 +31,7 @@ def make_runtime(url) -> AgentRuntime:
         stores=stores,
         linking=Linking(stores.linking, unused_phraser),
         summarizer=null_summarizer,
+        stream_replies=False,
     )
 
 

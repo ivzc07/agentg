@@ -119,6 +119,7 @@ class ConversationHarness:
             summarizer=_null_summarizer,
             notifier=notifier,
             dashboard=dashboard,
+            stream_replies=False,
         )
         await runtime.ensure_schema()
         harness = cls(

@@ -38,6 +38,7 @@ async def env(tmp_path):
         stores=stores,
         linking=Linking(stores.linking, unused_phraser),
         summarizer=RecordingSummarizer(),
+        stream_replies=False,
     )
     await runtime.ensure_schema()
     gym = await stores.linking.create_gym("Iron Temple")

@@ -39,6 +39,7 @@ async def env(tmp_path):
         linking=Linking(stores.linking, unused_phraser),
         summarizer=None,
         demo_sender=sender,
+        stream_replies=False,
     )
     await runtime.ensure_schema()
     gym = await stores.linking.create_gym("Iron Temple")

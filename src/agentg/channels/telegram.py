@@ -83,6 +83,70 @@ async def _keep_typing(bot: Bot, chat_id: int) -> None:
             logger.debug("typing refresh failed", exc_info=True)
 
 
+async def _deliver_streamed(
+    message: Message,
+    reply: Reply,
+    typing_task: asyncio.Task[None],
+) -> None:
+    """Stream reply chunks: first yield → new message, later yields → edits.
+
+    Cancels the typing indicator after the first chunk lands so the Member
+    sees the reply start right away.  Demo animations land after the stream
+    is exhausted, preserving the existing ordering guarantee.
+    """
+    assert reply.stream is not None
+    sent_message: Message | None = None
+    try:
+        async for chunk in reply.stream:
+            stripped = chunk.strip()
+            if sent_message is None:
+                # First chunk — cancel typing so it doesn't linger.
+                typing_task.cancel()
+                try:
+                    await typing_task
+                except asyncio.CancelledError:
+                    pass
+                if not stripped:
+                    continue
+                if reply.disable_preview:
+                    sent_message = await message.answer(
+                        stripped,
+                        link_preview_options=LinkPreviewOptions(is_disabled=True),
+                    )
+                else:
+                    sent_message = await message.answer(stripped)
+            else:
+                if not stripped:
+                    continue
+                # Edit the existing message with the growing text.
+                try:
+                    await sent_message.edit_text(stripped)
+                except Exception:
+                    logger.debug("edit_text failed, sending as new message", exc_info=True)
+                    sent_message = await message.answer(stripped)
+    except Exception:
+        logger.exception("streaming delivery failed for sender %s", message.from_user.id)
+        if sent_message is None:
+            await message.answer(ERROR_REPLY)
+    finally:
+        # Ensure typing is always cancelled.
+        if not typing_task.done():
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+
+    # Follow-up media lands beneath the final reply text.
+    if reply.after_send is not None:
+        try:
+            await reply.after_send()
+        except Exception:
+            logger.exception(
+                "post-reply delivery failed for sender %s", message.from_user.id
+            )
+
+
 def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[None]]:
     async def on_text(message: Message) -> None:
         if message.from_user is None or message.text is None:
@@ -113,6 +177,17 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
                 logger.exception("agent loop failed for sender %s", message.from_user.id)
                 await message.answer(ERROR_REPLY)
                 return
+            if reply.stream is not None:
+                # Streaming path (#176): send the first chunk as a new message,
+                # then edit it with progressively longer text at sentence
+                # boundaries.  Sentence-granularity respects Telegram's rate
+                # limits — no per-token edits.
+                await _deliver_streamed(
+                    message, reply, typing_task
+                )
+                # typing_task already cancelled inside _deliver_streamed
+                return
+            # Non-streaming path: split long replies and send in order.
             for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
                 if reply.disable_preview:  # keep the call shape unchanged otherwise
                     await message.answer(

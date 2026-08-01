@@ -93,6 +93,7 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
         stores=stores,
         linking=Linking(stores.linking, unused_phraser),
         summarizer=null_summarizer,
+        stream_replies=False,
     )
     await runtime.ensure_schema()
     gym = await stores.linking.create_gym("Iron Temple")
