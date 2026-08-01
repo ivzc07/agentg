@@ -56,7 +56,11 @@ describe("Dashboard", () => {
 
     renderDashboard();
 
-    expect(await screen.findByText("Not signed in.")).toBeInTheDocument();
+    expect(
+      await screen.findByText((content) =>
+        content.includes("No estás autenticado"),
+      ),
+    ).toBeInTheDocument();
   });
 
   it("shows a retryable error state on a non-401 failure", async () => {
@@ -88,6 +92,11 @@ describe("Dashboard", () => {
     // branches above are showing.
     expect(await screen.findByText("Iron Temple")).toBeInTheDocument();
     expect(screen.queryByText("Not signed in.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText((content) =>
+        content.includes("No estás autenticado"),
+      ),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByText("Something went wrong loading your session."),
     ).not.toBeInTheDocument();

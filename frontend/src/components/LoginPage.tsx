@@ -1,0 +1,87 @@
+import { useParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { useT } from "../hooks/useT";
+
+/** Validate a login token via the peek endpoint. */
+async function peekToken(token: string): Promise<boolean> {
+  const response = await fetch(`/api/login/${token}`);
+  if (!response.ok) return false;
+  const data = await response.json();
+  return data.valid === true;
+}
+
+/**
+ * Interstitial / bounce screen for the ``/dashboard/login/:token`` route
+ * (issue #153).
+ *
+ * Reachable **without** a session — the server serves the SPA shell
+ * unauthenticated for this route.  The login token is validated via a
+ * peek API (which never spends the token) so the SPA can distinguish
+ * "click to sign in" from a dead link.
+ *
+ * Token **redemption** stays server-side: the form POSTs to the existing
+ * ``/login/:token`` server route which redeems the token and sets the
+ * session cookie.
+ */
+export function LoginPage() {
+  const t = useT();
+  const { token = "" } = useParams<{ token: string }>();
+
+  const { data: valid, isLoading } = useQuery({
+    queryKey: ["login-token", token],
+    queryFn: () => peekToken(token),
+    staleTime: 60_000,
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen text-ink-2">
+        Loading…
+      </div>
+    );
+  }
+
+  // Dead link: show the friendly bounce page (same wording as the
+  // server-rendered door page — Spanish is the no-signal default).
+  if (!valid) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-bg">
+        <div className="door max-w-md mx-auto px-gut text-center">
+          <div className="card bg-elevation-1 border border-elevation-1-stroke rounded-sm p-8 space-y-4">
+            <h1 className="text-[20px] font-semibold">{t("done_saved") ? t("done_saved").replace("Guardado.", "Este enlace ya no sirve") : "Este enlace ya no sirve"}</h1>
+            <p className="text-[14px] text-ink-2">
+              Los enlaces al dashboard caducan y solo se pueden usar una vez.
+              Envía <b>/dashboard</b> a tu bot en Telegram para recibir uno
+              nuevo.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Valid token: show the interstitial with a sign-in button that POSTs
+  // to the server-side redemption route.
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-bg">
+      <div className="door max-w-md mx-auto px-gut text-center">
+        <div className="card bg-elevation-1 border border-elevation-1-stroke rounded-sm p-8 space-y-4">
+          <h1 className="text-[20px] font-semibold">
+            Abriendo tu dashboard…
+          </h1>
+          <form method="post" action={`/login/${token}`}>
+            <button
+              type="submit"
+              className="px-6 py-3 bg-ink text-bg font-semibold text-[15px] rounded-sm hover:bg-ink/90 transition-colors duration-fast"
+            >
+              Entrar al dashboard
+            </button>
+          </form>
+          <p className="text-[13px] text-ink-3">
+            Serás redirigido a tu dashboard.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
