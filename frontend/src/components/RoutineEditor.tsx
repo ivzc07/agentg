@@ -5,6 +5,7 @@ import { useForm, useFieldArray } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useT } from "../hooks/useT";
+import { getWeekdays } from "../lib/i18n";
 import { fetchRoutine, saveRoutine } from "../api/routine";
 import type {
   RoutineDay,
@@ -59,15 +60,6 @@ type FormValues = z.infer<typeof formSchema>;
 
 // --- Helpers ---
 
-const WEEKDAYS_EN = [
-  "Monday",
-  "Tuesday",
-  "Wednesday",
-  "Thursday",
-  "Friday",
-  "Saturday",
-  "Sunday",
-];
 function defaultExercise() {
   return { exercise: "", sets: null as number | null, reps: null as string | null };
 }
@@ -215,7 +207,7 @@ export function RoutineEditor() {
     onError: () => {
       setFeedback({
         type: "error",
-        message: "Network error — please try again.",
+        message: t("network_error"),
       });
     },
   });
@@ -256,7 +248,7 @@ export function RoutineEditor() {
   if (fetchError || !data) {
     return (
       <div className="min-h-screen bg-bg flex items-center justify-center text-ink-2">
-        Member not found.
+        {t("member_not_found")}
       </div>
     );
   }
@@ -344,7 +336,7 @@ export function RoutineEditor() {
                   {feedback.freshRoutine.map((day) => (
                     <div key={day.weekday}>
                       <span className="text-[14px] font-semibold text-ink">
-                        {WEEKDAYS_EN[day.weekday]}
+                        {getWeekdays()[day.weekday]}
                       </span>{" "}
                       <span className="text-[14px] text-ink-2">{day.name}</span>
                       <ul className="mt-1 space-y-0.5">
@@ -419,7 +411,7 @@ export function RoutineEditor() {
                           )
                         ).map((w) => (
                           <option key={w} value={w}>
-                            {WEEKDAYS_EN[w]}
+                            {getWeekdays()[w]}
                           </option>
                         ))}
                       </select>
@@ -438,7 +430,7 @@ export function RoutineEditor() {
                         setFeedback(null);
                       }}
                       className="flex-shrink-0 p-1.5 rounded-lg text-ink-2 hover:text-[#f87171] hover:bg-elevation-2 transition-colors duration-fast"
-                      aria-label="Remove day"
+                      aria-label={t("remove_day")}
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -481,7 +473,7 @@ export function RoutineEditor() {
               className="mt-4 flex items-center gap-1.5 text-[14px] text-ink-2 hover:text-ink transition-colors duration-fast"
             >
               <Plus className="w-4 h-4" />
-              Add day
+              {t("add_day")}
             </button>
           )}
 
@@ -563,6 +555,7 @@ function ExerciseList({
   errors: any;
   catalog: string[];
 }) {
+  const t = useT();
   const { fields, append, remove } = useFieldArray({
     control,
     name: `workouts.${dayIndex}.exercises`,
@@ -643,7 +636,7 @@ function ExerciseList({
               }}
               disabled={fields.length <= 1}
               className="flex-shrink-0 p-1.5 mt-0.5 rounded-lg text-ink-2 hover:text-[#f87171] hover:bg-elevation-2 disabled:opacity-30 disabled:cursor-not-allowed transition-colors duration-fast"
-              aria-label="Remove exercise"
+              aria-label={t("remove_exercise")}
             >
               <Trash2 className="w-4 h-4" />
             </button>
@@ -658,7 +651,7 @@ function ExerciseList({
         className="flex items-center gap-1 text-[13px] text-ink-2 hover:text-ink transition-colors duration-fast mt-1"
       >
         <Plus className="w-3.5 h-3.5" />
-        Add exercise
+        {t("add_exercise")}
       </button>
     </div>
   );

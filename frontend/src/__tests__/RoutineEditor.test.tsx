@@ -5,25 +5,34 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { RoutineEditor } from "../components/RoutineEditor";
 
+const EN_BOOTSTRAP = {
+  editor_title: "{name}'s routine",
+  chip_agent: "Agent-managed",
+  chip_coach: "Coach-authored",
+  chip_coach_named: "Coach-authored \u2014 {name}",
+  preset_chip: "Preset: {name}",
+  chip_consequence:
+    "Saving makes this plan yours — the Agent will stop adjusting it.",
+  routine_saved: "Routine saved.",
+  member_notified: "We told {name}.",
+  stale_error: "This routine changed while you were editing.",
+  current_version_label: "Current version",
+  pick_day: "\u2014 day \u2014",
+  workout_name_placeholder: "Name (e.g. Legs)",
+  catalog_label: "Exercise catalog",
+  editor_help: "One exercise per line: name, sets, reps.",
+  save_routine: "Save Routine",
+  network_error: "Network error — please try again.",
+  member_not_found: "Member not found.",
+  remove_day: "Remove day",
+  remove_exercise: "Remove exercise",
+  add_day: "Add day",
+  add_exercise: "Add exercise",
+  _weekdays: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+};
+
 beforeEach(() => {
-  (window as any).__I18N__ = {
-    editor_title: "{name}'s routine",
-    chip_agent: "Agent-managed",
-    chip_coach: "Coach-authored",
-    chip_coach_named: "Coach-authored \u2014 {name}",
-    preset_chip: "Preset: {name}",
-    chip_consequence:
-      "Saving makes this plan yours — the Agent will stop adjusting it.",
-    routine_saved: "Routine saved.",
-    member_notified: "We told {name}.",
-    stale_error: "This routine changed while you were editing.",
-    current_version_label: "Current version",
-    pick_day: "\u2014 day \u2014",
-    workout_name_placeholder: "Name (e.g. Legs)",
-    catalog_label: "Exercise catalog",
-    editor_help: "One exercise per line: name, sets, reps.",
-    save_routine: "Save Routine",
-  };
+  (window as any).__I18N__ = { ...EN_BOOTSTRAP };
 });
 
 function renderEditor(initialPath: string) {
@@ -353,5 +362,68 @@ describe("RoutineEditor", () => {
 
     // Catalog chips are visible
     expect(screen.getByText("deadlift")).toBeDefined();
+  });
+
+  // i18n: Spanish weekday names (issue #151, review 2).
+  it("renders Spanish weekday names from window.__I18N__._weekdays", async () => {
+    (window as any).__I18N__ = {
+      ...EN_BOOTSTRAP,
+      _weekdays: ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"],
+      pick_day: "\u2014 día \u2014",
+    };
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockRoutineResponse()),
+    } as Response);
+
+    renderEditor("/members/1/routine");
+
+    await waitFor(() => {
+      // Weekday 2 = Wednesday = "miércoles" in Spanish
+      expect(screen.getAllByText("miércoles").length).toBeGreaterThanOrEqual(1);
+      // Weekday 4 = Friday = "viernes" in Spanish
+      expect(screen.getAllByText("viernes").length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // i18n: translated error strings (issue #151, review 2).
+  it("renders the member_not_found string via useT", async () => {
+    (window as any).__I18N__ = {
+      ...EN_BOOTSTRAP,
+      member_not_found: "Miembro no encontrado.",
+    };
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: () => Promise.resolve({}),
+    } as Response);
+
+    renderEditor("/members/1/routine");
+
+    await waitFor(() => {
+      expect(screen.getByText("Miembro no encontrado.")).toBeDefined();
+    });
+  });
+
+  // Regression: prove the i18n bites by reverting a string to English.
+  it("shows English when _weekdays is missing (fallback path)", async () => {
+    // No _weekdays key — getWeekdays() falls back to English.
+    (window as any).__I18N__ = { ...EN_BOOTSTRAP };
+    delete (window as any).__I18N__._weekdays;
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockRoutineResponse()),
+    } as Response);
+
+    renderEditor("/members/1/routine");
+
+    await waitFor(() => {
+      // Falls back to English weekday names.
+      expect(screen.getAllByText("Wednesday").length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText("Friday").length).toBeGreaterThanOrEqual(1);
+    });
   });
 });

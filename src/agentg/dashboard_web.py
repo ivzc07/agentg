@@ -79,6 +79,7 @@ from agentg.dashboard_i18n import (
     LANG_COOKIE,
     LANG_COOKIE_TTL_SECONDS,
     LANGS,
+    MONTHS,
     NOTE_KIND_LABELS,
     STRINGS,
     WEEKDAY_INITIALS,
@@ -2556,7 +2557,10 @@ def build_app(
             return web.Response(text=_bounce_page(), content_type="text/html")
         member, gym = coach
         lang = _lang_of(request)
-        t = STRINGS[lang]
+        t: dict = dict(STRINGS[lang])
+        t["_months"] = list(MONTHS[lang])
+        t["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
+        t["_weekdays"] = list(WEEKDAYS[lang])
 
         index_path = resolved_dist / "index.html"
         if not index_path.exists():

@@ -8,6 +8,7 @@ import { getI18N } from "../lib/i18n";
 export function useT() {
   const strings = getI18N();
   return function t(key: string): string {
-    return strings[key] ?? key;
+    const val = strings[key];
+    return typeof val === "string" ? val : key;
   };
 }

@@ -247,6 +247,13 @@ STRINGS = {
             "¿Retirar este Preset? Los miembros conservan su copia, pero el "
             "Preset ya no se podrá editar ni aplicar."
         ),
+        # Routine editor i18n (issue #151, review 2).
+        "network_error": "Error de red — por favor, inténtalo de nuevo.",
+        "member_not_found": "Miembro no encontrado.",
+        "remove_day": "Quitar día",
+        "remove_exercise": "Quitar ejercicio",
+        "add_day": "Añadir día",
+        "add_exercise": "Añadir ejercicio",
     },
     "en": {
         "settings": "Settings",
@@ -419,6 +426,13 @@ STRINGS = {
             "Retire this preset? Members keep their copies, but the preset "
             "can no longer be edited or applied."
         ),
+        # Routine editor i18n (issue #151, review 2).
+        "network_error": "Network error — please try again.",
+        "member_not_found": "Member not found.",
+        "remove_day": "Remove day",
+        "remove_exercise": "Remove exercise",
+        "add_day": "Add day",
+        "add_exercise": "Add exercise",
     },
 }
 
