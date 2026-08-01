@@ -448,6 +448,79 @@ async def test_convergence_guard_skips_when_one_fresh_item_and_summaries_exist(e
     assert summarizer.calls == []
 
 
+# ---------------------------------------------------------------------------
+# Issue #173 — compaction-vs-next-turn serialization (criteria 2 & 3)
+# ---------------------------------------------------------------------------
+
+
+async def test_compaction_in_after_send_serializes_with_next_turn(env, monkeypatch):
+    """Compaction running inside after_send and the next handle_message
+    must never interleave — both acquire the same per-identity asyncio.Lock,
+    so Runner.run and maybe_compact are strictly serialized (issue #173)."""
+    import agentg.runtime as runtime_module
+    from types import SimpleNamespace
+    import asyncio
+    from agentg.compaction import CompactionSummary
+
+    running: set[str] = set()
+    overlapped: list[str] = []
+
+    # Gate holds the summarizer mid-flight inside the lock.
+    gate = asyncio.Event()
+    compaction_started = asyncio.Event()
+
+    async def slow_summarizer(old_items, existing_notes):
+        running.add("compaction")
+        compaction_started.set()
+        await gate.wait()
+        running.discard("compaction")
+        return CompactionSummary(summary="Dani benched 60.", notes=[])
+
+    async def fake_run(agent, text, *, session, context=None):
+        if "compaction" in running:
+            overlapped.append(f"run-during-compaction:{text}")
+        running.add("run")
+        await asyncio.sleep(0.01)
+        running.discard("run")
+        return SimpleNamespace(final_output="ok")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+    env.runtime.summarizer = slow_summarizer
+
+    total = KEEP_RECENT + 20
+    await env.session.add_items(over_budget_items(total))
+
+    # First turn returns immediately; compaction is deferred to after_send.
+    reply = await env.runtime.handle_message(
+        IncomingMessage(channel="telegram", channel_user_id="42", text="first")
+    )
+    assert reply.after_send is not None
+
+    # Start after_send in a concurrent task.
+    after_task = asyncio.create_task(reply.after_send())
+    # Wait until compaction is definitely inside the lock.
+    await asyncio.wait_for(compaction_started.wait(), timeout=5)
+
+    # Fire a second message for the same identity.  It must block on the
+    # per-identity lock that after_send still holds.
+    second_task = asyncio.create_task(
+        env.runtime.handle_message(
+            IncomingMessage(channel="telegram", channel_user_id="42", text="second")
+        )
+    )
+    # Let the second task reach the lock-acquisition point.
+    await asyncio.sleep(0.05)
+
+    # Release the gate so compaction finishes and releases the lock.
+    gate.set()
+    await asyncio.wait_for(after_task, timeout=5)
+    second_reply = await asyncio.wait_for(second_task, timeout=5)
+
+    # No overlap detected — the lock serialized correctly.
+    assert overlapped == []
+    assert str(second_reply) == "ok"
+
+
 async def test_convergence_guard_proceeds_with_enough_fresh_items(env):
     """When summaries exist AND enough fresh items have accumulated,
     compaction proceeds normally — the guard is a floor, not a ceiling."""
