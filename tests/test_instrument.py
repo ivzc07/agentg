@@ -1,5 +1,6 @@
 """Per-turn instrumentation: wall-time, model calls, SQL statements (#161)."""
 
+import asyncio
 import logging
 
 import litellm
@@ -133,6 +134,48 @@ class TestModelCounter:
         # No active instrument — nothing to assert beyond no crash.
 
 
+class TestConcurrency:
+    async def test_concurrent_turns_have_independent_model_counts(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """Two interleaved TurnContexts each count their own model calls.
+
+        Revert test for the P1 finding: the old save/restore approach
+        chained global wrappers under concurrency, so a single acompletion
+        call fired both wrappers and double-counted (or leaked the wrapper
+        permanently).  With the fix — a single persistent wrapper +
+        contextvar — each turn sees exactly its own calls.
+        """
+        caplog.set_level(logging.INFO, logger="agentg.instrument")
+
+        async def turn(name: str) -> int:
+            with TurnContext() as inst:
+                await litellm.acompletion(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": name}],
+                    mock_response="hello",
+                )
+                return inst.model_call_count
+
+        counts = await asyncio.gather(turn("A"), turn("B"))
+        assert counts == [1, 1], (
+            f"expected [1, 1] under concurrency, got {counts}"
+        )
+
+        # Each turn's log line should report exactly 1 model call.
+        log_lines = [
+            r.message
+            for r in caplog.records
+            if r.name == "agentg.instrument"
+            and "turn completed" in r.message
+        ]
+        assert len(log_lines) == 2
+        for line in log_lines:
+            assert "1 model calls" in line, (
+                f"expected '1 model calls', got: {line}"
+            )
+
+
 class TestIntegration:
     async def test_turn_context_wraps_handle_message(
         self, caplog: pytest.LogCaptureFixture
@@ -142,7 +185,6 @@ class TestIntegration:
         Uses the runtime fixture pattern from test_runtime.py — a linked
         Member with a mocked Runner so no real model call is needed.
         """
-        import asyncio
         from types import SimpleNamespace
 
         from agentg.db import create_engine
@@ -151,8 +193,6 @@ class TestIntegration:
         from agentg.runtime import AgentRuntime
         from agentg.stores import Stores
         from conftest import unused_phraser
-
-        from agentg import runtime as runtime_module
 
         async def null_summarizer(old_items, existing_notes):
             raise AssertionError("compaction should not trigger in this test")
@@ -204,5 +244,131 @@ class TestIntegration:
             line = log_lines[0]
             assert "model calls" in line
             assert "SQL statements" in line
+        finally:
+            await engine.dispose()
+
+    async def test_linking_only_turn_emits_instrument_log(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """A turn that short-circuits at linking still logs instrumentation.
+
+        Acceptance criterion 4 (issue #161): the linking path is covered,
+        not silently missing.  The runtime wraps the *entire* body in
+        TurnContext, so a linking-only reply emits a "turn completed" line.
+        """
+        from agentg.db import create_engine
+        from agentg.linking import Linking
+        from agentg.messages import IncomingMessage
+        from agentg.runtime import AgentRuntime
+        from agentg.stores import Stores
+        from conftest import identity_phraser
+
+        async def null_summarizer(old_items, existing_notes):
+            raise AssertionError("compaction should not trigger in this test")
+
+        engine = create_engine("sqlite+aiosqlite://")
+        stores = Stores.from_engine(engine)
+        # identity_phraser always returns a non-None reply, so every message
+        # short-circuits at linking and never reaches the Agent.
+        runtime = AgentRuntime(
+            agent=object(),
+            engine=engine,
+            stores=stores,
+            linking=Linking(stores.linking, identity_phraser),
+            summarizer=null_summarizer,
+        )
+        try:
+            await runtime.ensure_schema()
+            gym = await stores.linking.create_gym("Iron Temple")
+            await stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+            caplog.set_level(logging.INFO, logger="agentg.instrument")
+
+            reply = await runtime.handle_message(
+                IncomingMessage(
+                    channel="telegram",
+                    channel_user_id="42",
+                    text="hola",
+                )
+            )
+
+            assert isinstance(reply, str)
+            log_lines = [
+                r.message
+                for r in caplog.records
+                if r.name == "agentg.instrument"
+                and "turn completed" in r.message
+            ]
+            assert len(log_lines) == 1, (
+                f"linking-only turn should log one instrument line, got {log_lines}"
+            )
+        finally:
+            await engine.dispose()
+
+    async def test_dashboard_turn_emits_instrument_log(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """A /dashboard command turn logs instrumentation.
+
+        Acceptance criterion 4 (issue #161): the dashboard door is covered,
+        not silently missing.  The runtime wraps the *entire* body in
+        TurnContext, so the dashboard path emits a "turn completed" line.
+        """
+        from agentg.dashboard import DashboardDoor
+        from agentg.dashboard_store import DashboardStore
+        from agentg.db import create_engine
+        from agentg.linking import Linking
+        from agentg.messages import IncomingMessage
+        from agentg.runtime import AgentRuntime
+        from agentg.stores import Stores
+        from conftest import unused_phraser
+
+        async def null_summarizer(old_items, existing_notes):
+            raise AssertionError("compaction should not trigger in this test")
+
+        engine = create_engine("sqlite+aiosqlite://")
+        stores = Stores.from_engine(engine)
+        dashboard_store = DashboardStore(engine)
+        runtime = AgentRuntime(
+            agent=object(),
+            engine=engine,
+            stores=stores,
+            linking=Linking(stores.linking, unused_phraser),
+            summarizer=null_summarizer,
+            dashboard=DashboardDoor(
+                store=dashboard_store,
+                base_url="https://example.com",
+            ),
+        )
+        try:
+            await runtime.ensure_schema()
+            gym = await stores.linking.create_gym("Iron Temple")
+            coach = await stores.linking.link_member(
+                gym.id, "Coach Ana", "telegram", "42"
+            )
+            await stores.linking.set_coach(coach.id, True)
+
+            caplog.set_level(logging.INFO, logger="agentg.instrument")
+
+            reply = await runtime.handle_message(
+                IncomingMessage(
+                    channel="telegram",
+                    channel_user_id="42",
+                    text="/dashboard",
+                )
+            )
+
+            # /dashboard returns a Reply, which handle_message unwraps to str.
+            assert isinstance(reply, str)
+            assert "dashboard" in reply.lower()
+            log_lines = [
+                r.message
+                for r in caplog.records
+                if r.name == "agentg.instrument"
+                and "turn completed" in r.message
+            ]
+            assert len(log_lines) == 1, (
+                f"dashboard turn should log one instrument line, got {log_lines}"
+            )
         finally:
             await engine.dispose()
