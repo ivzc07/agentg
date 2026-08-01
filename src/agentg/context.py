@@ -7,9 +7,22 @@ delegate to (coaching.py) — neither imports the other's internals through it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from agentg.checkin_sweep import Notifier
 from agentg.stores import Stores
+
+
+@dataclass
+class TurnCache:
+    """Mutable per-turn cache — lives exactly one Agent run.
+
+    A MemberContext is built fresh each time the Agent runs, so anything
+    cached here is automatically dropped between turns.
+    """
+
+    _active_routine: dict[str, Any] | None = None
+    _routine_loaded: bool = False
 
 
 @dataclass(frozen=True)
@@ -33,3 +46,6 @@ class MemberContext:
     # Exercises the Agent asked to demo this turn; the channel sends them
     # after the reply so the agent loop stays channel-agnostic (ADR 0001).
     demo_requests: list[str] = field(default_factory=list)
+    # Per-turn cache so the active Routine is loaded once and reused
+    # across the snapshot, session opener, and weight suggestions (#162).
+    turn_cache: TurnCache = field(default_factory=TurnCache)

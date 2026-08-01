@@ -14,6 +14,7 @@ from agents import RunContextWrapper, Tool, function_tool
 from pydantic import BaseModel, Field
 
 from agentg.advice import suggest_for_today
+from agentg.snapshot import _ensure_cached_routine
 from agentg.coaching import (
     flag_to_coach_action,
     update_rules_doc_action,
@@ -57,12 +58,13 @@ async def open_session_payload(c: MemberContext) -> dict[str, Any]:
     """Open (or resume) the Member's Session and assemble the opener facts:
     the gap, the last Session's numbers, and today's Workout from the Routine."""
     opened = await c.stores.training.open_session(c.member_id, c.gym_id)
+    routine = await _ensure_cached_routine(c)
     return {
         "session_id": opened.session_id,
         "resumed_existing": opened.reopened,
         "days_since_last_session": opened.days_since_last,
         "last_session": opened.last_session,
-        "todays_workout": await c.stores.routines.todays_workout(c.member_id, c.timezone),
+        "todays_workout": c.stores.routines.pick_todays_workout(routine, c.timezone),
         "weight_unit": c.weight_unit,
     }
 
@@ -298,8 +300,10 @@ async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, An
     the suggestions ease back; open warm and guilt-free.
     """
     c = ctx.context
+    routine = await _ensure_cached_routine(c)
     suggestions = await suggest_for_today(
-        c.stores.training, c.stores.routines, c.member_id, c.gym_id, c.timezone
+        c.stores.training, c.stores.routines, c.member_id, c.gym_id, c.timezone,
+        routine=routine,
     )
     return {
         "weight_unit": c.weight_unit,

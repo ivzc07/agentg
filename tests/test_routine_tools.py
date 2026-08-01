@@ -18,6 +18,7 @@ from agentg.linking_store import LinkingStore
 from agentg.context import MemberContext
 from agentg.stores import Stores
 from agentg.tools import open_session_payload
+from agentg.advice import suggest_for_today
 from agentg.training import TrainingStore
 
 ROUTINE_TOOLS = {"get_rules_doc", "list_exercises", "save_routine", "get_routine"}
@@ -133,3 +134,106 @@ async def test_snapshot_names_todays_workout_when_a_routine_exists(env):
 async def test_snapshot_without_a_routine_says_so(env):
     snapshot = await member_snapshot(env.context)
     assert "no routine" in snapshot.lower()
+
+
+class _CountingRoutineStore:
+    """Wraps a RoutineStore to count active_routine calls (#162)."""
+
+    def __init__(self, store: RoutineStore) -> None:
+        self._store = store
+        self.active_routine_calls = 0
+
+    async def active_routine(self, member_id: int):
+        self.active_routine_calls += 1
+        return await self._store.active_routine(member_id)
+
+    # Delegate everything else so the cache helper's duck-type access works.
+    def __getattr__(self, name: str):
+        return getattr(self._store, name)
+
+
+async def test_active_routine_is_loaded_exactly_once_per_turn(env):
+    """A full turn (snapshot + open_session + suggest_weights) loads
+    the active Routine exactly once — the cache reuses it (#162)."""
+    await env.routines.save_routine(env.member_id, env.gym_id, wednesday_push())
+
+    counter = _CountingRoutineStore(env.routines)
+    context = MemberContext(
+        stores=Stores(
+            linking=env.context.stores.linking,
+            training=env.context.stores.training,
+            notes=env.context.stores.notes,
+            routines=counter,
+            checkins=env.context.stores.checkins,
+            demos=env.context.stores.demos,
+            forget=env.context.stores.forget,
+            dashboard=env.context.stores.dashboard,
+        ),
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        member_name="Dani",
+        gym_name="Iron Temple",
+        weight_unit="kg",
+    )
+
+    # Simulate a full turn: snapshot first, then session opener, then suggestions.
+    snapshot = await member_snapshot(context)
+    assert "Push" in snapshot
+
+    payload = await open_session_payload(context)
+    assert payload["todays_workout"] is not None
+    assert payload["todays_workout"]["name"] == "Push"
+
+    suggestions = await suggest_for_today(
+        context.stores.training,
+        context.stores.routines,
+        context.member_id,
+        context.gym_id,
+        context.timezone,
+        routine=context.turn_cache._active_routine,
+    )
+    assert len(suggestions) == 1
+    assert suggestions[0].exercise == "bench press"
+
+    # The active Routine was loaded exactly once — the cache fed the rest.
+    assert counter.active_routine_calls == 1
+
+
+async def test_the_cache_lives_exactly_one_turn(env):
+    """A fresh MemberContext (a new turn) reloads the Routine from the DB (#162)."""
+    await env.routines.save_routine(env.member_id, env.gym_id, wednesday_push())
+
+    counter = _CountingRoutineStore(env.routines)
+
+    # First turn.
+    ctx1 = MemberContext(
+        stores=Stores(
+            linking=env.context.stores.linking,
+            training=env.context.stores.training,
+            notes=env.context.stores.notes,
+            routines=counter,
+            checkins=env.context.stores.checkins,
+            demos=env.context.stores.demos,
+            forget=env.context.stores.forget,
+            dashboard=env.context.stores.dashboard,
+        ),
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        member_name="Dani",
+        gym_name="Iron Temple",
+        weight_unit="kg",
+    )
+    await member_snapshot(ctx1)
+    assert counter.active_routine_calls == 1
+
+    # Second turn with a fresh context — should re-query.
+    ctx2 = MemberContext(
+        stores=ctx1.stores,
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        member_name="Dani",
+        gym_name="Iron Temple",
+        weight_unit="kg",
+    )
+    await member_snapshot(ctx2)
+    assert counter.active_routine_calls == 2

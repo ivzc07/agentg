@@ -9,6 +9,7 @@ suggestions are ephemeral, never written to Routine/Workout rows.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from agentg.progression import (
     SessionResult,
@@ -46,10 +47,19 @@ async def suggest_for_today(
     member_id: int,
     gym_id: int,
     timezone: str = "UTC",
+    *,
+    routine: dict[str, Any] | None = None,
 ) -> list[ExerciseSuggestion]:
     """Weight suggestions for each Exercise in today's Workout (empty on a
-    rest day or with no Routine)."""
-    workout = await routines.todays_workout(member_id, timezone)
+    rest day or with no Routine).
+
+    When *routine* is provided (the pre-loaded active Routine from the
+    per-turn cache), today's Workout is derived from it without a re-query.
+    Otherwise ``todays_workout`` loads the active Routine itself."""
+    if routine is not None:
+        workout = routines.pick_todays_workout(routine, timezone)
+    else:
+        workout = await routines.todays_workout(member_id, timezone)
     if workout is None:
         return []
     rules = parse_progression_rules(await routines.effective_rules_doc(gym_id))
