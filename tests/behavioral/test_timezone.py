@@ -139,6 +139,45 @@ async def test_sweep_fires_the_fallback_nudge_on_the_local_gap(tmp_path):
         assert sent == 0
 
 
+async def test_snapshot_not_persisted_to_session_history(tmp_path):
+    """AC: the snapshot injected via call_model_input_filter is transient — it
+    reaches the model but is never saved into the persisted session history, so
+    stale snapshots cannot accumulate across turns (#175 criterion 3)."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        session = h.runtime.session_for_member(h.member_id)
+
+        # Turn 1
+        await h.say("hey", steps=[message("Hola.")])
+
+        # Turn 2
+        await h.say("I'm here", steps=[message("Let's go.")])
+
+        # (a) The persisted session history contains no developer snapshot items.
+        session_items = await session.get_items()
+        developer_items = [
+            item for item in session_items
+            if isinstance(item, dict) and item.get("role") == "developer"
+        ]
+        assert len(developer_items) == 0, (
+            f"session history must not contain snapshot items, "
+            f"found {len(developer_items)}"
+        )
+
+        # (b) The latest model call's input contains exactly one developer
+        # snapshot message (no accumulation, no omission).
+        last_input = h.model.calls[-1]["input"]
+        dev_messages = [
+            item for item in last_input
+            if isinstance(item, dict) and item.get("role") == "developer"
+        ]
+        assert len(dev_messages) == 1, (
+            f"latest model call must have exactly 1 developer message, "
+            f"found {len(dev_messages)}"
+        )
+        assert "Dani" in dev_messages[0]["content"]
+
+
 async def test_gap_deload_advice_uses_the_local_day_count(tmp_path):
     # Session logged Tue Jun 30, 21:00 local (after UTC midnight).
     clock = FakeClock(datetime(2026, 7, 1, 2, 0, tzinfo=UTC))
