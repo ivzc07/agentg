@@ -22,6 +22,15 @@ from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.dashboard import DashboardDoor, is_dashboard_command
 from agentg.demo_media import DemoSender, serve_demo
+
+
+async def _drain_coach_pings(pings):
+    """Best-effort drain of accumulated coach pings after a Runner failure."""
+    for ping in pings:
+        try:
+            await ping()
+        except Exception:
+            logger.exception("deferred coach ping failed after Runner exception")
 from agentg.messages import IncomingMessage, Reply
 from agentg.linking import Linking
 from agentg.linking_store import LinkedIdentity
@@ -96,44 +105,57 @@ class AgentRuntime:
                 session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
             )
             context = self.member_context(linked)
-            result = await Runner.run(
-                self.agent,
-                msg.text,
-                session=session,
-                context=context,
-            )
-            text = str(result.final_output)
-            sender = self.demo_sender
-            has_demos = sender is not None and context.demo_requests
-            has_pings = bool(context.coach_pings)
-            if not has_demos and not has_pings:
-                return Reply(text)
-            # Defer the demo sends and coach pings so the channel delivers the
-            # reply text first (issue #172).
-            demo_requests = list(context.demo_requests) if sender is not None else []
-            coach_pings = list(context.coach_pings)
-            gym_id = context.gym_id
-            channel, user_id = msg.channel, msg.channel_user_id
+            # Coach pings accumulated during the turn must be drained even
+            # if Runner.run raises (a later tool error, provider timeout,
+            # MaxTurnsExceeded) — the safety note was already committed and
+            # silence is not an option (P1 #5153515963).
+            result = None
+            try:
+                result = await Runner.run(
+                    self.agent,
+                    msg.text,
+                    session=session,
+                    context=context,
+                )
+                text = str(result.final_output)
+                sender = self.demo_sender
+                has_demos = sender is not None and context.demo_requests
+                has_pings = bool(context.coach_pings)
+                if not has_demos and not has_pings:
+                    return Reply(text)
+                demo_requests = list(context.demo_requests) if sender is not None else []
+                coach_pings = list(context.coach_pings)
+                gym_id = context.gym_id
+                channel, user_id = msg.channel, msg.channel_user_id
 
-            async def after_send() -> None:
-                async def _send_demo(exercise: str) -> None:
-                    try:
-                        await serve_demo(
-                            self.stores.demos, sender, exercise, gym_id, channel, user_id
-                        )
-                    except Exception:
-                        logger.exception("failed to serve demo %r to %s", exercise, user_id)
+                async def after_send() -> None:
+                    async def _send_demo(exercise: str) -> None:
+                        try:
+                            # Narrow sender for mypy (P2 #5153516992).
+                            assert sender is not None
+                            await serve_demo(
+                                self.stores.demos, sender, exercise, gym_id, channel, user_id
+                            )
+                        except Exception:
+                            logger.exception("failed to serve demo %r to %s", exercise, user_id)
 
-                async def _run_ping(ping: object) -> None:
-                    try:
-                        await ping()
-                    except Exception:
-                        logger.exception("deferred coach ping failed")
+                    async def _run_ping(ping):
+                        try:
+                            await ping()
+                        except Exception:
+                            logger.exception("deferred coach ping failed")
 
-                tasks = [_send_demo(ex) for ex in demo_requests] + [
-                    _run_ping(p) for p in coach_pings
-                ]
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    tasks = [_send_demo(ex) for ex in demo_requests] + [
+                        _run_ping(p) for p in coach_pings
+                    ]
+                    if tasks:
+                        await asyncio.gather(*tasks, return_exceptions=True)
 
-            return Reply(text, after_send=after_send)
+                return Reply(text, after_send=after_send)
+            except BaseException:
+                # Runner failed after the safety tool already ran — drain
+                # the accumulated pings so no Coach notification is lost.
+                if context.coach_pings:
+                    pings = list(context.coach_pings)
+                    asyncio.create_task(_drain_coach_pings(pings))
+                raise

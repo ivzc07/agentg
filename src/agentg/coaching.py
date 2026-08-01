@@ -116,13 +116,21 @@ async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]
     Member is never waiting on them (issue #172)."""
     note = await c.stores.notes.remember_safety(c.member_id, c.gym_id, summary)
     if c.notifier is None:
-        return {"logged": True, "coaches_notified": 0}
+        return {"logged": True, "coaches_to_notify": 0}
     coaches = await c.stores.linking.coaches_for_gym(c.gym_id, exclude_member_id=c.member_id)
     if not coaches:
-        return {"logged": True, "coaches_notified": 0}
+        return {"logged": True, "coaches_to_notify": 0}
     # The Member page excludes coach-flagged Members, so a flag about a coach
     # deep-links to the roster — their /members/<id> would be a signed-in 404.
     next_path = "/" if c.is_coach else f"/members/{c.member_id}"
+
+    # Bind notifier to a local after the None guard so mypy can prove it
+    # is not None inside the nested closures (P2 #5153516992).
+    notifier = c.notifier
+
+    # Bound the fan-out so a Gym with many Coaches does not flood the
+    # channel with unthrottled concurrent sends (P3 #5153518045).
+    _ping_semaphore = asyncio.Semaphore(10)
 
     async def _ping_coaches() -> None:
         async def _ping_one(coach_id: int, _name: str, channel: str, channel_user_id: str) -> None:
@@ -147,7 +155,8 @@ async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]
                 # No link preview on either message: Telegram's fetcher would GET
                 # the one-time link before the coach does (and the token would
                 # land in its logs).
-                await c.notifier.send(channel, channel_user_id, text, disable_preview=True)
+                async with _ping_semaphore:
+                    await notifier.send(channel, channel_user_id, text, disable_preview=True)
             except Exception:
                 logger.exception("failed to ping coach %s", channel_user_id)
                 return
@@ -156,21 +165,26 @@ async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]
                     # The link travels alone: member-influenced text (which can carry
                     # live URLs Telegram autolinks) never shares a message with the
                     # one-time token, and protect_content keeps it unforwardable.
-                    await c.notifier.send(
-                        channel,
-                        channel_user_id,
-                        link,
-                        disable_preview=True,
-                        protect_content=True,
-                    )
+                    async with _ping_semaphore:
+                        await notifier.send(
+                            channel,
+                            channel_user_id,
+                            link,
+                            disable_preview=True,
+                            protect_content=True,
+                        )
                 except Exception:
                     logger.exception(
                         "failed to send the dashboard link to coach %s", channel_user_id
                     )
 
-        await asyncio.gather(
+        results = await asyncio.gather(
             *[_ping_one(*coach) for coach in coaches], return_exceptions=True
         )
+        # Surface any unhandled exception from _ping_one (P3 #5153517944).
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.error("unhandled error during coach ping: %s", result)
 
     c.coach_pings.append(_ping_coaches)
-    return {"logged": True, "coaches_notified": len(coaches)}
+    return {"logged": True, "coaches_to_notify": len(coaches)}
