@@ -334,19 +334,29 @@ async def _flush_pings(ctx):
 
 
 class TimedFakeNotifier:
-    """A FakeNotifier that sleeps briefly per send and records timestamps,
-    so tests can verify concurrency (overlapping send windows)."""
+    """A FakeNotifier that sleeps briefly per send and tracks the peak number
+    of concurrent in-flight sends — a structural proof of concurrency that
+    does not depend on wall-clock thresholds."""
 
     def __init__(self, delay: float = 0.05):
         self.sent: list[tuple[float, float, str, str, str, bool, bool]] = []
         self._delay = delay
         self._lock = asyncio.Lock()
+        self._in_flight = 0
+        self.max_concurrent = 0
 
     async def send(
         self, channel, channel_user_id, text, disable_preview=False, protect_content=False
     ):
+        async with self._lock:
+            self._in_flight += 1
+            self.max_concurrent = max(self.max_concurrent, self._in_flight)
         start = time.monotonic()
-        await asyncio.sleep(self._delay)
+        try:
+            await asyncio.sleep(self._delay)
+        finally:
+            async with self._lock:
+                self._in_flight -= 1
         async with self._lock:
             self.sent.append((start, time.monotonic(), channel, channel_user_id, text, disable_preview, protect_content))
 
@@ -447,15 +457,15 @@ async def test_coach_pings_run_concurrently(env):
     await flag_to_coach_action(ctx, "sharp knee pain")
     await _flush_pings(ctx)
 
-    # All sends should overlap in time if truly concurrent.
-    # With 3 coaches × 2 messages = 6 sends, if sequential they'd take
-    # ~6 × 0.05 = 0.30s. If concurrent, all start and end nearly together.
-    starts = [s[0] for s in timed.sent]
-    ends = [s[1] for s in timed.sent]
-    total_wall = max(ends) - min(starts)
-    # Concurrent: wall time should be close to one delay (~0.05s), not 6×.
-    # Allow generous margin for test environment variance.
-    assert total_wall < 0.20, f"pings took {total_wall:.2f}s, expected concurrent (~0.05s)"
+    # All sends should overlap if truly concurrent — with 3 coaches
+    # (3 concurrent _ping_one calls), at least 3 sends should be in-flight
+    # at the same time.  Each _ping_one does two sequential sends, so the
+    # first send of every coach overlaps before any second send starts.
+    assert timed.max_concurrent >= 3, (
+        f"max concurrent sends was {timed.max_concurrent}, "
+        "expected >= 3 for concurrent coach pings"
+    )
+    assert len(timed.sent) == 6  # 3 coaches × (heads-up + link)
 
 
 class FailingForOneNotifier:

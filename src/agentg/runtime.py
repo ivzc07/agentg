@@ -110,7 +110,7 @@ class AgentRuntime:
                 return Reply(text)
             # Defer the demo sends and coach pings so the channel delivers the
             # reply text first (issue #172).
-            demo_requests = list(context.demo_requests)
+            demo_requests = list(context.demo_requests) if sender is not None else []
             coach_pings = list(context.coach_pings)
             gym_id = context.gym_id
             channel, user_id = msg.channel, msg.channel_user_id
