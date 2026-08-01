@@ -20,7 +20,7 @@ from agentg.config import Settings
 from agentg.dashboard_store import DashboardStore
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
-from agentg.models import Exercise, Member, MemberChannel, MemberNote, Routine, Session, Set, Workout
+from agentg.models import Exercise, Gym, Member, MemberNote, Session, Set
 from agentg.routines import ExerciseSpec, WorkoutSpec
 
 
@@ -68,7 +68,7 @@ async def seed_demo_data(
         "tricep extension", "lat pulldown", "calf raise", "plank",
     ]
 
-    async with store._sessions() as db:
+    async with store.session() as db:
         # Create exercises if they don't exist
         for ex_name in exercises_list:
             existing = await db.scalar(
@@ -90,7 +90,7 @@ async def seed_demo_data(
         created_members += 1
 
         # Set checkin state
-        async with store._sessions() as db:
+        async with store.session() as db:
             m = await db.get(Member, member.id)
             m.checkin_state = md["state"]
             if md.get("snoozed_days"):
@@ -120,15 +120,12 @@ async def seed_demo_data(
                     {"exercise": "calf raise", "sets": 3, "reps": "15"},
                 ]},
             ]
-            try:
-                await store.save_routine_from_web(
-                    gym_id, member.id, coach_member_id, None, [
-                        _spec_from_dict(w) for w in workouts_data
-                    ]
-                )
-                created_routines += 1
-            except Exception:
-                pass  # best-effort seeding
+            await store.save_routine_from_web(
+                gym_id, member.id, coach_member_id, None, [
+                    _spec_from_dict(w) for w in workouts_data
+                ]
+            )
+            created_routines += 1
 
             # Create sessions on various days
             session_dates = []
@@ -138,14 +135,16 @@ async def seed_demo_data(
                 session_dates.append(session_date)
 
             for sd in session_dates:
-                started = datetime.combine(sd, datetime.min.time(), tzinfo=UTC).replace(hour=10 + (len(session_dates) % 6))
+                started = datetime.combine(
+                    sd, datetime.min.time(), tzinfo=UTC
+                ).replace(hour=10 + (len(session_dates) % 6))
                 session = Session(
                     gym_id=gym_id,
                     member_id=member.id,
                     started_at=started,
-                    ended_at=started + timedelta(hours=1),
+                    closed_at=started + timedelta(hours=1),
                 )
-                async with store._sessions() as db:
+                async with store.session() as db:
                     db.add(session)
                     await db.flush()
                     # Add 2-4 random sets
@@ -157,28 +156,27 @@ async def seed_demo_data(
                             select(Exercise.id).where(Exercise.name == ex)
                         )
                         db.add(Set(
+                            gym_id=gym_id,
                             session_id=session.id,
                             exercise_id=ex_id,
                             weight=round(rng.uniform(20, 100), 1),
                             reps=rng.randint(5, 12),
+                            created_at=started,
                         ))
                     await db.commit()
                 created_sessions += 1
 
         # Add safety flag if specified
         if md.get("safety_flag"):
-            try:
-                async with store._sessions() as db:
-                    db.add(MemberNote(
-                        member_id=member.id,
-                        gym_id=gym_id,
-                        kind="safety",
-                        text=md["safety_flag"],
-                        created_at=now - timedelta(days=2),
-                    ))
-                    await db.commit()
-            except Exception:
-                pass
+            async with store.session() as db:
+                db.add(MemberNote(
+                    member_id=member.id,
+                    gym_id=gym_id,
+                    kind="safety",
+                    text=md["safety_flag"],
+                    created_at=now - timedelta(days=2),
+                ))
+                await db.commit()
 
     return {
         "members": created_members,
@@ -207,7 +205,7 @@ async def _run(gym_id: int, coach_member_id: int) -> int:
     store = DashboardStore(engine)
 
     # Verify the gym and coach exist
-    async with store._sessions() as db:
+    async with store.session() as db:
         gym = await db.get(Gym, gym_id)
         if gym is None:
             print(f"Gym {gym_id} not found.", file=sys.stderr)

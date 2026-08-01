@@ -187,7 +187,7 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
                  the member renders full-page. */
               view === "split" ? (
                 <RosterSplit
-                  members={filtered.active}
+                  members={filtered.active.concat(filtered.lapsed)}
                   selectedMemberId={selectedMemberId}
                 />
               ) : (
