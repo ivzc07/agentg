@@ -1,6 +1,5 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useParams, useSearchParams, Outlet } from "react-router-dom";
 import { Search, LayoutList, LayoutGrid, Columns2, Users } from "lucide-react";
 import { fetchRoster } from "../api/roster";
 import type { RosterView } from "../types/roster";
@@ -9,7 +8,6 @@ import { useT } from "../hooks/useT";
 import { RosterTable } from "./RosterTable";
 import { RosterCards } from "./RosterCards";
 import { RosterSplit } from "./RosterSplit";
-import type { RosterOutletContext } from "./MemberPage";
 
 interface RosterShellProps {
   /** The coach's name from /api/session. */
@@ -24,22 +22,13 @@ const VIEW_ICONS: Record<RosterView, typeof LayoutList> = {
   split: Columns2,
 };
 
-function readInitialView(sp: URLSearchParams): RosterView {
-  const v = sp.get("view");
-  if (v === "table" || v === "cards" || v === "split") return v;
-  return "table";
-}
-
 export function RosterShell({ name: _name, gym }: RosterShellProps) {
   const t = useT();
-  const [sp] = useSearchParams();
-  const [view, setView] = useState<RosterView>(() => readInitialView(sp));
+  const [view, setView] = useState<RosterView>("table");
   const [query, setQuery] = useState("");
   const [lapsedOpen, setLapsedOpen] = useState(false);
-  const { memberId } = useParams<{ memberId: string }>();
-  const selectedMemberId = memberId != null ? Number(memberId) : undefined;
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["roster"],
     queryFn: fetchRoster,
     staleTime: 30_000,
@@ -69,8 +58,14 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
 
   if (error || !data) {
     return (
-      <div className="flex items-center justify-center min-h-[200px] text-coral">
-        {t("no_sessions_yet") /* fallback: couldn't load roster */}
+      <div className="flex flex-col items-center justify-center min-h-[200px] text-coral gap-4">
+        <p>{t("roster_error")}</p>
+        <button
+          onClick={() => refetch()}
+          className="px-4 py-2 rounded bg-elevation-1 border border-elevation-0-stroke text-ink hover:bg-elevation-2 transition-colors"
+        >
+          {t("roster_retry")}
+        </button>
       </div>
     );
   }
@@ -79,11 +74,6 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
   const empty = data.active.length === 0 && data.lapsed.length === 0;
   const noMatch =
     !empty && filtered.active.length === 0 && filtered.lapsed.length === 0;
-
-  const outletContext: RosterOutletContext = {
-    members: data.active.concat(data.lapsed),
-    rosterView: view,
-  };
 
   return (
     <div className="min-h-screen bg-bg text-ink font-sans antialiased">
@@ -181,32 +171,22 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
               </span>
             </div>
 
-            {/* Active roster */}
-            {selectedMemberId != null ? (
-              /* Nested route: /members/:id.  In Split view the rail stays
-                 mounted and the member fills the right pane; in Table/Cards
-                 the member renders full-page.  Always renders when a member
-                 is selected — a non-matching search must not unmount an
-                 open member page that the URL still points at. */
-              view === "split" ? (
-                <RosterSplit
-                  members={filtered.active.concat(filtered.lapsed)}
-                  selectedMemberId={selectedMemberId}
-                />
-              ) : (
-                <Outlet context={outletContext} />
-              )
-            ) : (
+            {/* No match state */}
+            {noMatch && (
+              <p className="emptystate text-center py-12 text-ink-3">
+                {t("no_matches")}
+              </p>
+            )}
+
+            {/* Active roster — Table/Cards/Split views. Split keeps the
+                rail and renders the selected member inline (local state);
+                Table and Cards rows link to /members/:id, a sibling route
+                that renders the member full-page without roster chrome. */}
+            {!noMatch && (
               <>
-                {/* No match state */}
-                {noMatch && (
-                  <p className="emptystate text-center py-12 text-ink-3">
-                    {t("no_matches")}
-                  </p>
-                )}
-                {!noMatch && view === "table" && <RosterTable members={filtered.active} />}
-                {!noMatch && view === "cards" && <RosterCards members={filtered.active} />}
-                {!noMatch && view === "split" && <RosterSplit members={filtered.active} />}
+                {view === "table" && <RosterTable members={filtered.active} />}
+                {view === "cards" && <RosterCards members={filtered.active} />}
+                {view === "split" && <RosterSplit members={filtered.active} />}
               </>
             )}
 

@@ -1,16 +1,10 @@
-import { useParams, useSearchParams, Link, useOutletContext } from "react-router-dom";
+import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useT } from "../hooks/useT";
 import { getMonths, getWeekdayInitials, getDecimalMark } from "../lib/i18n";
 import { fetchMember, MemberAuthError, MemberNotFoundError, tickOffFlag } from "../api/member";
 import type { MemberPageData, SafetyFlag } from "../types/member";
 import type { RosterMember } from "../types/roster";
-
-/** Context provided by RosterShell via <Outlet />. */
-export interface RosterOutletContext {
-  members: RosterMember[];
-  rosterView: string;
-}
 
 /** Format a date string for display. Uses months from the server-injected
  *  i18n bootstrap (``_months`` in ``window.__I18N__``). */
@@ -490,15 +484,15 @@ export function MemberPageContent({
 /** Full member page — fetches from /api/members/{id} and renders
  *  Routine / Sessions / Weights / Notes cards plus safety flags.
  *  Works in Split's right pane and as a standalone deep link. */
-export function MemberPage() {
+export function MemberPage({ member: paneMember }: { member?: RosterMember } = {}) {
   const { memberId } = useParams<{ memberId: string }>();
   const [sp] = useSearchParams();
   const t = useT();
-  const id = memberId != null ? Number(memberId) : 0;
+  // The Split rail passes the member it selected; a deep link carries it in
+  // the URL. Either way the full detail comes from /api/members/{id}.
+  const id = paneMember ? paneMember.member_id : memberId != null ? Number(memberId) : 0;
   const page = Number(sp.get("page") ?? 1);
-
-  const outlet = useOutletContext<RosterOutletContext | undefined>();
-  const rosterView = outlet?.rosterView ?? "table";
+  const rosterView = sp.get("view") ?? "table";
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["member", id, page],
@@ -545,12 +539,10 @@ export function MemberPage() {
     );
   }
 
-  // In Split view the rail stays mounted and the member fills the right
-  // pane without chrome (ADR 0006 §Roster shell).  Inside the RosterShell
-  // in Table/Cards view we also render the bare pane — the shell already
-  // provides the header, search, and navigation.  Only when deep-linked
-  // (no outlet context) do we render the standalone chrome.
-  if (outlet) {
+  // In Split view the rail stays mounted and the member fills the right pane
+  // without chrome; a deep link to /members/:id is the standalone screen and
+  // brings its own header and back link.
+  if (paneMember) {
     return <MemberPane data={data} t={t} />;
   }
 

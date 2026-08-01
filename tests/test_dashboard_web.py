@@ -17,6 +17,8 @@ from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
+from agentg.models import Routine
+from agentg.routines import ExerciseSpec, WorkoutSpec
 from conftest import FakeClock
 
 SECRET = "test-secret"
@@ -335,13 +337,7 @@ async def test_spa_shell_injects_i18n_strings(spa_env):
 
     text = await response.text()
     assert "window.__I18N__" in text
-    # Spot-check a few English strings.
-    for key, value in STRINGS["en"].items():
-        # Not every string makes it into the bootstrap — just verify the
-        # object is injected and carries real keys.
-        if key == "settings":
-            assert value in text
-            break
+    assert STRINGS["en"]["settings"] in text
 
 
 async def test_spa_shell_injects_es_i18n_strings(spa_env):
@@ -429,7 +425,7 @@ async def test_spa_shell_escapes_script_close_tag(tmp_path, monkeypatch):
                 cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "en"},
             )
             text = await response.text()
-            # The raw </script> and </script must not appear in the
+            # The raw </script> and <script> must not appear in the
             # injection payload — < was escaped to \u003c.
             assert "</script>" in text  # the closing tag still exists
             # The payload between window.__I18N__ = and the closing </script>
@@ -439,6 +435,10 @@ async def test_spa_shell_escapes_script_close_tag(tmp_path, monkeypatch):
             assert "<script>" not in before_close
             # The escaped < appears as \u003c in the JSON.
             assert "\\u003c/script>" in text
+            # Round-trip: the payload must still be valid, lossless JSON.
+            i18n_raw = before_close.split(" = ", 1)[1].rstrip(";")
+            parsed = json.loads(i18n_raw)
+            assert parsed["settings"] == "</script><script>alert(1)</script>"
     finally:
         STRINGS["en"]["settings"] = original_settings
         await engine.dispose()
@@ -463,7 +463,7 @@ async def test_spa_serves_static_assets(spa_env):
 
 async def test_spa_enabled_no_dist_builds_app(tmp_path, monkeypatch):
     """With the flag on and no ``dist/`` directory the app builds without
-    crashing and the shell route returns a 503."""
+    crashing and the shell route returns a 404."""
     import agentg.dashboard_web as dashboard_web
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
@@ -526,11 +526,15 @@ async def test_flag_off_dashboard_unaffected(env):
 
 
 async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
-    """The production wiring — Settings.dashboard_spa_enabled → build_app — runs
-    through ``main.build_dashboard_app``, the one place ``run()`` builds the app.
+    """The production wiring — Settings.dashboard_spa_enabled +
+    Settings.dashboard_spa_dist → build_app — runs through
+    ``main.build_dashboard_app``, the one place ``run()`` builds the app.
 
-    Dropping ``spa_enabled=`` from that call site turns this test red; that gap
-    is exactly what shipped a dead flag the first time round.
+    ``_FRONTEND_DIST`` is pointed at a non-existent path so the only way the
+    SPA shell is reachable is through the ``spa_dist=`` kwarg wired from
+    ``DASHBOARD_SPA_DIST``.  Dropping that kwarg from the call site turns
+    this test red — the same dead-flag class of bug this PR already fixed
+    once for ``spa_enabled``.
     """
     from types import SimpleNamespace
 
@@ -542,16 +546,20 @@ async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
             "TELEGRAM_BOT_TOKEN": "dummy",
             "MODEL_API_KEY": "dummy",
             "DASHBOARD_SPA_ENABLED": "1",
+            "DASHBOARD_SPA_DIST": str(tmp_path / "dist"),
             "DASHBOARD_SESSION_SECRET": SECRET,
         }
     )
     assert settings.dashboard_spa_enabled is True
+    assert settings.dashboard_spa_dist == str(tmp_path / "dist")
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
     stub_dist = tmp_path / "dist"
     _write_stub_dist(stub_dist)
+    # _FRONTEND_DIST points into nowhere — the override must carry.
     monkeypatch.setattr(
-        "agentg.dashboard_web._FRONTEND_DIST", stub_dist
+        "agentg.dashboard_web._FRONTEND_DIST",
+        tmp_path / "site-packages" / "agentg" / ".." / ".." / "frontend" / "dist",
     )
     try:
         # The clock is the only thing run()'s call site cannot supply, so the
@@ -851,6 +859,92 @@ async def test_api_roster_snoozed_shows_until_date(spa_env):
     assert snoozed_row is not None
     assert snoozed_row["snoozed_until"] == future.isoformat()
     assert snoozed_row["severity"] is None
+
+
+async def test_api_roster_severity_and_attendance_from_known_history(spa_env):
+    """A member with a back-dated Routine and 3+ missed planned days
+    comes back with severity="red", non-zero missed_days, and a
+    non-empty attendance grid — the actual values the Cards view
+    renders, not just key presence (issue #149, PR review)."""
+    from datetime import UTC, datetime, timedelta
+
+    from agentg.models import Exercise, Session
+    from sqlalchemy import select as sa_select
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    now = spa_env.clock()  # the FakeClock's fixed instant
+    today = now.date()
+
+    member = await spa_env.linking.link_member(spa_env.gym.id, "Zoe", "telegram", "200")
+
+    # Give Zoe a session 8 days ago — so gap is large enough.
+    exercise_names = ["bench press", "deadlift", "squat"]
+    async with spa_env.store._sessions() as db:
+        for name in exercise_names:
+            existing = await db.scalar(
+                sa_select(Exercise).where(Exercise.name == name)
+            )
+            if existing is None:
+                db.add(Exercise(name=name))
+        db.add(Session(
+            gym_id=spa_env.gym.id,
+            member_id=member.id,
+            started_at=now - timedelta(days=8),
+            closed_at=now - timedelta(days=8, hours=-1),
+        ))
+        await db.commit()
+
+    # Create a M/W/F Routine back-dated to 20 days ago so it governs
+    # the window from the anchor (8 days ago) through yesterday.
+    await spa_env.store.save_routine_from_web(
+        spa_env.gym.id, member.id, spa_env.member.id, None,
+        [
+            WorkoutSpec(0, "Push", [ExerciseSpec("bench press", 4, "8-10")]),
+            WorkoutSpec(2, "Pull", [ExerciseSpec("deadlift", 4, "5")]),
+            WorkoutSpec(4, "Legs", [ExerciseSpec("squat", 4, "8-10")]),
+        ],
+    )
+    # Back-date the Routine so its weekdays land in the severity window.
+    async with spa_env.store._sessions() as db:
+        active = await db.scalar(
+            sa_select(Routine).where(
+                Routine.member_id == member.id,
+                Routine.is_active.is_(True),
+            )
+        )
+        active.created_at = datetime.combine(
+            today - timedelta(days=20),
+            datetime.min.time(),
+            tzinfo=UTC,
+        )
+        await db.commit()
+
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    zoe_row = next((r for r in data["active"] if r["member_id"] == member.id), None)
+    assert zoe_row is not None
+
+    # The member has a known history: last session 8 days ago, M/W/F
+    # Routine back-dated to 20 days ago.  With >= 3 missed planned
+    # days, severity must be "red" — the exact value, not just a key.
+    assert zoe_row["severity"] == "red", f"expected red, got {zoe_row['severity']}"
+    assert zoe_row["missed_days"] > 0, "missed_days must be non-zero"
+
+    # The attendance grid must hold actual cells, not an empty list.
+    assert isinstance(zoe_row["attendance"], list)
+    assert len(zoe_row["attendance"]) > 0, "attendance grid must be non-empty"
+    # At least one cell is a miss (planned weekday with no session).
+    assert any(
+        c["state"] == "miss" for c in zoe_row["attendance"]
+    ), "grid must include at least one miss cell"
+    # At least one cell is a hit (the session 8 days ago).
+    assert any(
+        c["state"] == "hit" for c in zoe_row["attendance"]
+    ), "grid must include at least one hit cell"
 
 
 async def test_api_roster_slides_session_cookie(spa_env):

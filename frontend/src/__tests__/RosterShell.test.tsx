@@ -4,7 +4,6 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { RosterShell } from "../components/RosterShell";
-import { MemberPage } from "../components/MemberPage";
 import * as rosterApi from "../api/roster";
 import * as memberApi from "../api/member";
 import type { RosterResponse } from "../types/roster";
@@ -50,6 +49,9 @@ vi.mock("../hooks/useT", () => ({
       sr_missed: "missed {date}",
       // Split
       pick_a_member: "Pick a member",
+      // Error state
+      roster_error: "Couldn't load the roster.",
+      roster_retry: "Retry",
       // Member page
       member_eyebrow: "Member",
       back_to_roster: "Back to roster",
@@ -80,48 +82,26 @@ const makeResponse = (overrides: Partial<RosterResponse> = {}): RosterResponse =
   ...overrides,
 });
 
-const MOCK_MEMBER = {
-  member_id: 1,
-  name: "Alice",
-  member_since: "2026-06-01",
-  weight_unit: "kg",
-  session_count: 2,
-  gap_days: 3,
-  has_sessions: true,
-  last_session_on: "2026-07-12",
-  lapsed: false,
-  snoozed_until: null,
-  routine: [],
-  routine_id: null,
-  routine_preset_name: null,
-  coach_authored: false,
-  routine_author: null,
-  sessions: [],
-  page: 1,
-  pages: 1,
-  weights: [],
-  notes: [],
-  retired_notes: [],
-  safety_flags: [],
-};
-
-function renderShell(response: RosterResponse, initialEntries: string[] = ["/"]) {
+function renderShell(
+  response: RosterResponse | null = null,
+  initialEntries: string[] = ["/"],
+  reject = false,
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
 
-  vi.spyOn(rosterApi, "fetchRoster").mockResolvedValue(response);
-  // The MemberPage now fetches its own data via /api/members/{id}.
-  vi.spyOn(memberApi, "fetchMember").mockResolvedValue(MOCK_MEMBER);
+  if (reject) {
+    vi.spyOn(rosterApi, "fetchRoster").mockRejectedValue(new Error("/api/roster: 500"));
+  } else if (response) {
+    vi.spyOn(rosterApi, "fetchRoster").mockResolvedValue(response);
+  }
 
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={initialEntries}>
         <Routes>
-          <Route element={<RosterShell name="Coach" gym="Iron Temple" />}>
-            <Route index />
-            <Route path="members/:memberId" element={<MemberPage />} />
-          </Route>
+          <Route path="/" element={<RosterShell name="Coach" gym="Iron Temple" />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>
@@ -265,7 +245,7 @@ describe("RosterShell", () => {
         active: [makeMember(1, { name: "Alice", attendance: [] })],
         counts: { active: 1, lapsed: 0 },
       }),
-      ["/members/1"],
+      ["/"],
     );
 
     await waitFor(() => {
@@ -276,16 +256,47 @@ describe("RosterShell", () => {
     await user.click(screen.getByLabelText("Split"));
 
     await waitFor(() => {
-      // The member name appears both in the rail link and in the pane heading.
-      const aliceNodes = screen.getAllByText("Alice");
-      expect(aliceNodes.length).toBeGreaterThanOrEqual(2);
-      // The eyebrow renders in both the bare pane and the chrome, so it
-      // cannot distinguish them.  Assert what MUST be absent in split:
-      // the back-link and the standalone page chrome.
-      expect(screen.queryByText(/← /)).not.toBeInTheDocument();
-      // The member eyebrow is still there inside the bare pane.
-      expect(screen.getByText("Member")).toBeInTheDocument();
+      expect(screen.getByText("Pick a member")).toBeInTheDocument();
     });
+
+    // The pane loads the member's detail from /api/members/{id}.
+    vi.spyOn(memberApi, "fetchMember").mockResolvedValue({
+      member_id: 1,
+      name: "Alice",
+      member_since: "2026-06-01",
+      weight_unit: "kg",
+      session_count: 0,
+      gap_days: 0,
+      has_sessions: false,
+      last_session_on: null,
+      lapsed: false,
+      snoozed_until: null,
+      routine: [],
+      routine_id: null,
+      routine_preset_name: null,
+      coach_authored: false,
+      routine_author: null,
+      sessions: [],
+      page: 1,
+      pages: 1,
+      weights: [],
+      notes: [],
+      retired_notes: [],
+      safety_flags: [],
+    });
+
+    // Click Alice in the rail.
+    await user.click(screen.getByText("Alice"));
+
+    await waitFor(() => {
+      // Alice's name is in the pane heading (the h1 in MemberPage).
+      const headings = screen.getAllByRole("heading", { level: 1 });
+      expect(headings.some((h) => h.textContent === "Alice")).toBe(true);
+    });
+    // The pane is the bare member body: the rail stays mounted, so the
+    // standalone page chrome (its own back link) must NOT be rendered —
+    // that duplicated the roster header and dropped the coach out of Split.
+    expect(screen.queryByText(/← /)).not.toBeInTheDocument();
   });
 
   it("shows filtered count when searching", async () => {
@@ -301,6 +312,35 @@ describe("RosterShell", () => {
 
     await waitFor(() => {
       expect(screen.getByText("1 of 2")).toBeInTheDocument();
+    });
+  });
+
+  it("shows a distinct error message when the roster fetch fails", async () => {
+    renderShell(null, ["/"], true);
+
+    await waitFor(() => {
+      expect(screen.getByText("Couldn't load the roster.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    });
+  });
+
+  it("no-match search does not hide the active roster view area", async () => {
+    // The no-match state renders in addition to the roster views, not
+    // instead of them — so the count bar and view area stay on screen.
+    const user = userEvent.setup();
+    renderShell(makeResponse());
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Search by name")).toBeInTheDocument();
+    });
+
+    const input = screen.getByPlaceholderText("Search by name");
+    await user.type(input, "Zorro");
+
+    await waitFor(() => {
+      expect(screen.getByText("No member matches the search.")).toBeInTheDocument();
+      // The count bar is still present.
+      expect(screen.getByText("Sorted by days away")).toBeInTheDocument();
     });
   });
 });
