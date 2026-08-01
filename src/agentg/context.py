@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from agentg.checkin_sweep import Notifier
+from agentg.demos import DemoRef
 from agentg.stores import Stores
 
 
@@ -30,6 +31,7 @@ class MemberContext:
     # Public origin the safety-flag deep links point at (DASHBOARD_BASE_URL);
     # None means no dashboard is wired and pings go out without a link.
     dashboard_base_url: str | None = None
-    # Exercises the Agent asked to demo this turn; the channel sends them
-    # after the reply so the agent loop stays channel-agnostic (ADR 0001).
-    demo_requests: list[str] = field(default_factory=list)
+    # Pre-resolved demo references the Agent asked to show this turn; the
+    # channel sends them after the reply so the agent loop stays
+    # channel-agnostic (ADR 0001) and no second resolution is needed.
+    demo_requests: list[DemoRef] = field(default_factory=list)

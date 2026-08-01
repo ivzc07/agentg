@@ -70,3 +70,8 @@ def test_dashboard_settings_read_their_env_vars():
     assert settings.dashboard_base_url == "https://dash.example.com"  # no trailing slash
     assert settings.dashboard_port == 9090
     assert settings.dashboard_session_secret == "s3cret"
+
+
+def test_a_non_numeric_dashboard_port_raises_config_error_naming_the_variable():
+    with pytest.raises(ConfigError, match="DASHBOARD_PORT"):
+        Settings.from_env({**FULL_ENV, "DASHBOARD_PORT": "abc"})

@@ -416,7 +416,7 @@ async def show_demo(ctx: RunContextWrapper[MemberContext], exercise: str) -> dic
     ref = await c.stores.demos.resolve(exercise, c.gym_id)
     if ref is None:
         return {"available": False, "exercise": exercise}
-    c.demo_requests.append(ref.exercise_name)
+    c.demo_requests.append(ref)
     return {"available": True, "exercise": ref.exercise_name}
 
 

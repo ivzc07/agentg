@@ -90,6 +90,8 @@ async def run() -> None:
     try:
         await run_polling(bot, runtime.handle_message)
     finally:
+        scheduler.shutdown(wait=False)
+        await bot.session.close()
         await web_runner.cleanup()
 
 

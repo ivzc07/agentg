@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from agentg.demos import DemoStore
+from agentg.demos import DemoRef, DemoStore
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,26 @@ class DemoSender(Protocol):
         ...
 
 
+async def _send_resolved_demo(
+    demos: DemoStore,
+    sender: DemoSender,
+    ref: DemoRef,
+    channel: str,
+    channel_user_id: str,
+) -> str:
+    """Send an already-resolved DemoRef. Returns 'sent' / 'send_failed'."""
+    bot = sender.cache_namespace
+    cached = await demos.cached_file_id(ref.exercise_id, ref.gym_id, bot)
+    result = await sender.send_animation(channel, channel_user_id, ref.slug, cached)
+    if result is None:
+        return "send_failed"
+    if result.file_id != cached:  # first send, or a refreshed id — seed the cache
+        await demos.cache_file_id(
+            ref.exercise_id, ref.gym_id, bot, result.file_id, result.file_unique_id
+        )
+    return "sent"
+
+
 async def serve_demo(
     demos: DemoStore,
     sender: DemoSender,
@@ -47,13 +67,4 @@ async def serve_demo(
     ref = await demos.resolve(exercise_name, gym_id)
     if ref is None:
         return "no_demo"
-    bot = sender.cache_namespace
-    cached = await demos.cached_file_id(ref.exercise_id, ref.gym_id, bot)
-    result = await sender.send_animation(channel, channel_user_id, ref.slug, cached)
-    if result is None:
-        return "send_failed"
-    if result.file_id != cached:  # first send, or a refreshed id — seed the cache
-        await demos.cache_file_id(
-            ref.exercise_id, ref.gym_id, bot, result.file_id, result.file_unique_id
-        )
-    return "sent"
+    return await _send_resolved_demo(demos, sender, ref, channel, channel_user_id)

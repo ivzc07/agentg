@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.dashboard import DashboardDoor, is_dashboard_command
-from agentg.demo_media import DemoSender, serve_demo
+from agentg.demo_media import DemoSender, _send_resolved_demo
 from agentg.messages import IncomingMessage, Reply
 from agentg.linking import Linking
 from agentg.linking_store import LinkedIdentity
@@ -108,17 +108,16 @@ class AgentRuntime:
                 return Reply(text)
             # Defer the demo sends so the channel delivers the reply text first,
             # then the animations land beneath it.
-            requests = list(context.demo_requests)
-            gym_id = context.gym_id
+            refs = list(context.demo_requests)
             channel, user_id = msg.channel, msg.channel_user_id
 
             async def after_send() -> None:
-                for exercise in requests:
+                for ref in refs:
                     try:
-                        await serve_demo(
-                            self.stores.demos, sender, exercise, gym_id, channel, user_id
+                        await _send_resolved_demo(
+                            self.stores.demos, sender, ref, channel, user_id
                         )
                     except Exception:
-                        logger.exception("failed to serve demo %r to %s", exercise, user_id)
+                        logger.exception("failed to serve demo %r to %s", ref.exercise_name, user_id)
 
             return Reply(text, after_send=after_send)

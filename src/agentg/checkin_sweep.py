@@ -9,10 +9,10 @@ Telegram adapter supplies the notifier (ADR 0001).
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Protocol
 
-from agentg.checkin import CheckinData, decide_checkin
+from agentg.checkin import CheckinData, _previous_pinned_day, decide_checkin
 from agentg.checkin_store import CheckinStore, SweepRow
 from agentg.routines import RoutineStore
 from agentg.timezones import gym_zone
@@ -32,21 +32,14 @@ class Notifier(Protocol):
     ) -> None: ...
 
 
-def _previous_pinned_weekday(today: date, pinned: frozenset[int]) -> int | None:
-    for back in range(1, 8):
-        weekday = date.fromordinal(today.toordinal() - back).weekday()
-        if weekday in pinned:
-            return weekday
-    return None
-
-
 async def _build_data(
     row: SweepRow, now_local: datetime, training: TrainingStore, routines: RoutineStore
 ) -> CheckinData:
     names = await routines.weekday_workout_names(row.member_id)
     pinned = frozenset(names)
     today = now_local.date()
-    missed_weekday = _previous_pinned_weekday(today, pinned) if pinned else None
+    prev = _previous_pinned_day(today, pinned)
+    missed_weekday = prev.weekday() if prev is not None else None
     return CheckinData(
         state=row.state,
         snoozed_until=row.snoozed_until,

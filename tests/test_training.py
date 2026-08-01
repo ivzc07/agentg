@@ -368,6 +368,20 @@ async def test_corrections_never_reach_a_previous_session(env):
         await env.training.edit_logged_sets(env.member_id, "bench", weight=62.5)
 
 
+async def test_growing_a_set_batch_preserves_note_and_rpe_on_the_added_sets(env):
+    await env.training.log_sets(
+        env.member_id, env.gym_id, "bench 60 8,8", rpe=8.0, note="paused"
+    )
+
+    await env.training.edit_logged_sets(env.member_id, "bench", reps=[8, 8, 8, 8])
+
+    sets = await env.training.current_session_sets(env.member_id)
+    assert len(sets) == 4
+    for s in sets:
+        assert s.rpe == 8.0
+        assert s.note == "paused"
+
+
 # --- closing ---
 
 
