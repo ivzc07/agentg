@@ -191,9 +191,23 @@ header.mhead .facts { color: var(--ink-2); font-size: 14px; margin-top: 10px; }
 .columns { display: flex; gap: 32px; flex-wrap: wrap; align-items: flex-start; }
 .col { flex: 1; min-width: 18rem; }
 .card { margin: 26px 0 0; }
+.card-elevated {
+  background: var(--elevation-2-bg);
+  border: 1px solid var(--elevation-2-stroke);
+  box-shadow: var(--elevation-2-shadow);
+  border-radius: var(--radius-md);
+  padding: 18px;
+}
 .card h2 { font-size: 20px; margin: 0 0 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.icon-chip { display: inline-flex; align-items: center; gap: 6px;
+  font-family: var(--mono); text-transform: uppercase;
+  font-size: 10px; letter-spacing: .12em; font-weight: 400;
+  color: var(--ink-2); background: var(--elevation-1-bg);
+  border: 1px solid var(--elevation-1-stroke);
+  border-radius: var(--radius-pill); padding: 4px 10px; white-space: nowrap; }
+.icon-chip .ic-icon { font-size: 14px; letter-spacing: 0; }
 a.edit { font-size: 14px; font-weight: 600; letter-spacing: 0; border: 1px solid var(--line-2);
-  padding: 8px 14px; margin-left: auto; transition: border-color var(--t-fast); }
+  padding: 8px 14px; margin-left: auto; border-radius: var(--radius-sm); transition: border-color var(--t-fast); }
 a.edit:hover { border-color: var(--ink-2); }
 .day { background: var(--surface); padding: 12px 14px; margin-bottom: 10px; }
 .day > b { font-family: var(--mono); text-transform: uppercase; font-size: 11px; letter-spacing: .14em;
@@ -207,6 +221,13 @@ a.edit:hover { border-color: var(--ink-2); }
 .sess .said { color: var(--coral); font-size: 13px; }
 .card > ul { list-style: none; margin: 0; padding: 0; }
 .card > ul > li { padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+/* Large numerals for Gap, Weights, and severity counts */
+.numeral { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
+.numeral-sm { font-size: 22px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; }
+.numeral-amber { color: var(--amber); }
+.numeral-red { color: var(--coral); }
+.weight-line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.weight-line .numeral-sm { min-width: 3ch; }
 .note { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
 .tail summary { padding: 8px 0; }
 .pages { display: flex; gap: 16px; margin-top: 10px; align-items: baseline; }
@@ -214,20 +235,40 @@ a.edit:hover { border-color: var(--ink-2); }
 .pages a:hover { text-decoration: underline; }
 .pages .muted { margin: 0 auto; }
 /* The loudest thing in the system is a white block, so the safety banner is one. */
-.safety-banner { background: var(--ink); color: #000; padding: 16px; margin-top: 20px; }
-.safety-banner h2 { color: #000; font-size: 20px; margin-bottom: 4px; }
-.safety-banner .flag { padding: 8px 0; display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; }
-.safety-banner .flag b { font-size: 16px; letter-spacing: -0.01em; }
+.safety-banner { background: var(--ink); color: #000; padding: 16px; margin-top: 20px; border-radius: var(--radius-md); }
+.safety-banner h2 { color: #000; font-size: 20px; margin-bottom: 6px; }
+.safety-banner .flag { padding: 10px 0; display: flex; gap: 10px 14px; align-items: flex-start; flex-wrap: wrap; border-bottom: 1px solid rgba(0,0,0,0.08); }
+.safety-banner .flag:last-child { border-bottom: 0; }
+.safety-banner .flag-body { flex: 1; min-width: 0; }
+.safety-banner .flag b { font-size: 16px; letter-spacing: -0.01em; display: block; }
+.safety-banner .flag .flag-meta { font-size: 13px; color: #555; margin-top: 2px; }
+.safety-banner .flag-feedback { display: inline-block; font-size: 13px; padding: 4px 10px; border-radius: var(--radius-xs); margin-top: 4px; }
+.safety-banner .flag-feedback.ack { background: #e8ffe8; color: #1a5c1a; }
+.safety-banner .flag-feedback.exp { background: #fff0f0; color: #a33; }
 .safety-banner .muted { color: #555; }
-.safety-banner form { margin: 0 0 0 auto; }
-.safety-banner button { background: #000; color: #fff; border: 0; }
-.safety-banner button:hover { background: #2a2a2a; }
+.safety-banner form { margin: 0; flex-shrink: 0; }
+.safety-banner button { background: #000; color: #fff; border: 0; font-size: 13px; padding: 8px 16px; min-height: 40px; white-space: nowrap; border-radius: var(--radius-sm); transition: background var(--t-fast), box-shadow var(--t-fast); }
+.safety-banner button:hover { background: #2a2a2a; box-shadow: var(--glow-accent); }
 /* The global focus ring is white — invisible on this white block. */
 .safety-banner :focus-visible { outline-color: #000; }
 /* The Member's own words, left alone, tagged when not in the Coach's language. */
 .verbatim { border-left: 2px solid var(--line-2); padding-left: 8px; }
 .langtag { display: inline-block; white-space: nowrap; font-family: var(--mono); font-size: 10px;
   letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); margin-left: 6px; }
+
+/* 375px: member page columns stack, header wraps naturally */
+@media (max-width: 420px) {
+  header.mhead h1 { font-size: 26px; }
+  .numeral { font-size: 24px; }
+  .numeral-sm { font-size: 20px; }
+  .card-elevated { padding: 14px; }
+  .columns { gap: 20px; }
+  .col { min-width: 0; }
+  .mhead .facts { font-size: 13px; }
+  .safety-banner .flag { flex-direction: column; align-items: stretch; gap: 8px; }
+  .safety-banner form { margin-left: 0; }
+  .safety-banner button { width: 100%; }
+}
 
 .editor-wrap { max-width: 44rem; margin: 0 auto; padding: 0 var(--gut) 48px; }
 .editor-wrap header h1 { font-size: 22px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

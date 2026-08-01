@@ -787,11 +787,12 @@ def _routine_card(view: MemberPage, lang: str, roster_view: str) -> str:
             )
         body = "".join(days)
     # The Edit journey keeps the view it started from, like tick-off does.
+    chip = f'<span class="icon-chip"><span class="ic-icon">📋</span> {t["routine"]}</span>'
     header = (
-        f'<h2>{t["routine"]} {_ownership_chip(view.coach_authored, view.routine_author, lang, view.routine_preset_name)} '
+        f'<h2>{chip} {_ownership_chip(view.coach_authored, view.routine_author, lang, view.routine_preset_name)} '
         f'<a class="edit" href="/members/{view.member_id}/routine?view={roster_view}">{t["edit"]}</a></h2>'
     )
-    return f'<section class="card">{header}{body}</section>'
+    return f'<section class="card card-elevated">{header}{body}</section>'
 
 
 def _sessions_card(view: MemberPage, lang: str, roster_view: str) -> str:
@@ -831,7 +832,8 @@ def _sessions_card(view: MemberPage, lang: str, roster_view: str) -> str:
             f'<nav class="pages" aria-label="{escape(t["sessions"], quote=True)}">{newer}'
             f'<span class="muted">{t["page_x_of_y"].format(page=view.page, pages=view.pages)}</span>{older}</nav>'
         )
-    return f'<section class="card" id="sessions"><h2>{t["sessions"]}</h2>{"".join(items)}{nav}</section>'
+    chip = f'<span class="icon-chip"><span class="ic-icon">📊</span> {t["sessions"]}</span>'
+    return f'<section class="card card-elevated" id="sessions"><h2>{chip}</h2>{"".join(items)}{nav}</section>'
 
 
 def _weights_card(view: MemberPage, lang: str) -> str:
@@ -840,14 +842,15 @@ def _weights_card(view: MemberPage, lang: str) -> str:
         rows = f'<p class="muted">{t["nothing_logged"]}</p>'
     else:
         rows = "".join(
-            f'<li><b>{escape(w.exercise)}</b> '
-            f'{_fmt_load(w.weight, view.weight_unit, lang)}'
+            f'<li class="weight-line"><b>{escape(w.exercise)}</b> '
+            f'<span class="numeral-sm">{_fmt_load(w.weight, view.weight_unit, lang)}</span>'
             f' × {",".join(str(r) for r in w.reps)}'
             f' <span class="muted">· {fmt_date(w.on, lang)}</span></li>'
             for w in view.weights
         )
         rows = f"<ul>{rows}</ul>"
-    return f'<section class="card"><h2>{t["last_weights"]}</h2>{rows}</section>'
+    chip = f'<span class="icon-chip"><span class="ic-icon">⚖️</span> {t["last_weights"]}</span>'
+    return f'<section class="card card-elevated"><h2>{chip}</h2>{rows}</section>'
 
 
 def _note_row(note: NoteView, lang: str) -> str:
@@ -893,7 +896,6 @@ def _safety_banner(view: MemberPage, lang: str, roster_view: str) -> str:
     t = STRINGS[lang]
     items = []
     for flag in view.safety_flags:
-        text = f"<b>{escape(flag.text)}</b> · {fmt_date(flag.on, lang)}"
         if flag.status == "open":
             action = (
                 f'<form method="post" '
@@ -905,12 +907,14 @@ def _safety_banner(view: MemberPage, lang: str, roster_view: str) -> str:
             who = flag.acknowledged_by or "—"
             when = fmt_date(flag.acknowledged_on, lang) if flag.acknowledged_on else ""
             action = (
-                f'<span class="muted">'
+                f'<span class="flag-feedback ack">'
                 f'{t["flag_seen_by"].format(who=escape(who), date=when)}</span>'
             )
         else:
-            action = f'<span class="muted">{t["flag_expired_unseen"]}</span>'
-        items.append(f'<div class="flag">{text} {action}</div>')
+            action = f'<span class="flag-feedback exp">{t["flag_expired_unseen"]}</span>'
+        body = f'<div class="flag-body"><b>{escape(flag.text)}</b>'
+        body += f'<div class="flag-meta">{fmt_date(flag.on, lang)}</div></div>'
+        items.append(f'<div class="flag">{body} {action}</div>')
     return (
         f'<section class="card safety-banner"><h2>{t["safety_section"]}</h2>'
         + "".join(items)
@@ -932,9 +936,17 @@ def _member_content(view: MemberPage, lang: str, roster_view: str, notice: str =
     chips = f'<div class="chips">{tags.rstrip()}</div>' if tags else ""
     count = t["one_session"] if view.session_count == 1 else t["n_sessions"].format(n=view.session_count)
     dot = '<span class="dot"></span>'
+    if view.has_sessions:
+        if view.gap_days == 0:
+            gap_html = t["trained_today"]
+        else:
+            n_html = f'<span class="numeral-sm">{view.gap_days}</span>'
+            gap_html = t["one_day_away"] if view.gap_days == 1 else t["days_away"].format(n=n_html)
+    else:
+        gap_html = t["no_sessions_yet"]
     facts = (
         f"{t['member_since'].format(date=fmt_date(view.member_since, lang))}{dot}{count}"
-        f"{dot}{away_text(view.has_sessions, view.gap_days, lang)}"
+        f"{dot}{gap_html}"
     )
     if view.last_session_on is not None:
         facts += f"{dot}{t['last_session'].format(date=fmt_date(view.last_session_on, lang))}"
