@@ -2,9 +2,9 @@
 
 import logging
 
+import litellm
 import pytest
 
-import agentg.instrument as mod
 from agentg.db import create_engine
 from agentg.instrument import TurnContext, TurnInstrument, register_sql_counter, _turn
 
@@ -76,12 +76,61 @@ class TestSqlCounter:
 
 
 class TestModelCounter:
-    async def test_register_does_not_raise(self):
-        # The litellm callback list must accept our counter.
-        mod.register_model_counter()
-        # Registering twice is harmless (idempotent append, but idempotency
-        # is hard to test — just verify the second call doesn't crash).
-        mod.register_model_counter()
+    async def test_increments_model_call_count_during_turn(self):
+        """litellm.acompletion inside a TurnContext is counted inline.
+
+        The count is available before __exit__ because the TurnContext wraps
+        acompletion — no race with litellm's async success-callback machinery.
+        To verify this test is not tautological: revert the __enter__ wrapper
+        and model_call_count stays 0, failing the asserts.
+        """
+        with TurnContext() as instrument:
+            assert instrument.model_call_count == 0
+            await litellm.acompletion(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": "hi"}],
+                mock_response="hello",
+            )
+            assert instrument.model_call_count == 1
+            await litellm.acompletion(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": "hi"}],
+                mock_response="hello",
+            )
+            assert instrument.model_call_count == 2
+            await litellm.acompletion(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": "hi"}],
+                mock_response="hello",
+            )
+            assert instrument.model_call_count == 3
+
+    async def test_logs_correct_count_on_exit(self, caplog: pytest.LogCaptureFixture):
+        """The log line emitted at __exit__ reports the correct model-call count."""
+        caplog.set_level(logging.INFO, logger="agentg.instrument")
+        with TurnContext():
+            await litellm.acompletion(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": "hi"}],
+                mock_response="hello",
+            )
+            await litellm.acompletion(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": "hi"}],
+                mock_response="hello",
+            )
+        record = caplog.records[0]
+        assert record.levelname == "INFO"
+        assert "2 model calls" in record.message
+
+    async def test_does_not_count_outside_turn(self):
+        """acompletion outside any TurnContext leaves the counter alone."""
+        await litellm.acompletion(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": "hi"}],
+            mock_response="hello",
+        )
+        # No active instrument — nothing to assert beyond no crash.
 
 
 class TestIntegration:

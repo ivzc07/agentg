@@ -7,6 +7,10 @@ model-call count, and SQL-statement count.
 ContextVars carry turn state so counters are isolated across concurrent
 turns (different Members are serialised per-identity but can interleave
 across identities, all in the same async loop).
+
+Model calls are counted inline by wrapping ``litellm.acompletion`` inside
+the turn context so the count is correct at ``__exit__`` time — litellm's
+``_async_success_callback`` fires asynchronously and would lag behind.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import contextvars
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -30,8 +35,8 @@ _turn: contextvars.ContextVar[TurnInstrument | None] = contextvars.ContextVar(
 class TurnInstrument:
     """Per-turn counters, populated during ``handle_message``.
 
-    All fields are mutable so SQLAlchemy event listeners and litellm
-    callbacks can increment them from outside the turn body.
+    All fields are mutable so SQLAlchemy event listeners and inline
+    wrappers can increment them from outside the turn body.
     """
 
     start_time: float = field(default_factory=time.monotonic)
@@ -56,36 +61,16 @@ def register_sql_counter(engine: AsyncEngine) -> None:
     event.listen(engine.sync_engine, "after_cursor_execute", _sql_counter)
 
 
-async def _count_model_call(
-    kwargs, completion_response, start_time, end_time
-) -> None:
-    instrument = _turn.get()
-    if instrument is not None:
-        instrument.model_call_count += 1
-
-
-def register_model_counter() -> None:
-    """Register a per-call counter on litellm's async-success-callback list.
-
-    All model calls in the Agent turn flow use ``litellm.acompletion``:
-    the Agent's ``Runner.run`` (via ``LitellmModel``) and the linking
-    phraser / compaction summarizer (direct ``acompletion``).  Counting
-    the async-success callback catches every one.
-    """
-    try:
-        import litellm
-
-        litellm._async_success_callback.append(_count_model_call)
-    except ImportError:
-        pass
-
-
 class TurnContext:
     """Start and end a single message turn for instrumentation.
 
+    Wraps ``litellm.acompletion`` so model calls are counted inline
+    before each call returns, avoiding the race in litellm's async
+    success-callback machinery.
+
     Usage inside ``handle_message``::
 
-        with TurnContext() as instrument:
+        with TurnContext():
             # ... turn body ...
         # instrument is logged automatically on exit
     """
@@ -93,14 +78,36 @@ class TurnContext:
     def __init__(self) -> None:
         self.instrument = TurnInstrument()
         self._token: contextvars.Token[TurnInstrument | None] | None = None
+        self._original_acompletion: Any = None
 
     def __enter__(self) -> TurnInstrument:
         self._token = _turn.set(self.instrument)
+        # Wrap litellm.acompletion so every model call made during the turn
+        # is counted *before* the call completes.  litellm's async success
+        # callback fires after the turn log line, so counting there would
+        # systematically undercount (issue #161 review round 1).
+        import litellm
+
+        self._original_acompletion = litellm.acompletion
+
+        async def _counting_acompletion(*args: Any, **kwargs: Any) -> Any:
+            instrument = _turn.get()
+            if instrument is not None:
+                instrument.model_call_count += 1
+            return await self._original_acompletion(*args, **kwargs)
+
+        litellm.acompletion = _counting_acompletion
         return self.instrument
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         assert self._token is not None
         _turn.reset(self._token)
+        # Restore the original acompletion so future turns (and code outside
+        # any turn) are unaffected.
+        import litellm
+
+        if self._original_acompletion is not None:
+            litellm.acompletion = self._original_acompletion
         duration = time.monotonic() - self.instrument.start_time
         logger.info(
             "turn completed in %.3fs, %d model calls, %d SQL statements",

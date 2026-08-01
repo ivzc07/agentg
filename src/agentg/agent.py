@@ -160,11 +160,9 @@ async def dynamic_instructions(
 
 
 def build_agent(settings: Settings) -> Agent:
-    # Register the per-turn model-call counter with litellm before any calls
-    # are made (issue #161).
-    from agentg.instrument import register_model_counter
-
-    register_model_counter()
+    # Model-call counting is done inline by TurnContext wrapping
+    # litellm.acompletion — no global litellm callback registration needed
+    # (issue #161).
     return Agent(
         name="Agent",
         instructions=dynamic_instructions,
