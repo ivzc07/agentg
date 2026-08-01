@@ -503,9 +503,11 @@ def _lapsed_section(
 </details>"""
 
 
-def _countbar(t: dict) -> str:
-    """The line that names the ordering, so the sort is never mysterious."""
-    return f'<div class="countbar">{t["sorted_by_gap"]}</div>'
+def _countbar(t: dict, count: int = 0) -> str:
+    """The line that names the ordering with an icon chip and a large bold
+    numeral of the active Member count, so the sort is never mysterious."""
+    numeral = f' <span class="numeral">{count}</span>' if count else ""
+    return f'<div class="countbar"><span class="chip-icon" aria-hidden="true">≡</span>{t["sorted_by_gap"]}{numeral}</div>'
 
 
 def _no_matches(t: dict) -> str:
@@ -516,6 +518,7 @@ def _no_matches(t: dict) -> str:
 def _empty_roster(t: dict) -> str:
     """A brand-new gym: no Members at all — point at the invite link."""
     return f"""<div class="emptystate">
+<div class="chip-icon" aria-hidden="true">◎</div>
 <h2>{t["empty_roster_title"]}</h2>
 <p>{t["empty_roster_body"]}</p>
 </div>"""
@@ -540,7 +543,7 @@ def _table_page(
         body = f'<div class="roster-body">{_empty_roster(t)}</div>'
     else:
         items = "".join(_roster_row(row, "table", lang) for row in rows)
-        body = f"""{_countbar(t)}
+        body = f"""{_countbar(t, count=len(rows))}
 <div class="roster-body">
 <ul id="roster">{items}</ul>
 {_no_matches(t)}
@@ -632,13 +635,16 @@ def _cards_page(
         else:
             band = "cool"
         next(b for b in bands if b[0] == band)[2].append(row)
+    # Icon chips for each band so they read as marked sections.
+    band_icons = {"hot": "●", "warm": "◐", "cool": "○", "new": "✦"}
     sections = ""
     for band_id, title, members in bands:
         if band_id == "new" and not members:
             continue  # a transient group, not a permanent fixture
         cards = "".join(_member_card(row, grids.get(row.member_id, []), lang) for row in members)
+        icon = band_icons.get(band_id, "")
         sections += f"""<section class="band band-{band_id}" id="band-{band_id}">
-<h2>{title} <span class="count">{len(members)}</span></h2>
+<h2><span class="chip-icon" aria-hidden="true">{icon}</span>{title} <span class="count">{len(members)}</span></h2>
 {f'<div class="grid">{cards}</div>' if members else ""}
 </section>"""
     body = f"""<div class="roster-body">
@@ -669,7 +675,7 @@ def _split_page(
         rail = _empty_roster(t)
     else:
         items = "".join(_roster_row(row, "split", lang, current_member_id) for row in rows)
-        rail = f"""{_countbar(t)}
+        rail = f"""{_countbar(t, count=len(rows))}
 <ul id="roster">{items}</ul>
 {_no_matches(t)}
 {_lapsed_section(lapsed, "split", lang, current_member_id)}"""
