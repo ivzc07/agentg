@@ -139,6 +139,39 @@ def test_malformed_doc_all_bad_values_degrades_to_defaults():
     assert parsed == ProgressionRules()
 
 
+def test_increment_above_100_is_clamped_to_default():
+    doc = "increment: 250"
+    assert parse_progression_rules(doc).increment == ProgressionRules.increment
+
+
+def test_increment_zero_is_clamped_to_default():
+    doc = "increment: 0"
+    assert parse_progression_rules(doc).increment == ProgressionRules.increment
+
+
+def test_stall_sessions_above_52_is_clamped_to_default():
+    doc = "stall_sessions: 100"
+    assert parse_progression_rules(doc).stall_sessions == ProgressionRules.stall_sessions
+
+
+def test_gap_deload_days_above_365_is_clamped_to_default():
+    doc = "gap_deload_days: 999"
+    assert parse_progression_rules(doc).gap_deload_days == ProgressionRules.gap_deload_days
+
+
+def test_upper_bounds_are_enforced():
+    """Regression: typo'd huge values reached the Member verbatim (issue #167)."""
+    doc = """\
+- increment: 1000
+- stall_sessions: 999
+- gap_deload_days: 99999
+"""
+    parsed = parse_progression_rules(doc)
+    assert parsed.increment == ProgressionRules.increment
+    assert parsed.stall_sessions == ProgressionRules.stall_sessions
+    assert parsed.gap_deload_days == ProgressionRules.gap_deload_days
+
+
 # --- the suggestion algorithm ---
 
 
@@ -223,6 +256,21 @@ def test_a_deload_always_reduces_even_for_small_loads():
     s = suggest_weight([missed(5.0), missed(5.0)], gap_days=2, rules=rules())
     assert s.action == "deload"
     assert s.suggested_weight is not None and s.suggested_weight < 5.0
+
+
+def test_deload_never_exceeds_last_weight_when_below_plate_step():
+    """Regression: max(PLATE_STEP, ...) could turn a deload into an increase
+    when last_weight < PLATE_STEP (e.g. a 1.0 kg dumbbell)."""
+    s = suggest_weight([missed(1.0), missed(1.0)], gap_days=2, rules=rules())
+    assert s.action == "deload"
+    assert s.suggested_weight is not None and s.suggested_weight < 1.0
+
+
+def test_gap_deload_never_exceeds_last_weight_when_below_plate_step():
+    """Regression: the gap_deload path had no guard at all."""
+    s = suggest_weight([done(1.0)], gap_days=14, rules=rules())
+    assert s.action == "gap_deload"
+    assert s.suggested_weight is not None and s.suggested_weight < 1.0
 
 
 def test_bodyweight_history_yields_no_weight_suggestion():
