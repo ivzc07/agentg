@@ -56,7 +56,11 @@ describe("Dashboard", () => {
 
     renderDashboard();
 
-    expect(await screen.findByText("Not signed in.")).toBeInTheDocument();
+    expect(
+      await screen.findByText((content) =>
+        content.includes("No estás autenticado"),
+      ),
+    ).toBeInTheDocument();
   });
 
   it("shows a retryable error state on a non-401 failure", async () => {
@@ -89,8 +93,42 @@ describe("Dashboard", () => {
     expect(await screen.findByText("Iron Temple")).toBeInTheDocument();
     expect(screen.queryByText("Not signed in.")).not.toBeInTheDocument();
     expect(
+      screen.queryByText((content) =>
+        content.includes("No estás autenticado"),
+      ),
+    ).not.toBeInTheDocument();
+    expect(
       screen.queryByText("Something went wrong loading your session."),
     ).not.toBeInTheDocument();
+  });
+
+  it("bypasses session states on login routes and renders LoginPage", async () => {
+    // isLoginRoute is true → Dashboard returns <LoginRoutes /> immediately,
+    // so the user always sees the login interstitial, never session
+    // loading / auth-error / retryable-error states.
+    // fetchSession still fires (React hooks always execute), but its
+    // result is irrelevant because LoginRoutes is returned first.
+    fetchSession.mockReturnValue(new Promise(() => {}));
+    window.history.pushState({}, "", "/dashboard/login/token-abc");
+
+    // LoginPage inside LoginRoutes will fetch the peek API.
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ valid: true }),
+    } as Response);
+
+    renderDashboard();
+
+    // The valid-token interstitial appears — never any session state.
+    expect(
+      await screen.findByText((content) =>
+        content.includes("Abriendo tu dashboard"),
+      ),
+    ).toBeInTheDocument();
+
+    // The session loading text must NOT appear even though
+    // fetchSession is still pending.
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
   });
 
   it("redirects unknown deep links to the roster", async () => {
@@ -128,7 +166,9 @@ describe("Dashboard", () => {
       view_split: "Split",
     };
     // Unknown deep link — the catch-all must redirect to /.
-    window.history.pushState({}, "", "/dashboard/settings");
+    // /dashboard/settings is a real route now (issue #153), so use
+    // a truly unknown path.
+    window.history.pushState({}, "", "/dashboard/unknown-deep-link");
 
     renderDashboard();
 

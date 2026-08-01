@@ -98,8 +98,8 @@ from agentg.dashboard_store import (
     DayCell,
     MemberPage,
     NoteView,
-    RoutineDayView,
     RosterRow,
+    RoutineDayView,
 )
 from agentg.linking_store import GYM_NAME_MAX_LENGTH, LinkingStore
 from agentg.models import Gym, Member, RoutinePreset
@@ -2345,6 +2345,123 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
+    # --- /api/settings JSON endpoints (issue #153) ---
+
+
+    async def api_login_peek(request: web.Request) -> web.Response:
+        """``GET /api/login/{token}`` — validate a login token without spending
+        it.  Returns ``{valid: true}`` or ``{valid: false}`` so the SPA
+        interstitial can distinguish "click to sign in" from a dead link."""
+        token = request.match_info["token"]
+        row = await store.peek_login_token(token)
+        return web.json_response({"valid": row is not None})
+
+
+    async def api_settings(request: web.Request) -> web.Response:
+        """``GET /api/settings`` — cookie-auth via ``require_coach``; returns
+        gym name, both invite codes/URLs, QR SVG, and the bot username as JSON.
+        Unauthenticated answers 401."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        # require_coach → coach_identity already SELECTs Member+Gym in the
+        # same request, so the Gym row here is fresh — no stale read (the
+        # re-fetch was redundant).  Serialize what the store computed.
+        invite_url = _invite_url(bot_username, gym.invite_code)
+        coach_url = _invite_url(bot_username, gym.coach_invite_code or "")
+        response = web.json_response({
+            "gym_name": gym.name,
+            "invite_code": gym.invite_code,
+            "invite_url": invite_url,
+            "qr_svg": _qr_svg(invite_url),
+            "coach_invite_code": gym.coach_invite_code,
+            "coach_invite_url": coach_url,
+            "bot_username": bot_username,
+        })
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def api_settings_regenerate_invite(request: web.Request) -> web.Response:
+        """``POST /api/settings/regenerate-invite`` — typed-confirm gated
+        regeneration of the member invite code. Returns the new code and URL."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            body = {}
+        confirm = (body.get("confirm") or "").strip().lower()
+        if confirm != t["confirm_word"]:
+            return web.json_response(
+                {"error": t["confirm_mismatch"].format(word=t["confirm_word"])},
+                status=400,
+            )
+        new_code = await linking.regenerate_invite_code(gym.id)
+        new_url = _invite_url(bot_username, new_code)
+        response = web.json_response({
+            "invite_code": new_code,
+            "invite_url": new_url,
+            "qr_svg": _qr_svg(new_url),
+        })
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def api_settings_regenerate_coach(request: web.Request) -> web.Response:
+        """``POST /api/settings/regenerate-coach`` — typed-confirm gated
+        regeneration of the coach invite code. Returns the new code and URL."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            body = {}
+        confirm = (body.get("confirm") or "").strip().lower()
+        if confirm != t["confirm_word"]:
+            return web.json_response(
+                {"error": t["confirm_mismatch"].format(word=t["confirm_word"])},
+                status=400,
+            )
+        new_code = await linking.regenerate_coach_invite_code(gym.id)
+        new_url = _invite_url(bot_username, new_code)
+        response = web.json_response({
+            "coach_invite_code": new_code,
+            "coach_invite_url": new_url,
+        })
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def api_settings_gym_name(request: web.Request) -> web.Response:
+        """``POST /api/settings/gym-name`` — rename the gym. Returns the new name."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            body = {}
+        name = body.get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            return web.json_response(
+                {"error": t["gym_name_empty"]},
+                status=400,
+            )
+        new_name = await linking.rename_gym(gym.id, name)
+        response = web.json_response({"gym_name": new_name})
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
     # --- /api/members/{id}/routine JSON endpoint (issue #151) ---
 
     async def api_member_routine_get(request: web.Request) -> web.Response:
@@ -2840,34 +2957,16 @@ def build_app(
 
     resolved_dist = spa_dist or _FRONTEND_DIST
 
-    async def spa_shell(request: web.Request) -> web.Response:
-        """Serve the Vite-built React bundle shell with ``window.__I18N__``
-        bootstrap injected (ADR 0004 §i18n 7a). Only reachable when the
-        ``spa_enabled`` flag is on."""
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        t: dict = dict(STRINGS[lang])
-        t["_months"] = list(MONTHS[lang])
-        t["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
-        t["_weekdays"] = list(WEEKDAYS[lang])
+    def _inject_i18n(html: str, t: dict, lang: str) -> str:
+        """Inject ``window.__I18N__`` bootstrap into the SPA shell HTML.
 
-        index_path = resolved_dist / "index.html"
-        if not index_path.exists():
-            return web.Response(
-                text="SPA bundle not built — run `npm run build` in frontend/",
-                status=503,
-                content_type="text/plain",
-            )
-
-        html = index_path.read_text(encoding="utf-8")
-        # Inject window.__I18N__ before the first script tag so the React
-        # app can read it synchronously on mount.
+        Includes STRINGS plus the ``_months``, ``_weekday_initials`` and
+        ``_decimal_mark`` keys the frontend's ``i18n.ts`` reads through
+        ``getMonths`` / ``getWeekdayInitials`` / ``getDecimalMark``."""
         i18n_payload: dict = dict(t)
         i18n_payload["_months"] = list(MONTHS[lang])
         i18n_payload["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
+        i18n_payload["_weekdays"] = list(WEEKDAYS[lang])
         i18n_payload["_decimal_mark"] = DECIMAL_MARK[lang]
         i18n_json = json.dumps(i18n_payload, ensure_ascii=False)
         # Escape <, U+2028, and U+2029 so no string value can close the
@@ -2878,7 +2977,7 @@ def build_app(
             .replace("\u2029", "\\u2029")
         )
         i18n_script = f"<script>window.__I18N__ = {safe_json};</script>"
-        # Insert after <head> (if present) or at the start of <body>.
+        # Insert after </head> (if present) or at the start of <body>.
         if "</head>" in html:
             html = html.replace("</head>", f"{i18n_script}\n</head>")
         elif "<body" in html:
@@ -2887,7 +2986,59 @@ def build_app(
             html = html[:body_close] + i18n_script + html[body_close:]
         else:
             html = i18n_script + html
+        return html
 
+    def _read_spa_index() -> str | None:
+        """Read the Vite-built index.html; ``None`` if not built."""
+        index_path = resolved_dist / "index.html"
+        if not index_path.exists():
+            return None
+        return index_path.read_text(encoding="utf-8")
+
+    async def spa_login_shell(request: web.Request) -> web.Response:
+        """Serve the SPA shell **without** auth for the login/interstitial
+        screen (issue #153).  The React app at ``/dashboard/login/:token``
+        detects the route and renders the interstitial — no session required.
+
+        The i18n bootstrap uses the language cookie if set, else the
+        no-signal default (Spanish) — the same rule as the door pages."""
+        lang = resolve_lang(
+            request.cookies.get(LANG_COOKIE),
+            request.headers.get("Accept-Language"),
+        )
+        t = STRINGS[lang]
+
+        html = _read_spa_index()
+        if html is None:
+            return web.Response(
+                text="SPA bundle not built — run `npm run build` in frontend/",
+                status=503,
+                content_type="text/plain",
+            )
+
+        html = _inject_i18n(html, t, lang)
+        return web.Response(text=html, content_type="text/html")
+
+    async def spa_shell(request: web.Request) -> web.Response:
+        """Serve the Vite-built React bundle shell with ``window.__I18N__``
+        bootstrap injected (ADR 0004 §i18n 7a). Only reachable when the
+        ``spa_enabled`` flag is on."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+
+        html = _read_spa_index()
+        if html is None:
+            return web.Response(
+                text="SPA bundle not built — run `npm run build` in frontend/",
+                status=503,
+                content_type="text/plain",
+            )
+
+        html = _inject_i18n(html, t, lang)
         response = web.Response(text=html, content_type="text/html")
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
@@ -2930,9 +3081,21 @@ def build_app(
     app.router.add_get("/members/{member_id}/routine", routine_editor)
     app.router.add_post("/members/{member_id}/routine", routine_save)
     if spa_enabled:
+        # /api/login/{token} peek is SPA-only — serves the interstitial's
+        # token validation without spending the token.  Flag-gated so the
+        # flag-off rollback contract holds.
+        app.router.add_get("/api/login/{token}", api_login_peek)
+        # /api/roster is the SPA's JSON endpoint — it has no server-HTML
+        # consumer, so flag-gating it keeps the prod surface minimal.
+        app.router.add_get("/api/roster", api_roster)
+        # /api/settings and its write routes (issue #153) — flag-gated like
+        # /api/roster so the flag-off rollback holds.
+        app.router.add_get("/api/settings", api_settings)
+        app.router.add_post("/api/settings/regenerate-invite", api_settings_regenerate_invite)
+        app.router.add_post("/api/settings/regenerate-coach", api_settings_regenerate_coach)
+        app.router.add_post("/api/settings/gym-name", api_settings_gym_name)
         # JSON endpoints for the SPA — flag-gated so the flag-off rollback
         # holds (ADR 0004 §Migration 5b).
-        app.router.add_get("/api/roster", api_roster)
         # /api/members/{id}/routine is the JSON Routine editor endpoint
         # (issue #151).
         app.router.add_get("/api/members/{member_id}/routine", api_member_routine_get)
@@ -2956,6 +3119,12 @@ def build_app(
                 resolved_dist / "assets",
             )
         else:
+            # Public (no-auth) SPA shell for the login/interstitial screen
+            # (issue #153).  Registered first so the authenticated catch-all
+            # only covers routes that need a session.
+            app.router.add_get(
+                f"{SPA_MOUNT}/login/{{token}}", spa_login_shell
+            )
             app.router.add_get(SPA_MOUNT, spa_shell)
             app.router.add_get(f"{SPA_MOUNT}/", spa_shell)
             # Assets first: the catch-all below would otherwise swallow them.

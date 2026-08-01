@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from conftest import FakeClock
 
 from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
@@ -19,7 +20,6 @@ from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
 from agentg.models import Exercise, Routine
 from agentg.routines import ExerciseSpec, WorkoutSpec
-from conftest import FakeClock
 
 SECRET = "test-secret"
 BOUNCE_MARKER = "/dashboard"  # the bounce page tells you to send /dashboard
@@ -196,6 +196,41 @@ async def test_the_language_toggle_rejects_a_control_char_next(env, next_path):
 
     assert response.status == 302
     assert response.headers["Location"] == "/"
+
+
+# --- /api/login/{token} peek (issue #153) ---
+
+
+async def test_api_login_peek_valid_token(spa_env):
+    """A valid unspent token returns {valid: true} without spending it."""
+    raw = await spa_env.store.create_login_token(spa_env.member.id, spa_env.gym.id)
+
+    response = await spa_env.client.get(f"/api/login/{raw}")
+
+    assert response.status == 200
+    assert response.content_type == "application/json"
+    data = json.loads(await response.text())
+    assert data["valid"] is True
+
+    # Token is still redeemable (peek didn't spend it)
+    assert await spa_env.store.peek_login_token(raw) is not None
+
+
+async def test_api_login_peek_used_token(spa_env):
+    """A used token returns {valid: false}."""
+    raw = await spa_env.store.create_login_token(spa_env.member.id, spa_env.gym.id)
+    await spa_env.store.redeem_login_token(raw)
+
+    response = await spa_env.client.get(f"/api/login/{raw}")
+    data = json.loads(await response.text())
+    assert data["valid"] is False
+
+
+async def test_api_login_peek_unknown_token(spa_env):
+    """An unknown token returns {valid: false}, not a 404."""
+    response = await spa_env.client.get("/api/login/no-such-token")
+    data = json.loads(await response.text())
+    assert data["valid"] is False
 
 
 # --- /api/session JSON contract (issue #155) ---
@@ -401,7 +436,7 @@ async def test_spa_shell_injects_months_and_weekday_initials_es(spa_env):
 
 async def test_spa_shell_escapes_script_close_tag(tmp_path, monkeypatch):
     """A ``</script>`` string in STRINGS must not close the injection tag early."""
-    import agentg.dashboard_web as dashboard_web
+    from agentg import dashboard_web
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
     stub_dist = tmp_path / "dist"
@@ -468,7 +503,7 @@ async def test_spa_serves_static_assets(spa_env):
 async def test_spa_enabled_no_dist_builds_app(tmp_path, monkeypatch):
     """With the flag on and no ``dist/`` directory the app builds without
     crashing and the shell route returns a 404."""
-    import agentg.dashboard_web as dashboard_web
+    from agentg import dashboard_web
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
     missing = tmp_path / "no-such-dist"
@@ -519,6 +554,10 @@ async def test_flag_off_dashboard_unaffected(env):
     # /api/seed is removed from the HTTP surface entirely — 404 in all configs.
     seed = await env.client.post("/api/seed", cookies={SESSION_COOKIE: cookie})
     assert seed.status == 404
+
+    # /api/login/{token} peek is flag-gated — 404 when the flag is off (issue #153, review).
+    peek = await env.client.get("/api/login/no-such-token")
+    assert peek.status == 404
 
     # SPA shell route is not registered.
     response = await env.client.get(SPA_SHELL_ROUTE)
@@ -597,7 +636,7 @@ async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
 async def test_spa_enabled_partial_bundle(tmp_path, monkeypatch):
     """A dist/ with index.html but no assets/ must not crash at build_app
     — the guard must catch the missing assets directory (P1, PR review 2)."""
-    import agentg.dashboard_web as dashboard_web
+    from agentg import dashboard_web
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
     stub_dist = tmp_path / "dist"
@@ -628,7 +667,7 @@ async def test_spa_dist_override_packaged_layout(tmp_path, monkeypatch):
     """With a spa_dist override, the app uses that path instead of the
     repo-relative _FRONTEND_DIST — simulating a container deploy where
     the bundle is at /app/frontend/dist (P2, PR review 2)."""
-    import agentg.dashboard_web as dashboard_web
+    from agentg import dashboard_web
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
     # Simulate a packaged layout: _FRONTEND_DIST points to a non-existent
@@ -872,8 +911,9 @@ async def test_api_roster_severity_and_attendance_from_known_history(spa_env):
     renders, not just key presence (issue #149, PR review)."""
     from datetime import UTC, datetime, timedelta
 
-    from agentg.models import Exercise, Session
     from sqlalchemy import select as sa_select
+
+    from agentg.models import Exercise, Session
 
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
     now = spa_env.clock()  # the FakeClock's fixed instant
@@ -1009,6 +1049,98 @@ async def test_spa_fallback_static_assets_still_served(spa_env):
     assert "stub" in text
 
 
+# --- SPA login shell (issue #153) ---
+
+
+async def test_spa_login_shell_serves_without_auth(spa_env):
+    """GET /dashboard/login/:token serves the SPA shell without requiring auth."""
+    response = await spa_env.client.get("/dashboard/login/test-token-42")
+
+    assert response.status == 200
+    text = await response.text()
+    assert "window.__I18N__" in text
+    assert 'id="root"' in text
+
+
+async def test_spa_login_shell_injects_default_language(spa_env):
+    """The login shell injects i18n with the no-signal default (Spanish)."""
+    response = await spa_env.client.get("/dashboard/login/test-token-42")
+
+    assert response.status == 200
+    text = await response.text()
+    # Spanish is the default — "Ajustes" is in the bootstrap
+    assert "Ajustes" in text
+
+
+async def test_spa_login_shell_respects_language_cookie(spa_env):
+    """The login shell uses the language cookie when set."""
+    response = await spa_env.client.get(
+        "/dashboard/login/test-token-42",
+        cookies={"agentg_dashboard_lang": "en"},
+    )
+
+    assert response.status == 200
+    text = await response.text()
+    # English is set via the cookie
+    assert "Settings" in text
+
+
+async def test_spa_login_shell_no_cookie_set(spa_env):
+    """Unlike the authenticated shell, the login shell does NOT set a
+    session cookie — there is no session to slide."""
+    response = await spa_env.client.get("/dashboard/login/test-token-42")
+
+    assert response.status == 200
+    assert SESSION_COOKIE not in response.cookies
+
+
+# --- SPA i18n key guard ---
+
+
+def _spa_i18n_keys() -> set[str]:
+    """Scan the SPA source for every ``t("key")`` call and return the union
+    of all string-literal keys.  Dynamic keys (``t(`view_${v}`)``) are
+    resolved against the known view set."""
+    import re
+
+    frontend_root = Path(__file__).resolve().parent.parent / "frontend" / "src"
+    key_re = re.compile(r'\bt\("([^"]+)"\)')
+    keys: set[str] = set()
+    for src_path in frontend_root.rglob("*.tsx"):
+        if "__tests__" in src_path.parts:
+            continue
+        for match in key_re.finditer(src_path.read_text(encoding="utf-8")):
+            keys.add(match.group(1))
+    for src_path in frontend_root.rglob("*.ts"):
+        if "__tests__" in src_path.parts:
+            continue
+        for match in key_re.finditer(src_path.read_text(encoding="utf-8")):
+            keys.add(match.group(1))
+    # Dynamic keys: view_table / view_cards / view_split from RosterShell
+    if "view_" in " ".join(keys):
+        keys.discard("view_")
+        keys.update({"view_table", "view_cards", "view_split"})
+    return keys
+
+
+def test_every_spa_i18n_key_exists_in_strings_for_both_languages():
+    """No ``t(key)`` in the SPA may refer to a key that is missing from
+    the real ``STRINGS`` dict — in either language.  This guards against the
+    &quot;mock hides reality&quot; trap where a Vitest mock defines a key that the
+    production i18n source does not."""
+    from agentg.dashboard_i18n import STRINGS
+
+    spa_keys = _spa_i18n_keys()
+    assert spa_keys, "expected at least one SPA i18n key"
+
+    for lang in ("es", "en"):
+        missing = spa_keys - set(STRINGS[lang].keys())
+        assert not missing, (
+            f"SPA keys missing from STRINGS['{lang}']: "
+            + ", ".join(sorted(missing))
+        )
+
+
 # --- /api/members/{id} JSON contract (issue #150) ---
 
 
@@ -1068,9 +1200,9 @@ async def test_api_member_404_for_unknown_ghost_or_coach(spa_env):
 
 async def test_api_member_returns_routine_sessions_weights_notes(spa_env):
     """The JSON member endpoint returns the same data the server-HTML page renders."""
-    from agentg.training import TrainingStore
-    from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
     from agentg.notes import NotesStore
+    from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
+    from agentg.training import TrainingStore
 
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
@@ -1174,6 +1306,7 @@ async def test_api_member_lapsed_returns_data(spa_env):
 async def test_api_member_snoozed_shows_until(spa_env):
     """A snoozed member carries snoozed_until in the JSON."""
     from datetime import date, timedelta
+
     from agentg.checkin import SNOOZED
 
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())

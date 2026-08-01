@@ -5,6 +5,8 @@ import { MotionConfig } from "framer-motion";
 import { fetchSession, SessionAuthError } from "./api/session";
 import { RosterShell } from "./components/RosterShell";
 import { MemberPage } from "./components/MemberPage";
+import { SettingsPage } from "./components/SettingsPage";
+import { LoginPage } from "./components/LoginPage";
 import { PresetsPage } from "./components/PresetsPage";
 import { PresetsShell } from "./components/PresetsShell";
 import { RoutineEditor } from "./components/RoutineEditor";
@@ -18,11 +20,38 @@ const queryClient = new QueryClient({
   },
 });
 
+/**
+ * The login / interstitial route is reachable **without** a session
+ * (issue #153).  Everything else requires the coach to be signed in.
+ */
+function LoginRoutes() {
+  return (
+    <MotionConfig reducedMotion="user">
+      <BrowserRouter basename="/dashboard">
+        <Routes>
+          <Route path="login/:token" element={<LoginPage />} />
+          {/* Any unmatched login path shows a fallback bounce */}
+          <Route path="login" element={<LoginPage />} />
+        </Routes>
+      </BrowserRouter>
+    </MotionConfig>
+  );
+}
+
 export function Dashboard() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["session"],
     queryFn: fetchSession,
   });
+
+  // Check if we're on a login route — those don't need a session.
+  const isLoginRoute =
+    typeof window !== "undefined" &&
+    window.location.pathname.startsWith("/dashboard/login");
+
+  if (isLoginRoute) {
+    return <LoginRoutes />;
+  }
 
   if (isLoading) {
     return (
@@ -35,7 +64,15 @@ export function Dashboard() {
   if (error instanceof SessionAuthError) {
     return (
       <div className="flex items-center justify-center min-h-screen text-ink-2">
-        Not signed in.
+        <div className="text-center space-y-4 max-w-sm px-gut">
+          <h1 className="text-[20px] font-semibold">
+            Dashboard no disponible
+          </h1>
+          <p className="text-[14px] text-ink-2">
+            No estás autenticado. Envía <b>/dashboard</b> a tu bot en Telegram
+            para recibir un enlace de acceso.
+          </p>
+        </div>
       </div>
     );
   }
@@ -64,6 +101,8 @@ export function Dashboard() {
           {/* A member loaded directly (not from the Split rail) — the full
               member screen, without roster chrome around it. */}
           <Route path="members/:memberId" element={<MemberPage />} />
+          {/* Settings screen (issue #153): full-page, no RosterShell chrome */}
+          <Route path="settings" element={<SettingsPage />} />
           {/* Presets management screen (issue #152) — standalone full-page. */}
           <Route
             path="presets"

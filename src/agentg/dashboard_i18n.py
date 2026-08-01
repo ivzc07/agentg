@@ -249,6 +249,8 @@ STRINGS = {
             "¿Retirar este Preset? Los miembros conservan su copia, pero el "
             "Preset ya no se podrá editar ni aplicar."
         ),
+        "settings_load_error": "No se pudieron cargar los ajustes.",
+        "nav_dashboard": "Dashboard",
         "presets_loading": "Cargando…",
         "presets_error": "Algo salió mal al cargar tus presets.",
         "presets_retry": "Reintentar",
@@ -434,6 +436,8 @@ STRINGS = {
             "Retire this preset? Members keep their copies, but the preset "
             "can no longer be edited or applied."
         ),
+        "settings_load_error": "Could not load settings.",
+        "nav_dashboard": "Dashboard",
         "presets_loading": "Loading…",
         "presets_error": "Something went wrong loading your presets.",
         "presets_retry": "Retry",
@@ -501,16 +505,10 @@ def away_text(has_sessions: bool, gap_days: int, lang: str) -> str:
 # bien, mal, canso, no) break the tie the other way.
 
 _ES_WORDS = frozenset(
-    "el la los las de del que un una con por para mi mis su sus se al no "
-    "quiero puedo solo antes después hacer muy más cuando porque entrenar "
-    "dolor pero también tiene estoy lo es son está me duele siento mucho "
-    "bien mal canso".split()
+    ["el", "la", "los", "las", "de", "del", "que", "un", "una", "con", "por", "para", "mi", "mis", "su", "sus", "se", "al", "no", "quiero", "puedo", "solo", "antes", "después", "hacer", "muy", "más", "cuando", "porque", "entrenar", "dolor", "pero", "también", "tiene", "estoy", "lo", "es", "son", "está", "me", "duele", "siento", "mucho", "bien", "mal", "canso"]
 )
 _EN_WORDS = frozenset(
-    "the and to of in is it i me i'm my can want only before with for on at "
-    "not hates will them train pain week but also have has am are was were "
-    "would could should this that these those from after when what who "
-    "help i'll i've i'd im".split()
+    ["the", "and", "to", "of", "in", "is", "it", "i", "me", "i'm", "my", "can", "want", "only", "before", "with", "for", "on", "at", "not", "hates", "will", "them", "train", "pain", "week", "but", "also", "have", "has", "am", "are", "was", "were", "would", "could", "should", "this", "that", "these", "those", "from", "after", "when", "what", "who", "help", "i'll", "i've", "i'd", "im"]
 )
 _ES_ACCENTS = re.compile(r"[áéíóúñ¿¡]")
 _WORDS = re.compile(r"[a-záéíóúñü]+(?:'[a-z]+)?")
