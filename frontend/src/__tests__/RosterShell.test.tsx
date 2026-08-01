@@ -271,4 +271,16 @@ describe("RosterShell", () => {
       expect(screen.getByText("1 of 2")).toBeInTheDocument();
     });
   });
+
+  it("renders the Presets nav as a link to /presets", async () => {
+    renderShell(makeResponse());
+
+    await waitFor(() => {
+      expect(screen.getByText("Presets")).toBeInTheDocument();
+    });
+
+    const link = screen.getByRole("link", { name: "Presets" });
+    expect(link).toBeInTheDocument();
+    expect(link).toHaveAttribute("href", "/presets");
+  });
 });

@@ -149,7 +149,7 @@ export function PresetsPage() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center min-h-[200px] text-ink-2">
-        Loading…
+        {t("presets_loading")}
       </div>
     );
   }
@@ -157,12 +157,12 @@ export function PresetsPage() {
   if (error || !data) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[200px] text-ink-2 gap-4">
-        <p>Something went wrong loading your presets.</p>
+        <p>{t("presets_error")}</p>
         <button
           onClick={() => window.location.reload()}
           className="px-4 py-2 rounded bg-elevation-1 border border-elevation-0-stroke text-ink hover:bg-elevation-2 transition-colors"
         >
-          Retry
+          {t("presets_retry")}
         </button>
       </div>
     );

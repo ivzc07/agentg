@@ -2311,18 +2311,18 @@ def build_app(
         presets = await store.presets(gym.id)
         members = await store.preset_members(gym.id)
         default_id = await store.default_preset_id(gym.id)
-
-        async def serialise(preset: RoutinePreset) -> dict:
-            master = await store.preset_master(preset.id)
-            return {
-                "id": preset.id,
-                "name": preset.name,
-                "is_default": preset.id == default_id,
-                "has_master": master is not None,
-            }
+        master_ids = await store.preset_ids_with_masters(gym.id)
 
         body = {
-            "presets": [await serialise(p) for p in presets],
+            "presets": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "is_default": p.id == default_id,
+                    "has_master": p.id in master_ids,
+                }
+                for p in presets
+            ],
             "members": [{"id": m.id, "name": m.name} for m in members],
             "default_preset_id": default_id,
         }
