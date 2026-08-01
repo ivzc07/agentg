@@ -168,6 +168,14 @@ def build_agent(settings: Settings) -> Agent:
         # tool-calling completion; we never run that proxy, so skip the import
         # rather than ship its dependencies. The SDK forwards extra_args to
         # litellm.acompletion. See tests/test_model_backend.py.
-        model_settings=ModelSettings(extra_args={"_skip_mcp_handler": True}),
+        model_settings=ModelSettings(
+            extra_args={
+                "_skip_mcp_handler": True,
+                "timeout": 30,  # interactive — bound the per-identity lock
+                "num_retries": 1,  # at least one retry for transient 5xx
+            },
+            max_tokens=2000,  # cap runaway generations
+            temperature=0.7,  # creative but grounded coaching
+        ),
         tools=build_tools(),
     )

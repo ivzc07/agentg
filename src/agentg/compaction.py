@@ -110,6 +110,10 @@ def build_summarizer(settings: Settings) -> Summarizer:
                 {"role": "system", "content": _SUMMARIZER_PROMPT % json.dumps(existing_notes)},
                 {"role": "user", "content": transcript},
             ],
+            timeout=60,  # background — longer window, not on the critical path
+            num_retries=1,
+            max_tokens=500,  # summaries are compact by design
+            temperature=0.3,  # factual, consistent
         )
         text = response.choices[0].message.content or ""
         try:
