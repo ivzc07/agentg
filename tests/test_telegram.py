@@ -1,5 +1,6 @@
 """Telegram adapter glue: handler wiring, /start payloads, chunking, fallback."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -241,8 +242,6 @@ async def test_typing_indicator_sent_before_agent_work():
 async def test_typing_indicator_refreshes_during_turn():
     """Telegram expires the typing action after ~5 s; the handler must
     refresh it while the Agent is still working."""
-    import asyncio
-
     from agentg.channels import telegram as tmod
 
     async def slow_agent(msg):
@@ -261,9 +260,10 @@ async def test_typing_indicator_refreshes_during_turn():
     finally:
         tmod._TYPING_REFRESH_INTERVAL = saved
 
-    # At least one send (the initial burst) + one refresh.
-    assert bot_send_chat_action.await_count >= 2, (
-        f"expected >= 2 typing refreshes, got {bot_send_chat_action.await_count}"
+    # The agent sleeps 0.15 s with a 0.04 s refresh interval, so the loop
+    # should fire at least three refreshes on top of the initial burst.
+    assert bot_send_chat_action.await_count >= 4, (
+        f"expected >= 4 typing sends, got {bot_send_chat_action.await_count}"
     )
 
     # Every call must use the action='typing' parameter.
@@ -273,10 +273,6 @@ async def test_typing_indicator_refreshes_during_turn():
 
 async def test_typing_indicator_stops_after_reply():
     """Once the reply is sent the typing indicator must not fire again."""
-    import asyncio
-
-    send_count = 0
-
     bot_send_chat_action = AsyncMock()
 
     async def reply_fn(msg):
@@ -297,8 +293,6 @@ async def test_typing_indicator_stops_after_reply():
 
 async def test_typing_indicator_stops_on_agent_failure():
     """A failure inside the Agent still clears the typing indicator."""
-    import asyncio
-
     bot_send_chat_action = AsyncMock()
 
     async def reply_fn(msg):
