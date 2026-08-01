@@ -308,10 +308,17 @@ async def test_spa_shell_trailing_slash_serves_authenticated(spa_env):
 
 
 async def test_spa_index_html_not_served_unauthenticated(spa_env):
-    """``/dashboard/index.html`` must not be fetchable without a cookie — the
-    static handler must be scoped to /dashboard/assets/, not the whole dist."""
+    """``/dashboard/index.html`` must not hand out the built bundle without a
+    cookie: the static handler is scoped to /dashboard/assets/, so the path
+    falls through to the deep-link catch-all (issue #149) and an anonymous
+    caller gets the same bounce page every other dashboard URL gives them."""
     response = await spa_env.client.get("/dashboard/index.html")
-    assert response.status == 404
+
+    assert response.status == 200
+    text = await response.text()
+    # Not the bundle off disk, and no bootstrap payload for an anonymous caller.
+    assert 'id="root"' not in text
+    assert "window.__I18N__" not in text
 
 
 async def test_spa_shell_injects_i18n_strings(spa_env):

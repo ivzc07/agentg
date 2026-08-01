@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 // Mock fetchSession and SessionAuthError before Dashboard is imported.
@@ -15,6 +14,11 @@ const { fetchSession, SessionAuthError } = vi.hoisted(() => ({
 }));
 
 vi.mock("../api/session", () => ({ fetchSession, SessionAuthError }));
+
+// The roster screen behind the router does its own fetch; this suite is about
+// Dashboard's session states, so keep the roster empty and predictable.
+const { fetchRoster } = vi.hoisted(() => ({ fetchRoster: vi.fn() }));
+vi.mock("../api/roster", () => ({ fetchRoster }));
 
 // Import Dashboard (the inner component) directly so we control QueryClient.
 import { Dashboard } from "../App";
@@ -66,14 +70,26 @@ describe("Dashboard", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
-  it("renders the Shell on a successful fetch", async () => {
+  it("renders the roster screen on a successful fetch", async () => {
     fetchSession.mockResolvedValue({ name: "Ana", gym: "Iron Temple" });
+    fetchRoster.mockResolvedValue({
+      active: [],
+      lapsed: [],
+      counts: { active: 0, lapsed: 0 },
+      sortedBy: "gap_days",
+    });
     window.__I18N__ = { member_eyebrow: "member", settings: "Settings" };
+    // The router mounts with basename="/dashboard", the URL aiohttp serves it at.
+    window.history.pushState({}, "", "/dashboard/");
 
     renderDashboard();
 
+    // The signed-in gym reaches the roster chrome, and none of the failure
+    // branches above are showing.
     expect(await screen.findByText("Iron Temple")).toBeInTheDocument();
-    // "Ana" appears in both the header and main content.
-    expect(screen.getAllByText("Ana").length).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByText("Not signed in.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Something went wrong loading your session."),
+    ).not.toBeInTheDocument();
   });
 });
