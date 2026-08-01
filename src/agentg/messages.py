@@ -22,7 +22,7 @@ class Reply(str):
     # Suppress the channel's link preview (magic links: a preview fetch could
     # spend a one-time token before the human taps it).
     disable_preview: bool
-    # When set, the channel streams chunks as they arrive (ADR on #176).
+    # When set, the channel streams chunks as they arrive (issue #176).
     stream: AsyncIterator[str] | None
 
     def __new__(

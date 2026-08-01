@@ -151,7 +151,8 @@ async def test_stream_with_error_after_partial_send():
 
 
 async def test_stream_with_error_before_first_send():
-    """An error before the first sentence is sent yields nothing."""
+    """An error before the first sentence propagates so the channel can
+    send an error reply instead of leaving the Member in silence."""
 
     class FakeStreamResult:
         async def stream_events(self):
@@ -165,10 +166,8 @@ async def test_stream_with_error_before_first_send():
             raise RuntimeError("model crashed")
 
     result = FakeStreamResult()
-    chunks = [c async for c in _stream_text(result)]
-    # "Hi" is too short to be a sentence boundary, so nothing was sent
-    # before the error.
-    assert len(chunks) == 0
+    with pytest.raises(RuntimeError, match="model crashed"):
+        [c async for c in _stream_text(result)]
 
 
 # ── Reply carries stream when streaming is enabled ────────────────────────

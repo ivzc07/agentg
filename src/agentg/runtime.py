@@ -244,7 +244,11 @@ async def _stream_text(result: "RunResultStreaming") -> AsyncIterator[str]:
             yield accumulated
     except Exception:
         logger.exception("streaming generation failed")
-        # If we already sent a partial reply, yield the remainder so the
-        # Member sees a coherent outcome rather than a truncated message.
-        if last_sent and accumulated != last_sent:
+        # When nothing has been delivered yet, re-raise so the channel can
+        # send an error reply instead of leaving the Member in silence.
+        if not last_sent:
+            raise
+        # Already sent a partial reply — yield the remainder so the Member
+        # sees a coherent outcome rather than a truncated message.
+        if accumulated != last_sent:
             yield accumulated

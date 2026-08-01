@@ -63,6 +63,23 @@ def split_reply(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
     return chunks
 
 
+def _cap_text(text: str, limit: int = MAX_MESSAGE_LENGTH) -> str:
+    """Truncate text to fit Telegram's UTF-16 character limit.
+
+    Used by the streaming path where a single growing message cannot be
+    split across multiple chunks like ``split_reply`` does.
+    """
+    units = 0
+    result: list[str] = []
+    for char in text:
+        weight = 2 if ord(char) > 0xFFFF else 1
+        if units + weight > limit:
+            break
+        result.append(char)
+        units += weight
+    return "".join(result)
+
+
 # Module-level so tests can shorten the refresh interval without waiting
 # for a full production cycle (Telegram expires the action after ~5 s).
 _TYPING_REFRESH_INTERVAL: float = 4.5
@@ -98,7 +115,7 @@ async def _deliver_streamed(
     sent_message: Message | None = None
     try:
         async for chunk in reply.stream:
-            stripped = chunk.strip()
+            stripped = _cap_text(chunk.strip().replace("**", ""))
             if sent_message is None:
                 # First chunk — cancel typing so it doesn't linger.
                 typing_task.cancel()
@@ -127,7 +144,7 @@ async def _deliver_streamed(
     except Exception:
         logger.exception("streaming delivery failed for sender %s", message.from_user.id)
         if sent_message is None:
-            await message.answer(ERROR_REPLY)
+            sent_message = await message.answer(ERROR_REPLY)
     finally:
         # Ensure typing is always cancelled.
         if not typing_task.done():
@@ -136,6 +153,11 @@ async def _deliver_streamed(
                 await typing_task
             except asyncio.CancelledError:
                 pass
+
+    # If nothing was delivered (empty stream, all-whitespace, or error before
+    # any chunk), send the fallback so the Member isn't left in silence.
+    if sent_message is None:
+        await message.answer(EMPTY_REPLY_FALLBACK)
 
     # Follow-up media lands beneath the final reply text.
     if reply.after_send is not None:
