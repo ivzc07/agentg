@@ -206,7 +206,9 @@ async def test_summary_lands_at_the_start_of_history(env):
     assert all("Summary of earlier conversation" not in str(i) for i in items[1:])
 
 
-async def test_handle_message_compacts_before_running_the_agent(env, monkeypatch):
+async def test_handle_message_defers_compaction_until_after_the_reply(env, monkeypatch):
+    """Compaction no longer blocks the reply: the Agent sees uncompacted
+    history, and compaction runs in after_send (issue #173)."""
     import agentg.runtime as runtime_module
     from types import SimpleNamespace
 
@@ -217,13 +219,23 @@ async def test_handle_message_compacts_before_running_the_agent(env, monkeypatch
         return SimpleNamespace(final_output="ok")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
-    await env.session.add_items(over_budget_items(KEEP_RECENT + 20))
+    total = KEEP_RECENT + 20
+    await env.session.add_items(over_budget_items(total))
 
-    await env.runtime.handle_message(
+    reply = await env.runtime.handle_message(
         IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
     )
 
-    assert history_sizes == [KEEP_RECENT + 1]  # compacted before the run
+    # The Agent saw uncompacted history — compaction didn't block the reply.
+    assert history_sizes == [total]
+    assert reply.after_send is not None
+
+    # After the reply is delivered, after_send compacts.
+    await reply.after_send()
+
+    items = await env.session.get_items()
+    assert len(items) == KEEP_RECENT + 1  # one summary + the recent tail
+    assert "benched 60" in str(items[0])
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +276,9 @@ async def test_failing_summarizer_does_not_lose_history(env):
 
 
 async def test_failing_summarizer_in_handle_message_does_not_block_reply(env, monkeypatch):
-    """A compaction failure is caught and the Member's message is still answered."""
+    """A compaction failure in after_send does not propagate to the caller
+    and the Member's message is still answered (issue #173 — compaction is
+    deferred behind the reply)."""
     import agentg.runtime as runtime_module
     from types import SimpleNamespace
 
@@ -281,9 +295,13 @@ async def test_failing_summarizer_in_handle_message_does_not_block_reply(env, mo
         IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
     )
 
-    # The reply still arrived — compaction failure didn't propagate
+    # The reply still arrived — compaction failure didn't block it.
     assert str(reply) == "ok"
-    # The summarizer was called (it tried)
+    # Compaction hasn't been called yet — it's deferred to after_send.
+    assert len(env.runtime.summarizer.calls) == 0
+
+    # after_send calls the summarizer; the failure is caught and logged.
+    await reply.after_send()
     assert len(env.runtime.summarizer.calls) == 1
 
 

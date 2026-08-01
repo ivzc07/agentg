@@ -83,5 +83,8 @@ async def test_no_send_when_nothing_was_queued(env, monkeypatch):
     reply = await env.runtime.handle_message(
         IncomingMessage(channel="telegram", channel_user_id="42", text="hi")
     )
-    assert getattr(reply, "after_send", None) is None  # nothing deferred
+    # after_send is always set (compaction is deferred behind every reply — issue #173),
+    # but calling it is safe even when no demos are queued.
+    assert reply.after_send is not None
+    await reply.after_send()
     assert env.sender.sent == []

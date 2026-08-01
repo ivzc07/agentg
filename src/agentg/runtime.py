@@ -92,12 +92,6 @@ class AgentRuntime:
             # Any reply resets the check-in rhythm and revives a lapsed Member.
             await self.stores.checkins.reset_rhythm(linked.member.id)
             session = self.session_for_member(linked.member.id)
-            try:
-                await maybe_compact(
-                    session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
-                )
-            except Exception:
-                logger.exception("compaction failed for member %d", linked.member.id)
             context = self.member_context(linked)
             result = await Runner.run(
                 self.agent,
@@ -106,22 +100,38 @@ class AgentRuntime:
                 context=context,
             )
             text = str(result.final_output)
-            sender = self.demo_sender
-            if sender is None or not context.demo_requests:
-                return Reply(text)
-            # Defer the demo sends so the channel delivers the reply text first,
-            # then the animations land beneath it.
-            requests = list(context.demo_requests)
+            # Build the after_send callback: compaction first (inside the
+            # per-identity lock so the next turn blocks until it finishes),
+            # then demo animations land beneath both the reply and the
+            # compaction finish.  Compaction only affects the *next* turn's
+            # prompt, so deferring it behind the reply removes a model call
+            # from the critical path (issue #173).
+            member_id = linked.member.id
             gym_id = context.gym_id
             channel, user_id = msg.channel, msg.channel_user_id
+            sender = self.demo_sender
+            summarizer = self.summarizer
+            notes_store = self.stores.notes
+            lock = self._locks[(msg.channel, msg.channel_user_id)]
+            demo_requests = list(context.demo_requests)
 
             async def after_send() -> None:
-                for exercise in requests:
+                async with lock:
                     try:
-                        await serve_demo(
-                            self.stores.demos, sender, exercise, gym_id, channel, user_id
+                        await maybe_compact(
+                            session, summarizer, notes_store, member_id, gym_id
                         )
                     except Exception:
-                        logger.exception("failed to serve demo %r to %s", exercise, user_id)
+                        logger.exception("compaction failed for member %d", member_id)
+                if sender is not None:
+                    for exercise in demo_requests:
+                        try:
+                            await serve_demo(
+                                self.stores.demos, sender, exercise, gym_id, channel, user_id
+                            )
+                        except Exception:
+                            logger.exception(
+                                "failed to serve demo %r to %s", exercise, user_id
+                            )
 
             return Reply(text, after_send=after_send)
