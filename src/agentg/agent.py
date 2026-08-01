@@ -171,7 +171,7 @@ def build_agent(settings: Settings) -> Agent:
         model_settings=ModelSettings(
             extra_args={
                 "_skip_mcp_handler": True,
-                "timeout": 30,  # interactive — bound the per-identity lock
+                "timeout": 30,  # interactive — per-attempt; ~2×30s + backoff worst case under lock
                 "num_retries": 1,  # at least one retry for transient 5xx
             },
             max_tokens=2000,  # cap runaway generations

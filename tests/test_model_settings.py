@@ -26,23 +26,64 @@ def _settings() -> Settings:
     )
 
 
+def _capture(content: str = "ok"):
+    """Return (capture_fn, last_kwargs) for intercepting litellm.acompletion.
+
+    The returned async function replaces ``litellm.acompletion``, stashes
+    every kwarg it was called with into *last_kwargs*, and returns a
+    minimal valid ``ModelResponse`` whose message content is *content*.
+    """
+    last_kwargs: dict[str, object] = {}
+
+    async def capture_acompletion(**kwargs: object) -> litellm.types.utils.ModelResponse:
+        last_kwargs.update(kwargs)
+        from litellm.types.utils import Choices, Message, ModelResponse
+
+        return ModelResponse(choices=[Choices(message=Message(content=content))])
+
+    return capture_acompletion, last_kwargs
+
+
 # --- Agent turn (LitellmModel via ModelSettings) ---
 
 
-def test_agent_model_settings_carry_timeout_and_retry():
-    """The Agent's ModelSettings must include a timeout and num_retries so
-    a hung model call cannot block a Member's chat for 10 minutes."""
-    agent = build_agent(_settings())
-    extra = dict(agent.model_settings.extra_args or {})
+async def test_agent_model_settings_reach_litellm_client():
+    """The Agent's timeout and num_retries must actually reach
+    litellm.acompletion through the SDK pipeline, not just sit on the
+    ModelSettings object.  Drives ``agent.model.get_response`` with
+    ``litellm.acompletion`` patched — same pattern as the compaction
+    and linking tests — so a future SDK change to extra_args handling
+    turns this red instead of staying silently green."""
+    from agents.models.interface import ModelTracing
 
-    assert "timeout" in extra, "Agent model call has no timeout set"
-    assert extra["timeout"] > 0, f"Agent timeout must be positive, got {extra['timeout']}"
-    assert "num_retries" in extra, "Agent model call has no num_retries set"
-    assert extra["num_retries"] >= 1, (
-        f"Agent must retry at least once on transient failure, got {extra['num_retries']}"
+    agent = build_agent(_settings())
+    capture, last_kwargs = _capture()
+
+    original = litellm.acompletion
+    litellm.acompletion = capture
+    try:
+        await agent.model.get_response(
+            system_instructions="You are a coach.",
+            input="Hello",
+            model_settings=agent.model_settings,
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+    finally:
+        litellm.acompletion = original
+
+    assert "timeout" in last_kwargs, "Agent model call has no timeout set"
+    assert last_kwargs["timeout"] > 0, (
+        f"Agent timeout must be positive, got {last_kwargs['timeout']}"
+    )
+    assert "num_retries" in last_kwargs, "Agent model call has no num_retries set"
+    assert last_kwargs["num_retries"] >= 1, (
+        f"Agent must retry at least once, got {last_kwargs['num_retries']}"
     )
     # _skip_mcp_handler must still be present (regression from the proxy fix)
-    assert extra.get("_skip_mcp_handler") is True, (
+    assert last_kwargs.get("_skip_mcp_handler") is True, (
         "Agent extra_args must still skip the proxy/MCP handler"
     )
 
@@ -65,20 +106,11 @@ def test_agent_model_settings_have_max_tokens_and_temperature():
 
 async def test_compaction_summarizer_passes_timeout_and_retry():
     """The compaction summarizer must pass timeout and num_retries to litellm."""
-    settings = _settings()
-    summarizer = build_summarizer(settings)
-    last_kwargs = {}
-
-    async def capture_acompletion(**kwargs):
-        last_kwargs.update(kwargs)
-        # Return a minimal valid response so the summarizer doesn't crash
-        from litellm.types.utils import ModelResponse, Choices, Message
-        return ModelResponse(
-            choices=[Choices(message=Message(content='{"summary": "ok", "notes": []}'))]
-        )
+    summarizer = build_summarizer(_settings())
+    capture, last_kwargs = _capture(content='{"summary": "ok", "notes": []}')
 
     original = litellm.acompletion
-    litellm.acompletion = capture_acompletion
+    litellm.acompletion = capture
     try:
         await summarizer([{"role": "user", "content": "bench 60"}], [])
     finally:
@@ -96,19 +128,11 @@ async def test_compaction_summarizer_passes_timeout_and_retry():
 
 async def test_compaction_summarizer_passes_max_tokens_and_temperature():
     """The compaction summarizer must cap output length and set temperature."""
-    settings = _settings()
-    summarizer = build_summarizer(settings)
-    last_kwargs = {}
-
-    async def capture_acompletion(**kwargs):
-        last_kwargs.update(kwargs)
-        from litellm.types.utils import ModelResponse, Choices, Message
-        return ModelResponse(
-            choices=[Choices(message=Message(content='{"summary": "ok", "notes": []}'))]
-        )
+    summarizer = build_summarizer(_settings())
+    capture, last_kwargs = _capture(content='{"summary": "ok", "notes": []}')
 
     original = litellm.acompletion
-    litellm.acompletion = capture_acompletion
+    litellm.acompletion = capture
     try:
         await summarizer([{"role": "user", "content": "bench 60"}], [])
     finally:
@@ -129,19 +153,11 @@ async def test_compaction_summarizer_passes_max_tokens_and_temperature():
 
 async def test_linking_phraser_passes_timeout_and_retry():
     """The linking phraser must pass timeout and num_retries to litellm."""
-    settings = _settings()
-    phraser = build_phraser(settings)
-    last_kwargs = {}
-
-    async def capture_acompletion(**kwargs):
-        last_kwargs.update(kwargs)
-        from litellm.types.utils import ModelResponse, Choices, Message
-        return ModelResponse(
-            choices=[Choices(message=Message(content="Hola, bienvenido!"))]
-        )
+    phraser = build_phraser(_settings())
+    capture, last_kwargs = _capture(content="Hola, bienvenido!")
 
     original = litellm.acompletion
-    litellm.acompletion = capture_acompletion
+    litellm.acompletion = capture
     try:
         await phraser("Welcome them", "hola")
     finally:
@@ -159,19 +175,11 @@ async def test_linking_phraser_passes_timeout_and_retry():
 
 async def test_linking_phraser_passes_max_tokens_and_temperature():
     """The linking phraser must cap output length and set temperature."""
-    settings = _settings()
-    phraser = build_phraser(settings)
-    last_kwargs = {}
-
-    async def capture_acompletion(**kwargs):
-        last_kwargs.update(kwargs)
-        from litellm.types.utils import ModelResponse, Choices, Message
-        return ModelResponse(
-            choices=[Choices(message=Message(content="Hola, bienvenido!"))]
-        )
+    phraser = build_phraser(_settings())
+    capture, last_kwargs = _capture(content="Hola, bienvenido!")
 
     original = litellm.acompletion
-    litellm.acompletion = capture_acompletion
+    litellm.acompletion = capture
     try:
         await phraser("Welcome them", "hola")
     finally:
