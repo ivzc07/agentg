@@ -37,6 +37,35 @@ def _css_text() -> str:
     return CSS_PATH.read_text(encoding="utf-8")
 
 
+def _media_blocks(css: str) -> dict[int, str]:
+    """Return {max_width_px: block_body} for all max-width media queries.
+
+    Uses depth-aware brace counting so multi-rule media blocks are captured
+    as a single body."""
+    css = _strip_comments(css)
+    blocks: dict[int, str] = {}
+    pattern = re.compile(r"@media\s*\(max-width:\s*(\d+)px\)\s*\{")
+    for m in pattern.finditer(css):
+        width = int(m.group(1))
+        body_start = m.end()
+        depth = 1
+        pos = body_start
+        while depth > 0 and pos < len(css):
+            if css[pos] == "{":
+                depth += 1
+            elif css[pos] == "}":
+                depth -= 1
+                if depth == 0:
+                    body = css[body_start:pos].strip()
+                    if width in blocks:
+                        blocks[width] = blocks[width] + " " + body
+                    else:
+                        blocks[width] = body
+                    break
+            pos += 1
+    return blocks
+
+
 # ── WCAG 2.1 relative luminance and contrast ratio ───────────────────
 
 def _srgb_to_linear(c: float) -> float:
@@ -370,41 +399,40 @@ def _collect_text_surface_pairs(css: str) -> list[TextSurfacePair]:
 
 # ── Explicit token pairs: the ones the design plan names ───────────────
 
-# The design tokens from docs/design/uxui-redesign-plan.md Phase 3 specify
-# these text-on-surface combos as AA-passing.  We hard-code the expected
-# pairs so the test is a regression check, not just a CSS parse.
+# Expected token pairs from docs/design/uxui-redesign-plan.md Phase 3.
+# The test resolves each CSS variable from the live stylesheet before
+# computing contrast — if a token value drifts, the test goes red.
 #
-# Format: (text_token, surface_token, expected_min_ratio, description)
+# Format: (fg_token_or_hex, bg_token_or_hex, expected_min_ratio, description)
+#   If the value starts with "--" it is resolved from the CSS :root block.
 EXPECTED_TOKEN_PAIRS: list[tuple[str, str, float, str]] = [
     # Ink on background
-    ("#ffffff", "#000000", 4.5, "--ink on --bg (page ground, 21:1)"),
-    ("#9a9a9a", "#000000", 4.5, "--ink-2 on --bg (secondary text)"),
-    ("#85858a", "#000000", 4.5, "--ink-3 on --bg (faint meta)"),
+    ("--ink", "--bg", 4.5, "--ink on --bg (page ground)"),
+    ("--ink-2", "--bg", 4.5, "--ink-2 on --bg (secondary text)"),
+    ("--ink-3", "--bg", 4.5, "--ink-3 on --bg (faint meta)"),
     # Ink on surfaces
-    ("#ffffff", "#131313", 4.5, "--ink on --surface (cards)"),
-    ("#9a9a9a", "#131313", 4.5, "--ink-2 on --surface"),
-    ("#85858a", "#131313", 4.5, "--ink-3 on --surface"),
-    ("#ffffff", "#1b1c1e", 4.5, "--ink on --surface-2 (inputs, tiles)"),
-    ("#9a9a9a", "#1b1c1e", 4.5, "--ink-2 on --surface-2"),
-    ("#85858a", "#1b1c1e", 4.5, "--ink-3 on --surface-2"),
+    ("--ink", "--surface", 4.5, "--ink on --surface (cards)"),
+    ("--ink-2", "--surface", 4.5, "--ink-2 on --surface"),
+    ("--ink-3", "--surface", 4.5, "--ink-3 on --surface"),
+    ("--ink", "--surface-2", 4.5, "--ink on --surface-2 (inputs, tiles)"),
+    ("--ink-2", "--surface-2", 4.5, "--ink-2 on --surface-2"),
+    ("--ink-3", "--surface-2", 4.5, "--ink-3 on --surface-2"),
     # Accent on background
-    ("#f472a7", "#000000", 4.5, "--magenta on --bg (hero accent)"),
-    ("#4dd4e0", "#000000", 4.5, "--cyan on --bg (secondary)"),
+    ("--magenta", "--bg", 4.5, "--magenta on --bg (hero accent)"),
+    ("--cyan", "--bg", 4.5, "--cyan on --bg (secondary)"),
     # Severity on background
-    ("#f58060", "#000000", 4.5, "--coral on --bg (red severity)"),
-    ("#f2b84b", "#000000", 4.5, "--amber on --bg (amber severity)"),
-    ("#8b7cf6", "#000000", 4.5, "--purple on --bg (extra)"),
+    ("--coral", "--bg", 4.5, "--coral on --bg (red severity)"),
+    ("--amber", "--bg", 4.5, "--amber on --bg (amber severity)"),
+    ("--purple", "--bg", 4.5, "--purple on --bg (extra)"),
     # Severity on their tints
-    ("#f58060", "#2b1712", 4.5, "--coral on --coral-tint"),
-    ("#f2b84b", "#2a2110", 4.5, "--amber on --amber-tint"),
-    ("#8b7cf6", "#201e33", 4.5, "--purple on --purple-tint"),
-    # Magenta on its tint
-    ("#f472a7", "#1f0d17", 4.5, "--magenta on --magenta-tint"),
-    ("#4dd4e0", "#0a1c20", 4.5, "--cyan on --cyan-tint"),
-    # White-on-black button (inverse)
-    ("#000000", "#ffffff", 4.5, "black text on white (btn-primary)"),
-    # Safety banner: black on white
-    ("#000000", "#ffffff", 4.5, "safety-banner text on white bg"),
+    ("--coral", "--coral-tint", 4.5, "--coral on --coral-tint"),
+    ("--amber", "--amber-tint", 4.5, "--amber on --amber-tint"),
+    ("--purple", "--purple-tint", 4.5, "--purple on --purple-tint"),
+    # Accent on their tints
+    ("--magenta", "--magenta-tint", 4.5, "--magenta on --magenta-tint"),
+    ("--cyan", "--cyan-tint", 4.5, "--cyan on --cyan-tint"),
+    # Hardcoded pairs (no CSS variable for these; hex-checked directly)
+    ("#000000", "#ffffff", 4.5, "black text on white (btn-primary, safety banner)"),
     ("#555555", "#ffffff", 4.5, "safety-banner muted on white"),
 ]
 
@@ -416,17 +444,27 @@ class TestAAContrast:
     """Verify every text/surface combination hits WCAG AA (>= 4.5:1)."""
 
     def test_all_expected_token_pairs_pass_aa(self):
-        """Every token pair from the design plan must compute >= 4.5:1."""
+        """Every token pair from the design plan must compute >= 4.5:1.
+
+        Resolves CSS variables from the live stylesheet so a drifted token
+        value (e.g. a weakened --ink-3) turns this test red."""
         css = _css_text()
         vars_ = _resolve_css_variables(css)
 
         failures: list[str] = []
-        for fg_hex, bg_hex, min_ratio, desc in EXPECTED_TOKEN_PAIRS:
-            ratio = contrast_ratio(fg_hex, bg_hex)
+        for fg_spec, bg_spec, min_ratio, desc in EXPECTED_TOKEN_PAIRS:
+            fg_src = f"var({fg_spec})" if fg_spec.startswith("--") else fg_spec
+            bg_src = f"var({bg_spec})" if bg_spec.startswith("--") else bg_spec
+            fg = _resolve_color(fg_src, vars_)
+            bg = _resolve_color(bg_src, vars_)
+            if fg is None or bg is None:
+                failures.append(f"{desc}: cannot resolve fg={fg_spec} bg={bg_spec}")
+                continue
+            ratio = contrast_ratio(fg, bg)
             if ratio < min_ratio:
                 failures.append(
                     f"{desc}: ratio={ratio:.2f} (need >= {min_ratio}) "
-                    f"fg={fg_hex} bg={bg_hex}"
+                    f"fg={fg} bg={bg}"
                 )
         if failures:
             pytest.fail("\n".join(failures))
@@ -572,119 +610,110 @@ class Test375pxBar:
     """Assert no horizontal overflow and that primary actions stay reachable
     at 375px on every dashboard screen."""
 
-    def test_css_has_375px_responsive_rules(self):
-        """The stylesheet must contain media queries targeting narrow viewports
-        (<= 500px) for every screen's layout."""
+    # Per-screen triples: (max_width_px, selector, declaration_fragment, description)
+    # Each triple must exist inside its named @media block.  Deleting any one
+    # responsive rule from the stylesheet must turn its screen's test red.
+    _PER_SCREEN_RULES: list[tuple[int, str, str, str]] = [
+        # Split: stacks to single column below 899px
+        (899, ".split", "grid-template-columns: 1fr", "Split stacking"),
+        # Roster cards: single column at 500px
+        (500, ".grid", "grid-template-columns: 1fr", "Cards single-column"),
+        # Roster rows: tile shrinks at 500px
+        (500, ".tile", "width: 36px", "Row tile shrink"),
+        (500, ".row > a", "grid-template-columns: 36px minmax(0, 1fr)", "Row grid shrink"),
+        # Roster cards at 500px: daygrid squares shrink
+        (500, ".daygrid", "grid-template-columns: repeat(7, 16px)", "Daygrid shrink"),
+        # Member page: columns stack at 420px
+        (420, ".safety-banner button", "width: 100%", "Safety banner btn full-width"),
+        (420, "header.mhead h1", "font-size: 26px", "Member header shrink"),
+        # Editor: padding reduced at 399px
+        (399, ".editor-wrap", "padding: 0 10px 48px", "Editor padding"),
+        (399, ".day-edit select", "width: 100%", "Editor select full-width"),
+        # Presets: actions stack at 600px
+        (600, ".actions", "flex-direction: column", "Presets actions stack"),
+        (600, ".actions button", "width: 100%", "Presets buttons full-width"),
+        # Settings: cards shrink at 420px
+        (420, ".setcard", "padding: 14px", "Settings card padding"),
+        (420, ".qr", "width: 100%", "QR constrained"),
+        # Search: full-width below 700px
+        (700, "#search", "flex: 1 1 100%", "Search full-width"),
+    ]
+
+    def test_per_screen_responsive_rules(self):
+        """Each screen's responsive rule must be present in its breakpoint.
+
+        Uses (max-width, selector, declaration) triples.  Deleting any one
+        responsive rule from the stylesheet turns its screen's test red."""
         css = _css_text()
+        blocks = _media_blocks(css)
 
-        # Find all max-width media queries
-        media_queries = re.findall(r"@media\s*\(max-width:\s*(\d+)px\)", css)
-        widths = sorted(set(int(w) for w in media_queries))
-
-        # We expect coverage of the 375px bar:
-        # - 500px for roster rows/cards
-        # - 420px for member page, settings
-        # - 399px for editor
-        # - 899px for split
-        # - 700px for search
-        # - 600px for presets
-        assert widths, "No max-width media queries found — 375px is unaddressed"
-
-        # At least one query must cover <= 420px (the tightest phone)
-        narrowest = min(widths)
-        assert narrowest <= 500, (
-            f"Narrowest media query is {narrowest}px — "
-            f"375px phones receive no layout adjustments"
-        )
+        failures: list[str] = []
+        for max_width, selector, decl_fragment, desc in self._PER_SCREEN_RULES:
+            if max_width not in blocks:
+                failures.append(
+                    f"{desc}: no @media (max-width: {max_width}px) block found"
+                )
+                continue
+            block = blocks[max_width]
+            if selector not in block:
+                failures.append(
+                    f"{desc}: selector '{selector}' not found in "
+                    f"@media (max-width: {max_width}px)"
+                )
+                continue
+            if decl_fragment not in block:
+                failures.append(
+                    f"{desc}: declaration '{decl_fragment}' not found in "
+                    f"@media (max-width: {max_width}px)"
+                )
+                continue
+        if failures:
+            pytest.fail("\n".join(failures))
 
     def test_no_horizontal_overflow_mechanisms(self):
         """Verify the CSS constrains width at narrow viewports:
-        - No fixed widths that exceed 375px
         - Text overflows use ellipsis, not clipping
         - Grid layouts collapse to single column
+        - No fixed widths that exceed the viewport
         """
         css = _css_text()
 
-        # Check for text-overflow: ellipsis on name/header elements
+        # text-overflow: ellipsis must be present for long names
         assert "text-overflow: ellipsis" in css, (
             "No text-overflow: ellipsis found — long names would overflow"
         )
 
-        # Check for overflow: hidden (used with ellipsis)
+        # overflow: hidden required as companion to ellipsis
         assert "overflow: hidden" in css, (
             "No overflow: hidden found — text containers won't clip"
         )
 
-        # Cards must collapse to single column at narrow widths
+        # At least one single-column grid fallback must exist
         assert "grid-template-columns: 1fr" in css, (
-            "No single-column grid fallback — cards won't stack at 375px"
+            "No single-column grid fallback — cards/rows won't stack at 375px"
         )
 
-        # Split must stack at narrow widths
-        assert "grid-template-columns: 1fr" in css, (
-            "Split view has no stacking fallback"
-        )
-
-        # Search input must go full-width at narrow widths
+        # Search input goes full-width at narrow widths
         assert "flex: 1 1 100%" in css, (
             "Search input doesn't go full-width at narrow widths"
         )
 
-    def test_primary_actions_are_full_width_at_375px(self):
-        """Primary buttons and actions must be reachable — full-width at
-        narrow viewports."""
-        css = _css_text()
-
-        # Buttons in narrow media queries should be full-width
-        assert "width: 100%" in css, (
-            "No element uses width: 100% — buttons may be clipped at 375px"
-        )
-
-        # Safety banner buttons go full width at 420px
-        assert ".safety-banner button" in css, (
-            "Safety banner button has no narrow-viewport rule"
-        )
-
-    def test_375px_media_query_presence_per_screen(self):
-        """Each screen family must have a narrow-viewport media query."""
-        css = _css_text()
-
-        # Extract all media query selectors
-        media_blocks = re.findall(
-            r"@media\s*\(max-width:\s*\d+px\)\s*\{([^}]*(?:\{[^}]*\}[^}]*)*)\}",
-            css, re.DOTALL,
-        )
-        all_media_css = " ".join(media_blocks)
-
-        # Roster (rows, cards, grid) — covered by @media (max-width: 500px)
-        # Member page — covered by @media (max-width: 420px)
-        # Editor — covered by @media (max-width: 399px)
-        # Presets — covered by @media (max-width: 600px)
-        # Settings — covered by @media (max-width: 420px)
-        # Split — covered by @media (max-width: 899px)
-
-        # Check for per-screen selectors in media queries
-        roster_covered = ".row" in all_media_css or ".mcard" in all_media_css or ".grid" in all_media_css
-        assert roster_covered, "Roster rows/cards have no narrow-viewport rules"
-
-        member_covered = ".mhead" in all_media_css or ".safety-banner" in all_media_css
-        assert member_covered, "Member page has no narrow-viewport rules"
-
-        editor_covered = ".day-edit" in all_media_css or ".editor-wrap" in all_media_css
-        assert editor_covered, "Editor has no narrow-viewport rules"
-
-        # The presets have their own @media block
-        presets_covered = ".pcard" in all_media_css or ".actions" in all_media_css
-        assert presets_covered, "Presets have no narrow-viewport rules"
-
-        settings_covered = ".setcard" in all_media_css or ".qr" in all_media_css
-        assert settings_covered, "Settings have no narrow-viewport rules"
-
     def test_sanity_check_a_regression_would_fail(self):
-        """Confirm the test catches a removed media query."""
-        # The CSS must have at least one max-width media query
+        """Confirm per-screen triples catch a removed responsive rule.
+
+        If we delete the entire 899px split-stacking block the per-screen
+        triples test must fail because (899, ".split", ...) is missing."""
         css = _css_text()
-        assert "@media (max-width:" in css or "@media (max-width :" in css
+
+        # Remove the 899px max-width block entirely
+        mutilated = re.sub(
+            r"@media\s*\(max-width:\s*899px\)\s*\{[^}]*\{[^}]*\}[^}]*\{[^}]*\}[^}]*\}",
+            "", css, flags=re.DOTALL,
+        )
+        blocks = _media_blocks(mutilated)
+        assert 899 not in blocks, (
+            "Sanity check failed: 899px block should be gone after removal"
+        )
 
 
 # ── 3. REDUCED MOTION ───────────────────────────────────────────────────
@@ -772,27 +801,48 @@ class TestReducedMotion:
         )
 
     def test_every_transition_has_a_reduced_motion_counterpart(self):
-        """For every ``transition`` property outside the reduced-motion block,
-        confirm the reduced-motion block zeros it via the universal selector.
-
-        This is a structural check: the reduced-motion block uses ``*`` and
-        ``!important``, so every transition in the sheet is necessarily
-        covered.  We verify that combination exists.
-        """
+        """For every ``transition`` or ``animation`` outside the
+        reduced-motion block, confirm the block's universal ``!important``
+        rule covers it — so no animation can escape the zeroing."""
         css = _css_text()
 
-        # Count transitions outside the reduced-motion block
+        # Extract the reduced-motion block
+        m = re.search(
+            r"@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{(.*?)\}",
+            css, re.DOTALL,
+        )
+        assert m is not None, "No reduced-motion block to verify coverage"
+        reduced_block = m.group(1)
+
+        # Strip the reduced-motion block to find transitions outside it
         non_reduced = re.sub(
             r"@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{.*?\}",
             "", css, flags=re.DOTALL,
         )
 
-        transitions = re.findall(r"transition\s*:", non_reduced)
-        # Every transition in the sheet must be covered by the universal
-        # selector with !important — this is confirmed by the structural
-        # checks above.  If there are no transitions, that's fine too.
-        # This is a documentation test, not a gate.
-        assert True  # Structural checks above cover this
+        # Find all transition/animation declarations outside the block
+        transitions = re.findall(r"(?:transition|animation)(?:\s*:|-[a-z]+\s*:)", non_reduced)
+
+        # The reduced-motion block must zero transition-duration and
+        # animation-duration with !important on a universal selector.
+        has_transition_zero = (
+            "transition-duration" in reduced_block and "0s" in reduced_block
+        )
+        has_animation_zero = (
+            "animation-duration" in reduced_block and "0s" in reduced_block
+        )
+        has_important = "!important" in reduced_block
+        has_universal = "*" in reduced_block
+
+        if transitions:
+            assert has_transition_zero and has_important and has_universal, (
+                f"Found {len(transitions)} transition/animation(s) outside "
+                "reduced-motion block but block is missing "
+                "transition-duration: 0s !important on a universal selector"
+            )
+            assert has_animation_zero, (
+                "Reduced-motion block missing animation-duration: 0s"
+            )
 
     def test_sanity_check_this_would_catch_a_removal(self):
         """If the reduced-motion block were removed, test_reduced_motion_block_exists
@@ -1124,6 +1174,16 @@ def _assert_shared_structure(full: str, fragment: str, label: str) -> None:
                 f"{label}: fragment missing core element '{elem}' "
                 f"that full page has. Full ids: {full_elems}"
             )
+
+    # Assert no unexplained structural differences — anything the full page
+    # has that the fragment lacks is a regression (barring the allowlist).
+    _FRAGMENT_ALLOWLIST: set[str] = set()
+    unexplained = missing - _FRAGMENT_ALLOWLIST
+    assert not unexplained, (
+        f"{label}: fragment missing structural elements that the full page "
+        f"has: {sorted(unexplained)}. "
+        f"Full: {sorted(full_elems)}. Fragment: {sorted(frag_elems)}."
+    )
 
 
 # ── 5. STRUCTURAL HTML SCREEN COVERAGE ─────────────────────────────────

@@ -47,7 +47,7 @@ Run: `uv run pytest tests/test_redesign_acceptance_sweep.py -v`
 
 ### Routine editor (`GET /members/{id}/routine`)
 
-- **AA contrast**: Day-edit blocks on `--elevation-1-bg` with `--ink` text pass. Error block: `--coral` on `--coral-tint` (5.39:1). Success notice: `--magenta` on `--magenta-tint` (4.52:1).
+- **AA contrast**: Day-edit blocks on `--elevation-1-bg` with `--ink` text pass. Error block: `--coral` on `--coral-tint` (6.60:1). Success notice: `--magenta` on `--magenta-tint` (6.92:1).
 - **375px**: Media query at 399px reduces padding, shrinks heading, full-width selects/buttons.
 - **Reduced motion**: Transitions on day-edit hover/focus-within zeroed.
 - **htmx swap parity**: ✅ Fragment `#editor-root` from POST matches the same div from GET. Structural elements (editor-root id, base_routine_id, weekday, workout_name, exercises) present in both. Stale-save and validation-refusal fragments also match.
@@ -105,9 +105,13 @@ The automated gates ensure the technical invariants hold; the Owner's eye is the
 
 To verify the sweep machinery catches real regressions:
 
-- **Break a contrast token**: Change `--ink-3` in `:root` from `#85858a` to `#7a7a80` → `test_ink3_against_all_surfaces` FAILS.
-- **Remove a 375px media query**: Delete the `@media (max-width: 500px)` block → `test_375px_media_query_presence_per_screen` FAILS.
+- **Break a contrast token**: Change `--ink-3` in `:root` from `#85858a` to `#7a7a80` → `test_ink3_against_all_surfaces` FAILS.  Changing `--ink-3` also fails `test_all_expected_token_pairs_pass_aa` because that test now resolves tokens from the live CSS.
+- **Remove a 375px responsive rule**: Delete the Split stacking rule inside `@media (max-width: 899px)` → `test_per_screen_responsive_rules` FAILS for the `(899, ".split", "grid-template-columns: 1fr")` triple.
 - **Remove reduced-motion**: Delete the `prefers-reduced-motion` block → `test_prefers_reduced_motion_block_exists` FAILS.
-- **Change htmx fragment structure**: Alter the `editor-root` div in `_routine_editor_page` without updating the fragment → `test_editor_fragment_matches_full_page_region` FAILS.
+- **Change htmx fragment structure**: Alter the `editor-root` div in `_routine_editor_page` without updating the fragment → `test_editor_fragment_matches_full_page_region` FAILS.  The `_assert_shared_structure` helper now also asserts that no unexplained structural elements are missing from the fragment.
 
 All confirmed during development — each gate was sanity-checked by temporarily breaking the corresponding token/style.
+
+## Known limitations
+
+- **Inherited color/background pairs**: The CSS parser collects text/surface pairs only from rules where `color` (or `caret-color`) and `background` (or `background-color`) are declared on the *same* selector, plus the explicit token matrices.  Pairs where color is inherited from a parent and background is set on a child are **not** auto-discovered.  The explicit token-pair and per-surface tests cover the important combinations, but a new rule that sets only `background` and relies on inherited `color` from `body` will not be checked automatically.
