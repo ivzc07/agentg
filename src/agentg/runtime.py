@@ -89,8 +89,6 @@ class AgentRuntime:
             # touches the check-in rhythm, compaction, or history.
             if self.dashboard is not None and is_dashboard_command(msg.text):
                 return await self.dashboard.handle(linked, is_group=msg.is_group)
-            # Any reply resets the check-in rhythm and revives a lapsed Member.
-            await self.stores.checkins.reset_rhythm(linked.member.id)
             session = self.session_for_member(linked.member.id)
             await maybe_compact(
                 session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
@@ -103,16 +101,16 @@ class AgentRuntime:
                 context=context,
             )
             text = str(result.final_output)
+            # The check-in rhythm reset is deferred past the reply so it never
+            # blocks the LLM call; it still revives lapsed Members (#169).
             sender = self.demo_sender
-            if sender is None or not context.demo_requests:
-                return Reply(text)
-            # Defer the demo sends so the channel delivers the reply text first,
-            # then the animations land beneath it.
-            requests = list(context.demo_requests)
+            member_id = linked.member.id
+            requests = list(context.demo_requests) if sender is not None else []
             gym_id = context.gym_id
             channel, user_id = msg.channel, msg.channel_user_id
 
             async def after_send() -> None:
+                await self.stores.checkins.reset_rhythm(member_id)
                 for exercise in requests:
                     try:
                         await serve_demo(

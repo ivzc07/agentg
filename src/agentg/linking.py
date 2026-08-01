@@ -244,7 +244,11 @@ class Linking:
 
         # A typed Invite or coach code links too; a near-miss code is told
         # so; any other unlinked text dead-ends.
-        resolved = await self._gym_for_code(msg.text)
+        # Short-circuit: a message that can't possibly be a code (wrong shape,
+        # wrong alphabet, no digit) skips both DB lookups entirely (#169).
+        resolved = None
+        if _looks_like_invite_code(msg.text):
+            resolved = await self._gym_for_code(msg.text)
         if resolved is not None:
             gym, as_coach = resolved
             return await self._start_link(identity, msg, linked, gym, as_coach)
@@ -341,8 +345,10 @@ class Linking:
         self, identity: _Identity, msg: IncomingMessage, pending: _AwaitingName
     ) -> str:
         # A pasted Invite or coach code mid-flow restarts linking, not a
-        # name change.
-        resolved = await self._gym_for_code(msg.text)
+        # name change. Short-circuit: skip DB lookups when it can't be a code (#169).
+        resolved = None
+        if _looks_like_invite_code(msg.text):
+            resolved = await self._gym_for_code(msg.text)
         if resolved is not None:
             typed_gym, as_coach = resolved
             del self._pending[identity]
