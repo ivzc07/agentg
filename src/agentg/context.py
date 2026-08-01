@@ -29,7 +29,7 @@ class MemberContext:
     # should be offered. Always True for Coaches (is_coach dominates); for
     # Members, True when they have no routine or an agent-generated one
     # they can ask to restructure (issue #174).
-    can_author_routine: bool = True
+    can_author_routine: bool = False
     # Channel notifier for pinging a Gym's Coaches on a safety flag.
     notifier: Notifier | None = None
     # Public origin the safety-flag deep links point at (DASHBOARD_BASE_URL);

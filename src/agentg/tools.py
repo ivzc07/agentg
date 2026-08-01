@@ -32,9 +32,10 @@ def _coach_only(ctx: RunContextWrapper[MemberContext], _agent: AgentBase) -> boo
 def _routine_authoring_enabled(
     ctx: RunContextWrapper[MemberContext], _agent: AgentBase
 ) -> bool:
-    """Routine-authoring tools are enabled when the Member is a Coach or has no
-    active Routine yet (issue #174). The ``can_author_routine`` flag is precomputed
-    when ``MemberContext`` is built so this check is a cheap field read."""
+    """Routine-authoring tools are enabled when the Member is a Coach, has no
+    Routine, or has an agent-generated Routine they can ask to restructure
+    (issue #174). The ``can_author_routine`` flag is precomputed when
+    ``MemberContext`` is built so this check is a cheap field read."""
     c = ctx.context
     return c.is_coach or c.can_author_routine
 
@@ -225,7 +226,7 @@ async def retire_note(ctx: RunContextWrapper[MemberContext], note_id: int) -> di
     return {"retired_note_id": note.id, "text": note.text}
 
 
-@function_tool(is_enabled=_routine_authoring_enabled)
+@function_tool
 async def get_rules_doc(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     """Read the gym's coaching rules doc. Follow it when generating a Routine.
 

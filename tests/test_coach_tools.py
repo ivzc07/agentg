@@ -18,7 +18,7 @@ from agentg.training import TrainingStore
 from agents import Agent, RunContextWrapper
 
 
-async def make_context(engine, *, is_coach):
+async def make_context(engine, *, is_coach, can_author_routine=True):
     linking = LinkingStore(engine)
     await linking.ensure_schema()
     training = TrainingStore(engine)
@@ -47,6 +47,7 @@ async def make_context(engine, *, is_coach):
         gym_name="Iron Temple",
         weight_unit="kg",
         is_coach=is_coach,
+        can_author_routine=can_author_routine,
     )
     return context, gym, member
 
@@ -163,14 +164,9 @@ async def test_coach_tools_are_disabled_for_non_coaches(engine):
 
 
 async def test_routine_authoring_tools_are_enabled_for_coaches(engine):
-    """A Coach always has routine-authoring tools, even with a coach-authored routine."""
-    context, _, _ = await make_context(engine, is_coach=True)
-    # Give the coach a coach-authored routine — the gate should still be open because is_coach wins.
-    from agentg.routines import ExerciseSpec, WorkoutSpec
-    spec = [WorkoutSpec(weekday=0, name="Push", exercises=[ExerciseSpec("bench press", sets=3, reps="5")])]
-    await context.stores.routines.save_routine(
-        context.member_id, context.gym_id, spec, coach_authored=True
-    )
+    """A Coach always has routine-authoring tools — even when can_author_routine
+    is False (is_coach dominates, the is_coach short-circuit in the predicate is coverage-tested)."""
+    context, _, _ = await make_context(engine, is_coach=True, can_author_routine=False)
     wrapper = RunContextWrapper(context=context)
     agent = Agent(name="test")
     assert _routine_authoring_enabled(wrapper, agent) is True
@@ -178,8 +174,9 @@ async def test_routine_authoring_tools_are_enabled_for_coaches(engine):
 
 async def test_routine_authoring_tools_enabled_when_member_has_no_routine(engine):
     """A Member with no routine gets routine-authoring tools."""
-    context, _, _ = await make_context(engine, is_coach=False)
-    # The default can_author_routine=True (set by make_context) means no routine exists.
+    context, _, _ = await make_context(engine, is_coach=False, can_author_routine=True)
+    # can_author_routine=True mirrors what runtime.member_context computes for a
+    # Member with no routine (routine is None → can_author_routine=True).
     wrapper = RunContextWrapper(context=context)
     agent = Agent(name="test")
     assert _routine_authoring_enabled(wrapper, agent) is True
@@ -187,17 +184,10 @@ async def test_routine_authoring_tools_enabled_when_member_has_no_routine(engine
 
 async def test_routine_authoring_tools_disabled_when_member_has_a_coach_authored_routine(engine):
     """A non-coach Member with a coach-authored routine does not get routine-authoring tools."""
-    context, _, _ = await make_context(engine, is_coach=False)
-    # Give the actor a coach-authored routine — this blocks routine-authoring tools.
-    from agentg.routines import ExerciseSpec, WorkoutSpec
-    spec = [WorkoutSpec(weekday=0, name="Push", exercises=[ExerciseSpec("bench press", sets=3, reps="5")])]
-    await context.stores.routines.save_routine(
-        context.member_id, context.gym_id, spec, coach_authored=True
-    )
-    # Rebuild with the flag off — this is how runtime.member_context works after save.
-    from dataclasses import replace
-    gated_context = replace(context, can_author_routine=False)
-    wrapper = RunContextWrapper(context=gated_context)
+    context, _, _ = await make_context(engine, is_coach=False, can_author_routine=False)
+    # can_author_routine=False is what runtime.member_context computes when the
+    # Member has a coach-authored routine (routine["coach_authored"] is True).
+    wrapper = RunContextWrapper(context=context)
     agent = Agent(name="test")
     assert _routine_authoring_enabled(wrapper, agent) is False
 
@@ -205,12 +195,9 @@ async def test_routine_authoring_tools_disabled_when_member_has_a_coach_authored
 async def test_routine_authoring_tools_remain_enabled_for_agent_generated_routine(engine):
     """A non-coach Member with an agent-generated routine still gets routine-authoring tools
     because the Agent can restructure it on request (issue #174)."""
-    context, _, _ = await make_context(engine, is_coach=False)
-    from agentg.routines import ExerciseSpec, WorkoutSpec
-    spec = [WorkoutSpec(weekday=0, name="Push", exercises=[ExerciseSpec("bench press", sets=3, reps="5")])]
-    await context.stores.routines.save_routine(context.member_id, context.gym_id, spec)
-    # An agent-generated routine still has can_author_routine=True because the Member
-    # can ask the Agent to restructure it.
+    context, _, _ = await make_context(engine, is_coach=False, can_author_routine=True)
+    # can_author_routine=True is what runtime.member_context computes when the
+    # routine is agent-generated (not coach_authored).
     wrapper = RunContextWrapper(context=context)
     agent = Agent(name="test")
     assert _routine_authoring_enabled(wrapper, agent) is True
@@ -228,4 +215,35 @@ async def test_routine_authoring_tool_is_enabled_is_wired_on_decorators():
     tools = {tool.name: tool for tool in build_tools()}
     assert tools["save_routine"].is_enabled is _routine_authoring_enabled
     assert tools["list_exercises"].is_enabled is _routine_authoring_enabled
-    assert tools["get_rules_doc"].is_enabled is _routine_authoring_enabled
+
+
+async def test_get_rules_doc_is_always_available():
+    """get_rules_doc is not gated — every Member needs the gym's safety rules
+    regardless of routine-authoring status (P1 fix from PR review)."""
+    tools = {tool.name: tool for tool in build_tools()}
+    # When is_enabled is not passed to the decorator, the SDK defaults to True
+    # (always available). This is correct: every Member needs the safety rules.
+    assert tools["get_rules_doc"].is_enabled is True
+
+
+async def test_get_all_tools_filters_coach_only_tools_from_non_coach(engine):
+    """The Agent's get_all_tools filters coach-only tool names from the schema
+    for a non-coach context (integration test for SDK is_enabled semantics)."""
+    coach_only_names = {"update_rules_doc", "write_routine"}
+    # Non-coach: coach-only names absent.
+    context, _, _ = await make_context(engine, is_coach=False)
+    agent = Agent(name="test", tools=build_tools())
+    non_coach_names = {
+        tool.name
+        for tool in await agent.get_all_tools(RunContextWrapper(context=context))
+    }
+    assert coach_only_names.isdisjoint(non_coach_names)
+    # Coach: coach-only names present.
+    coach_context, _, _ = await make_context(engine, is_coach=True)
+    coach_names = {
+        tool.name
+        for tool in await agent.get_all_tools(RunContextWrapper(context=coach_context))
+    }
+    assert coach_only_names <= coach_names
+    # get_rules_doc is always present (ungated, P1 fix).
+    assert "get_rules_doc" in non_coach_names
