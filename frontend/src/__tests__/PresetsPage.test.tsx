@@ -243,6 +243,32 @@ describe("PresetsPage", () => {
         "/api/presets/1/apply",
         expect.objectContaining({
           method: "POST",
+          body: JSON.stringify({ member_ids: [10], apply_all: false }),
+        }),
+      );
+    });
+  });
+
+  it("applies preset to all members", async () => {
+    const user = userEvent.setup();
+    mockFetch.mockResolvedValueOnce(makeResponse(ONE_PRESET)); // initial
+    mockFetch.mockResolvedValueOnce(makeResponse({ applied: 2 })); // apply
+    mockFetch.mockResolvedValueOnce(makeResponse(ONE_PRESET)); // refetch
+
+    render(<PresetsPage />, { wrapper });
+
+    await waitFor(() => {
+      expect(screen.getByText("Beginner")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("All members"));
+
+    await waitFor(() => {
+      expect(mockFetch).toHaveBeenCalledWith(
+        "/api/presets/1/apply",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ member_ids: [], apply_all: true }),
         }),
       );
     });

@@ -1552,6 +1552,24 @@ async def test_api_presets_list_returns_json_shape(spa_env):
     assert "name" in m
 
 
+async def test_api_presets_list_default_set(spa_env):
+    """A preset set as default reports is_default=True and default_preset_id."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    preset = await store.create_preset(spa_env.gym.id, "Beginner")
+    await store.set_default_preset(spa_env.gym.id, preset.id)
+
+    response = await spa_env.client.get(
+        "/api/presets", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    p = next(p for p in data["presets"] if p["id"] == preset.id)
+    assert p["is_default"] is True
+    assert data["default_preset_id"] == preset.id
+
+
 async def test_api_presets_list_has_master_true(spa_env):
     """A preset with a master Routine reports has_master=True."""
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
