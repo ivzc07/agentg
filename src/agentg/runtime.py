@@ -104,21 +104,36 @@ class AgentRuntime:
             )
             text = str(result.final_output)
             sender = self.demo_sender
-            if sender is None or not context.demo_requests:
+            has_demos = sender is not None and context.demo_requests
+            has_pings = bool(context.coach_pings)
+            if not has_demos and not has_pings:
                 return Reply(text)
-            # Defer the demo sends so the channel delivers the reply text first,
-            # then the animations land beneath it.
-            requests = list(context.demo_requests)
+            # Defer the demo sends and coach pings so the channel delivers the
+            # reply text first (issue #172).
+            demo_requests = list(context.demo_requests)
+            coach_pings = list(context.coach_pings)
             gym_id = context.gym_id
             channel, user_id = msg.channel, msg.channel_user_id
 
             async def after_send() -> None:
-                for exercise in requests:
+                async def _send_demo(exercise: str) -> None:
                     try:
                         await serve_demo(
                             self.stores.demos, sender, exercise, gym_id, channel, user_id
                         )
                     except Exception:
                         logger.exception("failed to serve demo %r to %s", exercise, user_id)
+
+                async def _run_ping(ping: object) -> None:
+                    try:
+                        await ping()
+                    except Exception:
+                        logger.exception("deferred coach ping failed")
+
+                tasks = [_send_demo(ex) for ex in demo_requests] + [
+                    _run_ping(p) for p in coach_pings
+                ]
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
             return Reply(text, after_send=after_send)

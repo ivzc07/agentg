@@ -6,6 +6,7 @@ delegate to (coaching.py) — neither imports the other's internals through it.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from agentg.checkin_sweep import Notifier
@@ -33,3 +34,5 @@ class MemberContext:
     # Exercises the Agent asked to demo this turn; the channel sends them
     # after the reply so the agent loop stays channel-agnostic (ADR 0001).
     demo_requests: list[str] = field(default_factory=list)
+    # Coach safety-flag pings deferred past the Member's reply (issue #172).
+    coach_pings: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
