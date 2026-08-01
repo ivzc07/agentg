@@ -102,6 +102,35 @@ describe("Dashboard", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("bypasses session states on login routes and renders LoginPage", async () => {
+    // isLoginRoute is true → Dashboard returns <LoginRoutes /> immediately,
+    // so the user always sees the login interstitial, never session
+    // loading / auth-error / retryable-error states.
+    // fetchSession still fires (React hooks always execute), but its
+    // result is irrelevant because LoginRoutes is returned first.
+    fetchSession.mockReturnValue(new Promise(() => {}));
+    window.history.pushState({}, "", "/dashboard/login/token-abc");
+
+    // LoginPage inside LoginRoutes will fetch the peek API.
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ valid: true }),
+    } as Response);
+
+    renderDashboard();
+
+    // The valid-token interstitial appears — never any session state.
+    expect(
+      await screen.findByText((content) =>
+        content.includes("Abriendo tu dashboard"),
+      ),
+    ).toBeInTheDocument();
+
+    // The session loading text must NOT appear even though
+    // fetchSession is still pending.
+    expect(screen.queryByText("Loading…")).not.toBeInTheDocument();
+  });
+
   it("redirects unknown deep links to the roster", async () => {
     fetchSession.mockResolvedValue({ name: "Ana", gym: "Iron Temple" });
     fetchRoster.mockResolvedValue({
