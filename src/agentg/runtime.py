@@ -66,14 +66,14 @@ class AgentRuntime:
     async def member_context(self, linked: LinkedIdentity) -> MemberContext:
         """Build the per-turn context with conversation-stable gating flags
         precomputed (issue #174)."""
-        needs_routine = True
+        can_author_routine = True
         if not linked.member.is_coach:
             routine = await self.stores.routines.active_routine(linked.member.id)
             # Routine-authoring tools are usable when the Member has no routine
             # at all (intake) OR has an agent-generated one (can replace it).
             # A coach-authored routine blocks them — the Agent never restructures
             # those (issue #174).
-            needs_routine = (
+            can_author_routine = (
                 routine is None or not routine.get("coach_authored", False)
             )
         return MemberContext(
@@ -86,7 +86,7 @@ class AgentRuntime:
             weight_unit=linked.gym.weight_unit,
             timezone=linked.gym.timezone,
             is_coach=linked.member.is_coach,
-            needs_routine=needs_routine,
+            can_author_routine=can_author_routine,
             dashboard_base_url=self.dashboard.base_url if self.dashboard else None,
         )
 

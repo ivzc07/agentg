@@ -14,8 +14,8 @@ from agentg.context import MemberContext
 from agentg.linking_store import LinkingStore
 from agentg.stores import Stores
 from agentg.tools import build_tools, _coach_only, _routine_authoring_enabled
-from agents import Agent, RunContextWrapper
 from agentg.training import TrainingStore
+from agents import Agent, RunContextWrapper
 
 
 async def make_context(engine, *, is_coach):
@@ -179,7 +179,7 @@ async def test_routine_authoring_tools_are_enabled_for_coaches(engine):
 async def test_routine_authoring_tools_enabled_when_member_has_no_routine(engine):
     """A Member with no routine gets routine-authoring tools."""
     context, _, _ = await make_context(engine, is_coach=False)
-    # The default needs_routine=True (set by make_context) means no routine exists.
+    # The default can_author_routine=True (set by make_context) means no routine exists.
     wrapper = RunContextWrapper(context=context)
     agent = Agent(name="test")
     assert _routine_authoring_enabled(wrapper, agent) is True
@@ -196,7 +196,7 @@ async def test_routine_authoring_tools_disabled_when_member_has_a_coach_authored
     )
     # Rebuild with the flag off — this is how runtime.member_context works after save.
     from dataclasses import replace
-    gated_context = replace(context, needs_routine=False)
+    gated_context = replace(context, can_author_routine=False)
     wrapper = RunContextWrapper(context=gated_context)
     agent = Agent(name="test")
     assert _routine_authoring_enabled(wrapper, agent) is False
@@ -209,7 +209,7 @@ async def test_routine_authoring_tools_remain_enabled_for_agent_generated_routin
     from agentg.routines import ExerciseSpec, WorkoutSpec
     spec = [WorkoutSpec(weekday=0, name="Push", exercises=[ExerciseSpec("bench press", sets=3, reps="5")])]
     await context.stores.routines.save_routine(context.member_id, context.gym_id, spec)
-    # An agent-generated routine still has needs_routine=True because the Member
+    # An agent-generated routine still has can_author_routine=True because the Member
     # can ask the Agent to restructure it.
     wrapper = RunContextWrapper(context=context)
     agent = Agent(name="test")

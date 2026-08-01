@@ -33,10 +33,10 @@ def _routine_authoring_enabled(
     ctx: RunContextWrapper[MemberContext], _agent: AgentBase
 ) -> bool:
     """Routine-authoring tools are enabled when the Member is a Coach or has no
-    active Routine yet (issue #174). The ``needs_routine`` flag is precomputed
+    active Routine yet (issue #174). The ``can_author_routine`` flag is precomputed
     when ``MemberContext`` is built so this check is a cheap field read."""
     c = ctx.context
-    return c.is_coach or c.needs_routine
+    return c.is_coach or c.can_author_routine
 
 
 class ExerciseInput(BaseModel):
