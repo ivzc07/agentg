@@ -4,7 +4,6 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { RosterShell } from "../components/RosterShell";
-import { MemberPage } from "../components/MemberPage";
 import * as rosterApi from "../api/roster";
 import type { RosterResponse } from "../types/roster";
 
@@ -49,6 +48,9 @@ vi.mock("../hooks/useT", () => ({
       sr_missed: "missed {date}",
       // Split
       pick_a_member: "Pick a member",
+      // Error state
+      roster_error: "Couldn't load the roster.",
+      roster_retry: "Retry",
       // Member page
       member_eyebrow: "Member",
       back_to_roster: "Back to roster",
@@ -79,21 +81,26 @@ const makeResponse = (overrides: Partial<RosterResponse> = {}): RosterResponse =
   ...overrides,
 });
 
-function renderShell(response: RosterResponse, initialEntries: string[] = ["/"]) {
+function renderShell(
+  response: RosterResponse | null = null,
+  initialEntries: string[] = ["/"],
+  reject = false,
+) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
 
-  vi.spyOn(rosterApi, "fetchRoster").mockResolvedValue(response);
+  if (reject) {
+    vi.spyOn(rosterApi, "fetchRoster").mockRejectedValue(new Error("/api/roster: 500"));
+  } else if (response) {
+    vi.spyOn(rosterApi, "fetchRoster").mockResolvedValue(response);
+  }
 
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={initialEntries}>
         <Routes>
-          <Route element={<RosterShell name="Coach" gym="Iron Temple" />}>
-            <Route index />
-            <Route path="members/:memberId" element={<MemberPage />} />
-          </Route>
+          <Route path="/" element={<RosterShell name="Coach" gym="Iron Temple" />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>
@@ -237,7 +244,7 @@ describe("RosterShell", () => {
         active: [makeMember(1, { name: "Alice", attendance: [] })],
         counts: { active: 1, lapsed: 0 },
       }),
-      ["/members/1"],
+      ["/"],
     );
 
     await waitFor(() => {
@@ -248,11 +255,18 @@ describe("RosterShell", () => {
     await user.click(screen.getByLabelText("Split"));
 
     await waitFor(() => {
-      // The member name appears both in the rail link and in the pane heading.
-      const aliceNodes = screen.getAllByText("Alice");
-      expect(aliceNodes.length).toBeGreaterThanOrEqual(2);
+      expect(screen.getByText("Pick a member")).toBeInTheDocument();
+    });
+
+    // Click Alice in the rail.
+    await user.click(screen.getByText("Alice"));
+
+    await waitFor(() => {
       // The MemberPage back link is present, confirming the pane rendered.
       expect(screen.getByText(/←/)).toBeInTheDocument();
+      // Alice's name is in the pane heading (the h1 in MemberPage).
+      const headings = screen.getAllByRole("heading", { level: 1 });
+      expect(headings.some((h) => h.textContent === "Alice")).toBe(true);
     });
   });
 
@@ -269,6 +283,35 @@ describe("RosterShell", () => {
 
     await waitFor(() => {
       expect(screen.getByText("1 of 2")).toBeInTheDocument();
+    });
+  });
+
+  it("shows a distinct error message when the roster fetch fails", async () => {
+    renderShell(null, ["/"], true);
+
+    await waitFor(() => {
+      expect(screen.getByText("Couldn't load the roster.")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    });
+  });
+
+  it("no-match search does not hide the active roster view area", async () => {
+    // The no-match state renders in addition to the roster views, not
+    // instead of them — so the count bar and view area stay on screen.
+    const user = userEvent.setup();
+    renderShell(makeResponse());
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("Search by name")).toBeInTheDocument();
+    });
+
+    const input = screen.getByPlaceholderText("Search by name");
+    await user.type(input, "Zorro");
+
+    await waitFor(() => {
+      expect(screen.getByText("No member matches the search.")).toBeInTheDocument();
+      // The count bar is still present.
+      expect(screen.getByText("Sorted by days away")).toBeInTheDocument();
     });
   });
 });

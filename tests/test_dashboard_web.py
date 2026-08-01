@@ -17,6 +17,8 @@ from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
+from agentg.models import Routine
+from agentg.routines import ExerciseSpec, WorkoutSpec
 from conftest import FakeClock
 
 SECRET = "test-secret"
@@ -663,7 +665,7 @@ async def test_api_roster_active_rows_have_required_fields(spa_env):
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
     # Add a non-coach member so the roster has at least one row.
-    member2 = await spa_env.linking.link_member(spa_env.gym.id, "Ben", "telegram", "99")
+    _member2 = await spa_env.linking.link_member(spa_env.gym.id, "Ben", "telegram", "99")
 
     response = await spa_env.client.get(
         "/api/roster", cookies={SESSION_COOKIE: cookie}
@@ -814,6 +816,92 @@ async def test_api_roster_snoozed_shows_until_date(spa_env):
     assert snoozed_row is not None
     assert snoozed_row["snoozed_until"] == future.isoformat()
     assert snoozed_row["severity"] is None
+
+
+async def test_api_roster_severity_and_attendance_from_known_history(spa_env):
+    """A member with a back-dated Routine and 3+ missed planned days
+    comes back with severity="red", non-zero missed_days, and a
+    non-empty attendance grid — the actual values the Cards view
+    renders, not just key presence (issue #149, PR review)."""
+    from datetime import UTC, datetime, timedelta
+
+    from agentg.models import Exercise, Session
+    from sqlalchemy import select as sa_select
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    now = spa_env.clock()  # the FakeClock's fixed instant
+    today = now.date()
+
+    member = await spa_env.linking.link_member(spa_env.gym.id, "Zoe", "telegram", "200")
+
+    # Give Zoe a session 8 days ago — so gap is large enough.
+    exercise_names = ["bench press", "deadlift", "squat"]
+    async with spa_env.store._sessions() as db:
+        for name in exercise_names:
+            existing = await db.scalar(
+                sa_select(Exercise).where(Exercise.name == name)
+            )
+            if existing is None:
+                db.add(Exercise(name=name))
+        db.add(Session(
+            gym_id=spa_env.gym.id,
+            member_id=member.id,
+            started_at=now - timedelta(days=8),
+            closed_at=now - timedelta(days=8, hours=-1),
+        ))
+        await db.commit()
+
+    # Create a M/W/F Routine back-dated to 20 days ago so it governs
+    # the window from the anchor (8 days ago) through yesterday.
+    await spa_env.store.save_routine_from_web(
+        spa_env.gym.id, member.id, spa_env.member.id, None,
+        [
+            WorkoutSpec(0, "Push", [ExerciseSpec("bench press", 4, "8-10")]),
+            WorkoutSpec(2, "Pull", [ExerciseSpec("deadlift", 4, "5")]),
+            WorkoutSpec(4, "Legs", [ExerciseSpec("squat", 4, "8-10")]),
+        ],
+    )
+    # Back-date the Routine so its weekdays land in the severity window.
+    async with spa_env.store._sessions() as db:
+        active = await db.scalar(
+            sa_select(Routine).where(
+                Routine.member_id == member.id,
+                Routine.is_active.is_(True),
+            )
+        )
+        active.created_at = datetime.combine(
+            today - timedelta(days=20),
+            datetime.min.time(),
+            tzinfo=UTC,
+        )
+        await db.commit()
+
+    response = await spa_env.client.get(
+        "/api/roster", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    zoe_row = next((r for r in data["active"] if r["member_id"] == member.id), None)
+    assert zoe_row is not None
+
+    # The member has a known history: last session 8 days ago, M/W/F
+    # Routine back-dated to 20 days ago.  With >= 3 missed planned
+    # days, severity must be "red" — the exact value, not just a key.
+    assert zoe_row["severity"] == "red", f"expected red, got {zoe_row['severity']}"
+    assert zoe_row["missed_days"] > 0, "missed_days must be non-zero"
+
+    # The attendance grid must hold actual cells, not an empty list.
+    assert isinstance(zoe_row["attendance"], list)
+    assert len(zoe_row["attendance"]) > 0, "attendance grid must be non-empty"
+    # At least one cell is a miss (planned weekday with no session).
+    assert any(
+        c["state"] == "miss" for c in zoe_row["attendance"]
+    ), "grid must include at least one miss cell"
+    # At least one cell is a hit (the session 8 days ago).
+    assert any(
+        c["state"] == "hit" for c in zoe_row["attendance"]
+    ), "grid must include at least one hit cell"
 
 
 async def test_api_roster_slides_session_cookie(spa_env):

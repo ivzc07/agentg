@@ -1,23 +1,37 @@
-import { useParams, Link, useOutletContext } from "react-router-dom";
+import { useParams, Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useT } from "../hooks/useT";
+import { fetchRoster } from "../api/roster";
 import type { RosterMember } from "../types/roster";
 import { gapText } from "./roster-utils";
 
-/** Context provided by RosterShell via <Outlet />. */
-export interface RosterOutletContext {
-  members: RosterMember[];
-}
-
 /** Renders a member's detail — lean for now (issue #150 delivers the full
- *  page).  When nested inside the Split view's right pane the rail stays
- *  mounted; in Table/Cards the member renders full-page. */
-export function MemberPage() {
+ *  page).  When rendered from the Split view's right pane the member is
+ *  passed as a prop and the rail stays mounted; loaded directly at
+ *  /members/:id (Table/Cards row click or deep link) it fetches the roster
+ *  and renders full-page without the roster chrome. */
+export function MemberPage({ member: propMember }: { member?: RosterMember }) {
   const { memberId } = useParams<{ memberId: string }>();
   const t = useT();
-  const ctx = useOutletContext<RosterOutletContext | null>();
-  const member = ctx?.members.find(
-    (m) => m.member_id === (memberId != null ? Number(memberId) : 0)
-  );
+
+  // When a member prop is provided (Split view) use it directly;
+  // otherwise look the member up from the roster cache/API.
+  const { data } = useQuery({
+    queryKey: ["roster"],
+    queryFn: fetchRoster,
+    staleTime: 30_000,
+    enabled: propMember === undefined,
+  });
+
+  const member =
+    propMember ??
+    (data
+      ? data.active
+          .concat(data.lapsed)
+          .find(
+            (m) => m.member_id === (memberId != null ? Number(memberId) : 0),
+          )
+      : undefined);
 
   return (
     <div className="min-h-screen bg-bg text-ink font-sans antialiased">

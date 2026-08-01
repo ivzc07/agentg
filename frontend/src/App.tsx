@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { MotionConfig } from "framer-motion";
 import { fetchSession, SessionAuthError } from "./api/session";
 import { RosterShell } from "./components/RosterShell";
@@ -55,15 +55,14 @@ export function Dashboard() {
     <MotionConfig reducedMotion="user">
       <BrowserRouter basename="/dashboard">
         <Routes>
-          <Route element={<RosterShell name={data.name} gym={data.gym} />}>
-            {/* Index: the roster in table, cards, or split view
-                (with an empty right pane in Split). */}
-            <Route index />
-            {/* Nested: a member in the outlet.  In Split view the rail
-                stays mounted and the member fills the right pane; in
-                Table/Cards view the member renders full-page. */}
-            <Route path="members/:memberId" element={<MemberPage />} />
-          </Route>
+          {/* The roster in table, cards, or split view.  Split keeps the
+              rail and renders the member inline, not via a deep link. */}
+          <Route path="/" element={<RosterShell name={data.name} gym={data.gym} />} />
+          {/* A member loaded directly (not from the Split rail) — the full
+              member screen, without roster chrome around it. */}
+          <Route path="members/:memberId" element={<MemberPage />} />
+          {/* Unknown deep links: get the coach back to the roster. */}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
     </MotionConfig>
