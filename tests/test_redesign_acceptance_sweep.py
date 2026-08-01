@@ -18,12 +18,9 @@ regression.
 
 from __future__ import annotations
 
-import json
-import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -925,12 +922,11 @@ class TestReducedMotion:
 class _HtmxEnv:
     """Lightweight holder for htmx test fixtures."""
 
-    def __init__(self, client, gym, member, linking, routines, training):
+    def __init__(self, client, gym, member, linking, training):
         self.client = client
         self.gym = gym
         self.member = member
         self.linking = linking
-        self.routines = routines
         self.training = training
 
 
@@ -941,10 +937,9 @@ class TestHtmxSwapParity:
     @pytest.fixture
     async def htmx_env(self, tmp_path):
         from agentg.dashboard_store import DashboardStore
-        from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
+        from agentg.dashboard_web import build_app
         from agentg.db import create_engine
         from agentg.linking_store import LinkingStore
-        from agentg.routines import RoutineStore
         from agentg.training import TrainingStore
         from conftest import FakeClock
         from aiohttp.test_utils import TestClient, TestServer
@@ -954,7 +949,6 @@ class TestHtmxSwapParity:
         linking = LinkingStore(engine)
         store = DashboardStore(engine, clock=clock)
         training = TrainingStore(engine, clock=clock)
-        routines = RoutineStore(engine, clock=clock)
         await linking.ensure_schema()
         await training.ensure_seeded()  # Catalog so the save validates
         gym = await linking.create_gym("Iron Temple")
@@ -974,7 +968,7 @@ class TestHtmxSwapParity:
             # Sign in as coach
             token = await store.create_login_token(coach.id, gym.id)
             await client.post(f"/login/{token}")
-            yield _HtmxEnv(client, gym, member, linking, routines, training)
+            yield _HtmxEnv(client, gym, member, linking, training)
 
         await engine.dispose()
 
@@ -1257,7 +1251,6 @@ class TestScreenCoverage:
         from agentg.dashboard_web import build_app
         from agentg.db import create_engine
         from agentg.linking_store import LinkingStore
-        from agentg.routines import RoutineStore
         from agentg.training import TrainingStore
         from conftest import FakeClock
         from aiohttp.test_utils import TestClient, TestServer
@@ -1267,7 +1260,6 @@ class TestScreenCoverage:
         linking = LinkingStore(engine)
         store = DashboardStore(engine, clock=clock)
         training = TrainingStore(engine, clock=clock)
-        routines = RoutineStore(engine, clock=clock)
         await linking.ensure_schema()
         await training.ensure_seeded()
         gym = await linking.create_gym("Iron Temple")

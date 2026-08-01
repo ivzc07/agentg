@@ -57,7 +57,7 @@ Run: `uv run pytest tests/test_redesign_acceptance_sweep.py -v`
 - **AA contrast**: Preset cards on `--elevation-2-bg` with `--ink` text (15.8:1). Default border: magenta with glow.
 - **375px**: Media query at 600px stacks actions vertically, full-width buttons and pick labels.
 - **Reduced motion**: Transitions zeroed.
-- **htmx swap**: The Preset apply POST also checks `_is_htmx` and returns fragments; structural test covers the edge.
+- **htmx swap**: N/A — Presets list and apply actions are not htmx surfaces (they use full-page form submissions with redirects).
 
 ### Settings (`GET /settings`)
 
