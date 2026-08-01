@@ -35,6 +35,10 @@ class Settings:
     # Feature flag: serve the React SPA dashboard instead of server-rendered
     # HTML. Defaults OFF so production is unaffected (ADR 0004 §Migration 5b).
     dashboard_spa_enabled: bool = False
+    # Optional override for the Vite-built React bundle directory; defaults
+    # to the repo-relative path ``frontend/dist/``. Set this in container
+    # deploys where the package is installed into site-packages.
+    dashboard_spa_dist: str = ""
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -56,6 +60,7 @@ class Settings:
             dashboard_port=port,
             dashboard_session_secret=env.get("DASHBOARD_SESSION_SECRET") or None,
             dashboard_spa_enabled=_bool_env(env, "DASHBOARD_SPA_ENABLED"),
+            dashboard_spa_dist=env.get("DASHBOARD_SPA_DIST") or "",
         )
 
 

@@ -18,7 +18,7 @@ describe("Shell", () => {
     expect(screen.getByText("Iron Temple")).toBeInTheDocument();
     // The coach's name appears in the header and main content.
     const headings = screen.getAllByText("Ana");
-    expect(headings.length).toBeGreaterThanOrEqual(1);
+    expect(headings.length).toBeGreaterThanOrEqual(2);
   });
 
   it("resolves i18n strings via useT()", () => {

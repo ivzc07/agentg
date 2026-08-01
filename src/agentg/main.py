@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 
 from agents import set_tracing_disabled
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -40,6 +41,10 @@ def build_dashboard_app(
     Kept apart from :func:`run` so the settings-to-app wiring (notably the SPA
     flag) is reachable from a test without standing up a bot and a poller.
     """
+    spa_dist = None
+    if settings.dashboard_spa_dist:
+        spa_dist = Path(settings.dashboard_spa_dist)
+
     return build_app(
         stores.dashboard,
         stores.linking,
@@ -49,6 +54,7 @@ def build_dashboard_app(
         secure_cookies=settings.dashboard_base_url.startswith("https://"),
         notifier=notifier,
         spa_enabled=settings.dashboard_spa_enabled,
+        spa_dist=spa_dist,
     )
 
 

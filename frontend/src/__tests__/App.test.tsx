@@ -1,13 +1,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-// Mock fetchSession before Dashboard is imported.
-const { fetchSession } = vi.hoisted(() => ({
+// Mock fetchSession and SessionAuthError before Dashboard is imported.
+const { fetchSession, SessionAuthError } = vi.hoisted(() => ({
   fetchSession: vi.fn(),
+  SessionAuthError: class SessionAuthError extends Error {
+    constructor() {
+      super("/api/session: 401");
+      this.name = "SessionAuthError";
+    }
+  },
 }));
 
-vi.mock("../api/session", () => ({ fetchSession }));
+vi.mock("../api/session", () => ({ fetchSession, SessionAuthError }));
 
 // Import Dashboard (the inner component) directly so we control QueryClient.
 import { Dashboard } from "../App";
@@ -40,12 +47,23 @@ describe("Dashboard", () => {
     expect(screen.getByText("Loading…")).toBeInTheDocument();
   });
 
-  it("shows the error state on a rejected fetch", async () => {
-    fetchSession.mockRejectedValue(new Error("/api/session: 401"));
+  it("shows the auth error state on a 401", async () => {
+    fetchSession.mockRejectedValue(new SessionAuthError());
 
     renderDashboard();
 
     expect(await screen.findByText("Not signed in.")).toBeInTheDocument();
+  });
+
+  it("shows a retryable error state on a non-401 failure", async () => {
+    fetchSession.mockRejectedValue(new Error("/api/session: 503"));
+
+    renderDashboard();
+
+    expect(
+      await screen.findByText("Something went wrong loading your session."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
   it("renders the Shell on a successful fetch", async () => {

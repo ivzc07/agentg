@@ -1553,6 +1553,7 @@ def build_app(
     clock: Clock = _utcnow,
     notifier: Notifier | None = None,
     spa_enabled: bool = False,
+    spa_dist: Path | None = None,
 ) -> web.Application:
     def set_session(response: web.StreamResponse, member_id: int, gym_id: int) -> None:
         response.set_cookie(
@@ -2297,6 +2298,8 @@ def build_app(
 
     # --- SPA shell and static assets (issue #155, ADR 0004) ---
 
+    resolved_dist = spa_dist or _FRONTEND_DIST
+
     async def spa_shell(request: web.Request) -> web.Response:
         """Serve the Vite-built React bundle shell with ``window.__I18N__``
         bootstrap injected (ADR 0004 §i18n 7a). Only reachable when the
@@ -2308,7 +2311,7 @@ def build_app(
         lang = _lang_of(request)
         t = STRINGS[lang]
 
-        index_path = _FRONTEND_DIST / "index.html"
+        index_path = resolved_dist / "index.html"
         if not index_path.exists():
             return web.Response(
                 text="SPA bundle not built — run `npm run build` in frontend/",
@@ -2368,17 +2371,17 @@ def build_app(
     app.router.add_post("/login/{token}", login_redeem)
     app.router.add_static("/static/", STATIC_DIR)
     if spa_enabled:
-        if not _FRONTEND_DIST.is_dir():
+        if not (resolved_dist / "assets").is_dir():
             logger.warning(
                 "SPA enabled but %s missing — serve /dashboard with a 503; "
                 "run `npm run build` in frontend/",
-                _FRONTEND_DIST,
+                resolved_dist / "assets",
             )
         else:
             app.router.add_get(SPA_MOUNT, spa_shell)
             app.router.add_get(f"{SPA_MOUNT}/", spa_shell)
             app.router.add_static(
-                f"{SPA_MOUNT}/assets/", _FRONTEND_DIST / "assets"
+                f"{SPA_MOUNT}/assets/", resolved_dist / "assets"
             )
     return app
 

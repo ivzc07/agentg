@@ -234,17 +234,21 @@ async def test_api_session_rejects_forged_cookie(env):
 SPA_SHELL_ROUTE = "/dashboard"
 
 
-def _write_stub_dist(dist_dir: Path) -> None:
-    """Write a minimal stub bundle under *dist_dir* so the SPA routes find it."""
+def _write_stub_dist(dist_dir: Path, *, assets: bool = True) -> None:
+    """Write a minimal stub bundle under *dist_dir* so the SPA routes find it.
+
+    Set *assets* to ``False`` to create a partial bundle (``index.html`` only)
+    that triggers the missing-assets guard."""
     dist_dir.mkdir(parents=True, exist_ok=True)
     (dist_dir / "index.html").write_text(
         '<!DOCTYPE html><html><head><title>SPA</title></head>'
         '<body><div id="root"></div></body></html>',
         encoding="utf-8",
     )
-    (dist_dir / "assets").mkdir(exist_ok=True)
-    (dist_dir / "assets" / "index.js").write_text("// stub", encoding="utf-8")
-    (dist_dir / "assets" / "index.css").write_text("/* stub */", encoding="utf-8")
+    if assets:
+        (dist_dir / "assets").mkdir(exist_ok=True)
+        (dist_dir / "assets" / "index.js").write_text("// stub", encoding="utf-8")
+        (dist_dir / "assets" / "index.css").write_text("/* stub */", encoding="utf-8")
 
 
 @pytest.fixture
@@ -508,6 +512,77 @@ async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
             settings,
             bot_username="testbot",
             notifier=None,
+        )
+        async with TestClient(TestServer(app)) as client:
+            cookie = sign_session(member.id, gym.id, SECRET, clock())
+            response = await client.get(
+                SPA_SHELL_ROUTE,
+                cookies={SESSION_COOKIE: cookie},
+            )
+            assert response.status == 200
+            text = await response.text()
+            assert "window.__I18N__" in text
+    finally:
+        await engine.dispose()
+
+
+async def test_spa_enabled_partial_bundle(tmp_path, monkeypatch):
+    """A dist/ with index.html but no assets/ must not crash at build_app
+    — the guard must catch the missing assets directory (P1, PR review 2)."""
+    import agentg.dashboard_web as dashboard_web
+
+    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+    stub_dist = tmp_path / "dist"
+    _write_stub_dist(stub_dist, assets=False)
+    monkeypatch.setattr(dashboard_web, "_FRONTEND_DIST", stub_dist)
+    try:
+        app = build_app(
+            store,
+            linking,
+            session_secret=SECRET,
+            bot_username="testbot",
+            secure_cookies=False,
+            clock=clock,
+            spa_enabled=True,
+        )
+        async with TestClient(TestServer(app)) as client:
+            cookie = sign_session(member.id, gym.id, SECRET, clock())
+            # The SPA route is not registered — aiohttp falls back to 404.
+            response = await client.get(
+                SPA_SHELL_ROUTE, cookies={SESSION_COOKIE: cookie}
+            )
+            assert response.status == 404
+    finally:
+        await engine.dispose()
+
+
+async def test_spa_dist_override_packaged_layout(tmp_path, monkeypatch):
+    """With a spa_dist override, the app uses that path instead of the
+    repo-relative _FRONTEND_DIST — simulating a container deploy where
+    the bundle is at /app/frontend/dist (P2, PR review 2)."""
+    import agentg.dashboard_web as dashboard_web
+
+    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+    # Simulate a packaged layout: _FRONTEND_DIST points to a non-existent
+    # site-packages-adjacent path.
+    monkeypatch.setattr(
+        dashboard_web,
+        "_FRONTEND_DIST",
+        tmp_path / "site-packages" / "agentg" / ".." / ".." / "frontend" / "dist",
+    )
+    # The override points at the real stub bundle.
+    override_dist = tmp_path / "dist"
+    _write_stub_dist(override_dist)
+    try:
+        app = build_app(
+            store,
+            linking,
+            session_secret=SECRET,
+            bot_username="testbot",
+            secure_cookies=False,
+            clock=clock,
+            spa_enabled=True,
+            spa_dist=override_dist,
         )
         async with TestClient(TestServer(app)) as client:
             cookie = sign_session(member.id, gym.id, SECRET, clock())
