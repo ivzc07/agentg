@@ -53,7 +53,10 @@ async def _counting_acompletion(*args: Any, **kwargs: Any) -> Any:
     return await _original_acompletion(*args, **kwargs)
 
 
-litellm.acompletion = _counting_acompletion
+# Idempotence: if this module is ever reloaded, skip patching rather than
+# chaining wrappers and double-counting every call (issue #161 PR review).
+if litellm.acompletion is not _counting_acompletion:
+    litellm.acompletion = _counting_acompletion
 
 
 @dataclass
@@ -112,6 +115,11 @@ class TurnContext:
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
         assert self._token is not None
         _turn.reset(self._token)
+        if exc_type is not None:
+            # Exception-aborted turn — don't log "completed" so the
+            # latency baseline isn't polluted (issue #161: only completed
+            # turns are measured).
+            return False  # don't suppress the exception
         duration = time.monotonic() - self.instrument.start_time
         logger.info(
             "turn completed in %.3fs, %d model calls, %d SQL statements",
@@ -119,4 +127,4 @@ class TurnContext:
             self.instrument.model_call_count,
             self.instrument.sql_count,
         )
-        return False  # don't suppress exceptions
+        return False

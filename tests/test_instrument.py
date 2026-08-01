@@ -25,6 +25,23 @@ class TestTurnContext:
         assert "2 model calls" in record.message
         assert "3 SQL statements" in record.message
 
+    def test_does_not_log_on_exception(self, caplog: pytest.LogCaptureFixture):
+        """Exception-aborted turns must not pollute the latency baseline."""
+        caplog.set_level(logging.INFO, logger="agentg.instrument")
+        with pytest.raises(ValueError):
+            with TurnContext() as instrument:
+                instrument.sql_count = 5
+                raise ValueError("boom")
+        # No "turn completed" line should be emitted.
+        log_lines = [
+            r.message
+            for r in caplog.records
+            if "turn completed" in r.message
+        ]
+        assert len(log_lines) == 0, (
+            f"exception path should not log, got {log_lines}"
+        )
+
     async def test_clears_context_on_exit(self):
         assert _turn.get() is None
         with TurnContext():
@@ -133,6 +150,23 @@ class TestModelCounter:
         )
         # No active instrument — nothing to assert beyond no crash.
 
+    async def test_production_path_guard(self):
+        """Guard: the SDK's LitellmModel must reach our wrapper at call time.
+
+        If an SDK upgrade switches from ``litellm.acompletion(...)``
+        (attribute access) to ``from litellm import acompletion`` (local
+        reference), the production count silently becomes 0 with the
+        suite still green.  This assertion fails on that change.
+        """
+        import agents.extensions.models.litellm_model  # noqa: F401
+
+        import agentg.instrument
+
+        assert litellm.acompletion is agentg.instrument._counting_acompletion, (
+            "litellm.acompletion is not our counting wrapper — "
+            "the SDK may have switched to a local reference import"
+        )
+
 
 class TestConcurrency:
     async def test_concurrent_turns_have_independent_model_counts(
@@ -217,33 +251,39 @@ class TestIntegration:
 
             import agentg.runtime as rt_mod
 
-            monkeypatch = pytest.MonkeyPatch()
-            monkeypatch.setattr(rt_mod.Runner, "run", fake_run)
+            with pytest.MonkeyPatch.context() as monkeypatch:
+                monkeypatch.setattr(rt_mod.Runner, "run", fake_run)
 
-            caplog.set_level(logging.INFO, logger="agentg.instrument")
+                caplog.set_level(logging.INFO, logger="agentg.instrument")
 
-            reply = await runtime.handle_message(
-                IncomingMessage(
-                    channel="telegram",
-                    channel_user_id="42",
-                    text="bench 60 8,8,8",
+                reply = await runtime.handle_message(
+                    IncomingMessage(
+                        channel="telegram",
+                        channel_user_id="42",
+                        text="bench 60 8,8,8",
+                    )
                 )
-            )
 
-            assert isinstance(reply, str)
-            # The instrument log line should have fired.
-            log_lines = [
-                r.message
-                for r in caplog.records
-                if r.name == "agentg.instrument"
-                and "turn completed" in r.message
-            ]
-            assert len(log_lines) == 1, (
-                f"expected one instrument log line, got {log_lines}"
-            )
-            line = log_lines[0]
-            assert "model calls" in line
-            assert "SQL statements" in line
+                assert isinstance(reply, str)
+                # The instrument log line should have fired.
+                log_lines = [
+                    r.message
+                    for r in caplog.records
+                    if r.name == "agentg.instrument"
+                    and "turn completed" in r.message
+                ]
+                assert len(log_lines) == 1, (
+                    f"expected one instrument log line, got {log_lines}"
+                )
+                line = log_lines[0]
+                assert "model calls" in line
+                assert "SQL statements" in line
+                # At least one SQL statement must have been counted — the
+                # handle_message body issues several queries.  A regression
+                # that zeros the SQL counter must fail this assertion.
+                assert "0 SQL statements" not in line, (
+                    f"SQL counter appears zero in log line: {line}"
+                )
         finally:
             await engine.dispose()
 
@@ -255,6 +295,10 @@ class TestIntegration:
         Acceptance criterion 4 (issue #161): the linking path is covered,
         not silently missing.  The runtime wraps the *entire* body in
         TurnContext, so a linking-only reply emits a "turn completed" line.
+
+        An *unlinked* identity sending any non-code text triggers
+        ``Linking._reply_unlinked_unknown``, which calls the phraser and
+        returns a reply — ``handle_message`` returns before ``Runner.run``.
         """
         from agentg.db import create_engine
         from agentg.linking import Linking
@@ -268,8 +312,9 @@ class TestIntegration:
 
         engine = create_engine("sqlite+aiosqlite://")
         stores = Stores.from_engine(engine)
-        # identity_phraser always returns a non-None reply, so every message
-        # short-circuits at linking and never reaches the Agent.
+        # identity_phraser returns the instruction text it receives, so
+        # every unlinked message receives a linking reply — the Agent is
+        # never reached.
         runtime = AgentRuntime(
             agent=object(),
             engine=engine,
@@ -279,15 +324,15 @@ class TestIntegration:
         )
         try:
             await runtime.ensure_schema()
-            gym = await stores.linking.create_gym("Iron Temple")
-            await stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+            # No link_member call — identity stays unlinked so every
+            # message short-circuits at linking.
 
             caplog.set_level(logging.INFO, logger="agentg.instrument")
 
             reply = await runtime.handle_message(
                 IncomingMessage(
                     channel="telegram",
-                    channel_user_id="42",
+                    channel_user_id="99",
                     text="hola",
                 )
             )
