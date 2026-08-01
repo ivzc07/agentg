@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { Search, LayoutList, LayoutGrid, Columns2, Users } from "lucide-react";
 import { fetchRoster } from "../api/roster";
 import type { RosterView } from "../types/roster";
@@ -120,7 +121,7 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
 
         {/* Presets & Settings quick links */}
         <nav className="quick flex gap-2 text-[13px] text-ink-2" aria-label={t("nav_sections")}>
-          <span>{t("presets")}</span>
+          <Link to="/presets" className="transition-colors hover:text-ink">{t("presets")}</Link>
           <span>{t("settings")}</span>
         </nav>
       </header>

@@ -7,6 +7,9 @@ import { RosterShell } from "./components/RosterShell";
 import { MemberPage } from "./components/MemberPage";
 import { SettingsPage } from "./components/SettingsPage";
 import { LoginPage } from "./components/LoginPage";
+import { PresetsPage } from "./components/PresetsPage";
+import { PresetsShell } from "./components/PresetsShell";
+import { RoutineEditor } from "./components/RoutineEditor";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -100,6 +103,20 @@ export function Dashboard() {
           <Route path="members/:memberId" element={<MemberPage />} />
           {/* Settings screen (issue #153): full-page, no RosterShell chrome */}
           <Route path="settings" element={<SettingsPage />} />
+          {/* Presets management screen (issue #152) — standalone full-page. */}
+          <Route
+            path="presets"
+            element={
+              <PresetsShell name={data.name} gym={data.gym}>
+                <PresetsPage />
+              </PresetsShell>
+            }
+          />
+          {/* The Routine editor, reached from the Member page. */}
+          <Route
+            path="members/:memberId/routine"
+            element={<RoutineEditor />}
+          />
           {/* Unknown deep links: get the coach back to the roster. */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

@@ -1108,6 +1108,53 @@ placeholder="squat, 4, 8-10">{escape(exercises_text)}</textarea></label>
 </fieldset>"""
 
 
+def _parse_workouts_from_json(raw_workouts: list, lang: str) -> list[WorkoutSpec]:
+    """The JSON editor body into WorkoutSpecs — the same rules as the form
+    parser, with the same Coach-readable error messages."""
+    t = STRINGS[lang]
+    specs = []
+    seen_weekdays: set[int] = set()
+    for item in raw_workouts:
+        if not isinstance(item, dict):
+            raise ValueError(t["bad_weekday_error"])
+        weekday = item.get("weekday")
+        if weekday is None or not isinstance(weekday, int) or not 0 <= weekday <= 6:
+            raise ValueError(t["bad_weekday_error"])
+        if weekday in seen_weekdays:
+            raise ValueError(t["duplicate_weekday_error"])
+        seen_weekdays.add(weekday)
+        name = item.get("name", "")
+        if not isinstance(name, str):
+            name = ""
+        raw_exercises = item.get("exercises")
+        if not isinstance(raw_exercises, list) or not raw_exercises:
+            raise ValueError(t["empty_workout_error"])
+        exercises = []
+        for ex in raw_exercises:
+            if not isinstance(ex, dict):
+                raise ValueError(t["bad_sets_error"])
+            exercise_name = ex.get("exercise", "")
+            if not isinstance(exercise_name, str) or not exercise_name.strip():
+                raise ValueError(t["empty_workout_error"])
+            sets = ex.get("sets")
+            if sets is not None:
+                if not isinstance(sets, int):
+                    raise ValueError(t["bad_sets_error"])
+                if not SETS_MIN <= sets <= SETS_MAX:
+                    raise ValueError(t["sets_range_error"])
+            reps = ex.get("reps")
+            if reps is not None:
+                if not isinstance(reps, str):
+                    reps = str(reps)
+                if len(reps) > REPS_MAX_LENGTH:
+                    raise ValueError(t["reps_too_long"])
+            exercises.append(ExerciseSpec(exercise_name, sets, reps))
+        if len(name) > WORKOUT_NAME_MAX_LENGTH:
+            raise ValueError(t["workout_name_too_long"])
+        specs.append(WorkoutSpec(weekday, name or WEEKDAYS[lang][weekday], exercises))
+    return specs
+
+
 def _parse_workouts(form: MultiDictProxy, lang: str) -> list[WorkoutSpec]:
     """The editor form into WorkoutSpecs. A fully blank block (the spare one
     the page always appends) is dropped; anything malformed or half-filled —
@@ -2415,7 +2462,318 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
+    # --- /api/members/{id}/routine JSON endpoint (issue #151) ---
+
+    async def api_member_routine_get(request: web.Request) -> web.Response:
+        """``GET /api/members/{id}/routine`` — cookie-auth via ``require_coach``;
+        returns the member's active Routine as JSON: weekday blocks, ownership
+        info, the routine_id stamp for stale-save checks, and the exercise
+        catalog. Unauthenticated answers 401; an unknown or unreachable member
+        answers 404."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        _, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+        except ValueError:
+            return web.json_response({"error": "not found"}, status=404)
+        view = await store.member_page(gym.id, member_id)
+        if view is None:
+            return web.json_response({"error": "not found"}, status=404)
+        catalog = await store.catalog_exercises()
+
+        def serialise_day(day: RoutineDayView) -> dict:
+            return {
+                "weekday": day.weekday,
+                "name": day.name,
+                "exercises": [
+                    {"exercise": name, "sets": sets, "reps": reps}
+                    for name, sets, reps in day.exercises
+                ],
+            }
+
+        body = {
+            "member_id": view.member_id,
+            "name": view.name,
+            "routine": [serialise_day(day) for day in view.routine],
+            "routine_id": view.routine_id,
+            "coach_authored": view.coach_authored,
+            "routine_author": view.routine_author,
+            "routine_preset_name": view.routine_preset_name,
+            "catalog": catalog,
+        }
+        response = web.json_response(body)
+        set_session(response, coach[0].id, gym.id)
+        return response
+
+    async def api_member_routine_put(request: web.Request) -> web.Response:
+        """``PUT /api/members/{id}/routine`` — cookie-auth via ``require_coach``;
+        saves a coach-authored Routine through the supersession machinery.
+        Accepts a JSON body with ``base_routine_id`` and ``workouts`` array.
+        Answers 200 on success (with the fresh routine and notified flag),
+        400 on validation errors, 409 on a stale save (with the fresh version),
+        and 401/404 like the GET."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+        except ValueError:
+            return web.json_response({"error": "not found"}, status=404)
+        target = await store.roster_member(gym.id, member_id)
+        if target is None:
+            return web.json_response({"error": "not found"}, status=404)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+
+        base_routine_id = body.get("base_routine_id")
+        raw_workouts = body.get("workouts")
+        if not isinstance(raw_workouts, list):
+            return web.json_response({"error": t["empty_routine_error"]}, status=400)
+
+        # Parse workouts from JSON into WorkoutSpecs, reusing the existing
+        # validation rules (weekday ranges, duplicates, sets/reps limits).
+        try:
+            workouts = _parse_workouts_from_json(raw_workouts, lang)
+        except ValueError as error:
+            return web.json_response({"error": str(error)}, status=400)
+
+        if not workouts:
+            return web.json_response({"error": t["empty_routine_error"]}, status=400)
+
+        try:
+            await store.save_routine_from_web(
+                gym.id, member_id, coach_member.id, base_routine_id, workouts
+            )
+        except StaleRoutineError:
+            view = await store.member_page(gym.id, member_id)
+            assert view is not None
+            fresh = [
+                {
+                    "weekday": day.weekday,
+                    "name": day.name,
+                    "exercises": [
+                        {"exercise": name, "sets": sets, "reps": reps}
+                        for name, sets, reps in day.exercises
+                    ],
+                }
+                for day in view.routine
+            ]
+            return web.json_response(
+                {"error": t["stale_error"], "fresh_routine": fresh,
+                 "fresh_routine_id": view.routine_id},
+                status=409,
+            )
+        except UnknownExercisesError as error:
+            message = t["unknown_exercises_error"].format(names=", ".join(error.names))
+            return web.json_response({"error": message}, status=400)
+
+        notified = False
+        if notifier is not None:
+            try:
+                channel = await store.member_channel(member_id)
+                if channel is not None:
+                    await notifier.send(
+                        channel[0],
+                        channel[1],
+                        routine_notice(coach_member.name, workouts),
+                    )
+                    notified = True
+            except Exception:
+                logger.exception("failed to notify member %s of the routine save", member_id)
+
+        view = await store.member_page(gym.id, member_id)
+        assert view is not None
+        response = web.json_response(
+            {
+                "ok": True,
+                "routine_id": view.routine_id,
+                "routine": [
+                    {
+                        "weekday": day.weekday,
+                        "name": day.name,
+                        "exercises": [
+                            {"exercise": name, "sets": sets, "reps": reps}
+                            for name, sets, reps in day.exercises
+                        ],
+                    }
+                    for day in view.routine
+                ],
+                "coach_authored": view.coach_authored,
+                "routine_author": view.routine_author,
+                "routine_preset_name": view.routine_preset_name,
+                "notified": notified,
+            }
+        )
+        set_session(response, coach_member.id, gym.id)
+        return response
+
     # --- /api/roster JSON endpoint (issue #149) ---
+
+    # --- /api/presets JSON endpoints (issue #152) ---
+
+    async def api_presets_list(request: web.Request) -> web.Response:
+        """``GET /api/presets`` — cookie-auth via ``require_coach``; returns
+        the Gym's live Presets, eligible Members, and the default Preset id.
+        Unauthenticated answers 401."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        presets = await store.presets(gym.id)
+        members = await store.preset_members(gym.id)
+        default_id = await store.default_preset_id(gym.id)
+        master_ids = await store.preset_ids_with_masters(gym.id)
+
+        body = {
+            "presets": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "is_default": p.id == default_id,
+                    "has_master": p.id in master_ids,
+                }
+                for p in presets
+            ],
+            "members": [{"id": m.id, "name": m.name} for m in members],
+            "default_preset_id": default_id,
+        }
+        response = web.json_response(body)
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def api_presets_create(request: web.Request) -> web.Response:
+        """``POST /api/presets`` — create a new Preset. Body: ``{"name": "..."}``.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        try:
+            payload = await request.json()
+            name = payload.get("name", "")
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        if not isinstance(name, str) or not name.strip():
+            return web.json_response({"error": "preset_name_empty"}, status=400)
+        if len(name.strip()) > 100:
+            return web.json_response({"error": "preset_name_too_long"}, status=400)
+        try:
+            preset = await store.create_preset(gym.id, name)
+        except DuplicatePresetNameError:
+            return web.json_response({"error": "duplicate_preset_name"}, status=400)
+        except ValueError:
+            return web.json_response({"error": "preset_name_empty"}, status=400)
+        response = web.json_response({"id": preset.id, "name": preset.name}, status=201)
+        set_session(response, member.id, gym.id)
+        return response
+
+    async def api_presets_apply(request: web.Request) -> web.Response:
+        """``POST /api/presets/{preset_id}/apply`` — apply a Preset to chosen
+        Members. Body: ``{"member_ids": [...], "apply_all": bool}``.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        if await store.preset_for_gym(gym.id, preset_id) is None:
+            return web.json_response({"error": "not_found"}, status=404)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        apply_all = bool(payload.get("apply_all", False))
+        raw_ids = payload.get("member_ids", [])
+        if not isinstance(raw_ids, list):
+            return web.json_response({"error": "preset_no_selection"}, status=400)
+        try:
+            member_ids = [int(v) for v in raw_ids]
+        except (ValueError, TypeError):
+            return web.json_response({"error": "not_found"}, status=404)
+        if apply_all:
+            member_ids = [m.id for m in await store.preset_members(gym.id)]
+        elif not member_ids:
+            return web.json_response({"error": "preset_no_selection"}, status=400)
+        try:
+            copies = await store.apply_preset(gym.id, preset_id, coach_member.id, member_ids)
+        except NoPresetMasterError:
+            return web.json_response({"error": "preset_no_master"}, status=400)
+        except StaleRoutineError:
+            return web.json_response({"error": "stale_error"}, status=409)
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        # Best-effort notify each member.
+        for copy in copies:
+            try:
+                channel = await store.member_channel(copy.member_id)
+                if channel is not None and notifier is not None:
+                    await notifier.send(
+                        channel[0],
+                        channel[1],
+                        routine_notice(coach_member.name, copy.workouts),
+                    )
+            except Exception:
+                logger.exception("failed to notify member %s of the Preset apply", copy.member_id)
+        response = web.json_response({"applied": len(copies)})
+        set_session(response, coach_member.id, gym.id)
+        return response
+
+    async def api_presets_default(request: web.Request) -> web.Response:
+        """``POST /api/presets/{preset_id}/default`` — set or clear the default
+        Preset. Toggling the current default clears it.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        if await store.preset_for_gym(gym.id, preset_id) is None:
+            return web.json_response({"error": "not_found"}, status=404)
+        try:
+            current_default = await store.default_preset_id(gym.id)
+            clearing = current_default == preset_id
+            await store.set_default_preset(gym.id, None if clearing else preset_id)
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        new_default = await store.default_preset_id(gym.id)
+        response = web.json_response({"default_preset_id": new_default})
+        set_session(response, coach_member.id, gym.id)
+        return response
+
+    async def api_presets_retire(request: web.Request) -> web.Response:
+        """``POST /api/presets/{preset_id}/retire`` — retire a Preset.
+        Members keep their copies; the Preset can no longer be edited or applied.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        try:
+            await store.retire_preset(gym.id, preset_id)
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        response = web.json_response({"retired": True})
+        set_session(response, coach_member.id, gym.id)
+        return response
 
     async def api_roster(request: web.Request) -> web.Response:
         """``GET /api/roster`` — cookie-auth via ``require_coach``; returns
@@ -2608,6 +2966,7 @@ def build_app(
         i18n_payload: dict = dict(t)
         i18n_payload["_months"] = list(MONTHS[lang])
         i18n_payload["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
+        i18n_payload["_weekdays"] = list(WEEKDAYS[lang])
         i18n_payload["_decimal_mark"] = DECIMAL_MARK[lang]
         i18n_json = json.dumps(i18n_payload, ensure_ascii=False)
         # Escape <, U+2028, and U+2029 so no string value can close the
@@ -2701,8 +3060,6 @@ def build_app(
     # health-check probes) so there is no value in gating it behind the flag.
     app.router.add_get("/api/session", api_session)
     app.router.add_get("/members/{member_id}", member_page)
-    app.router.add_get("/members/{member_id}/routine", routine_editor)
-    app.router.add_post("/members/{member_id}/routine", routine_save)
     app.router.add_get("/presets", presets_page)
     app.router.add_post("/presets", preset_create)
     app.router.add_get("/presets/{preset_id}/routine", preset_editor)
@@ -2719,6 +3076,10 @@ def build_app(
     app.router.add_get("/login/{token}", login_form)
     app.router.add_post("/login/{token}", login_redeem)
     app.router.add_static("/static/", STATIC_DIR)
+    # The server-HTML Routine editor is production today — registered
+    # unconditionally like member_page and the /presets routes (#151, #154).
+    app.router.add_get("/members/{member_id}/routine", routine_editor)
+    app.router.add_post("/members/{member_id}/routine", routine_save)
     if spa_enabled:
         # /api/login/{token} peek is SPA-only — serves the interstitial's
         # token validation without spending the token.  Flag-gated so the
@@ -2733,12 +3094,24 @@ def build_app(
         app.router.add_post("/api/settings/regenerate-invite", api_settings_regenerate_invite)
         app.router.add_post("/api/settings/regenerate-coach", api_settings_regenerate_coach)
         app.router.add_post("/api/settings/gym-name", api_settings_gym_name)
+        # JSON endpoints for the SPA — flag-gated so the flag-off rollback
+        # holds (ADR 0004 §Migration 5b).
+        # /api/members/{id}/routine is the JSON Routine editor endpoint
+        # (issue #151).
+        app.router.add_get("/api/members/{member_id}/routine", api_member_routine_get)
+        app.router.add_put("/api/members/{member_id}/routine", api_member_routine_put)
         # /api/members/{id} and tick-off are the SPA's member-page JSON
         # endpoints (issue #150).
         app.router.add_get("/api/members/{member_id}", api_member)
         app.router.add_post(
             "/api/members/{member_id}/flags/{note_id}/tick-off", api_tick_off_flag
         )
+        # /api/presets JSON endpoints (issue #152).
+        app.router.add_get("/api/presets", api_presets_list)
+        app.router.add_post("/api/presets", api_presets_create)
+        app.router.add_post("/api/presets/{preset_id}/apply", api_presets_apply)
+        app.router.add_post("/api/presets/{preset_id}/default", api_presets_default)
+        app.router.add_post("/api/presets/{preset_id}/retire", api_presets_retire)
         if not (resolved_dist / "assets").is_dir():
             logger.warning(
                 "SPA enabled but %s missing — not serving /dashboard; "

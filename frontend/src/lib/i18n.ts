@@ -10,6 +10,14 @@ export function getI18N(): I18NStrings {
   return window.__I18N__;
 }
 
+/** The seven full weekday names (Mon first) for the active language. */
+export function getWeekdays(): string[] {
+  const raw = getI18N()["_weekdays"];
+  if (Array.isArray(raw)) return raw as string[];
+  // Fallback: English.
+  return ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+}
+
 /** The twelve month abbreviations for the active language. */
 export function getMonths(): string[] {
   const raw = getI18N()["_months"];
