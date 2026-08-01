@@ -1333,12 +1333,12 @@ def _presets_page(
     A rejected create keeps the typed name in the form."""
     t = STRINGS[lang]
     notice = success + (f'<p class="error">{escape(error)}</p>' if error else "")
-    create = f"""<section class="pcard">
+    create = f"""<section class="create-preset">
 <h2>{t["create_preset"]}</h2>
 <form method="post" action="/presets">
-<label class="stack">{t["preset_name"]}
+<label>{t["preset_name"]}</label>
 <input type="text" name="name" value="{escape(create_name, quote=True)}" maxlength="100" required>
-</label> <button type="submit">{t["create_preset"]}</button>
+<button type="submit" class="btn-primary">{t["create_preset"]}</button>
 </form></section>"""
     if not presets:
         cards = f'<div class="emptystate"><h2>{t["no_presets"]}</h2></div>'
@@ -1350,23 +1350,25 @@ def _presets_page(
                 f"{escape(member.name)}</label>"
                 for member in members
             )
+            is_default = default_preset_id == preset.id
+            card_class = "pcard default" if is_default else "pcard"
+            preset_badge = (
+                f' <span class="preset-badge">{t["preset_default"]}</span>'
+                if is_default
+                else ""
+            )
             if members:
                 apply_form = f"""<form method="post" action="/presets/{preset.id}/apply">
 <fieldset><legend>{t["apply_preset"]}</legend>
 <div class="pick"><label><input type="checkbox" name="apply_all" value="1">{t["apply_all"]}</label></div>
 <div class="pick">{member_choices}</div>
-<button type="submit">{t["apply"]}</button>
+<button type="submit" class="btn-primary">{t["apply"]}</button>
 </fieldset></form>"""
             else:
                 apply_form = f'<p class="muted">{t["no_members_to_apply"]}</p>'
-            default_tag = (
-                f' <span class="tag">{t["preset_default"]}</span>'
-                if default_preset_id == preset.id
-                else ""
-            )
             default_label = (
                 t["clear_default_preset"]
-                if default_preset_id == preset.id
+                if is_default
                 else t["set_default_preset"]
             )
             default_form = (
@@ -1375,16 +1377,15 @@ def _presets_page(
             )
             # Retiring is quiet next to Apply — a browser confirm stands
             # between one stray click and every Member keeping a copy of a
-            # plan the Coach meant to keep editing. No JS: it just submits,
-            # and retire stays reversible-in-spirit (copies survive).
+            # plan the Coach meant to keep editing.
             retire_form = (
                 f'<form method="post" action="/presets/{preset.id}/retire" '
                 f'onsubmit="return confirm(this.dataset.confirm)" '
                 f'data-confirm="{escape(t["retire_confirm"], quote=True)}">'
-                f'<button type="submit">{t["retire_preset"]}</button></form>'
+                f'<button type="submit" class="btn-retire">{t["retire_preset"]}</button></form>'
             )
             card_blocks.append(
-                f'<section class="pcard"><h2>{escape(preset.name)}{default_tag} '
+                f'<section class="{card_class}"><h2>{escape(preset.name)}{preset_badge} '
                 f'<a class="edit" href="/presets/{preset.id}/routine">{t["edit_preset"]}</a></h2>'
                 f'{apply_form}<div class="actions">{default_form}{retire_form}</div></section>'
             )
