@@ -63,7 +63,19 @@ class AgentRuntime:
     def session_for_member(self, member_id: int) -> SQLAlchemySession:
         return SQLAlchemySession(f"member:{member_id}", engine=self.engine)
 
-    def member_context(self, linked: LinkedIdentity) -> MemberContext:
+    async def member_context(self, linked: LinkedIdentity) -> MemberContext:
+        """Build the per-turn context with conversation-stable gating flags
+        precomputed (issue #174)."""
+        needs_routine = True
+        if not linked.member.is_coach:
+            routine = await self.stores.routines.active_routine(linked.member.id)
+            # Routine-authoring tools are usable when the Member has no routine
+            # at all (intake) OR has an agent-generated one (can replace it).
+            # A coach-authored routine blocks them — the Agent never restructures
+            # those (issue #174).
+            needs_routine = (
+                routine is None or not routine.get("coach_authored", False)
+            )
         return MemberContext(
             stores=self.stores,
             notifier=self.notifier,
@@ -74,6 +86,7 @@ class AgentRuntime:
             weight_unit=linked.gym.weight_unit,
             timezone=linked.gym.timezone,
             is_coach=linked.member.is_coach,
+            needs_routine=needs_routine,
             dashboard_base_url=self.dashboard.base_url if self.dashboard else None,
         )
 
@@ -95,7 +108,7 @@ class AgentRuntime:
             await maybe_compact(
                 session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
             )
-            context = self.member_context(linked)
+            context = await self.member_context(linked)
             result = await Runner.run(
                 self.agent,
                 msg.text,

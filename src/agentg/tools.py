@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from agents import RunContextWrapper, Tool, function_tool
+from agents import AgentBase, RunContextWrapper, Tool, function_tool
 from pydantic import BaseModel, Field
 
 from agentg.advice import suggest_for_today
@@ -22,6 +22,21 @@ from agentg.coaching import (
 from agentg.context import MemberContext
 from agentg.routines import ExerciseSpec, WorkoutSpec
 from agentg.training import LoggedSets
+
+
+def _coach_only(ctx: RunContextWrapper[MemberContext], _agent: AgentBase) -> bool:
+    """Coach-only tools are enabled only when the Member is flagged as a Coach."""
+    return ctx.context.is_coach
+
+
+def _routine_authoring_enabled(
+    ctx: RunContextWrapper[MemberContext], _agent: AgentBase
+) -> bool:
+    """Routine-authoring tools are enabled when the Member is a Coach or has no
+    active Routine yet (issue #174). The ``needs_routine`` flag is precomputed
+    when ``MemberContext`` is built so this check is a cheap field read."""
+    c = ctx.context
+    return c.is_coach or c.needs_routine
 
 
 class ExerciseInput(BaseModel):
@@ -210,7 +225,7 @@ async def retire_note(ctx: RunContextWrapper[MemberContext], note_id: int) -> di
     return {"retired_note_id": note.id, "text": note.text}
 
 
-@function_tool
+@function_tool(is_enabled=_routine_authoring_enabled)
 async def get_rules_doc(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     """Read the gym's coaching rules doc. Follow it when generating a Routine.
 
@@ -221,14 +236,14 @@ async def get_rules_doc(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]
     return {"rules_doc": await c.stores.routines.effective_rules_doc(c.gym_id)}
 
 
-@function_tool
+@function_tool(is_enabled=_routine_authoring_enabled)
 async def list_exercises(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     """The Exercise catalog to draw a Routine from. Prescribe only these names."""
     c = ctx.context
     return {"exercises": await c.stores.training.catalog_names()}
 
 
-@function_tool
+@function_tool(is_enabled=_routine_authoring_enabled)
 async def save_routine(
     ctx: RunContextWrapper[MemberContext], workouts: list[WorkoutInput]
 ) -> dict[str, Any]:
@@ -320,7 +335,7 @@ async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, An
 # The gate and the behavior live in coaching.py; these wrappers only adapt.
 
 
-@function_tool
+@function_tool(is_enabled=_coach_only)
 async def update_rules_doc(ctx: RunContextWrapper[MemberContext], new_doc: str) -> dict[str, Any]:
     """(Coach only) Replace the gym's rules doc with new plain text.
 
@@ -333,7 +348,7 @@ async def update_rules_doc(ctx: RunContextWrapper[MemberContext], new_doc: str) 
     return await update_rules_doc_action(ctx.context, new_doc)
 
 
-@function_tool
+@function_tool(is_enabled=_coach_only)
 async def write_routine(
     ctx: RunContextWrapper[MemberContext],
     member_name: str,
