@@ -151,3 +151,45 @@ async def test_notes_sit_at_the_attention_favored_edge_of_the_prompt(env):
     # protocol first, notes last — attention-favored edges of the system prompt
     assert text.index("You are the coach") < text.index("left shoulder impingement")
     assert text.rstrip().endswith("left shoulder impingement")
+
+
+async def test_independent_reads_run_concurrently(env):
+    """The two pure-read operations (routine load, notes query) overlap.
+
+    latest_session_info runs serial because it may write — only the two
+    pure reads are gathered.  This test proves they overlapped and fails
+    if they are reverted to serial."""
+    import asyncio
+
+    events: list[str] = []
+
+    original_get = env.context.turn_cache.get_or_load_routine
+    original_active = env.context.stores.notes.active
+
+    async def tracked_get(*args, **kwargs):
+        events.append("routine_start")
+        await asyncio.sleep(0.005)
+        result = await original_get(*args, **kwargs)
+        events.append("routine_end")
+        return result
+
+    async def tracked_active(*args, **kwargs):
+        events.append("notes_start")
+        await asyncio.sleep(0.005)
+        result = await original_active(*args, **kwargs)
+        events.append("notes_end")
+        return result
+
+    env.context.turn_cache.get_or_load_routine = tracked_get  # type: ignore[method-assign]
+    env.context.stores.notes.active = tracked_active  # type: ignore[method-assign]
+
+    await member_snapshot(env.context)
+
+    # The two tracked reads overlap: each started before the other finished.
+    routine_start = events.index("routine_start")
+    routine_end = events.index("routine_end")
+    notes_start = events.index("notes_start")
+    notes_end = events.index("notes_end")
+
+    assert routine_start < notes_end, "routine started before notes finished"
+    assert notes_start < routine_end, "notes started before routine finished"

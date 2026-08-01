@@ -28,9 +28,13 @@ def _headline(exercises: list[dict[str, Any]], unit: str) -> str:
 
 
 async def member_snapshot(context: MemberContext) -> str:
-    # Three independent reads — run them concurrently to save two serial waits (#169).
-    (days, last), routine, notes = await asyncio.gather(
-        context.stores.training.latest_session_info(context.member_id),
+    # Three independent reads — the two pure reads run concurrently while
+    # latest_session_info runs serial because it may write (auto-close a
+    # stale open session), which would lock SQLite if gathered (#169).
+    (days, last) = await context.stores.training.latest_session_info(
+        context.member_id
+    )
+    routine, notes = await asyncio.gather(
         context.turn_cache.get_or_load_routine(
             context.stores.routines, context.member_id
         ),

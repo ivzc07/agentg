@@ -109,8 +109,16 @@ class AgentRuntime:
             gym_id = context.gym_id
             channel, user_id = msg.channel, msg.channel_user_id
 
+            # after_send is a best-effort hook: the channel adapter fires it
+            # after the reply is delivered, so if the send itself fails this
+            # never runs and the rhythm reset + demos are silently skipped.
             async def after_send() -> None:
-                await self.stores.checkins.reset_rhythm(member_id)
+                # reset_rhythm is isolated from demo sends so a failure in
+                # one doesn't block the other.
+                try:
+                    await self.stores.checkins.reset_rhythm(member_id)
+                except Exception:
+                    logger.exception("reset_rhythm failed for %d", member_id)
                 for exercise in requests:
                     try:
                         await serve_demo(
