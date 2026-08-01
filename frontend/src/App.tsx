@@ -5,6 +5,8 @@ import { MotionConfig } from "framer-motion";
 import { fetchSession, SessionAuthError } from "./api/session";
 import { RosterShell } from "./components/RosterShell";
 import { MemberPage } from "./components/MemberPage";
+import { PresetsPage } from "./components/PresetsPage";
+import { PresetsShell } from "./components/PresetsShell";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -64,6 +66,15 @@ export function Dashboard() {
                 Table/Cards view the member renders full-page. */}
             <Route path="members/:memberId" element={<MemberPage />} />
           </Route>
+          {/* Presets management screen (issue #152) — standalone full-page. */}
+          <Route
+            path="presets"
+            element={
+              <PresetsShell name={data.name} gym={data.gym}>
+                <PresetsPage />
+              </PresetsShell>
+            }
+          />
         </Routes>
       </BrowserRouter>
     </MotionConfig>
