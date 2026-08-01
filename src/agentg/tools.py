@@ -55,9 +55,14 @@ def _logged(payload: LoggedSets, unit: str) -> dict[str, Any]:
 
 async def open_session_payload(c: MemberContext) -> dict[str, Any]:
     """Open (or resume) the Member's Session and assemble the opener facts:
-    the gap, the last Session's numbers, and today's Workout from the Routine."""
+    the gap, the last Session's numbers, today's Workout from the Routine,
+    and weight suggestions for today's Workout (#171)."""
     opened = await c.stores.training.open_session(c.member_id, c.gym_id)
     routine = await c.turn_cache.get_or_load_routine(c.stores.routines, c.member_id)
+    suggestions = await suggest_for_today(
+        c.stores.training, c.stores.routines, c.member_id, c.gym_id, c.timezone,
+        routine=routine,
+    )
     return {
         "session_id": opened.session_id,
         "resumed_existing": opened.reopened,
@@ -65,6 +70,16 @@ async def open_session_payload(c: MemberContext) -> dict[str, Any]:
         "last_session": opened.last_session,
         "todays_workout": c.stores.routines.pick_todays_workout(routine, c.timezone),
         "weight_unit": c.weight_unit,
+        "suggestions": [
+            {
+                "exercise": s.exercise,
+                "last_weight": s.last_weight,
+                "suggested_weight": s.suggested_weight,
+                "action": s.action,
+                "reason": s.reason,
+            }
+            for s in suggestions
+        ],
     }
 
 
@@ -73,8 +88,11 @@ async def open_session(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     """Open (or resume) a Session because the Member is at the gym now.
 
     Returns days since the last Session, that Session's exercises with weights
-    and reps (reference numbers to offer, never to assume logged), and today's
-    Workout from the Member's Routine.
+    and reps (reference numbers to offer, never to assume logged), today's
+    Workout from the Member's Routine, and weight suggestions for each Exercise
+    (action + reason). Present the suggestions in your reply as suggestions,
+    never as logged sets. After a long gap the suggestions come back easier —
+    open warm and guilt-free.
     """
     return await open_session_payload(ctx.context)
 
@@ -293,7 +311,11 @@ async def get_routine(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
 
 @function_tool
 async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
-    """Suggested working weights for today's Workout, derived from logged Sets.
+    """Re-ask for working-weight suggestions mid-Session, derived from logged Sets.
+
+    Use this when the Member asks to re-check suggestions or when today's
+    Workout changes mid-Session. On arrival, open_session already returns
+    suggestions — do not call both.
 
     Per Exercise: the last weight, a suggested next weight, and why (action is
     increment / hold / deload / gap_deload / none). These come from the gym's

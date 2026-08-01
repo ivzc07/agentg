@@ -109,7 +109,6 @@ async def test_full_push_day_with_copy_and_correction(tmp_path):
             "I'm here",
             steps=[
                 tool("open_session"),
-                tool("suggest_weights"),
                 message("Push day."),
             ],
         )

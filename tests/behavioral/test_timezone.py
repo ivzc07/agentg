@@ -157,7 +157,6 @@ async def test_gap_deload_advice_uses_the_local_day_count(tmp_path):
             "I'm here",
             steps=[
                 tool("open_session"),
-                tool("suggest_weights"),
                 message("Ease back in today."),
             ],
         )
