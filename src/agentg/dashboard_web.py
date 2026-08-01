@@ -76,6 +76,7 @@ from multidict import MultiDictProxy
 
 from agentg.checkin_sweep import Notifier
 from agentg.dashboard_i18n import (
+    DECIMAL_MARK,
     LANG_COOKIE,
     LANG_COOKIE_TTL_SECONDS,
     LANGS,
@@ -2435,7 +2436,9 @@ def build_app(
         _, gym = coach
         try:
             member_id = int(request.match_info["member_id"])
-        except ValueError:
+            if not 0 < member_id < 2**63:
+                return web.json_response({"error": "not found"}, status=404)
+        except (ValueError, OverflowError):
             return web.json_response({"error": "not found"}, status=404)
         try:
             page = int(request.query.get("page", "1"))
@@ -2462,7 +2465,9 @@ def build_app(
         try:
             member_id = int(request.match_info["member_id"])
             note_id = int(request.match_info["note_id"])
-        except ValueError:
+            if not (0 < member_id < 2**63 and 0 < note_id < 2**63):
+                return web.json_response({"error": "not found"}, status=404)
+        except (ValueError, OverflowError):
             return web.json_response({"error": "not found"}, status=404)
         note = await store.acknowledge_flag(gym.id, member_id, note_id, member.id)
         if note is None:
@@ -2502,6 +2507,7 @@ def build_app(
         i18n_payload: dict = dict(t)
         i18n_payload["_months"] = list(MONTHS[lang])
         i18n_payload["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
+        i18n_payload["_decimal_mark"] = DECIMAL_MARK[lang]
         i18n_json = json.dumps(i18n_payload, ensure_ascii=False)
         # Escape <, U+2028, and U+2029 so no string value can close the
         # <script> tag early or inject a line separator (ADR 0004 §i18n 7a).

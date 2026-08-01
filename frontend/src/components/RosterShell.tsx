@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useParams, Outlet } from "react-router-dom";
+import { useParams, useSearchParams, Outlet } from "react-router-dom";
 import { Search, LayoutList, LayoutGrid, Columns2, Users } from "lucide-react";
 import { fetchRoster } from "../api/roster";
 import type { RosterView } from "../types/roster";
@@ -24,9 +24,16 @@ const VIEW_ICONS: Record<RosterView, typeof LayoutList> = {
   split: Columns2,
 };
 
+function readInitialView(sp: URLSearchParams): RosterView {
+  const v = sp.get("view");
+  if (v === "table" || v === "cards" || v === "split") return v;
+  return "table";
+}
+
 export function RosterShell({ name: _name, gym }: RosterShellProps) {
   const t = useT();
-  const [view, setView] = useState<RosterView>("table");
+  const [sp] = useSearchParams();
+  const [view, setView] = useState<RosterView>(() => readInitialView(sp));
   const [query, setQuery] = useState("");
   const [lapsedOpen, setLapsedOpen] = useState(false);
   const { memberId } = useParams<{ memberId: string }>();
@@ -174,18 +181,13 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
               </span>
             </div>
 
-            {/* No match state */}
-            {noMatch && (
-              <p className="emptystate text-center py-12 text-ink-3">
-                {t("no_matches")}
-              </p>
-            )}
-
             {/* Active roster */}
-            {!noMatch && selectedMemberId != null ? (
+            {selectedMemberId != null ? (
               /* Nested route: /members/:id.  In Split view the rail stays
                  mounted and the member fills the right pane; in Table/Cards
-                 the member renders full-page. */
+                 the member renders full-page.  Always renders when a member
+                 is selected — a non-matching search must not unmount an
+                 open member page that the URL still points at. */
               view === "split" ? (
                 <RosterSplit
                   members={filtered.active.concat(filtered.lapsed)}
@@ -196,9 +198,15 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
               )
             ) : (
               <>
-                {view === "table" && <RosterTable members={filtered.active} />}
-                {view === "cards" && <RosterCards members={filtered.active} />}
-                {view === "split" && <RosterSplit members={filtered.active} />}
+                {/* No match state */}
+                {noMatch && (
+                  <p className="emptystate text-center py-12 text-ink-3">
+                    {t("no_matches")}
+                  </p>
+                )}
+                {!noMatch && view === "table" && <RosterTable members={filtered.active} />}
+                {!noMatch && view === "cards" && <RosterCards members={filtered.active} />}
+                {!noMatch && view === "split" && <RosterSplit members={filtered.active} />}
               </>
             )}
 

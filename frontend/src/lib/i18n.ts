@@ -25,3 +25,11 @@ export function getWeekdayInitials(): string[] {
   // Fallback: English.
   return ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 }
+
+/** The decimal mark for the active language (e.g. "." for en, "," for es). */
+export function getDecimalMark(): string {
+  const raw = getI18N()["_decimal_mark"];
+  if (typeof raw === "string") return raw;
+  // Fallback: period.
+  return ".";
+}

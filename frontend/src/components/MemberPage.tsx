@@ -1,8 +1,8 @@
 import { useParams, useSearchParams, Link, useOutletContext } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useT } from "../hooks/useT";
-import { getMonths, getWeekdayInitials } from "../lib/i18n";
-import { fetchMember, MemberNotFoundError, tickOffFlag } from "../api/member";
+import { getMonths, getWeekdayInitials, getDecimalMark } from "../lib/i18n";
+import { fetchMember, MemberAuthError, MemberNotFoundError, tickOffFlag } from "../api/member";
 import type { MemberPageData, SafetyFlag } from "../types/member";
 import type { RosterMember } from "../types/roster";
 
@@ -22,10 +22,13 @@ function fmtDate(iso: string): string {
   return `${day} ${month} ${d.getFullYear()}`;
 }
 
-/** Format a weight with the gym's unit. */
-function fmtWeight(weight: number | null, unit: string): string {
-  if (weight == null) return "BW";
-  return `${weight} ${unit}`;
+/** Format a weight with the gym's unit. Uses the bodyweight key from
+ *  the server i18n bootstrap and the language's decimal mark. */
+function fmtWeight(weight: number | null, unit: string, t: (key: string) => string): string {
+  if (weight == null) return t("bodyweight");
+  const dm = getDecimalMark();
+  const formatted = String(weight).replace(".", dm);
+  return `${formatted} ${unit}`;
 }
 
 function SafetyBanner({
@@ -214,7 +217,7 @@ function SessionsCard({
                     return (
                       <div key={key}>
                         <div className="set text-[13px] text-ink-2 mt-1">
-                          {exName} {fmtWeight(weight, data.weight_unit)} ×{" "}
+                          {exName} {fmtWeight(weight, data.weight_unit, t)} × {" "}
                           {repsList.join(",")}
                         </div>
                         {notes.map((note, ni) => (
@@ -291,7 +294,7 @@ function WeightsCard({
             <li key={i} className="weight-line text-[13px]">
               <b>{w.exercise}</b>{" "}
               <span className="numeral-sm font-mono font-bold">
-                {fmtWeight(w.weight, data.weight_unit)}
+                {fmtWeight(w.weight, data.weight_unit, t)}
               </span>{" "}
               × {w.reps.join(",")}{" "}
               <span className="muted text-ink-3">· {fmtDate(w.on)}</span>
@@ -512,6 +515,14 @@ export function MemberPage() {
     );
   }
 
+  if (error instanceof MemberAuthError) {
+    return (
+      <div className="flex items-center justify-center min-h-[200px] text-ink-3 text-[14px]">
+        Not signed in.
+      </div>
+    );
+  }
+
   if (error instanceof MemberNotFoundError) {
     return (
       <div className="flex items-center justify-center min-h-[200px] text-ink-3 text-[14px]">
@@ -534,7 +545,12 @@ export function MemberPage() {
     );
   }
 
-  if (rosterView === "split") {
+  // In Split view the rail stays mounted and the member fills the right
+  // pane without chrome (ADR 0006 §Roster shell).  Inside the RosterShell
+  // in Table/Cards view we also render the bare pane — the shell already
+  // provides the header, search, and navigation.  Only when deep-linked
+  // (no outlet context) do we render the standalone chrome.
+  if (outlet) {
     return <MemberPane data={data} t={t} />;
   }
 

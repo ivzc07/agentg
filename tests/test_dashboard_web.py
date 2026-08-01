@@ -363,6 +363,42 @@ async def test_spa_shell_injects_es_i18n_strings(spa_env):
     assert "Ajustes" in text
 
 
+async def test_spa_shell_injects_months_and_weekday_initials_en(spa_env):
+    """The SPA shell injects _months and _weekday_initials for English."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        SPA_SHELL_ROUTE,
+        cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "en"},
+    )
+
+    text = await response.text()
+    # English months
+    assert '"Jan"' in text and '"Feb"' in text and '"Dec"' in text
+    # English weekday initials
+    assert '"Mo"' in text and '"Tu"' in text and '"Su"' in text
+    # Decimal mark for English
+    assert '"_decimal_mark"' in text
+
+
+async def test_spa_shell_injects_months_and_weekday_initials_es(spa_env):
+    """The SPA shell injects _months and _weekday_initials for Spanish."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        SPA_SHELL_ROUTE,
+        cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "es"},
+    )
+
+    text = await response.text()
+    # Spanish months
+    assert '"ene"' in text and '"feb"' in text and '"dic"' in text
+    # Spanish weekday initials
+    assert '"lu"' in text and '"ma"' in text and '"do"' in text
+    # Decimal mark for Spanish
+    assert '"_decimal_mark"' in text
+
+
 async def test_spa_shell_escapes_script_close_tag(tmp_path, monkeypatch):
     """A ``</script>`` string in STRINGS must not close the injection tag early."""
     import agentg.dashboard_web as dashboard_web
@@ -1199,3 +1235,154 @@ async def test_api_member_and_tick_off_flag_off_404(env):
         "/api/members/1/flags/1/tick-off", cookies={SESSION_COOKIE: cookie}
     )
     assert tick_resp.status == 404
+
+
+# --- overflow member id → 404 (issue #150, PR review) ---
+
+
+async def test_api_member_overflow_id_returns_404(spa_env):
+    """An out-of-range member id (too large for SQLite INTEGER) returns 404."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        "/api/members/99999999999999999999999999",
+        cookies={SESSION_COOKIE: cookie},
+    )
+    assert response.status == 404
+    assert response.content_type == "application/json"
+
+
+async def test_api_tick_off_overflow_ids_return_404(spa_env):
+    """An out-of-range member_id or note_id on tick-off returns 404."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    # Huge member id
+    r1 = await spa_env.client.post(
+        "/api/members/99999999999999999999999999/flags/1/tick-off",
+        cookies={SESSION_COOKIE: cookie},
+    )
+    assert r1.status == 404
+
+    # Huge note id
+    r2 = await spa_env.client.post(
+        "/api/members/1/flags/99999999999999999999999999/tick-off",
+        cookies={SESSION_COOKIE: cookie},
+    )
+    assert r2.status == 404
+
+
+# --- cross-gym IDOR regression tests (issue #150, PR review) ---
+
+
+async def test_api_member_other_gym_404(spa_env):
+    """``GET /api/members/{id}`` on another gym's member returns 404."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    other_gym = await spa_env.linking.create_gym("Other Gym")
+    outsider = await spa_env.linking.link_member(
+        other_gym.id, "Outsider", "telegram", "901"
+    )
+
+    response = await spa_env.client.get(
+        f"/api/members/{outsider.id}", cookies={SESSION_COOKIE: cookie}
+    )
+    assert response.status == 404
+    assert response.content_type == "application/json"
+
+
+async def test_api_tick_off_other_gym_flag_404(spa_env):
+    """``POST /api/members/{id}/flags/{note_id}/tick-off`` on another gym's
+    flag returns 404 and leaves the flag unacknowledged."""
+    from agentg.notes import NotesStore
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    other_gym = await spa_env.linking.create_gym("Other Gym")
+    outsider = await spa_env.linking.link_member(
+        other_gym.id, "Outsider", "telegram", "902"
+    )
+    notes = NotesStore(spa_env.engine, clock=spa_env.clock)
+    foreign_flag = await notes.remember_safety(outsider.id, other_gym.id, "dizzy")
+
+    response = await spa_env.client.post(
+        f"/api/members/{outsider.id}/flags/{foreign_flag.id}/tick-off",
+        cookies={SESSION_COOKIE: cookie},
+    )
+    assert response.status == 404
+
+    # The flag remains unacknowledged.
+    note = await notes.active(outsider.id)
+    assert note[0].acknowledged_at is None
+
+
+# --- JSON tick-off read-back and idempotency (issue #150, PR review) ---
+
+
+async def test_api_tick_off_read_back_confirms_stamps(spa_env):
+    """After a JSON tick-off, GET /api/members/{id} shows the flag
+    acknowledged with the correct coach and timestamp stamps."""
+    from agentg.notes import NotesStore
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    member = await spa_env.linking.link_member(spa_env.gym.id, "Estampa", "telegram", "210")
+    notes = NotesStore(spa_env.engine, clock=spa_env.clock)
+    note = await notes.remember_safety(member.id, spa_env.gym.id, "Check form")
+
+    # Tick off via JSON.
+    post_resp = await spa_env.client.post(
+        f"/api/members/{member.id}/flags/{note.id}/tick-off",
+        cookies={SESSION_COOKIE: cookie},
+    )
+    assert post_resp.status == 200
+
+    # Read back via GET.
+    get_resp = await spa_env.client.get(
+        f"/api/members/{member.id}", cookies={SESSION_COOKIE: cookie}
+    )
+    data = json.loads(await get_resp.text())
+    flags = data["safety_flags"]
+    assert len(flags) == 1
+    assert flags[0]["status"] == "acknowledged"
+    assert flags[0]["acknowledged_on"] is not None
+    assert flags[0]["acknowledged_by"] is not None
+
+
+async def test_api_tick_off_idempotent_read_back(spa_env):
+    """A second tick-off does not overwrite the original stamps (idempotent)."""
+    from agentg.notes import NotesStore
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    member = await spa_env.linking.link_member(spa_env.gym.id, "Idem", "telegram", "211")
+    notes = NotesStore(spa_env.engine, clock=spa_env.clock)
+    note = await notes.remember_safety(member.id, spa_env.gym.id, "Fatigue")
+
+    # First tick-off.
+    await spa_env.client.post(
+        f"/api/members/{member.id}/flags/{note.id}/tick-off",
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    # Read back stamps after first tick.
+    r1 = await spa_env.client.get(
+        f"/api/members/{member.id}", cookies={SESSION_COOKIE: cookie}
+    )
+    f1 = json.loads(await r1.text())["safety_flags"][0]
+
+    # Advance clock so a re-stamp would be visible.
+    from datetime import timedelta
+    spa_env.clock.advance(timedelta(hours=1))
+
+    # Second tick-off (idempotent).
+    r2 = await spa_env.client.post(
+        f"/api/members/{member.id}/flags/{note.id}/tick-off",
+        cookies={SESSION_COOKIE: cookie},
+    )
+    assert r2.status == 200
+    d2 = json.loads(await r2.text())
+    assert d2["acknowledged"] is True
+
+    # Read back — stamps must not have changed.
+    r3 = await spa_env.client.get(
+        f"/api/members/{member.id}", cookies={SESSION_COOKIE: cookie}
+    )
+    f3 = json.loads(await r3.text())["safety_flags"][0]
+    assert f3["acknowledged_on"] == f1["acknowledged_on"]
+    assert f3["acknowledged_by"] == f1["acknowledged_by"]

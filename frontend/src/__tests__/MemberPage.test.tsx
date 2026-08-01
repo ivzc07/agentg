@@ -54,6 +54,8 @@ vi.mock("../hooks/useT", () => ({
       flag_seen_by: "Seen by {who} on {date}",
       flag_expired_unseen: "expired, never seen",
       save_failed: "Failed to save.",
+      // Weights
+      bodyweight: "BW",
     };
     return strings[key] ?? key;
   },
@@ -148,6 +150,8 @@ function mockT(key: string): string {
     flag_seen_by: "Seen by {who} on {date}",
     flag_expired_unseen: "expired, never seen",
     save_failed: "Failed to save.",
+    // Weights
+    bodyweight: "BW",
   };
   return strings[key] ?? key;
 }
