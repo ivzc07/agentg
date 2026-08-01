@@ -5,6 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { RosterShell } from "../components/RosterShell";
 import * as rosterApi from "../api/roster";
+import * as memberApi from "../api/member";
 import type { RosterResponse } from "../types/roster";
 
 vi.mock("../hooks/useT", () => ({
@@ -258,16 +259,44 @@ describe("RosterShell", () => {
       expect(screen.getByText("Pick a member")).toBeInTheDocument();
     });
 
+    // The pane loads the member's detail from /api/members/{id}.
+    vi.spyOn(memberApi, "fetchMember").mockResolvedValue({
+      member_id: 1,
+      name: "Alice",
+      member_since: "2026-06-01",
+      weight_unit: "kg",
+      session_count: 0,
+      gap_days: 0,
+      has_sessions: false,
+      last_session_on: null,
+      lapsed: false,
+      snoozed_until: null,
+      routine: [],
+      routine_id: null,
+      routine_preset_name: null,
+      coach_authored: false,
+      routine_author: null,
+      sessions: [],
+      page: 1,
+      pages: 1,
+      weights: [],
+      notes: [],
+      retired_notes: [],
+      safety_flags: [],
+    });
+
     // Click Alice in the rail.
     await user.click(screen.getByText("Alice"));
 
     await waitFor(() => {
-      // The MemberPage back link is present, confirming the pane rendered.
-      expect(screen.getByText(/←/)).toBeInTheDocument();
       // Alice's name is in the pane heading (the h1 in MemberPage).
       const headings = screen.getAllByRole("heading", { level: 1 });
       expect(headings.some((h) => h.textContent === "Alice")).toBe(true);
     });
+    // The pane is the bare member body: the rail stays mounted, so the
+    // standalone page chrome (its own back link) must NOT be rendered —
+    // that duplicated the roster header and dropped the coach out of Split.
+    expect(screen.queryByText(/← /)).not.toBeInTheDocument();
   });
 
   it("shows filtered count when searching", async () => {
