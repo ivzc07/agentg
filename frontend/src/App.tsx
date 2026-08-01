@@ -1,7 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { MotionConfig } from "framer-motion";
 import { fetchSession, SessionAuthError } from "./api/session";
-import { Shell } from "./components/Shell";
+import { RosterShell } from "./components/RosterShell";
+import { MemberPage } from "./components/MemberPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -48,7 +51,16 @@ export function Dashboard() {
     );
   }
 
-  return <Shell name={data.name} gym={data.gym} />;
+  return (
+    <MotionConfig reducedMotion="user">
+      <BrowserRouter basename="/dashboard">
+        <Routes>
+          <Route index element={<RosterShell name={data.name} gym={data.gym} />} />
+          <Route path="members/:memberId" element={<MemberPage />} />
+        </Routes>
+      </BrowserRouter>
+    </MotionConfig>
+  );
 }
 
 export default function App() {
