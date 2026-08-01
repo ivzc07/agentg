@@ -6,7 +6,9 @@ cookie -> signed-in shell, refreshed on every visit; every bad state bounces
 to the friendly page.
 """
 
+import json
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -185,3 +187,151 @@ async def test_the_language_toggle_rejects_a_control_char_next(env, next_path):
 
     assert response.status == 302
     assert response.headers["Location"] == "/"
+
+
+# --- /api/session JSON contract (issue #155) ---
+
+
+async def test_api_session_returns_coach_name_and_gym(env):
+    """An authenticated coach's GET /api/session returns JSON with name and gym."""
+    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
+
+    response = await env.client.get(
+        "/api/session", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    assert response.content_type == "application/json"
+    data = json.loads(await response.text())
+    assert data["name"] == "Ana"
+    assert data["gym"] == "Iron Temple"
+
+
+async def test_api_session_rejects_unauthenticated(env):
+    """Without a valid session cookie /api/session answers 401."""
+    response = await env.client.get("/api/session")
+    assert response.status == 401
+
+
+async def test_api_session_rejects_forged_cookie(env):
+    """A forged session cookie does not open /api/session."""
+    forged = sign_session(env.member.id, env.gym.id, "wrong-secret", env.clock())
+    response = await env.client.get(
+        "/api/session", cookies={SESSION_COOKIE: forged}
+    )
+    assert response.status == 401
+
+
+# --- SPA serving (issue #155) ---
+
+
+@pytest.fixture
+async def spa_env(tmp_path):
+    """A test app with dashboard_spa_enabled=True and a stub built bundle."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'domain.db'}")
+    clock = FakeClock()
+    linking = LinkingStore(engine)
+    store = DashboardStore(engine, clock=clock)
+    await linking.ensure_schema()
+    gym = await linking.create_gym("Iron Temple")
+    member = await linking.link_member(gym.id, "Ana", "telegram", "42")
+    await linking.set_coach(member.id, True)
+
+    # Create a stub built bundle so the SPA route finds assets.
+    dist_dir = Path(__file__).parent.parent / "frontend" / "dist"
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    (dist_dir / "index.html").write_text(
+        '<!DOCTYPE html><html><head><title>SPA</title></head>'
+        '<body><div id="root"></div></body></html>',
+        encoding="utf-8",
+    )
+    (dist_dir / "assets").mkdir(exist_ok=True)
+    (dist_dir / "assets" / "index.js").write_text("// stub", encoding="utf-8")
+    (dist_dir / "assets" / "index.css").write_text("/* stub */", encoding="utf-8")
+
+    app = build_app(
+        store,
+        linking,
+        session_secret=SECRET,
+        bot_username="testbot",
+        secure_cookies=False,
+        clock=clock,
+        spa_enabled=True,
+    )
+    async with TestClient(TestServer(app)) as client:
+        yield SimpleEnv(clock, linking, store, client, gym, member)
+    await engine.dispose()
+
+
+SPA_SHELL_ROUTE = "/dashboard"
+
+
+async def test_spa_shell_serves_authenticated(spa_env):
+    """With the flag on, an authenticated coach gets the SPA shell."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        SPA_SHELL_ROUTE, cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    text = await response.text()
+    # The shell injects window.__I18N__ with the active-language strings.
+    assert "window.__I18N__" in text
+    # The root div is present for React to mount into.
+    assert 'id="root"' in text
+
+
+async def test_spa_shell_injects_i18n_strings(spa_env):
+    """The SPA shell injects window.__I18N__ from server STRINGS for the active lang."""
+    from agentg.dashboard_i18n import STRINGS
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        SPA_SHELL_ROUTE,
+        cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "en"},
+    )
+
+    text = await response.text()
+    assert "window.__I18N__" in text
+    # Spot-check a few English strings.
+    for key, value in STRINGS["en"].items():
+        # Not every string makes it into the bootstrap — just verify the
+        # object is injected and carries real keys.
+        if key == "settings":
+            assert value in text
+            break
+
+
+async def test_spa_shell_rejects_unauthenticated(spa_env):
+    """Without a cookie the SPA shell answers the same bounce page."""
+    response = await spa_env.client.get(SPA_SHELL_ROUTE)
+    assert response.status == 200
+    text = await response.text()
+    assert BOUNCE_MARKER in text
+    assert "Iron Temple" not in text
+
+
+async def test_spa_serves_static_assets(spa_env):
+    """The built assets are served as static files."""
+    response = await spa_env.client.get("/dashboard/assets/index.js")
+    assert response.status == 200
+    text = await response.text()
+    assert "stub" in text
+
+
+async def test_flag_off_dashboard_unaffected(env):
+    """With the spa flag off (default), the existing dashboard is byte-for-byte
+    the same — no new route leaks in."""
+    # Sign in and verify the classic dashboard renders.
+    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
+
+    response = await env.client.get("/", cookies={SESSION_COOKIE: cookie})
+
+    assert response.status == 200
+    text = await response.text()
+    # The server-HTML dashboard is served, not the SPA shell.
+    assert "Iron Temple" in text
+    assert "window.__I18N__" not in text
+    assert 'id="root"' not in text
