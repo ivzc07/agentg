@@ -355,10 +355,16 @@ async def test_flag_off_dashboard_unaffected(env):
     assert 'id="root"' not in text
 
 
-async def test_spa_enabled_wired_from_settings(tmp_path):
-    """The production wiring — Settings.dashboard_spa_enabled → build_app —
-    gates the SPA shell.  This test caught the original gap where main.py
-    never passed ``spa_enabled``."""
+async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
+    """The production wiring — Settings.dashboard_spa_enabled → build_app — runs
+    through ``main.build_dashboard_app``, the one place ``run()`` builds the app.
+
+    Dropping ``spa_enabled=`` from that call site turns this test red; that gap
+    is exactly what shipped a dead flag the first time round.
+    """
+    from types import SimpleNamespace
+
+    from agentg import main as main_module
     from agentg.config import Settings
 
     settings = Settings.from_env(
@@ -366,20 +372,27 @@ async def test_spa_enabled_wired_from_settings(tmp_path):
             "TELEGRAM_BOT_TOKEN": "dummy",
             "MODEL_API_KEY": "dummy",
             "DASHBOARD_SPA_ENABLED": "1",
+            "DASHBOARD_SESSION_SECRET": SECRET,
         }
     )
     assert settings.dashboard_spa_enabled is True
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
     try:
-        app = build_app(
-            store,
-            linking,
-            session_secret=SECRET,
+        # The clock is the only thing run()'s call site cannot supply, so the
+        # app is built through the production helper and only the clock is
+        # patched in.
+        real_build_app = main_module.build_app
+
+        def build_app_with_clock(*args, **kwargs):
+            return real_build_app(*args, clock=clock, **kwargs)
+
+        monkeypatch.setattr(main_module, "build_app", build_app_with_clock)
+        app = main_module.build_dashboard_app(
+            SimpleNamespace(dashboard=store, linking=linking),
+            settings,
             bot_username="testbot",
-            secure_cookies=False,
-            clock=clock,
-            spa_enabled=settings.dashboard_spa_enabled,
+            notifier=None,
         )
         # Create stub dist so the SPA route resolves.
         dist_dir = Path(__file__).parent.parent / "frontend" / "dist"
