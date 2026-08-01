@@ -251,10 +251,11 @@ async def test_suggestions_for_multi_exercise_workout_use_constant_queries(
         assert s.exercise in ("bench press", "squat", "deadlift")
         assert s.action != "none"  # each has logged history
 
-    # The old N+1 pattern would issue ~38 queries for 6 exercises (per the
-    # latency audit).  For 3 exercises with 2 sessions each, it would still
-    # be well into the 20s.  With batching (#170), the whole call stays
-    # inside a tight constant bound regardless of exercise count.
-    assert counts[0] < 20, (
-        f"expected < 20 SQL statements (constant batch), got {counts[0]}"
+    # The old N+1 pattern issues ~19 queries for 3 exercises with 2
+    # sessions each (per-exercise history queries plus overhead).  With
+    # batching (#170), the whole call stays inside a tight constant bound
+    # regardless of exercise count.  The threshold must be below the
+    # N+1 count so the guard bites when the fix is reverted.
+    assert counts[0] <= 12, (
+        f"expected <= 12 SQL statements (constant batch), got {counts[0]}"
     )

@@ -7,12 +7,13 @@ gap math and the auto-close timeout are testable.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from agentg.catalog import find_exercise, find_or_create_exercise, normalize_exercise_name
@@ -433,8 +434,6 @@ class TrainingStore:
             # Group by exercise, then by session; enforce the per-Exercise
             # limit on the grouped sessions (most-recent-first from the
             # ordering above).
-            from collections import defaultdict
-
             ex_sessions: dict[int, dict[int, dict[str, Any]]] = defaultdict(dict)
             for session_id, ex_id, weight, reps, started_at in rows:
                 if session_id not in ex_sessions[ex_id]:
@@ -444,9 +443,10 @@ class TrainingStore:
                     }
                 ex_sessions[ex_id][session_id]["weight_reps"].append((weight, reps))
 
-            id_to_name = {v: k for k, v in name_to_id.items()}
+            id_to_names: dict[int, list[str]] = defaultdict(list)
+            for ex_name, ex_id in name_to_id.items():
+                id_to_names[ex_id].append(ex_name)
             for ex_id, sessions in ex_sessions.items():
-                ex_name = id_to_name[ex_id]
                 sorted_sessions = sorted(
                     sessions.items(),
                     key=lambda kv: kv[1]["started_at"],
@@ -460,7 +460,8 @@ class TrainingStore:
                         r for w, r in data["weight_reps"] if w == top_weight
                     ]
                     history.append({"top_weight": top_weight, "top_reps": top_reps})
-                result[ex_name] = history
+                for ex_name in id_to_names[ex_id]:
+                    result[ex_name] = history
 
             return result
 
