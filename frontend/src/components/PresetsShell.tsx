@@ -28,7 +28,7 @@ export function PresetsShell({ name: _name, gym, children }: PresetsShellProps) 
         <span className="flex-1" />
 
         <Link
-          to="/dashboard"
+          to="/"
           className="text-[13px] text-ink-2 hover:text-ink transition-colors"
         >
           {t("back_to_roster")}

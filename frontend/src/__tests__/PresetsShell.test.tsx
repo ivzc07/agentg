@@ -31,7 +31,7 @@ describe("PresetsShell", () => {
 
   it("renders a link back to the roster", () => {
     render(
-      <MemoryRouter>
+      <MemoryRouter basename="/dashboard" initialEntries={["/dashboard/presets"]}>
         <PresetsShell name="Coach" gym="Iron Temple">
           <div />
         </PresetsShell>

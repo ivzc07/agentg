@@ -947,6 +947,27 @@ async def test_api_presets_list_returns_json_shape(spa_env):
     assert "name" in m
 
 
+async def test_api_presets_list_has_master_true(spa_env):
+    """A preset with a master Routine reports has_master=True."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    await _seed_exercises(store)
+    preset = await store.create_preset(spa_env.gym.id, "Mastered")
+    await store.save_preset_master_from_web(
+        spa_env.gym.id, preset.id, spa_env.member.id, None,
+        [WorkoutSpec(weekday=0, name="Full body", exercises=[ExerciseSpec("squat", 3, "8-10")])],
+    )
+
+    response = await spa_env.client.get(
+        "/api/presets", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    p = next(p for p in data["presets"] if p["id"] == preset.id)
+    assert p["has_master"] is True
+
+
 async def test_api_presets_list_refreshes_cookie(spa_env):
     """A successful GET /api/presets slides the 90-day session cookie."""
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
