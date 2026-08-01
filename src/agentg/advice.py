@@ -20,6 +20,8 @@ from agentg.progression import (
 from agentg.routines import RoutineStore
 from agentg.training import TrainingStore
 
+_UNSET_ROUTINE: Any = object()
+
 
 @dataclass(frozen=True)
 class ExerciseSuggestion:
@@ -48,15 +50,16 @@ async def suggest_for_today(
     gym_id: int,
     timezone: str = "UTC",
     *,
-    routine: dict[str, Any] | None = None,
+    routine: Any = _UNSET_ROUTINE,
 ) -> list[ExerciseSuggestion]:
     """Weight suggestions for each Exercise in today's Workout (empty on a
     rest day or with no Routine).
 
     When *routine* is provided (the pre-loaded active Routine from the
     per-turn cache), today's Workout is derived from it without a re-query.
-    Otherwise ``todays_workout`` loads the active Routine itself."""
-    if routine is not None:
+    ``None`` means the cache was consulted and there is no Routine — no
+    re-query.  Omit the argument to fall back to ``todays_workout``."""
+    if routine is not _UNSET_ROUTINE:
         workout = routines.pick_todays_workout(routine, timezone)
     else:
         workout = await routines.todays_workout(member_id, timezone)

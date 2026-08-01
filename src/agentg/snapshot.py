@@ -26,20 +26,11 @@ def _headline(exercises: list[dict[str, Any]], unit: str) -> str:
     return " · ".join(parts)
 
 
-async def _ensure_cached_routine(context: MemberContext) -> dict[str, Any] | None:
-    """Return the active Routine, loading it once per turn into the
-    MemberContext cache so the snapshot, session opener, and weight
-    suggestions all use the same loaded Routine (#162)."""
-    cache = context.turn_cache
-    if not cache._routine_loaded:
-        cache._active_routine = await context.stores.routines.active_routine(context.member_id)
-        cache._routine_loaded = True
-    return cache._active_routine
-
-
 async def member_snapshot(context: MemberContext) -> str:
     days, last = await context.stores.training.latest_session_info(context.member_id)
-    routine = await _ensure_cached_routine(context)
+    routine = await context.turn_cache.get_or_load_routine(
+        context.stores.routines, context.member_id
+    )
     todays_workout = context.stores.routines.pick_todays_workout(routine, context.timezone)
     notes = await context.stores.notes.active(context.member_id)
 

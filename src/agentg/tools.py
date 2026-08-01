@@ -14,7 +14,6 @@ from agents import RunContextWrapper, Tool, function_tool
 from pydantic import BaseModel, Field
 
 from agentg.advice import suggest_for_today
-from agentg.snapshot import _ensure_cached_routine
 from agentg.coaching import (
     flag_to_coach_action,
     update_rules_doc_action,
@@ -58,7 +57,7 @@ async def open_session_payload(c: MemberContext) -> dict[str, Any]:
     """Open (or resume) the Member's Session and assemble the opener facts:
     the gap, the last Session's numbers, and today's Workout from the Routine."""
     opened = await c.stores.training.open_session(c.member_id, c.gym_id)
-    routine = await _ensure_cached_routine(c)
+    routine = await c.turn_cache.get_or_load_routine(c.stores.routines, c.member_id)
     return {
         "session_id": opened.session_id,
         "resumed_existing": opened.reopened,
@@ -271,6 +270,9 @@ async def save_routine(
         # list_exercises and try again.
         return {"error": str(error)}
     saved = await c.stores.routines.active_routine(c.member_id)
+    # Update the per-turn cache so subsequent calls in this turn
+    # (open_session_payload, suggest_weights) see the new Routine (#162).
+    c.turn_cache.set_routine(saved)
     return {
         "routine_id": routine.id,
         "workouts_saved": len(saved["workouts"]) if saved is not None else len(specs),
@@ -300,7 +302,7 @@ async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, An
     the suggestions ease back; open warm and guilt-free.
     """
     c = ctx.context
-    routine = await _ensure_cached_routine(c)
+    routine = await c.turn_cache.get_or_load_routine(c.stores.routines, c.member_id)
     suggestions = await suggest_for_today(
         c.stores.training, c.stores.routines, c.member_id, c.gym_id, c.timezone,
         routine=routine,

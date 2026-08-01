@@ -184,13 +184,19 @@ async def test_active_routine_is_loaded_exactly_once_per_turn(env):
     assert payload["todays_workout"] is not None
     assert payload["todays_workout"]["name"] == "Push"
 
+    # Exercise the same code path suggest_weights uses: get the cached
+    # Routine via the public TurnCache API (not the private field), then
+    # pass it to suggest_for_today.
+    routine = await context.turn_cache.get_or_load_routine(
+        context.stores.routines, context.member_id
+    )
     suggestions = await suggest_for_today(
         context.stores.training,
         context.stores.routines,
         context.member_id,
         context.gym_id,
         context.timezone,
-        routine=context.turn_cache._active_routine,
+        routine=routine,
     )
     assert len(suggestions) == 1
     assert suggestions[0].exercise == "bench press"
@@ -199,8 +205,56 @@ async def test_active_routine_is_loaded_exactly_once_per_turn(env):
     assert counter.active_routine_calls == 1
 
 
+async def test_no_routine_loads_exactly_once_per_turn(env):
+    """When a Member has no Routine, a full turn still queries active_routine
+    exactly once — cached None avoids a re-query via the sentinel (#162)."""
+    counter = _CountingRoutineStore(env.routines)
+    context = MemberContext(
+        stores=Stores(
+            linking=env.context.stores.linking,
+            training=env.context.stores.training,
+            notes=env.context.stores.notes,
+            routines=counter,
+            checkins=env.context.stores.checkins,
+            demos=env.context.stores.demos,
+            forget=env.context.stores.forget,
+            dashboard=env.context.stores.dashboard,
+        ),
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        member_name="Dani",
+        gym_name="Iron Temple",
+        weight_unit="kg",
+    )
+
+    # Full turn: snapshot, session opener, weight suggestions.
+    snapshot = await member_snapshot(context)
+    assert "no routine" in snapshot.lower()
+
+    payload = await open_session_payload(context)
+    assert payload["todays_workout"] is None
+
+    # Exercise the same code path suggest_weights uses.
+    routine = await context.turn_cache.get_or_load_routine(
+        context.stores.routines, context.member_id
+    )
+    suggestions = await suggest_for_today(
+        context.stores.training,
+        context.stores.routines,
+        context.member_id,
+        context.gym_id,
+        context.timezone,
+        routine=routine,  # None — cached, sentinel tells suggest_for_today not to re-query
+    )
+    assert suggestions == []
+
+    # Exactly one DB load — cached None fed the rest, no fallback re-query.
+    assert counter.active_routine_calls == 1
+
+
 async def test_the_cache_lives_exactly_one_turn(env):
-    """A fresh MemberContext (a new turn) reloads the Routine from the DB (#162)."""
+    """A fresh MemberContext (a new turn) reloads the Routine from the DB,
+    and a Routine edited between turns shows the new content (#162)."""
     await env.routines.save_routine(env.member_id, env.gym_id, wednesday_push())
 
     counter = _CountingRoutineStore(env.routines)
@@ -223,10 +277,24 @@ async def test_the_cache_lives_exactly_one_turn(env):
         gym_name="Iron Temple",
         weight_unit="kg",
     )
-    await member_snapshot(ctx1)
+    snapshot1 = await member_snapshot(ctx1)
+    assert "Push" in snapshot1
     assert counter.active_routine_calls == 1
 
-    # Second turn with a fresh context — should re-query.
+    # Edit the Routine between turns — save a Pull workout instead.
+    await env.routines.save_routine(
+        env.member_id,
+        env.gym_id,
+        [
+            WorkoutSpec(
+                weekday=2,
+                name="Pull",
+                exercises=[ExerciseSpec("deadlift", sets=1, reps="5")],
+            )
+        ],
+    )
+
+    # Second turn with a fresh context — should re-query and see the new name.
     ctx2 = MemberContext(
         stores=ctx1.stores,
         member_id=env.member_id,
@@ -235,5 +303,7 @@ async def test_the_cache_lives_exactly_one_turn(env):
         gym_name="Iron Temple",
         weight_unit="kg",
     )
-    await member_snapshot(ctx2)
+    snapshot2 = await member_snapshot(ctx2)
+    assert "Pull" in snapshot2
+    assert "Push" not in snapshot2
     assert counter.active_routine_calls == 2

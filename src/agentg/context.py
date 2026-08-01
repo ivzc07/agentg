@@ -24,6 +24,20 @@ class TurnCache:
     _active_routine: dict[str, Any] | None = None
     _routine_loaded: bool = False
 
+    async def get_or_load_routine(
+        self, routines_store: Any, member_id: int
+    ) -> dict[str, Any] | None:
+        """Return the active Routine, loading it once per turn (#162)."""
+        if not self._routine_loaded:
+            self._active_routine = await routines_store.active_routine(member_id)
+            self._routine_loaded = True
+        return self._active_routine
+
+    def set_routine(self, routine: dict[str, Any] | None) -> None:
+        """Replace the cached Routine — call after saving a new one."""
+        self._active_routine = routine
+        self._routine_loaded = True
+
 
 @dataclass(frozen=True)
 class MemberContext:
