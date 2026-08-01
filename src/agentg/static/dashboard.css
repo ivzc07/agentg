@@ -57,7 +57,8 @@ button:hover { border-color: var(--ink-2); }
 button:disabled { opacity: .4; cursor: default; }
 .btn-primary { background: var(--ink); color: #000; border-color: var(--ink); }
 .btn-primary:hover { background: #e6e6e6; border-color: #e6e6e6; }
-.btn-primary.big { display: block; width: 100%; min-height: 55px; font-size: 16px; }
+.btn-primary.big { display: block; width: 100%; min-height: 55px; font-size: 16px; transition: box-shadow var(--t-fast), background var(--t-fast); }
+.btn-primary.big:hover { box-shadow: var(--glow-accent-strong); }
 input[type="text"], input[type="search"], select, textarea {
   background: var(--surface-2); color: var(--ink); border: 1px solid var(--line-2);
   font: inherit; min-height: 44px; padding: 8px 12px;
@@ -272,16 +273,42 @@ a.edit:hover { border-color: var(--ink-2); }
 
 .editor-wrap { max-width: 44rem; margin: 0 auto; padding: 0 var(--gut) 48px; }
 .editor-wrap header h1 { font-size: 22px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.day-edit { background: var(--surface); border: 0; margin: 12px 0; padding: 14px 16px; }
+/* Day edit blocks — relieved surfaces with elevation, radius, and stroke tokens. */
+.day-edit {
+  background: var(--elevation-1-bg);
+  border: 1px solid var(--elevation-1-stroke);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elevation-1-shadow);
+  margin: 14px 0; padding: 16px; }
+/* A spare (empty) block is dimmed and dashed — still a drop target, not a ghost. */
+.day-edit.spare {
+  background: var(--elevation-0-bg);
+  border: 1px dashed var(--elevation-0-stroke);
+  box-shadow: none; opacity: .65; }
+.day-edit.spare:hover, .day-edit.spare:focus-within { opacity: 1; }
+/* The weekday name as a fieldset legend — the group label. */
+.day-edit .day-legend {
+  font-family: var(--mono); text-transform: uppercase; font-size: 11px;
+  letter-spacing: .14em; font-weight: 400; color: var(--ink-3);
+  padding: 0 6px 8px; }
 .day-edit label { display: block; font-size: 13px; color: var(--ink-2); margin: 10px 0 0; }
+.day-edit label:first-of-type { margin-top: 0; }
 .day-edit select, .day-edit input, .day-edit textarea { display: block; width: 100%; margin: 4px 0 0; }
 .day-edit select { width: auto; }
 .day-edit textarea { font-family: var(--mono); min-height: 96px; }
+.day-edit select:focus, .day-edit input:focus, .day-edit textarea:focus {
+  border-color: var(--magenta); box-shadow: var(--glow-accent); }
 .consequence { color: var(--ink-2); font-size: 14px; margin: 6px 0 0; }
 .editor-help { color: var(--ink-2); font-size: 13px; margin: 12px 0 4px; }
 .catalog { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0 10px; }
 .catchip { border: 1px solid var(--line-2); color: var(--ink-2); font-size: 12px; padding: 4px 8px; white-space: nowrap; }
-.fresh-version { background: var(--surface); padding: 4px 16px 12px; margin: 12px 0; }
+/* The fresh version readout on a stale refuse — same elevation as day blocks. */
+.fresh-version {
+  background: var(--elevation-1-bg);
+  border: 1px solid var(--elevation-1-stroke);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elevation-1-shadow);
+  padding: 4px 16px 12px; margin: 12px 0; }
 /* Presets: one card per Preset, members picked as chips. */
 .pcard { background: var(--surface); padding: 16px; margin-top: 14px; }
 .pcard h2 { font-size: 17px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -305,6 +332,15 @@ a.edit:hover { border-color: var(--ink-2); }
 /* A QR must sit on white to scan — the one white block that is not a flag. */
 .qr { background: #fff; padding: 12px; width: 200px; margin: 12px 0; }
 .qr svg { display: block; width: 100%; height: auto; }
+/* --- 375px baseline: the editor stays usable on the narrowest phone --- */
+@media (max-width: 399px) {
+  .editor-wrap { padding: 0 10px 48px; }
+  .day-edit { padding: 12px; margin: 10px 0; }
+  .day-edit select { width: 100%; }
+  .editor-wrap header h1 { font-size: 19px; }
+  .btn-primary.big { min-height: 48px; font-size: 15px; }
+}
+
 /* --- Reduced motion: kill every transition & animation --- */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

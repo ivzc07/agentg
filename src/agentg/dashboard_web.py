@@ -1060,14 +1060,17 @@ def _days_from_form(form: MultiDictProxy) -> list[EditorDay]:
     return days
 
 
-def _editor_day(day: EditorDay, lang: str) -> str:
+def _editor_day(day: EditorDay, lang: str, *, spare: bool = False) -> str:
     weekday, name, exercises_text = day
     t = STRINGS[lang]
     options = [f'<option value="">{t["pick_day"]}</option>']
     for i, weekday_name in enumerate(WEEKDAYS[lang]):
         selected = " selected" if weekday == i else ""
         options.append(f'<option value="{i}"{selected}>{weekday_name}</option>')
-    return f"""<fieldset class="day-edit">
+    spare_class = " spare" if spare else ""
+    legend = "" if spare else f'<legend class="day-legend">{WEEKDAYS[lang][weekday] if weekday is not None else t["pick_day"]}</legend>'
+    return f"""<fieldset class="day-edit{spare_class}">
+{legend}
 <label>{t["label_weekday"]}
 <select name="weekday">{"".join(options)}</select></label>
 <label>{t["label_workout_name"]}
@@ -1226,7 +1229,7 @@ def _routine_editor_page(
     used = {day[0] for day in days if day[0] is not None}
     spares = max(1, 7 - len(used))
     blocks = "".join(_editor_day(day, lang) for day in days) + "".join(
-        _editor_day((None, "", ""), lang) for _ in range(spares)
+        _editor_day((None, "", ""), lang, spare=True) for _ in range(spares)
     )
     # The stale-check stamp: the view's active Routine by default, but a
     # rejected save keeps the SUBMITTED stamp — rebuilding it from the fresh
