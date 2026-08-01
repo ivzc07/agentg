@@ -2298,6 +2298,163 @@ def build_app(
 
     # --- /api/roster JSON endpoint (issue #149) ---
 
+    # --- /api/presets JSON endpoints (issue #152) ---
+
+    async def api_presets_list(request: web.Request) -> web.Response:
+        """``GET /api/presets`` — cookie-auth via ``require_coach``; returns
+        the Gym's live Presets, eligible Members, and the default Preset id.
+        Unauthenticated answers 401."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        presets = await store.presets(gym.id)
+        members = await store.preset_members(gym.id)
+        default_id = await store.default_preset_id(gym.id)
+
+        async def serialise(preset: RoutinePreset) -> dict:
+            master = await store.preset_master(preset.id)
+            return {
+                "id": preset.id,
+                "name": preset.name,
+                "is_default": preset.id == default_id,
+                "has_master": master is not None,
+            }
+
+        body = {
+            "presets": [await serialise(p) for p in presets],
+            "members": [{"id": m.id, "name": m.name} for m in members],
+            "default_preset_id": default_id,
+        }
+        response = web.json_response(body)
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def api_presets_create(request: web.Request) -> web.Response:
+        """``POST /api/presets`` — create a new Preset. Body: ``{"name": "..."}``.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        try:
+            payload = await request.json()
+            name = payload.get("name", "")
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        if not isinstance(name, str) or not name.strip():
+            return web.json_response({"error": "preset_name_empty"}, status=400)
+        if len(name.strip()) > 100:
+            return web.json_response({"error": "preset_name_too_long"}, status=400)
+        try:
+            preset = await store.create_preset(gym.id, name)
+        except DuplicatePresetNameError:
+            return web.json_response({"error": "duplicate_preset_name"}, status=400)
+        except ValueError:
+            return web.json_response({"error": "preset_name_empty"}, status=400)
+        response = web.json_response({"id": preset.id, "name": preset.name}, status=201)
+        set_session(response, member.id, gym.id)
+        return response
+
+    async def api_presets_apply(request: web.Request) -> web.Response:
+        """``POST /api/presets/{preset_id}/apply`` — apply a Preset to chosen
+        Members. Body: ``{"member_ids": [...], "apply_all": bool}``.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        if await store.preset_for_gym(gym.id, preset_id) is None:
+            return web.json_response({"error": "not_found"}, status=404)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        apply_all = bool(payload.get("apply_all", False))
+        raw_ids = payload.get("member_ids", [])
+        if not isinstance(raw_ids, list):
+            return web.json_response({"error": "preset_no_selection"}, status=400)
+        try:
+            member_ids = [int(v) for v in raw_ids]
+        except (ValueError, TypeError):
+            return web.json_response({"error": "not_found"}, status=404)
+        if apply_all:
+            member_ids = [m.id for m in await store.preset_members(gym.id)]
+        elif not member_ids:
+            return web.json_response({"error": "preset_no_selection"}, status=400)
+        try:
+            copies = await store.apply_preset(gym.id, preset_id, coach_member.id, member_ids)
+        except NoPresetMasterError:
+            return web.json_response({"error": "preset_no_master"}, status=400)
+        except StaleRoutineError:
+            return web.json_response({"error": "stale_error"}, status=409)
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        # Best-effort notify each member.
+        for copy in copies:
+            try:
+                channel = await store.member_channel(copy.member_id)
+                if channel is not None and notifier is not None:
+                    await notifier.send(
+                        channel[0],
+                        channel[1],
+                        routine_notice(coach_member.name, copy.workouts),
+                    )
+            except Exception:
+                logger.exception("failed to notify member %s of the Preset apply", copy.member_id)
+        response = web.json_response({"applied": len(copies)})
+        set_session(response, coach_member.id, gym.id)
+        return response
+
+    async def api_presets_default(request: web.Request) -> web.Response:
+        """``POST /api/presets/{preset_id}/default`` — set or clear the default
+        Preset. Toggling the current default clears it.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        if await store.preset_for_gym(gym.id, preset_id) is None:
+            return web.json_response({"error": "not_found"}, status=404)
+        try:
+            current_default = await store.default_preset_id(gym.id)
+            clearing = current_default == preset_id
+            await store.set_default_preset(gym.id, None if clearing else preset_id)
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        new_default = await store.default_preset_id(gym.id)
+        response = web.json_response({"default_preset_id": new_default})
+        set_session(response, coach_member.id, gym.id)
+        return response
+
+    async def api_presets_retire(request: web.Request) -> web.Response:
+        """``POST /api/presets/{preset_id}/retire`` — retire a Preset.
+        Members keep their copies; the Preset can no longer be edited or applied.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        try:
+            await store.retire_preset(gym.id, preset_id)
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        response = web.json_response({"retired": True})
+        set_session(response, coach_member.id, gym.id)
+        return response
+
     async def api_roster(request: web.Request) -> web.Response:
         """``GET /api/roster`` — cookie-auth via ``require_coach``; returns
         the roster as JSON: active rows, lapsed tail, counts, and the sort
@@ -2427,9 +2584,14 @@ def build_app(
     app.router.add_post("/login/{token}", login_redeem)
     app.router.add_static("/static/", STATIC_DIR)
     if spa_enabled:
-        # /api/roster is the SPA's JSON endpoint — it has no server-HTML
-        # consumer, so flag-gating it keeps the prod surface minimal.
+        # JSON endpoints for the SPA — flag-gated so the flag-off rollback
+        # holds (ADR 0004 §Migration 5b).
         app.router.add_get("/api/roster", api_roster)
+        app.router.add_get("/api/presets", api_presets_list)
+        app.router.add_post("/api/presets", api_presets_create)
+        app.router.add_post("/api/presets/{preset_id}/apply", api_presets_apply)
+        app.router.add_post("/api/presets/{preset_id}/default", api_presets_default)
+        app.router.add_post("/api/presets/{preset_id}/retire", api_presets_retire)
         if not (resolved_dist / "assets").is_dir():
             logger.warning(
                 "SPA enabled but %s missing — serve /dashboard with a 503; "

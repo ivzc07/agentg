@@ -17,6 +17,8 @@ from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
+from agentg.models import Exercise
+from agentg.routines import ExerciseSpec, WorkoutSpec
 from conftest import FakeClock
 
 SECRET = "test-secret"
@@ -663,7 +665,7 @@ async def test_api_roster_active_rows_have_required_fields(spa_env):
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
     # Add a non-coach member so the roster has at least one row.
-    member2 = await spa_env.linking.link_member(spa_env.gym.id, "Ben", "telegram", "99")
+    await spa_env.linking.link_member(spa_env.gym.id, "Ben", "telegram", "99")
 
     response = await spa_env.client.get(
         "/api/roster", cookies={SESSION_COOKIE: cookie}
@@ -872,3 +874,420 @@ async def test_spa_fallback_static_assets_still_served(spa_env):
     assert response.status == 200
     text = await response.text()
     assert "stub" in text
+
+
+# --- /api/presets JSON endpoint (issue #152) ---
+#
+# The presets API is flag-gated behind spa_enabled; every mutating endpoint is
+# a POST that requires cookie auth via require_coach and reuses existing store
+# methods.
+
+
+async def test_api_presets_flag_off_404(env):
+    """When spa_enabled=False, /api/presets routes return 404."""
+    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
+    for method, path in [
+        ("get", "/api/presets"),
+        ("post", "/api/presets"),
+        ("post", "/api/presets/1/apply"),
+        ("post", "/api/presets/1/default"),
+        ("post", "/api/presets/1/retire"),
+    ]:
+        if method == "get":
+            resp = await env.client.get(path, cookies={SESSION_COOKIE: cookie})
+        else:
+            resp = await env.client.post(path, json={}, cookies={SESSION_COOKIE: cookie})
+        assert resp.status == 404, f"{method.upper()} {path} should 404 when flag off, got {resp.status}"
+
+
+async def test_api_presets_list_requires_auth(spa_env):
+    """GET /api/presets answers 401 without a valid session cookie."""
+    response = await spa_env.client.get("/api/presets")
+    assert response.status == 401
+    data = json.loads(await response.text())
+    assert data["error"] == "unauthorized"
+
+
+async def test_api_presets_list_returns_json_shape(spa_env):
+    """An authenticated coach gets the expected JSON shape for presets."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    await store.create_preset(spa_env.gym.id, "Beginner")
+
+    # Add a non-coach member so the members list is non-empty.
+    await spa_env.linking.link_member(spa_env.gym.id, "Luis", "telegram", "200")
+
+    response = await spa_env.client.get(
+        "/api/presets", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 200
+    assert response.content_type == "application/json"
+    data = json.loads(await response.text())
+    assert "presets" in data
+    assert "members" in data
+    assert "default_preset_id" in data
+    assert isinstance(data["presets"], list)
+    assert isinstance(data["members"], list)
+    assert data["default_preset_id"] is None
+    # Preset shape.
+    assert len(data["presets"]) == 1
+    p = data["presets"][0]
+    assert "id" in p
+    assert "name" in p
+    assert "is_default" in p
+    assert "has_master" in p
+    assert p["name"] == "Beginner"
+    assert p["is_default"] is False
+    assert p["has_master"] is False
+    # Member shape.
+    assert len(data["members"]) >= 1
+    m = data["members"][0]
+    assert "id" in m
+    assert "name" in m
+
+
+async def test_api_presets_list_refreshes_cookie(spa_env):
+    """A successful GET /api/presets slides the 90-day session cookie."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    response = await spa_env.client.get(
+        "/api/presets", cookies={SESSION_COOKIE: cookie}
+    )
+    assert response.status == 200
+    assert SESSION_COOKIE in response.cookies
+
+
+async def test_api_presets_create_requires_auth(spa_env):
+    """POST /api/presets answers 401 without a valid session cookie."""
+    response = await spa_env.client.post("/api/presets", json={"name": "Test"})
+    assert response.status == 401
+
+
+async def test_api_presets_create_success(spa_env):
+    """POST /api/presets creates a new preset and returns it."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.post(
+        "/api/presets", json={"name": " Beginner "}, cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 201
+    data = json.loads(await response.text())
+    assert data["name"] == "Beginner"
+    assert "id" in data
+
+    # Verify it appears in the list.
+    list_resp = await spa_env.client.get(
+        "/api/presets", cookies={SESSION_COOKIE: cookie}
+    )
+    list_data = json.loads(await list_resp.text())
+    assert len(list_data["presets"]) == 1
+    assert list_data["presets"][0]["name"] == "Beginner"
+
+
+async def test_api_presets_create_duplicate(spa_env):
+    """POST /api/presets rejects a duplicate name with 400."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    await spa_env.client.post(
+        "/api/presets", json={"name": "Beginner"}, cookies={SESSION_COOKIE: cookie}
+    )
+    response = await spa_env.client.post(
+        "/api/presets", json={"name": "Beginner"}, cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 400
+    data = json.loads(await response.text())
+    assert data["error"] == "duplicate_preset_name"
+
+
+async def test_api_presets_create_empty_name(spa_env):
+    """POST /api/presets rejects an empty name with 400."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.post(
+        "/api/presets", json={"name": "  "}, cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 400
+    data = json.loads(await response.text())
+    assert data["error"] == "preset_name_empty"
+
+
+async def test_api_presets_apply_requires_auth(spa_env):
+    """POST /api/presets/{id}/apply answers 401 without a valid session cookie."""
+    response = await spa_env.client.post("/api/presets/1/apply", json={"member_ids": [1]})
+    assert response.status == 401
+
+
+async def _seed_exercises(store) -> None:
+    """Ensure the Catalog has the exercises our preset tests need."""
+    async with store.session() as db:
+        from sqlalchemy import select
+        existing = set(await db.scalars(select(Exercise.name)))
+        needed = [
+            ("squat", "squats"),
+            ("bench press", "bench"),
+            ("deadlift", "deadlifts"),
+            ("barbell row", "row"),
+        ]
+        for name, aliases in needed:
+            if name not in existing:
+                db.add(Exercise(name=name, aliases=aliases))
+        if len([n for n, _ in needed if n not in existing]) > 0:
+            await db.commit()
+
+
+async def test_api_presets_apply_to_zero_members(spa_env):
+    """POST /api/presets/{id}/apply with empty member_ids returns 400."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    await _seed_exercises(store)
+    preset = await store.create_preset(spa_env.gym.id, "Beginner")
+    # Create a master so the apply doesn't fail on no_master.
+    await store.save_preset_master_from_web(
+        spa_env.gym.id, preset.id, spa_env.member.id, None,
+        [WorkoutSpec(weekday=0, name="Full body", exercises=[ExerciseSpec("squat", 3, "8-10")])],
+    )
+
+    response = await spa_env.client.post(
+        f"/api/presets/{preset.id}/apply",
+        json={"member_ids": []},
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    assert response.status == 400
+    data = json.loads(await response.text())
+    assert data["error"] == "preset_no_selection"
+
+
+async def test_api_presets_apply_not_found(spa_env):
+    """POST /api/presets/{id}/apply for unknown preset returns 404."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.post(
+        "/api/presets/999999/apply",
+        json={"member_ids": [1]},
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    assert response.status == 404
+
+
+async def test_api_presets_apply_no_master(spa_env):
+    """POST /api/presets/{id}/apply when preset has no master returns 400."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    preset = await store.create_preset(spa_env.gym.id, "Empty")
+    member = await spa_env.linking.link_member(spa_env.gym.id, "Luis", "telegram", "201")
+
+    response = await spa_env.client.post(
+        f"/api/presets/{preset.id}/apply",
+        json={"member_ids": [member.id]},
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    assert response.status == 400
+    data = json.loads(await response.text())
+    assert data["error"] == "preset_no_master"
+
+
+async def test_api_presets_apply_to_member_with_existing_routine(spa_env):
+    """Applying a preset to a member who already has a routine supersedes it."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    await _seed_exercises(store)
+    preset = await store.create_preset(spa_env.gym.id, "Beginner")
+    member = await spa_env.linking.link_member(spa_env.gym.id, "Luis", "telegram", "202")
+
+    # Give the member an existing routine first.
+    await store._routines.save_coach_routine(
+        member.id, spa_env.gym.id, spa_env.member.id,
+        [WorkoutSpec(weekday=1, name="Legs", exercises=[ExerciseSpec("squat", 4, "10")])],
+        base_routine_id=None,
+    )
+
+    # Create the preset master.
+    await store.save_preset_master_from_web(
+        spa_env.gym.id, preset.id, spa_env.member.id, None,
+        [WorkoutSpec(weekday=0, name="Full body", exercises=[ExerciseSpec("bench press", 3, "8-10")])],
+    )
+
+    response = await spa_env.client.post(
+        f"/api/presets/{preset.id}/apply",
+        json={"member_ids": [member.id]},
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    assert data["applied"] == 1
+    # The member's routine should now be the preset's.
+    active = await store._routines.active_routine(member.id)
+    assert active["workouts"][0]["name"] == "Full body"
+
+
+async def test_api_presets_apply_all(spa_env):
+    """apply_all=true applies to all eligible members."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    await _seed_exercises(store)
+    preset = await store.create_preset(spa_env.gym.id, "Beginner")
+    m1 = await spa_env.linking.link_member(spa_env.gym.id, "Luis", "telegram", "203")
+    m2 = await spa_env.linking.link_member(spa_env.gym.id, "Mara", "telegram", "204")
+
+    await store.save_preset_master_from_web(
+        spa_env.gym.id, preset.id, spa_env.member.id, None,
+        [WorkoutSpec(weekday=0, name="Full body", exercises=[ExerciseSpec("squat", 3, "8-10")])],
+    )
+
+    response = await spa_env.client.post(
+        f"/api/presets/{preset.id}/apply",
+        json={"apply_all": True, "member_ids": []},
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    assert data["applied"] == 2
+    assert await store._routines.active_routine(m1.id) is not None
+    assert await store._routines.active_routine(m2.id) is not None
+
+
+async def test_api_presets_default_requires_auth(spa_env):
+    """POST /api/presets/{id}/default answers 401 without a valid session cookie."""
+    response = await spa_env.client.post("/api/presets/1/default")
+    assert response.status == 401
+
+
+async def test_api_presets_default_set_and_clear(spa_env):
+    """POST /api/presets/{id}/default toggles the default preset."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    preset = await store.create_preset(spa_env.gym.id, "Beginner")
+
+    # Set default.
+    response = await spa_env.client.post(
+        f"/api/presets/{preset.id}/default",
+        cookies={SESSION_COOKIE: cookie},
+    )
+    assert response.status == 200
+    data = json.loads(await response.text())
+    assert data["default_preset_id"] == preset.id
+
+    # Clear default (toggle again).
+    response = await spa_env.client.post(
+        f"/api/presets/{preset.id}/default",
+        cookies={SESSION_COOKIE: cookie},
+    )
+    assert response.status == 200
+    data = json.loads(await response.text())
+    assert data["default_preset_id"] is None
+
+
+async def test_api_presets_default_not_found(spa_env):
+    """POST /api/presets/{id}/default for unknown preset returns 404."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.post(
+        "/api/presets/999999/default",
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    assert response.status == 404
+
+
+async def test_api_presets_retire_requires_auth(spa_env):
+    """POST /api/presets/{id}/retire answers 401 without a valid session cookie."""
+    response = await spa_env.client.post("/api/presets/1/retire")
+    assert response.status == 401
+
+
+async def test_api_presets_retire_success(spa_env):
+    """POST /api/presets/{id}/retire retires a preset."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    preset = await store.create_preset(spa_env.gym.id, "Beginner")
+
+    response = await spa_env.client.post(
+        f"/api/presets/{preset.id}/retire",
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    assert response.status == 200
+    data = json.loads(await response.text())
+    assert data["retired"] is True
+
+    # The preset should no longer appear in the list.
+    list_resp = await spa_env.client.get(
+        "/api/presets", cookies={SESSION_COOKIE: cookie}
+    )
+    list_data = json.loads(await list_resp.text())
+    assert len(list_data["presets"]) == 0
+
+
+async def test_api_presets_retire_clears_default(spa_env):
+    """Retiring the default preset clears the default_preset_id."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    preset = await store.create_preset(spa_env.gym.id, "Beginner")
+    await store.set_default_preset(spa_env.gym.id, preset.id)
+
+    await spa_env.client.post(
+        f"/api/presets/{preset.id}/retire",
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    assert await store.default_preset_id(spa_env.gym.id) is None
+
+
+async def test_api_presets_retire_not_found(spa_env):
+    """POST /api/presets/{id}/retire for unknown preset returns 404."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.post(
+        "/api/presets/999999/retire",
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    assert response.status == 404
+
+
+async def test_api_presets_retired_cannot_be_applied(spa_env):
+    """Applying a retired preset returns 404."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+    store = spa_env.store
+    await _seed_exercises(store)
+    preset = await store.create_preset(spa_env.gym.id, "Beginner")
+    await store.save_preset_master_from_web(
+        spa_env.gym.id, preset.id, spa_env.member.id, None,
+        [WorkoutSpec(weekday=0, name="Full body", exercises=[ExerciseSpec("squat", 3, "8-10")])],
+    )
+    member = await spa_env.linking.link_member(spa_env.gym.id, "Luis", "telegram", "205")
+
+    # Retire it.
+    await store.retire_preset(spa_env.gym.id, preset.id)
+
+    # Try to apply — should 404.
+    response = await spa_env.client.post(
+        f"/api/presets/{preset.id}/apply",
+        json={"member_ids": [member.id]},
+        cookies={SESSION_COOKIE: cookie},
+    )
+
+    assert response.status == 404
+
+
+async def test_api_presets_forged_cookie_rejected(spa_env):
+    """A forged session cookie does not open any /api/presets route."""
+    forged = sign_session(spa_env.member.id, spa_env.gym.id, "wrong-secret", spa_env.clock())
+
+    response = await spa_env.client.get(
+        "/api/presets", cookies={SESSION_COOKIE: forged}
+    )
+    assert response.status == 401
+
+    response = await spa_env.client.post(
+        "/api/presets", json={"name": "X"}, cookies={SESSION_COOKIE: forged}
+    )
+    assert response.status == 401
