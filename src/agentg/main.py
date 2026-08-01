@@ -65,6 +65,7 @@ async def run() -> None:
             bot_username=bot_username,
             secure_cookies=settings.dashboard_base_url.startswith("https://"),
             notifier=notifier,
+            spa_enabled=settings.dashboard_spa_enabled,
         ),
         host="0.0.0.0",
         port=settings.dashboard_port,

@@ -23,8 +23,8 @@ SECRET = "test-secret"
 BOUNCE_MARKER = "/dashboard"  # the bounce page tells you to send /dashboard
 
 
-@pytest.fixture
-async def env(tmp_path):
+async def _setup_stores(tmp_path):
+    """Shared store and member setup for dashboard web tests."""
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'domain.db'}")
     clock = FakeClock()
     linking = LinkingStore(engine)
@@ -33,6 +33,12 @@ async def env(tmp_path):
     gym = await linking.create_gym("Iron Temple")
     member = await linking.link_member(gym.id, "Ana", "telegram", "42")
     await linking.set_coach(member.id, True)
+    return engine, clock, linking, store, gym, member
+
+
+@pytest.fixture
+async def env(tmp_path):
+    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
     app = build_app(
         store,
         linking,
@@ -228,14 +234,7 @@ async def test_api_session_rejects_forged_cookie(env):
 @pytest.fixture
 async def spa_env(tmp_path):
     """A test app with dashboard_spa_enabled=True and a stub built bundle."""
-    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'domain.db'}")
-    clock = FakeClock()
-    linking = LinkingStore(engine)
-    store = DashboardStore(engine, clock=clock)
-    await linking.ensure_schema()
-    gym = await linking.create_gym("Iron Temple")
-    member = await linking.link_member(gym.id, "Ana", "telegram", "42")
-    await linking.set_coach(member.id, True)
+    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
 
     # Create a stub built bundle so the SPA route finds assets.
     dist_dir = Path(__file__).parent.parent / "frontend" / "dist"
@@ -304,6 +303,25 @@ async def test_spa_shell_injects_i18n_strings(spa_env):
             break
 
 
+async def test_spa_shell_injects_es_i18n_strings(spa_env):
+    """When the language cookie is ``es``, the SPA shell injects Spanish STRINGS."""
+    from agentg.dashboard_i18n import STRINGS
+
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        SPA_SHELL_ROUTE,
+        cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "es"},
+    )
+
+    text = await response.text()
+    assert "window.__I18N__" in text
+    # Verify ES strings are present in the injected bootstrap.
+    es_settings = STRINGS["es"]["settings"]
+    assert es_settings in text
+    assert "Ajustes" in text
+
+
 async def test_spa_shell_rejects_unauthenticated(spa_env):
     """Without a cookie the SPA shell answers the same bounce page."""
     response = await spa_env.client.get(SPA_SHELL_ROUTE)
@@ -335,3 +353,50 @@ async def test_flag_off_dashboard_unaffected(env):
     assert "Iron Temple" in text
     assert "window.__I18N__" not in text
     assert 'id="root"' not in text
+
+
+async def test_spa_enabled_wired_from_settings(tmp_path):
+    """The production wiring — Settings.dashboard_spa_enabled → build_app —
+    gates the SPA shell.  This test caught the original gap where main.py
+    never passed ``spa_enabled``."""
+    from agentg.config import Settings
+
+    settings = Settings.from_env(
+        {
+            "TELEGRAM_BOT_TOKEN": "dummy",
+            "MODEL_API_KEY": "dummy",
+            "DASHBOARD_SPA_ENABLED": "1",
+        }
+    )
+    assert settings.dashboard_spa_enabled is True
+
+    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+    try:
+        app = build_app(
+            store,
+            linking,
+            session_secret=SECRET,
+            bot_username="testbot",
+            secure_cookies=False,
+            clock=clock,
+            spa_enabled=settings.dashboard_spa_enabled,
+        )
+        # Create stub dist so the SPA route resolves.
+        dist_dir = Path(__file__).parent.parent / "frontend" / "dist"
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        (dist_dir / "index.html").write_text(
+            '<!DOCTYPE html><html><head><title>SPA</title></head>'
+            '<body><div id="root"></div></body></html>',
+            encoding="utf-8",
+        )
+        async with TestClient(TestServer(app)) as client:
+            cookie = sign_session(member.id, gym.id, SECRET, clock())
+            response = await client.get(
+                SPA_SHELL_ROUTE,
+                cookies={SESSION_COOKIE: cookie},
+            )
+            assert response.status == 200
+            text = await response.text()
+            assert "window.__I18N__" in text
+    finally:
+        await engine.dispose()

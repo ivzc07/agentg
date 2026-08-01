@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1536,9 +1537,6 @@ def verify_session(value: str, secret: str, now: datetime) -> tuple[int, int] | 
         return None
 
 
-import json as _json
-
-
 # The directory where the Vite-built React bundle lives.
 _FRONTEND_DIST = Path(__file__).parent.parent.parent / "frontend" / "dist"
 # The hidden route the SPA shell mounts at (ADR 0004 §Migration 5b).
@@ -2321,7 +2319,7 @@ def build_app(
         html = index_path.read_text(encoding="utf-8")
         # Inject window.__I18N__ before the first script tag so the React
         # app can read it synchronously on mount.
-        i18n_json = _json.dumps(t, ensure_ascii=False)
+        i18n_json = json.dumps(t, ensure_ascii=False)
         i18n_script = f"<script>window.__I18N__ = {i18n_json};</script>"
         # Insert after <head> (if present) or at the start of <body>.
         if "</head>" in html:
@@ -2339,6 +2337,9 @@ def build_app(
 
     app = web.Application()
     app.router.add_get("/", home)
+    # /api/session is registered unconditionally — the JSON session-info
+    # endpoint is tiny and useful for any non-SPA consumer (CLI scripts,
+    # health-check probes) so there is no value in gating it behind the flag.
     app.router.add_get("/api/session", api_session)
     app.router.add_get("/members/{member_id}", member_page)
     app.router.add_get("/members/{member_id}/routine", routine_editor)
