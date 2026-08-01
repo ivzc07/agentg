@@ -956,3 +956,50 @@ async def test_spa_login_shell_no_cookie_set(spa_env):
 
     assert response.status == 200
     assert SESSION_COOKIE not in response.cookies
+
+
+# --- SPA i18n key guard ---
+
+
+def _spa_i18n_keys() -> set[str]:
+    """Scan the SPA source for every ``t("key")`` call and return the union
+    of all string-literal keys.  Dynamic keys (``t(`view_${v}`)``) are
+    resolved against the known view set."""
+    import re
+
+    frontend_root = Path(__file__).resolve().parent.parent / "frontend" / "src"
+    key_re = re.compile(r'\bt\("([^"]+)"\)')
+    keys: set[str] = set()
+    for src_path in frontend_root.rglob("*.tsx"):
+        if "__tests__" in src_path.parts:
+            continue
+        for match in key_re.finditer(src_path.read_text(encoding="utf-8")):
+            keys.add(match.group(1))
+    for src_path in frontend_root.rglob("*.ts"):
+        if "__tests__" in src_path.parts:
+            continue
+        for match in key_re.finditer(src_path.read_text(encoding="utf-8")):
+            keys.add(match.group(1))
+    # Dynamic keys: view_table / view_cards / view_split from RosterShell
+    if "view_" in " ".join(keys):
+        keys.discard("view_")
+        keys.update({"view_table", "view_cards", "view_split"})
+    return keys
+
+
+def test_every_spa_i18n_key_exists_in_strings_for_both_languages():
+    """No ``t(key)`` in the SPA may refer to a key that is missing from
+    the real ``STRINGS`` dict — in either language.  This guards against the
+    &quot;mock hides reality&quot; trap where a Vitest mock defines a key that the
+    production i18n source does not."""
+    from agentg.dashboard_i18n import STRINGS
+
+    spa_keys = _spa_i18n_keys()
+    assert spa_keys, "expected at least one SPA i18n key"
+
+    for lang in ("es", "en"):
+        missing = spa_keys - set(STRINGS[lang].keys())
+        assert not missing, (
+            f"SPA keys missing from STRINGS['{lang}']: "
+            + ", ".join(sorted(missing))
+        )

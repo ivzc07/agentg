@@ -247,6 +247,8 @@ STRINGS = {
             "¿Retirar este Preset? Los miembros conservan su copia, pero el "
             "Preset ya no se podrá editar ni aplicar."
         ),
+        "settings_load_error": "No se pudieron cargar los ajustes.",
+        "nav_dashboard": "Dashboard",
     },
     "en": {
         "settings": "Settings",
@@ -419,6 +421,8 @@ STRINGS = {
             "Retire this preset? Members keep their copies, but the preset "
             "can no longer be edited or applied."
         ),
+        "settings_load_error": "Could not load settings.",
+        "nav_dashboard": "Dashboard",
     },
 }
 

@@ -124,7 +124,7 @@ export function SettingsPage() {
           aria-label={t("nav_sections")}
         >
           <Link to="/dashboard" className="hover:text-ink transition-colors duration-fast">
-            {t("settings") /* fallback */ }
+            {t("nav_dashboard")}
           </Link>
           <span className="text-ink">{t("settings")}</span>
         </nav>
