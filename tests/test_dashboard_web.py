@@ -327,13 +327,7 @@ async def test_spa_shell_injects_i18n_strings(spa_env):
 
     text = await response.text()
     assert "window.__I18N__" in text
-    # Spot-check a few English strings.
-    for key, value in STRINGS["en"].items():
-        # Not every string makes it into the bootstrap — just verify the
-        # object is injected and carries real keys.
-        if key == "settings":
-            assert value in text
-            break
+    assert STRINGS["en"]["settings"] in text
 
 
 async def test_spa_shell_injects_es_i18n_strings(spa_env):
@@ -385,7 +379,7 @@ async def test_spa_shell_escapes_script_close_tag(tmp_path, monkeypatch):
                 cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "en"},
             )
             text = await response.text()
-            # The raw </script> and </script must not appear in the
+            # The raw </script> and <script> must not appear in the
             # injection payload — < was escaped to \u003c.
             assert "</script>" in text  # the closing tag still exists
             # The payload between window.__I18N__ = and the closing </script>
@@ -395,6 +389,10 @@ async def test_spa_shell_escapes_script_close_tag(tmp_path, monkeypatch):
             assert "<script>" not in before_close
             # The escaped < appears as \u003c in the JSON.
             assert "\\u003c/script>" in text
+            # Round-trip: the payload must still be valid, lossless JSON.
+            i18n_raw = before_close.split(" = ", 1)[1].rstrip(";")
+            parsed = json.loads(i18n_raw)
+            assert parsed["settings"] == "</script><script>alert(1)</script>"
     finally:
         STRINGS["en"]["settings"] = original_settings
         await engine.dispose()
@@ -419,7 +417,7 @@ async def test_spa_serves_static_assets(spa_env):
 
 async def test_spa_enabled_no_dist_builds_app(tmp_path, monkeypatch):
     """With the flag on and no ``dist/`` directory the app builds without
-    crashing and the shell route returns a 503."""
+    crashing and the shell route returns a 404."""
     import agentg.dashboard_web as dashboard_web
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
@@ -470,11 +468,15 @@ async def test_flag_off_dashboard_unaffected(env):
 
 
 async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
-    """The production wiring — Settings.dashboard_spa_enabled → build_app — runs
-    through ``main.build_dashboard_app``, the one place ``run()`` builds the app.
+    """The production wiring — Settings.dashboard_spa_enabled +
+    Settings.dashboard_spa_dist → build_app — runs through
+    ``main.build_dashboard_app``, the one place ``run()`` builds the app.
 
-    Dropping ``spa_enabled=`` from that call site turns this test red; that gap
-    is exactly what shipped a dead flag the first time round.
+    ``_FRONTEND_DIST`` is pointed at a non-existent path so the only way the
+    SPA shell is reachable is through the ``spa_dist=`` kwarg wired from
+    ``DASHBOARD_SPA_DIST``.  Dropping that kwarg from the call site turns
+    this test red — the same dead-flag class of bug this PR already fixed
+    once for ``spa_enabled``.
     """
     from types import SimpleNamespace
 
@@ -486,16 +488,20 @@ async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
             "TELEGRAM_BOT_TOKEN": "dummy",
             "MODEL_API_KEY": "dummy",
             "DASHBOARD_SPA_ENABLED": "1",
+            "DASHBOARD_SPA_DIST": str(tmp_path / "dist"),
             "DASHBOARD_SESSION_SECRET": SECRET,
         }
     )
     assert settings.dashboard_spa_enabled is True
+    assert settings.dashboard_spa_dist == str(tmp_path / "dist")
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
     stub_dist = tmp_path / "dist"
     _write_stub_dist(stub_dist)
+    # _FRONTEND_DIST points into nowhere — the override must carry.
     monkeypatch.setattr(
-        "agentg.dashboard_web._FRONTEND_DIST", stub_dist
+        "agentg.dashboard_web._FRONTEND_DIST",
+        tmp_path / "site-packages" / "agentg" / ".." / ".." / "frontend" / "dist",
     )
     try:
         # The clock is the only thing run()'s call site cannot supply, so the

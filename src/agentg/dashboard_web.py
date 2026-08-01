@@ -2373,7 +2373,7 @@ def build_app(
     if spa_enabled:
         if not (resolved_dist / "assets").is_dir():
             logger.warning(
-                "SPA enabled but %s missing — serve /dashboard with a 503; "
+                "SPA enabled but %s missing — not serving /dashboard; "
                 "run `npm run build` in frontend/",
                 resolved_dist / "assets",
             )
