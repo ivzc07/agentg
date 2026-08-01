@@ -5,6 +5,8 @@ import { MotionConfig } from "framer-motion";
 import { fetchSession, SessionAuthError } from "./api/session";
 import { RosterShell } from "./components/RosterShell";
 import { MemberPage } from "./components/MemberPage";
+import { PresetsPage } from "./components/PresetsPage";
+import { PresetsShell } from "./components/PresetsShell";
 import { RoutineEditor } from "./components/RoutineEditor";
 
 const queryClient = new QueryClient({
@@ -62,6 +64,15 @@ export function Dashboard() {
           {/* A member loaded directly (not from the Split rail) — the full
               member screen, without roster chrome around it. */}
           <Route path="members/:memberId" element={<MemberPage />} />
+          {/* Presets management screen (issue #152) — standalone full-page. */}
+          <Route
+            path="presets"
+            element={
+              <PresetsShell name={data.name} gym={data.gym}>
+                <PresetsPage />
+              </PresetsShell>
+            }
+          />
           {/* The Routine editor, reached from the Member page. */}
           <Route
             path="members/:memberId/routine"

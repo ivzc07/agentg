@@ -777,6 +777,9 @@ class DashboardStore:
     async def presets(self, gym_id: int) -> list[RoutinePreset]:
         return await self._routines.presets(gym_id)
 
+    async def preset_ids_with_masters(self, gym_id: int) -> set[int]:
+        return await self._routines.preset_ids_with_masters(gym_id)
+
     async def create_preset(self, gym_id: int, name: str) -> RoutinePreset:
         return await self._routines.create_preset(gym_id, name)
 

@@ -249,6 +249,9 @@ STRINGS = {
             "¿Retirar este Preset? Los miembros conservan su copia, pero el "
             "Preset ya no se podrá editar ni aplicar."
         ),
+        "presets_loading": "Cargando…",
+        "presets_error": "Algo salió mal al cargar tus presets.",
+        "presets_retry": "Reintentar",
         # Routine editor i18n (issue #151, review 2).
         "network_error": "Error de red — por favor, inténtalo de nuevo.",
         "member_not_found": "Miembro no encontrado.",
@@ -431,6 +434,9 @@ STRINGS = {
             "Retire this preset? Members keep their copies, but the preset "
             "can no longer be edited or applied."
         ),
+        "presets_loading": "Loading…",
+        "presets_error": "Something went wrong loading your presets.",
+        "presets_retry": "Retry",
         # Routine editor i18n (issue #151, review 2).
         "network_error": "Network error — please try again.",
         "member_not_found": "Member not found.",
