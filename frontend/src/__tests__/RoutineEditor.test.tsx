@@ -256,6 +256,12 @@ describe("RoutineEditor", () => {
       expect(screen.getByText("Save Routine")).toBeDefined();
     });
 
+    // Edit the workout name before saving — this is the value that must
+    // survive the 409 refusal (not just pre-loaded server data).
+    const nameInput = screen.getByDisplayValue("Piernas");
+    await user.clear(nameInput);
+    await user.type(nameInput, "COACH-EDIT-CustomName");
+
     await user.click(screen.getByText("Save Routine"));
 
     await waitFor(() => {
@@ -267,8 +273,10 @@ describe("RoutineEditor", () => {
       expect(screen.getByText("deadlift")).toBeDefined();
     });
 
-    // The user's own edits stay on screen (not destroyed by refusal)
+    // The user's own edits stay on screen (not destroyed by refusal).
+    // Both the pre-loaded exercise (squat) and the edited name survive.
     expect(screen.getByDisplayValue("squat")).toBeDefined();
+    expect(screen.getByDisplayValue("COACH-EDIT-CustomName")).toBeDefined();
   });
 
   it("shows server validation errors", async () => {

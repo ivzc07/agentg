@@ -2625,6 +2625,10 @@ def build_app(
     app.router.add_get("/login/{token}", login_form)
     app.router.add_post("/login/{token}", login_redeem)
     app.router.add_static("/static/", STATIC_DIR)
+    # The server-HTML Routine editor is production today — registered
+    # unconditionally like member_page and the /presets routes (#151, #154).
+    app.router.add_get("/members/{member_id}/routine", routine_editor)
+    app.router.add_post("/members/{member_id}/routine", routine_save)
     if spa_enabled:
         # /api/roster is the SPA's JSON endpoint — it has no server-HTML
         # consumer, so flag-gating it keeps the prod surface minimal.

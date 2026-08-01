@@ -485,3 +485,25 @@ async def test_ensure_schema_heals_dual_active_routines_before_the_index(tmp_pat
 # Remaining web-layer tests (validation errors, notification failures, htmx
 # in-place saves) moved to test_routine_api.py — the JSON PUT endpoint
 # covers the same scenarios.
+
+
+# --- Flag-off regression: the member page Edit link must work ---
+
+
+async def test_member_page_edit_link_is_200_with_flag_off(env):
+    """The member page renders an Edit link to the server-HTML Routine
+    editor.  When spa_enabled is False (production today) that link must
+    answer 200 — the SPA cutover is #154's job, not #151's."""
+    member = await env.add_member("Luis")
+    await env.give_routine(member)
+
+    # Fetch the member page and confirm its Edit link.
+    status, body = await env.get("/members/{}".format(member.id))
+    assert status == 200
+    assert 'href="/members/{}/routine'.format(member.id) in body
+
+    # Follow the Edit link.
+    status, _ = await env.get(
+        "/members/{}/routine?view=table".format(member.id)
+    )
+    assert status == 200

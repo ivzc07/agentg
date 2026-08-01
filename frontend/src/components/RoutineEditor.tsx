@@ -245,12 +245,6 @@ export function RoutineEditor() {
     }
   };
 
-  // AA contrast values (computed against #0a0a0a bg):
-  // ink (#f5f5f5) vs bg (#0a0a0a) = ~17.3:1 ✓
-  // ink-2 (#9e9ea8) vs bg = ~7.2:1 ✓ (AA body text)
-  // accent-magenta (#e04090) vs bg = ~5.7:1 ✓ (AA large text)
-  // error text (#f87171) vs bg = ~6.3:1 ✓
-
   if (isLoading) {
     return (
       <div className="min-h-screen bg-bg flex items-center justify-center">
@@ -407,7 +401,7 @@ export function RoutineEditor() {
                         {...register(`workouts.${dayIndex}.weekday`, {
                           valueAsNumber: true,
                         })}
-                        className="w-full min-w-0 bg-elevation-0 border border-elevation-0-stroke rounded-lg px-3 py-2 text-[14px] text-ink focus:outline-none focus:ring-2 focus:ring-accent-magenta appearance-none"
+                        className="w-full min-w-0 bg-elevation-0 border border-elevation-0-stroke rounded-lg px-3 py-2 text-[14px] text-ink focus:outline-none focus:ring-2 focus:ring-magenta appearance-none"
                         style={{
                           backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%239e9ea8'%3E%3Cpath d='M3 5l3 3 3-3'/%3E%3C/svg%3E")`,
                           backgroundRepeat: "no-repeat",
@@ -457,7 +451,7 @@ export function RoutineEditor() {
                       {...register(`workouts.${dayIndex}.name`)}
                       placeholder={t("workout_name_placeholder")}
                       maxLength={100}
-                      className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-3 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-accent-magenta"
+                      className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-3 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-magenta"
                     />
                     {dayErrors?.name && (
                       <p className="mt-1 text-[12px] text-[#fca5a5]">
@@ -540,7 +534,7 @@ export function RoutineEditor() {
             <button
               type="submit"
               disabled={saveMutation.isPending}
-              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-accent-magenta text-white text-[14px] font-medium hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-fast"
+              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-magenta text-white text-[14px] font-medium hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-fast"
             >
               {saveMutation.isPending && (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -590,7 +584,7 @@ function ExerciseList({
                 placeholder="squat"
                 list={`catalog-list-${dayIndex}`}
                 autoComplete="off"
-                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-3 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-accent-magenta"
+                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-3 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-magenta"
               />
               <datalist id={`catalog-list-${dayIndex}`}>
                 {catalog.map((name) => (
@@ -614,7 +608,7 @@ function ExerciseList({
                 placeholder="sets"
                 min={1}
                 max={99}
-                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-2 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-accent-magenta text-center"
+                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-2 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-magenta text-center"
               />
               {exErrors?.sets && (
                 <p className="mt-0.5 text-[12px] text-[#fca5a5] text-center">
@@ -630,7 +624,7 @@ function ExerciseList({
                 {...register(`${exPath}.reps`)}
                 placeholder="8-10"
                 maxLength={40}
-                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-2 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-accent-magenta text-center"
+                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-2 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-magenta text-center"
               />
               {exErrors?.reps && (
                 <p className="mt-0.5 text-[12px] text-[#fca5a5] text-center">
