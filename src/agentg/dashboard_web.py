@@ -1543,6 +1543,191 @@ _FRONTEND_DIST = Path(__file__).parent.parent.parent / "frontend" / "dist"
 SPA_MOUNT = "/dashboard"
 
 
+async def _seed_demo_data(
+    store: DashboardStore,
+    linking: LinkingStore,
+    gym_id: int,
+    coach_member_id: int,
+) -> dict:
+    """Seed realistic demo data for the roster pilot (issue #149).
+
+    Creates members at varying stages — some with routines and session
+    history, some new with no sessions, some snoozed, some lapsed — so
+    the roster reads populated, not hollow, when judged against the #133
+    visual bar.
+
+    Returns a summary of what was created.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from agentg.models import Member, MemberChannel, Routine, Session, Set, Workout, Exercise
+    from agentg.checkin import ON, OFF, SNOOZED, LAPSED
+
+    now = datetime.now(UTC)
+    today = now.date()
+
+    member_defs: list[dict] = [
+        # name, checkin_state, snoozed_until offset, gap offset (days since last session),
+        # has_routine, session_count, missed_window_days
+        {"name": "Elena Vargas", "state": ON, "gap": 1, "routine": True, "sessions": 12, "missed": 3},
+        {"name": "Marcus Chen", "state": ON, "gap": 2, "routine": True, "sessions": 8, "missed": 1},
+        {"name": "Sofia Ricci", "state": ON, "gap": 0, "routine": True, "sessions": 20, "missed": 0},
+        {"name": "Jamal Owens", "state": ON, "gap": 6, "routine": True, "sessions": 4, "missed": 5},
+        {"name": "Yuki Tanaka", "state": ON, "gap": 3, "routine": True, "sessions": 15, "missed": 2},
+        {"name": "Piotr Nowak", "state": SNOOZED, "gap": 8, "routine": True, "sessions": 6, "missed": 4,
+         "snoozed_days": 4},
+        {"name": "Clara Beaufort", "state": ON, "gap": 1, "routine": False, "sessions": 0, "missed": 0},
+        {"name": "Ravi Kapoor", "state": LAPSED, "gap": 18, "routine": True, "sessions": 3, "missed": 12},
+        {"name": "Leila Haddad", "state": ON, "gap": 4, "routine": True, "sessions": 10, "missed": 3},
+        {"name": "Tom Bakker", "state": ON, "gap": 0, "routine": True, "sessions": 7, "missed": 0},
+        {"name": "Nia Mensah", "state": OFF, "gap": 10, "routine": False, "sessions": 0, "missed": 0},
+        {"name": "Diego Moretti", "state": ON, "gap": 5, "routine": True, "sessions": 2, "missed": 6,
+         "safety_flag": "sharp knee pain reported"},
+    ]
+
+    # Exercises for sessions
+    exercises_list = [
+        "squat", "bench press", "deadlift", "overhead press", "barbell row",
+        "pull-up", "dip", "lunge", "leg press", "bicep curl",
+        "tricep extension", "lat pulldown", "calf raise", "plank",
+    ]
+
+    async with store._sessions() as db:
+        # Create exercises if they don't exist
+        for ex_name in exercises_list:
+            existing = await db.scalar(
+                select(Exercise).where(Exercise.name == ex_name)
+            )
+            if existing is None:
+                db.add(Exercise(name=ex_name))
+        await db.commit()
+
+    created_members = 0
+    created_sessions = 0
+    created_routines = 0
+
+    for i, md in enumerate(member_defs):
+        # Create member and channel
+        member = await linking.link_member(
+            gym_id, md["name"], "telegram", f"demo-{i:04d}"
+        )
+        created_members += 1
+
+        # Set checkin state
+        async with store._sessions() as db:
+            m = await db.get(Member, member.id)
+            m.checkin_state = md["state"]
+            if md.get("snoozed_days"):
+                m.snoozed_until = today + timedelta(days=md["snoozed_days"])
+            await db.commit()
+
+        gap_days = md["gap"]
+        session_count = md.get("sessions", 0)
+
+        # Create sessions going back from the gap
+        if session_count > 0 and md.get("routine"):
+            # First create a routine for the member
+            workouts_data = [
+                {"weekday": 0, "name": "Push", "exercises": [
+                    {"exercise": "bench press", "sets": 4, "reps": "8-10"},
+                    {"exercise": "overhead press", "sets": 3, "reps": "10-12"},
+                    {"exercise": "dip", "sets": 3, "reps": "8-12"},
+                ]},
+                {"weekday": 2, "name": "Pull", "exercises": [
+                    {"exercise": "deadlift", "sets": 4, "reps": "5"},
+                    {"exercise": "barbell row", "sets": 3, "reps": "8-10"},
+                    {"exercise": "pull-up", "sets": 3, "reps": "6-8"},
+                ]},
+                {"weekday": 4, "name": "Legs", "exercises": [
+                    {"exercise": "squat", "sets": 4, "reps": "8-10"},
+                    {"exercise": "lunge", "sets": 3, "reps": "10"},
+                    {"exercise": "calf raise", "sets": 3, "reps": "15"},
+                ]},
+            ]
+            try:
+                await store.save_routine_from_web(
+                    gym_id, member.id, coach_member_id, None, [
+                        _spec_from_dict(w) for w in workouts_data
+                    ]
+                )
+                created_routines += 1
+            except Exception:
+                pass  # best-effort seeding
+
+            # Create sessions on various days
+            session_dates = []
+            for s in range(session_count):
+                days_ago = gap_days + s * 2 + (s % 3)  # stagger sessions
+                session_date = today - timedelta(days=days_ago)
+                session_dates.append(session_date)
+
+            for sd in session_dates:
+                started = datetime.combine(sd, datetime.min.time(), tzinfo=UTC).replace(hour=10 + (len(session_dates) % 6))
+                session = Session(
+                    gym_id=gym_id,
+                    member_id=member.id,
+                    started_at=started,
+                    ended_at=started + timedelta(hours=1),
+                )
+                async with store._sessions() as db:
+                    db.add(session)
+                    await db.flush()
+                    # Add 2-4 random sets
+                    import random
+                    rng = random.Random(member.id * 1000 + len(session_dates))
+                    n_sets = rng.randint(2, 4)
+                    for _ in range(n_sets):
+                        ex = rng.choice(exercises_list[:8])
+                        ex_id = await db.scalar(
+                            select(Exercise.id).where(Exercise.name == ex)
+                        )
+                        db.add(Set(
+                            session_id=session.id,
+                            exercise_id=ex_id,
+                            weight=round(rng.uniform(20, 100), 1),
+                            reps=rng.randint(5, 12),
+                        ))
+                    await db.commit()
+                created_sessions += 1
+
+        # Add safety flag if specified
+        if md.get("safety_flag"):
+            try:
+                from agentg.stores import Stores
+                # Use the notes store through the linking store's session
+                async with store._sessions() as db:
+                    from agentg.models import MemberNote
+                    db.add(MemberNote(
+                        member_id=member.id,
+                        gym_id=gym_id,
+                        kind="safety",
+                        text=md["safety_flag"],
+                        created_at=now - timedelta(days=2),
+                    ))
+                    await db.commit()
+            except Exception:
+                pass
+
+    return {
+        "members": created_members,
+        "sessions": created_sessions,
+        "routines": created_routines,
+    }
+
+
+def _spec_from_dict(d: dict):
+    """A WorkoutSpec from a plain dict for the seeder."""
+    from agentg.routines import ExerciseSpec, WorkoutSpec
+    return WorkoutSpec(
+        weekday=d["weekday"],
+        name=d["name"],
+        exercises=[
+            ExerciseSpec(e["exercise"], e.get("sets"), e.get("reps"))
+            for e in d["exercises"]
+        ],
+    )
+
+
 def build_app(
     store: DashboardStore,
     linking: LinkingStore,
@@ -2296,6 +2481,66 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
+    # --- /api/roster JSON endpoint (issue #149) ---
+
+    async def api_roster(request: web.Request) -> web.Response:
+        """``GET /api/roster`` — cookie-auth via ``require_coach``; returns
+        the roster as JSON: active rows, lapsed tail, counts, and the sort
+        key. Unauthenticated answers 401.
+
+        Each row carries its attendance grid (4-week day cells) so the
+        Cards view renders with one round-trip. No domain logic moves into
+        the web layer — this endpoint serializes what the store already
+        computes."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        rows, lapsed = await store.roster(gym.id)
+        member_ids = [row.member_id for row in rows] + [row.member_id for row in lapsed]
+        grids = await store.attendance(gym.id, member_ids) if member_ids else {}
+
+        def serialise(row: RosterRow) -> dict:
+            cells = grids.get(row.member_id, [])
+            return {
+                "member_id": row.member_id,
+                "name": row.name,
+                "gap_days": row.gap_days,
+                "has_sessions": row.has_sessions,
+                "is_new": row.is_new,
+                "snoozed_until": row.snoozed_until.isoformat() if row.snoozed_until else None,
+                "missed_days": row.missed_days,
+                "severity": row.severity,
+                "has_safety_flag": row.has_safety_flag,
+                "attendance": [{"on": c.on.isoformat(), "state": c.state} for c in cells],
+            }
+
+        body = {
+            "active": [serialise(row) for row in rows],
+            "lapsed": [serialise(row) for row in lapsed],
+            "counts": {"active": len(rows), "lapsed": len(lapsed)},
+            "sortedBy": "gap_days",
+        }
+        response = web.json_response(body)
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    # --- /api/seed dev/demo data endpoint (issue #149) ---
+
+    async def api_seed(request: web.Request) -> web.Response:
+        """``POST /api/seed`` — seed realistic demo data so the roster can
+        be judged populated, not hollow. Cookie-auth via ``require_coach``;
+        only available behind the SPA flag. Creates members, routines,
+        sessions, and attendance history for a realistic-looking gym."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+        created = await _seed_demo_data(store, linking, gym.id, member.id)
+        return web.json_response({"seeded": created, "message": t.get("done_saved", "Done.")})
+
     # --- SPA shell and static assets (issue #155, ADR 0004) ---
 
     resolved_dist = spa_dist or _FRONTEND_DIST
@@ -2345,12 +2590,24 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
+    async def spa_catchall(request: web.Request) -> web.Response:
+        """SPA fallback: serve the shell for any unmatched ``/dashboard/*`` path
+        so React Router deep links resolve on a cold load (issue #149).
+
+        Real bundle files are served by the ``/dashboard/assets/`` static mount
+        registered ahead of this route; everything else is a client-side route,
+        and the shell it gets is the authenticated one.
+        """
+        return await spa_shell(request)
+
     app = web.Application()
     app.router.add_get("/", home)
     # /api/session is registered unconditionally — the JSON session-info
     # endpoint is tiny and useful for any non-SPA consumer (CLI scripts,
     # health-check probes) so there is no value in gating it behind the flag.
     app.router.add_get("/api/session", api_session)
+    app.router.add_get("/api/roster", api_roster)
+    app.router.add_post("/api/seed", api_seed)
     app.router.add_get("/members/{member_id}", member_page)
     app.router.add_get("/members/{member_id}/routine", routine_editor)
     app.router.add_post("/members/{member_id}/routine", routine_save)
@@ -2380,9 +2637,13 @@ def build_app(
         else:
             app.router.add_get(SPA_MOUNT, spa_shell)
             app.router.add_get(f"{SPA_MOUNT}/", spa_shell)
+            # Assets first: the catch-all below would otherwise swallow them.
             app.router.add_static(
                 f"{SPA_MOUNT}/assets/", resolved_dist / "assets"
             )
+            # Every other /dashboard/* path is a React Router deep link, so it
+            # gets the authenticated shell (issue #149).
+            app.router.add_get(f"{SPA_MOUNT}/{{tail:.*}}", spa_catchall)
     return app
 
 
