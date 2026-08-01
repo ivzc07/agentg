@@ -5,6 +5,7 @@ import logging
 from datetime import UTC, datetime
 
 from agents import set_tracing_disabled
+from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from agentg.agent import build_agent
@@ -90,9 +91,18 @@ async def run() -> None:
     try:
         await run_polling(bot, runtime.handle_message)
     finally:
-        scheduler.shutdown(wait=False)
-        await bot.session.close()
-        await web_runner.cleanup()
+        await _shutdown(scheduler, bot, web_runner)
+
+
+async def _shutdown(
+    scheduler: AsyncIOScheduler,
+    bot,  # aiogram Bot — not annotated to keep channel isolation (ADR 0001)
+    web_runner: web.AppRunner,
+) -> None:
+    """Cleanly stop scheduler, bot HTTP session, and web server."""
+    scheduler.shutdown(wait=False)
+    await bot.session.close()
+    await web_runner.cleanup()
 
 
 def main() -> None:
