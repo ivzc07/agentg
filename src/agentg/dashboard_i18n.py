@@ -252,6 +252,13 @@ STRINGS = {
         "presets_loading": "Cargando…",
         "presets_error": "Algo salió mal al cargar tus presets.",
         "presets_retry": "Reintentar",
+        # Routine editor i18n (issue #151, review 2).
+        "network_error": "Error de red — por favor, inténtalo de nuevo.",
+        "member_not_found": "Miembro no encontrado.",
+        "remove_day": "Quitar día",
+        "remove_exercise": "Quitar ejercicio",
+        "add_day": "Añadir día",
+        "add_exercise": "Añadir ejercicio",
         "save_failed": "No se pudo guardar — intentá de nuevo.",
     },
     "en": {
@@ -430,6 +437,13 @@ STRINGS = {
         "presets_loading": "Loading…",
         "presets_error": "Something went wrong loading your presets.",
         "presets_retry": "Retry",
+        # Routine editor i18n (issue #151, review 2).
+        "network_error": "Network error — please try again.",
+        "member_not_found": "Member not found.",
+        "remove_day": "Remove day",
+        "remove_exercise": "Remove exercise",
+        "add_day": "Add day",
+        "add_exercise": "Add exercise",
         "save_failed": "Could not save — try again.",
     },
 }

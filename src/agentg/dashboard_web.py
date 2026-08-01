@@ -1108,6 +1108,53 @@ placeholder="squat, 4, 8-10">{escape(exercises_text)}</textarea></label>
 </fieldset>"""
 
 
+def _parse_workouts_from_json(raw_workouts: list, lang: str) -> list[WorkoutSpec]:
+    """The JSON editor body into WorkoutSpecs — the same rules as the form
+    parser, with the same Coach-readable error messages."""
+    t = STRINGS[lang]
+    specs = []
+    seen_weekdays: set[int] = set()
+    for item in raw_workouts:
+        if not isinstance(item, dict):
+            raise ValueError(t["bad_weekday_error"])
+        weekday = item.get("weekday")
+        if weekday is None or not isinstance(weekday, int) or not 0 <= weekday <= 6:
+            raise ValueError(t["bad_weekday_error"])
+        if weekday in seen_weekdays:
+            raise ValueError(t["duplicate_weekday_error"])
+        seen_weekdays.add(weekday)
+        name = item.get("name", "")
+        if not isinstance(name, str):
+            name = ""
+        raw_exercises = item.get("exercises")
+        if not isinstance(raw_exercises, list) or not raw_exercises:
+            raise ValueError(t["empty_workout_error"])
+        exercises = []
+        for ex in raw_exercises:
+            if not isinstance(ex, dict):
+                raise ValueError(t["bad_sets_error"])
+            exercise_name = ex.get("exercise", "")
+            if not isinstance(exercise_name, str) or not exercise_name.strip():
+                raise ValueError(t["empty_workout_error"])
+            sets = ex.get("sets")
+            if sets is not None:
+                if not isinstance(sets, int):
+                    raise ValueError(t["bad_sets_error"])
+                if not SETS_MIN <= sets <= SETS_MAX:
+                    raise ValueError(t["sets_range_error"])
+            reps = ex.get("reps")
+            if reps is not None:
+                if not isinstance(reps, str):
+                    reps = str(reps)
+                if len(reps) > REPS_MAX_LENGTH:
+                    raise ValueError(t["reps_too_long"])
+            exercises.append(ExerciseSpec(exercise_name, sets, reps))
+        if len(name) > WORKOUT_NAME_MAX_LENGTH:
+            raise ValueError(t["workout_name_too_long"])
+        specs.append(WorkoutSpec(weekday, name or WEEKDAYS[lang][weekday], exercises))
+    return specs
+
+
 def _parse_workouts(form: MultiDictProxy, lang: str) -> list[WorkoutSpec]:
     """The editor form into WorkoutSpecs. A fully blank block (the spare one
     the page always appends) is dropped; anything malformed or half-filled —
@@ -2298,6 +2345,160 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
+    # --- /api/members/{id}/routine JSON endpoint (issue #151) ---
+
+    async def api_member_routine_get(request: web.Request) -> web.Response:
+        """``GET /api/members/{id}/routine`` — cookie-auth via ``require_coach``;
+        returns the member's active Routine as JSON: weekday blocks, ownership
+        info, the routine_id stamp for stale-save checks, and the exercise
+        catalog. Unauthenticated answers 401; an unknown or unreachable member
+        answers 404."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        _, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+        except ValueError:
+            return web.json_response({"error": "not found"}, status=404)
+        view = await store.member_page(gym.id, member_id)
+        if view is None:
+            return web.json_response({"error": "not found"}, status=404)
+        catalog = await store.catalog_exercises()
+
+        def serialise_day(day: RoutineDayView) -> dict:
+            return {
+                "weekday": day.weekday,
+                "name": day.name,
+                "exercises": [
+                    {"exercise": name, "sets": sets, "reps": reps}
+                    for name, sets, reps in day.exercises
+                ],
+            }
+
+        body = {
+            "member_id": view.member_id,
+            "name": view.name,
+            "routine": [serialise_day(day) for day in view.routine],
+            "routine_id": view.routine_id,
+            "coach_authored": view.coach_authored,
+            "routine_author": view.routine_author,
+            "routine_preset_name": view.routine_preset_name,
+            "catalog": catalog,
+        }
+        response = web.json_response(body)
+        set_session(response, coach[0].id, gym.id)
+        return response
+
+    async def api_member_routine_put(request: web.Request) -> web.Response:
+        """``PUT /api/members/{id}/routine`` — cookie-auth via ``require_coach``;
+        saves a coach-authored Routine through the supersession machinery.
+        Accepts a JSON body with ``base_routine_id`` and ``workouts`` array.
+        Answers 200 on success (with the fresh routine and notified flag),
+        400 on validation errors, 409 on a stale save (with the fresh version),
+        and 401/404 like the GET."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+        except ValueError:
+            return web.json_response({"error": "not found"}, status=404)
+        target = await store.roster_member(gym.id, member_id)
+        if target is None:
+            return web.json_response({"error": "not found"}, status=404)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+
+        base_routine_id = body.get("base_routine_id")
+        raw_workouts = body.get("workouts")
+        if not isinstance(raw_workouts, list):
+            return web.json_response({"error": t["empty_routine_error"]}, status=400)
+
+        # Parse workouts from JSON into WorkoutSpecs, reusing the existing
+        # validation rules (weekday ranges, duplicates, sets/reps limits).
+        try:
+            workouts = _parse_workouts_from_json(raw_workouts, lang)
+        except ValueError as error:
+            return web.json_response({"error": str(error)}, status=400)
+
+        if not workouts:
+            return web.json_response({"error": t["empty_routine_error"]}, status=400)
+
+        try:
+            await store.save_routine_from_web(
+                gym.id, member_id, coach_member.id, base_routine_id, workouts
+            )
+        except StaleRoutineError:
+            view = await store.member_page(gym.id, member_id)
+            assert view is not None
+            fresh = [
+                {
+                    "weekday": day.weekday,
+                    "name": day.name,
+                    "exercises": [
+                        {"exercise": name, "sets": sets, "reps": reps}
+                        for name, sets, reps in day.exercises
+                    ],
+                }
+                for day in view.routine
+            ]
+            return web.json_response(
+                {"error": t["stale_error"], "fresh_routine": fresh,
+                 "fresh_routine_id": view.routine_id},
+                status=409,
+            )
+        except UnknownExercisesError as error:
+            message = t["unknown_exercises_error"].format(names=", ".join(error.names))
+            return web.json_response({"error": message}, status=400)
+
+        notified = False
+        if notifier is not None:
+            try:
+                channel = await store.member_channel(member_id)
+                if channel is not None:
+                    await notifier.send(
+                        channel[0],
+                        channel[1],
+                        routine_notice(coach_member.name, workouts),
+                    )
+                    notified = True
+            except Exception:
+                logger.exception("failed to notify member %s of the routine save", member_id)
+
+        view = await store.member_page(gym.id, member_id)
+        assert view is not None
+        response = web.json_response(
+            {
+                "ok": True,
+                "routine_id": view.routine_id,
+                "routine": [
+                    {
+                        "weekday": day.weekday,
+                        "name": day.name,
+                        "exercises": [
+                            {"exercise": name, "sets": sets, "reps": reps}
+                            for name, sets, reps in day.exercises
+                        ],
+                    }
+                    for day in view.routine
+                ],
+                "coach_authored": view.coach_authored,
+                "routine_author": view.routine_author,
+                "routine_preset_name": view.routine_preset_name,
+                "notified": notified,
+            }
+        )
+        set_session(response, coach_member.id, gym.id)
+        return response
+
     # --- /api/roster JSON endpoint (issue #149) ---
 
     # --- /api/presets JSON endpoints (issue #152) ---
@@ -2648,7 +2849,10 @@ def build_app(
             return web.Response(text=_bounce_page(), content_type="text/html")
         member, gym = coach
         lang = _lang_of(request)
-        t = STRINGS[lang]
+        t: dict = dict(STRINGS[lang])
+        t["_months"] = list(MONTHS[lang])
+        t["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
+        t["_weekdays"] = list(WEEKDAYS[lang])
 
         index_path = resolved_dist / "index.html"
         if not index_path.exists():
@@ -2705,8 +2909,6 @@ def build_app(
     # health-check probes) so there is no value in gating it behind the flag.
     app.router.add_get("/api/session", api_session)
     app.router.add_get("/members/{member_id}", member_page)
-    app.router.add_get("/members/{member_id}/routine", routine_editor)
-    app.router.add_post("/members/{member_id}/routine", routine_save)
     app.router.add_get("/presets", presets_page)
     app.router.add_post("/presets", preset_create)
     app.router.add_get("/presets/{preset_id}/routine", preset_editor)
@@ -2723,10 +2925,18 @@ def build_app(
     app.router.add_get("/login/{token}", login_form)
     app.router.add_post("/login/{token}", login_redeem)
     app.router.add_static("/static/", STATIC_DIR)
+    # The server-HTML Routine editor is production today — registered
+    # unconditionally like member_page and the /presets routes (#151, #154).
+    app.router.add_get("/members/{member_id}/routine", routine_editor)
+    app.router.add_post("/members/{member_id}/routine", routine_save)
     if spa_enabled:
         # JSON endpoints for the SPA — flag-gated so the flag-off rollback
         # holds (ADR 0004 §Migration 5b).
         app.router.add_get("/api/roster", api_roster)
+        # /api/members/{id}/routine is the JSON Routine editor endpoint
+        # (issue #151).
+        app.router.add_get("/api/members/{member_id}/routine", api_member_routine_get)
+        app.router.add_put("/api/members/{member_id}/routine", api_member_routine_put)
         # /api/members/{id} and tick-off are the SPA's member-page JSON
         # endpoints (issue #150).
         app.router.add_get("/api/members/{member_id}", api_member)

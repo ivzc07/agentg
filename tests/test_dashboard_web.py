@@ -360,7 +360,7 @@ async def test_spa_shell_injects_es_i18n_strings(spa_env):
 
 
 async def test_spa_shell_injects_months_and_weekday_initials_en(spa_env):
-    """The SPA shell injects _months and _weekday_initials for English."""
+    """The SPA shell injects _months, _weekday_initials, _weekdays, and _decimal_mark for English."""
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
     response = await spa_env.client.get(
@@ -373,12 +373,14 @@ async def test_spa_shell_injects_months_and_weekday_initials_en(spa_env):
     assert '"Jan"' in text and '"Feb"' in text and '"Dec"' in text
     # English weekday initials
     assert '"Mo"' in text and '"Tu"' in text and '"Su"' in text
+    # English full weekdays
+    assert '"Monday"' in text and '"Tuesday"' in text and '"Sunday"' in text
     # Decimal mark for English
     assert '"_decimal_mark"' in text
 
 
 async def test_spa_shell_injects_months_and_weekday_initials_es(spa_env):
-    """The SPA shell injects _months and _weekday_initials for Spanish."""
+    """The SPA shell injects _months, _weekday_initials, _weekdays, and _decimal_mark for Spanish."""
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
     response = await spa_env.client.get(
@@ -391,6 +393,8 @@ async def test_spa_shell_injects_months_and_weekday_initials_es(spa_env):
     assert '"ene"' in text and '"feb"' in text and '"dic"' in text
     # Spanish weekday initials
     assert '"lu"' in text and '"ma"' in text and '"do"' in text
+    # Spanish full weekdays
+    assert '"lunes"' in text and '"martes"' in text and '"domingo"' in text
     # Decimal mark for Spanish
     assert '"_decimal_mark"' in text
 

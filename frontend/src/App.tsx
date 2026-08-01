@@ -7,6 +7,7 @@ import { RosterShell } from "./components/RosterShell";
 import { MemberPage } from "./components/MemberPage";
 import { PresetsPage } from "./components/PresetsPage";
 import { PresetsShell } from "./components/PresetsShell";
+import { RoutineEditor } from "./components/RoutineEditor";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -71,6 +72,11 @@ export function Dashboard() {
                 <PresetsPage />
               </PresetsShell>
             }
+          />
+          {/* The Routine editor, reached from the Member page. */}
+          <Route
+            path="members/:memberId/routine"
+            element={<RoutineEditor />}
           />
           {/* Unknown deep links: get the coach back to the roster. */}
           <Route path="*" element={<Navigate to="/" replace />} />
