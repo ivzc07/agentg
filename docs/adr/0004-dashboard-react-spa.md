@@ -31,7 +31,7 @@ Three design pushes later, the visual bar still isn't met. Live screenshots of t
 ## Consequences
 
 - ADR 0003's "no React / no SPA / no JSON API" and htmx-cap clauses no longer bind; 0003 is marked superseded. htmx is removed as each screen migrates.
-- A **frontend build step enters the repo** (Node/Vite), served as static assets from the same container — the "no build step" constraint from spec-dashboard §Stack is lifted by this ADR.
+- A **frontend build step enters the repo** (Node/Vite), served as static assets from the same container — the "no build step" constraint from spec-dashboard §Stack is lifted by this ADR. **Spec-dashboard §Stack is amended in this change** (as ADR 0003 amended it in its own): the Rendering bullet now describes the SPA and cites this ADR, and the *In-place interactions* cluster is marked historical, since leaving them citing a superseded ADR as binding would contradict this decision. Both remain documented while the cutover flag is off.
 - **Web-layer tests that assert rendered HTML/text are re-targeted to assert JSON responses**; a frontend test stack (Vitest + React Testing Library, plus a Playwright smoke) is added. Domain/store tests stay put.
 - **URLs, the login-token flow, QR deep links, and the signed cookie are preserved** so the Telegram/bot integration is unaffected.
 - **Revisit trigger for this ADR:** if React with this ecosystem *also* fails to beat the in-stack result on the roster pilot, reopen this decision rather than fan out.
