@@ -17,6 +17,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 from agents import Agent, RunConfig, Runner
+from agents.items import ItemHelpers
 from agents.stream_events import RawResponsesStreamEvent
 from openai.types.responses import ResponseTextDeltaEvent
 from agents.extensions.memory import SQLAlchemySession
@@ -242,7 +243,6 @@ class AgentRuntime:
         confirmation = self._format_fast_confirmation(logged, context.weight_unit)
         # Record the user message and assistant confirmation in the session
         # history so the Agent's next turn stays coherent (#177).
-        from agents.items import ItemHelpers
         await session.add_items([
             *ItemHelpers.input_to_new_input_list(text),
             {"content": confirmation, "role": "assistant"},
@@ -309,9 +309,17 @@ class AgentRuntime:
                 if fast is not None:
                     # The fast path still resets the check-in rhythm — any
                     # reply from a linked Member counts as activity (#169).
-                    asyncio.create_task(
-                        self.stores.checkins.reset_rhythm(member_id)
-                    )
+                    # Wrapped like the Agent path so a DB failure is logged
+                    # rather than silently lost.
+                    async def _fast_reset() -> None:
+                        try:
+                            await self.stores.checkins.reset_rhythm(member_id)
+                        except Exception:
+                            logger.exception(
+                                "reset_rhythm failed for %d (fast path)", member_id
+                            )
+
+                    asyncio.create_task(_fast_reset())
                     return fast
                 # Any reply resets the check-in rhythm and revives a lapsed
                 # Member.  Fired concurrently with the model call rather than
