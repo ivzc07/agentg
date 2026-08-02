@@ -21,8 +21,13 @@ PR="${1:?usage: scripts/pi-review <pr-number>}"
 #
 # The probe must not fire under Git Bash, which reports MINGW64_NT/MSYS_NT in
 # /proc/version; only WSL reports a Linux kernel carrying "microsoft"/"WSL".
+# PI_REVIEW_PROC_VERSION is a test seam, not a knob for callers: it lets the
+# probe be exercised against known kernel strings (MINGW64_NT vs WSL2) on any
+# platform, so the "must stay silent under Git Bash" case is a real test rather
+# than something only reproducible on a Windows box.
+_proc_version="${PI_REVIEW_PROC_VERSION:-/proc/version}"
 if [ -n "${WSL_DISTRO_NAME:-}" ] ||
-    { [ -r /proc/version ] && grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; }; then
+    { [ -r "$_proc_version" ] && grep -qiE 'microsoft|wsl' "$_proc_version" 2>/dev/null; }; then
     cat >&2 <<EOF
 pi-review: running under WSL bash, which cannot read this repository.
 
