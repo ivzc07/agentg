@@ -286,7 +286,7 @@ Linear's row anatomy and grouped sections with counts (roster rows, bands, lapse
 ### Left undone, knowingly
 
 - Routine day-cards carry no per-exercise "last logged" lines (plan §3): needs per-Member exercise history in `member_page`, out of the store's scope this pass.
-- Sessions stay flat rows, not `details` collapses - revisit with the htmx interaction cluster (ADR 0003).
+- Sessions stay flat rows, not `details` collapses - originally deferred to the htmx interaction cluster (ADR 0003). That cluster is retired by [ADR 0004](../adr/0004-dashboard-react-spa.md); revisit during the React cutover ([#154](https://github.com/ivzc07/agentg/issues/154)) instead.
 - The zero-match search state is a fixed sentence, not "0 de N", and the header count never updates live - same cluster.
 - No per-day remove affordance in the editor (pain 13) - the clear-the-block gesture stands for now.
 

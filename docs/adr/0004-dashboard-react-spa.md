@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-08-01
 - **Supersedes:** [ADR 0003](0003-dashboard-stays-server-rendered.md)
-- **Decision drivers:** After three in-stack design attempts (`fix/shadcn` Pico cleanup, `feat/UXUI`, and the #134–#139 token redesign), the Owner judges the dashboard still reads competent-but-flat — short of the reference-level look (#133). A design interview (2026-08-01) reopened ADR 0003 and resolved the shape of the move.
+- **Decision drivers:** After three in-stack design attempts (`fix/shadcn` Pico cleanup, `feat/UXUI`, and the [#134](https://github.com/ivzc07/agentg/issues/134)–[#139](https://github.com/ivzc07/agentg/issues/139) token redesign), the Owner judges the dashboard still reads competent-but-flat — short of the reference-level look ([#133](https://github.com/ivzc07/agentg/issues/133)). A design interview (2026-08-01) reopened ADR 0003 and resolved the shape of the move.
 
 ## Context
 
@@ -20,7 +20,7 @@ Three design pushes later, the visual bar still isn't met. Live screenshots of t
 2. **One process, one deploy (topology 4A).** JSON `/api/*` routes are added to the existing aiohttp app, reusing `DashboardStore`/`LinkingStore` directly; the Vite-built React bundle is served as static assets by that same app. The **existing signed session cookie** authenticates the API (same-origin). One container, one DB, one auth, one i18n source. No separate frontend service.
 3. **Stack:** Vite + TypeScript + Tailwind + shadcn/ui (Radix) + lucide + TanStack Query + React Router + react-hook-form/zod + Framer Motion + Recharts. **No global-state library** — TanStack Query holds server state, `useState` covers the rest.
 4. **i18n (7a):** the Python `STRINGS` dict remains the **single source of truth**, bootstrap-injected as `window.__I18N__` for the active language; cookie-based language selection is retained.
-5. **Migration (5b):** parallel build to parity, **flag-gated cutover with instant rollback** (don't serve the bundle). The **roster screen (all three views) is the pilot**, judged on *populated* data against the #133 reference before any fan-out. The other screens (member, routine editor, presets, settings, login) migrate after the pilot clears the look bar. htmx is retired screen-by-screen as it goes.
+5. **Migration (5b):** parallel build to parity, **flag-gated cutover with instant rollback** (don't serve the bundle). The **roster screen (all three views) is the pilot**, judged on *populated* data against the [#133](https://github.com/ivzc07/agentg/issues/133) reference before any fan-out. The other screens (member, routine editor, presets, settings, login) migrate after the pilot clears the look bar. htmx is retired screen-by-screen as it goes.
 
 ## Rationale
 
