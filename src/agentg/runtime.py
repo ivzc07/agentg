@@ -117,11 +117,13 @@ class AgentRuntime:
             # Any reply resets the check-in rhythm and revives a lapsed Member.
             await self.stores.checkins.reset_rhythm(linked.member.id)
             session = self.session_for_member(linked.member.id)
-            await maybe_compact(
-                session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
-            )
+            try:
+                await maybe_compact(
+                    session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
+                )
+            except Exception:
+                logger.exception("compaction failed for member %d", linked.member.id)
             context = self.member_context(linked)
-
             if self.stream_replies:
                 # Transfer lock ownership to the stream wrapper.
                 # It releases the lock when the stream is exhausted (or errors
@@ -140,12 +142,21 @@ class AgentRuntime:
         self, msg: IncomingMessage, context: MemberContext, session: SQLAlchemySession
     ) -> Reply:
         """Non-streaming path kept deliberately for tests (#176)."""
-        result = await Runner.run(
-            self.agent,
-            msg.text,
-            session=session,
-            context=context,
-        )
+        try:
+            result = await Runner.run(
+                self.agent,
+                msg.text,
+                session=session,
+                context=context,
+            )
+        finally:
+            # Issue #166: delete_my_data clears the session during the turn,
+            # but the runner persists this turn's items afterwards -- the tool
+            # call and goodbye survive the wipe.  Clear again so nothing
+            # remains.  In a finally so a mid-turn error doesn't skip the
+            # clear after the domain wipe has already committed.
+            if context.forgotten:
+                await session.clear_session()
         text = str(result.final_output)
         return self._wrap_with_demos(text, context, msg.channel, msg.channel_user_id)
 
@@ -170,6 +181,8 @@ class AgentRuntime:
             context=context,
         )
         stream = _stream_text(result)
+        # Innermost first: wipe on forget (#166), then release the lock (#176).
+        stream = _clear_if_forgotten(stream, context, session)
         if _lock is not None:
             stream = _hold_lock(stream, _lock)
         after_send = self._after_send_for_demos(context, msg.channel, msg.channel_user_id)
@@ -243,6 +256,25 @@ def _is_sentence_boundary(text: str, last_sent: str) -> bool:
             continue  # first chunk too short; keep scanning
         return True
     return False
+
+
+async def _clear_if_forgotten(
+    inner: AsyncIterator[str], context: MemberContext, session: SQLAlchemySession,
+) -> AsyncIterator[str]:
+    """Yield every chunk from ``inner``, then wipe the session if the turn
+    forgot the Member.
+
+    The streaming path is the production default, so issue #166 has to hold
+    here too: ``delete_my_data`` clears the session mid-turn, but the runner
+    persists this turn's items afterwards.  The clear runs in a ``finally``
+    so a stream that errors part-way still leaves no residue behind a
+    committed domain wipe."""
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        if context.forgotten:
+            await session.clear_session()
 
 
 async def _hold_lock(

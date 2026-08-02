@@ -73,6 +73,105 @@ def test_parse_top_reps(scheme, top):
     assert parse_top_reps(scheme) == top
 
 
+# --- clamping out-of-range values in parse_progression_rules ---
+
+
+def test_stall_window_below_1_is_clamped_to_default():
+    doc = "stall_sessions: 0"
+    assert parse_progression_rules(doc).stall_sessions == ProgressionRules.stall_sessions
+
+
+def test_negative_stall_sessions_is_clamped_to_default():
+    doc = "stall_sessions: -1"
+    assert parse_progression_rules(doc).stall_sessions == ProgressionRules.stall_sessions
+
+
+def test_deload_percent_above_100_is_clamped_to_default():
+    doc = "deload_percent: 150"
+    assert parse_progression_rules(doc).deload_percent == ProgressionRules.deload_percent
+
+
+def test_deload_percent_zero_is_clamped_to_default():
+    doc = "deload_percent: 0"
+    assert parse_progression_rules(doc).deload_percent == ProgressionRules.deload_percent
+
+
+def test_negative_deload_percent_is_clamped_to_default():
+    doc = "deload_percent: -10"
+    assert parse_progression_rules(doc).deload_percent == ProgressionRules.deload_percent
+
+
+def test_gap_deload_percent_above_100_is_clamped_to_default():
+    doc = "gap_deload_percent: 150"
+    assert parse_progression_rules(doc).gap_deload_percent == ProgressionRules.gap_deload_percent
+
+
+def test_gap_deload_percent_zero_is_clamped_to_default():
+    doc = "gap_deload_percent: 0"
+    assert parse_progression_rules(doc).gap_deload_percent == ProgressionRules.gap_deload_percent
+
+
+def test_negative_increment_is_clamped_to_default():
+    doc = "increment: -5"
+    assert parse_progression_rules(doc).increment == ProgressionRules.increment
+
+
+def test_gap_deload_days_zero_is_clamped_to_default():
+    doc = "gap_deload_days: 0"
+    assert parse_progression_rules(doc).gap_deload_days == ProgressionRules.gap_deload_days
+
+
+def test_negative_gap_deload_days_is_clamped_to_default():
+    doc = "gap_deload_days: -5"
+    assert parse_progression_rules(doc).gap_deload_days == ProgressionRules.gap_deload_days
+
+
+def test_malformed_doc_all_bad_values_degrades_to_defaults():
+    doc = """\
+## Progression
+- increment: -100
+- deload_percent: 200
+- stall_sessions: -3
+- gap_deload_days: -10
+- gap_deload_percent: 999
+"""
+    parsed = parse_progression_rules(doc)
+    assert parsed == ProgressionRules()
+
+
+def test_increment_above_100_is_clamped_to_default():
+    doc = "increment: 250"
+    assert parse_progression_rules(doc).increment == ProgressionRules.increment
+
+
+def test_increment_zero_is_clamped_to_default():
+    doc = "increment: 0"
+    assert parse_progression_rules(doc).increment == ProgressionRules.increment
+
+
+def test_stall_sessions_above_52_is_clamped_to_default():
+    doc = "stall_sessions: 100"
+    assert parse_progression_rules(doc).stall_sessions == ProgressionRules.stall_sessions
+
+
+def test_gap_deload_days_above_365_is_clamped_to_default():
+    doc = "gap_deload_days: 999"
+    assert parse_progression_rules(doc).gap_deload_days == ProgressionRules.gap_deload_days
+
+
+def test_upper_bounds_are_enforced():
+    """Regression: typo'd huge values reached the Member verbatim (issue #167)."""
+    doc = """\
+- increment: 1000
+- stall_sessions: 999
+- gap_deload_days: 99999
+"""
+    parsed = parse_progression_rules(doc)
+    assert parsed.increment == ProgressionRules.increment
+    assert parsed.stall_sessions == ProgressionRules.stall_sessions
+    assert parsed.gap_deload_days == ProgressionRules.gap_deload_days
+
+
 # --- the suggestion algorithm ---
 
 
@@ -159,6 +258,21 @@ def test_a_deload_always_reduces_even_for_small_loads():
     assert s.suggested_weight is not None and s.suggested_weight < 5.0
 
 
+def test_deload_never_exceeds_last_weight_when_below_plate_step():
+    """Regression: max(PLATE_STEP, ...) could turn a deload into an increase
+    when last_weight < PLATE_STEP (e.g. a 1.0 kg dumbbell)."""
+    s = suggest_weight([missed(1.0), missed(1.0)], gap_days=2, rules=rules())
+    assert s.action == "deload"
+    assert s.suggested_weight is not None and s.suggested_weight < 1.0
+
+
+def test_gap_deload_never_exceeds_last_weight_when_below_plate_step():
+    """Regression: the gap_deload path had no guard at all."""
+    s = suggest_weight([done(1.0)], gap_days=14, rules=rules())
+    assert s.action == "gap_deload"
+    assert s.suggested_weight is not None and s.suggested_weight < 1.0
+
+
 def test_bodyweight_history_yields_no_weight_suggestion():
     s = suggest_weight([SessionResult(weight=None, completed=True)], gap_days=2, rules=rules())
     assert s.suggested_weight is None
@@ -169,3 +283,48 @@ def test_no_history_yields_no_suggestion():
     s = suggest_weight([], gap_days=None, rules=rules())
     assert s.suggested_weight is None
     assert s.action == "none"
+
+
+# --- safety: out-of-range values via parse_progression_rules ---
+
+
+def test_malformed_doc_yields_sensible_suggestions():
+    """A doc with all progression values out of range must still produce
+    sensible (non-negative, non-zero) weight suggestions."""
+    doc = """\
+- stall_sessions: 0
+- deload_percent: 150
+- gap_deload_percent: 200
+- increment: -100
+- gap_deload_days: -10
+"""
+    clamped = parse_progression_rules(doc)
+    # with the default stall_sessions=2, two missed sessions at the same
+    # weight trigger a deload — and the deloaded weight must be positive
+    s = suggest_weight([missed(80.0), missed(80.0)], gap_days=2, rules=clamped)
+    assert s.action == "deload"
+    assert s.suggested_weight is not None and s.suggested_weight > 0
+
+
+def test_stall_zero_doc_unverifiable_holds_not_deloads():
+    """Regression: stall_sessions: 0 made every Session a stall (issue #167).
+    After clamping, an unverifiable Session does not trigger a deload."""
+    clamped = parse_progression_rules("stall_sessions: 0")
+    s = suggest_weight([unknown(80.0)], gap_days=2, rules=clamped)
+    assert s.action == "hold"
+
+
+def test_deload_percent_above_100_does_not_produce_negative():
+    """deload_percent above 100% would give a negative suggested weight."""
+    clamped = parse_progression_rules("deload_percent: 150")
+    s = suggest_weight([missed(80.0), missed(80.0)], gap_days=2, rules=clamped)
+    assert s.action == "deload"
+    assert s.suggested_weight is not None and s.suggested_weight > 0
+
+
+def test_gap_deload_percent_above_100_does_not_produce_negative():
+    """gap_deload_percent above 100% would give a negative eased weight."""
+    clamped = parse_progression_rules("gap_deload_percent: 150")
+    s = suggest_weight([done(80.0)], gap_days=14, rules=clamped)
+    assert s.action == "gap_deload"
+    assert s.suggested_weight is not None and s.suggested_weight > 0
