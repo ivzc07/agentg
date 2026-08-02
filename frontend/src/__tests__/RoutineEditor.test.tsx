@@ -81,8 +81,169 @@ function buildTextColorInventory(): Set<string> {
 
 const TEXT_COLOR_INVENTORY = buildTextColorInventory();
 
-/** True when `value` looks like a colour: hex, CSS colour function, or a
- *  CSS variable that resolves to a colour. */
+// CSS named colours (CSS Color Module Level 4).  Tailwind compiles
+// arbitrary-value utilities such as text-[red] and text-[rebeccapurple]
+// as colour utilities, so the conflict guard must recognise them.
+const CSS_NAMED_COLORS: Set<string> = new Set([
+  // CSS basic colour keywords
+  "black",
+  "silver",
+  "gray",
+  "white",
+  "maroon",
+  "red",
+  "purple",
+  "fuchsia",
+  "green",
+  "lime",
+  "olive",
+  "yellow",
+  "navy",
+  "blue",
+  "teal",
+  "aqua",
+  // Extended colour keywords
+  "aliceblue",
+  "antiquewhite",
+  "aquamarine",
+  "azure",
+  "beige",
+  "bisque",
+  "blanchedalmond",
+  "blueviolet",
+  "brown",
+  "burlywood",
+  "cadetblue",
+  "chartreuse",
+  "chocolate",
+  "coral",
+  "cornflowerblue",
+  "cornsilk",
+  "crimson",
+  "cyan",
+  "darkblue",
+  "darkcyan",
+  "darkgoldenrod",
+  "darkgray",
+  "darkgreen",
+  "darkgrey",
+  "darkkhaki",
+  "darkmagenta",
+  "darkolivegreen",
+  "darkorange",
+  "darkorchid",
+  "darkred",
+  "darksalmon",
+  "darkseagreen",
+  "darkslateblue",
+  "darkslategray",
+  "darkslategrey",
+  "darkturquoise",
+  "darkviolet",
+  "deeppink",
+  "deepskyblue",
+  "dimgray",
+  "dimgrey",
+  "dodgerblue",
+  "firebrick",
+  "floralwhite",
+  "forestgreen",
+  "gainsboro",
+  "ghostwhite",
+  "gold",
+  "goldenrod",
+  "greenyellow",
+  "grey",
+  "honeydew",
+  "hotpink",
+  "indianred",
+  "indigo",
+  "ivory",
+  "khaki",
+  "lavender",
+  "lavenderblush",
+  "lawngreen",
+  "lemonchiffon",
+  "lightblue",
+  "lightcoral",
+  "lightcyan",
+  "lightgoldenrodyellow",
+  "lightgray",
+  "lightgreen",
+  "lightgrey",
+  "lightpink",
+  "lightsalmon",
+  "lightseagreen",
+  "lightskyblue",
+  "lightslategray",
+  "lightslategrey",
+  "lightsteelblue",
+  "lightyellow",
+  "limegreen",
+  "linen",
+  "magenta",
+  "mediumaquamarine",
+  "mediumblue",
+  "mediumorchid",
+  "mediumpurple",
+  "mediumseagreen",
+  "mediumslateblue",
+  "mediumspringgreen",
+  "mediumturquoise",
+  "mediumvioletred",
+  "midnightblue",
+  "mintcream",
+  "mistyrose",
+  "moccasin",
+  "navajowhite",
+  "oldlace",
+  "olivedrab",
+  "orange",
+  "orangered",
+  "orchid",
+  "palegoldenrod",
+  "palegreen",
+  "paleturquoise",
+  "palevioletred",
+  "papayawhip",
+  "peachpuff",
+  "peru",
+  "pink",
+  "plum",
+  "powderblue",
+  "rebeccapurple",
+  "rosybrown",
+  "royalblue",
+  "saddlebrown",
+  "salmon",
+  "sandybrown",
+  "seagreen",
+  "seashell",
+  "sienna",
+  "skyblue",
+  "slateblue",
+  "slategray",
+  "slategrey",
+  "snow",
+  "springgreen",
+  "steelblue",
+  "tan",
+  "thistle",
+  "tomato",
+  "turquoise",
+  "violet",
+  "wheat",
+  "whitesmoke",
+  "yellowgreen",
+  // transparent / currentColor are already in TEXT_COLOR_INVENTORY as
+  // text-transparent / text-current, but they are also valid CSS named
+  // colours inside text-[…] so include them here too.
+  "transparent",
+  "currentcolor",
+]);
+
+/** True when `value` looks like a colour: hex, CSS colour function, CSS
+ *  named colour, or a CSS variable that resolves to a colour. */
 function looksLikeColor(value: string): boolean {
   // Hex colour: #rgb, #rrggbb, #rgba, #rrggbbaa
   if (/^#[0-9a-fA-F]{3,8}$/.test(value)) return true;
@@ -90,6 +251,8 @@ function looksLikeColor(value: string): boolean {
   if (/^(rgb|rgba|hsl|hsla|hwb|lab|lch|oklch|oklab|color)\(/.test(value)) return true;
   // CSS variable — likely a colour variable (e.g. var(--foreground))
   if (/^var\(--/.test(value)) return true;
+  // CSS named colour keyword (e.g. red, rebeccapurple)
+  if (CSS_NAMED_COLORS.has(value.toLowerCase())) return true;
   return false;
 }
 
@@ -768,6 +931,47 @@ describe("RoutineEditor", () => {
         expect(isTextColorClass("text-[#ffffff]/10")).toBe(true);
       });
 
+      // P2, fix-r4: CSS named colours inside arbitrary values must be
+      // recognised so they cannot silently coexist with text-bg.
+      it("recognises CSS named-colour arbitrary values", () => {
+        // Basic keywords
+        expect(isTextColorClass("text-[red]")).toBe(true);
+        expect(isTextColorClass("text-[blue]")).toBe(true);
+        expect(isTextColorClass("text-[green]")).toBe(true);
+        expect(isTextColorClass("text-[yellow]")).toBe(true);
+        expect(isTextColorClass("text-[purple]")).toBe(true);
+        // Extended keyword (the motivating case from fix-r4)
+        expect(isTextColorClass("text-[rebeccapurple]")).toBe(true);
+        expect(isTextColorClass("text-[cornflowerblue]")).toBe(true);
+        expect(isTextColorClass("text-[darkorange]")).toBe(true);
+        expect(isTextColorClass("text-[mediumspringgreen]")).toBe(true);
+        // Case-insensitive
+        expect(isTextColorClass("text-[RebeccaPurple]")).toBe(true);
+        expect(isTextColorClass("text-[CornflowerBlue]")).toBe(true);
+        // transparent / currentColor
+        expect(isTextColorClass("text-[transparent]")).toBe(true);
+        expect(isTextColorClass("text-[currentcolor]")).toBe(true);
+        expect(isTextColorClass("text-[currentColor]")).toBe(true);
+      });
+
+      it("recognises CSS named-colour arbitrary values with alpha modifier", () => {
+        expect(isTextColorClass("text-[red]/50")).toBe(true);
+        expect(isTextColorClass("text-[rebeccapurple]/25")).toBe(true);
+        expect(isTextColorClass("text-[cornflowerblue]/[.5]")).toBe(true);
+      });
+
+      it("rejects non-colour bare words in arbitrary values", () => {
+        // Sizing/length values are never colours
+        expect(isTextColorClass("text-[14px]")).toBe(false);
+        expect(isTextColorClass("text-[1.5rem]")).toBe(false);
+        expect(isTextColorClass("text-[2em]")).toBe(false);
+        // Typed non-colour still rejected
+        expect(isTextColorClass("text-[font-size:14px]")).toBe(false);
+        // Bogus bare word that isn't a valid CSS colour
+        expect(isTextColorClass("text-[squat]")).toBe(false);
+        expect(isTextColorClass("text-[bench]")).toBe(false);
+      });
+
       it("rejects typography / non-colour text-* utilities", () => {
         expect(isTextColorClass("text-left")).toBe(false);
         expect(isTextColorClass("text-sm")).toBe(false);
@@ -886,6 +1090,30 @@ describe("RoutineEditor", () => {
       expect(colorClasses2).toHaveLength(2);
       expect(colorClasses2).toContain("text-bg");
       expect(colorClasses2).toContain("text-bg/50");
+    });
+
+    // P2, fix-r4: CSS named colours inside text-[...] must be flagged as
+    // colour utilities so they cannot silently coexist with text-bg.
+    it("rejects conflicting CSS named-colour arbitrary values alongside text-bg", () => {
+      const tokens = classTokens("text-bg text-[red] bg-magenta");
+      const colorClasses = tokens.filter(isTextColorClass);
+      expect(colorClasses).toHaveLength(2);
+      expect(colorClasses).toContain("text-bg");
+      expect(colorClasses).toContain("text-[red]");
+
+      // Extended keyword
+      const tokens2 = classTokens("text-bg text-[rebeccapurple] bg-magenta");
+      const colorClasses2 = tokens2.filter(isTextColorClass);
+      expect(colorClasses2).toHaveLength(2);
+      expect(colorClasses2).toContain("text-bg");
+      expect(colorClasses2).toContain("text-[rebeccapurple]");
+
+      // With alpha modifier
+      const tokens3 = classTokens("text-bg text-[red]/50 bg-magenta");
+      const colorClasses3 = tokens3.filter(isTextColorClass);
+      expect(colorClasses3).toHaveLength(2);
+      expect(colorClasses3).toContain("text-bg");
+      expect(colorClasses3).toContain("text-[red]/50");
     });
   });
 
