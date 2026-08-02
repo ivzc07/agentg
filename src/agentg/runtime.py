@@ -52,6 +52,11 @@ class AgentRuntime:
     _locks: defaultdict[tuple[str, str], asyncio.Lock] = field(
         default_factory=lambda: defaultdict(asyncio.Lock)
     )
+    # One pending-compaction event per identity.  Before processing a turn,
+    # handle_message awaits the previous turn's compaction (if any) outside
+    # the lock — after_send still acquires the lock to compact, so the
+    # event-based wait avoids a deadlock (issue #173 criterion 2).
+    _compaction_done: dict[tuple[str, str], asyncio.Event] = field(default_factory=dict)
 
     async def ensure_schema(self) -> None:
         """Create the domain and SDK session tables once at startup."""
@@ -78,7 +83,14 @@ class AgentRuntime:
         )
 
     async def handle_message(self, msg: IncomingMessage) -> Reply:
-        async with self._locks[(msg.channel, msg.channel_user_id)]:
+        key = (msg.channel, msg.channel_user_id)
+        # Await the previous turn's compaction (if any) before acquiring the
+        # lock.  This is done outside the lock so that after_send (which
+        # also acquires the lock) can still make progress (issue #173).
+        prev = self._compaction_done.get(key)
+        if prev is not None:
+            await prev.wait()
+        async with self._locks[key]:
             linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
             reply = await self.linking.handle(msg, linked)
             if reply is not None:
@@ -100,12 +112,14 @@ class AgentRuntime:
                 context=context,
             )
             text = str(result.final_output)
-            # Build the after_send callback: compaction first (inside the
-            # per-identity lock so the next turn blocks until it finishes),
-            # then demo animations land beneath both the reply and the
-            # compaction finish.  Compaction only affects the *next* turn's
-            # prompt, so deferring it behind the reply removes a model call
-            # from the critical path (issue #173).
+            # Build the after_send callback: demo animations land first
+            # (they don't need the lock and shouldn't wait on the summarizer),
+            # then compaction runs inside the per-identity lock.  Compaction
+            # only affects the *next* turn's prompt, so deferring it behind
+            # the reply removes a model call from the critical path (issue #173).
+            # The next turn awaits compaction_done before acquiring the lock,
+            # so criterion 2 (compaction completes before next turn) holds
+            # even when the adapter delays calling after_send.
             member_id = linked.member.id
             gym_id = context.gym_id
             channel, user_id = msg.channel, msg.channel_user_id
@@ -114,15 +128,13 @@ class AgentRuntime:
             notes_store = self.stores.notes
             lock = self._locks[(msg.channel, msg.channel_user_id)]
             demo_requests = list(context.demo_requests)
+            compaction_done = asyncio.Event()
+            self._compaction_done[key] = compaction_done
 
             async def after_send() -> None:
-                async with lock:
-                    try:
-                        await maybe_compact(
-                            session, summarizer, notes_store, member_id, gym_id
-                        )
-                    except Exception:
-                        logger.exception("compaction failed for member %d", member_id)
+                # Serve demos first — they don't need the lock and
+                # shouldn't wait for the summarizer (timeout=60,
+                # num_retries=1 → up to ~2 min).
                 if sender is not None:
                     for exercise in demo_requests:
                         try:
@@ -133,5 +145,14 @@ class AgentRuntime:
                             logger.exception(
                                 "failed to serve demo %r to %s", exercise, user_id
                             )
+                async with lock:
+                    try:
+                        await maybe_compact(
+                            session, summarizer, notes_store, member_id, gym_id
+                        )
+                    except Exception:
+                        logger.exception("compaction failed for member %d", member_id)
+                    finally:
+                        compaction_done.set()
 
             return Reply(text, after_send=after_send)

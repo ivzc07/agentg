@@ -521,6 +521,80 @@ async def test_compaction_in_after_send_serializes_with_next_turn(env, monkeypat
     assert str(second_reply) == "ok"
 
 
+async def test_compaction_completes_before_next_turn_even_when_after_send_is_delayed(env, monkeypatch):
+    """When the adapter delays calling after_send (e.g. Telegram's
+    message.answer calls), a rapid second message for the same identity must
+    still wait for the first turn's compaction to finish before its own
+    Runner.run begins (issue #173 criterion 2 — inverted ordering).
+
+    This is the case the existing serialization test does NOT cover: there,
+    after_send already holds the lock so the second turn blocks on the lock
+    itself.  Here after_send hasn't even started — the second turn must
+    block on _compaction_done instead."""
+    import agentg.runtime as runtime_module
+    from types import SimpleNamespace
+    import asyncio
+    from agentg.compaction import CompactionSummary
+
+    run_order: list[str] = []
+
+    # Gate holds the summarizer mid-flight.  after_send hasn't started yet
+    # when the second message arrives — it's still queued behind the
+    # adapter's message.answer calls.
+    gate = asyncio.Event()
+
+    async def slow_summarizer(old_items, existing_notes):
+        await gate.wait()
+        run_order.append("compaction-1")
+        return CompactionSummary(summary="Dani benched 60.", notes=[])
+
+    async def fake_run(agent, text, *, session, context=None):
+        run_order.append(f"run:{text}")
+        return SimpleNamespace(final_output="ok")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+    env.runtime.summarizer = slow_summarizer
+
+    total = KEEP_RECENT + 20
+    await env.session.add_items(over_budget_items(total))
+
+    # First turn returns immediately; compaction is deferred to after_send.
+    reply1 = await env.runtime.handle_message(
+        IncomingMessage(channel="telegram", channel_user_id="42", text="first")
+    )
+    assert reply1.after_send is not None
+
+    # Simulate the adapter delay: the second message arrives BEFORE
+    # after_send is called (while the adapter is still sending
+    # message.answer chunks).  The second turn must block on
+    # _compaction_done, not on the lock.
+    second_task = asyncio.create_task(
+        env.runtime.handle_message(
+            IncomingMessage(channel="telegram", channel_user_id="42", text="second")
+        )
+    )
+    # Let the second task reach the _compaction_done wait point.
+    await asyncio.sleep(0.05)
+    # The second turn should NOT have run yet.
+    assert run_order == ["run:first"]
+
+    # Now start after_send — it will block inside the lock on the gate.
+    after_task = asyncio.create_task(reply1.after_send())
+    await asyncio.sleep(0.05)
+    # Still blocked.
+    assert run_order == ["run:first"]
+
+    # Release the gate so compaction finishes and sets the event.
+    gate.set()
+    await asyncio.wait_for(after_task, timeout=5)
+    reply2 = await asyncio.wait_for(second_task, timeout=5)
+
+    assert str(reply2) == "ok"
+    # Compaction from turn 1 finished before turn 2's Agent ran — even
+    # though the second message arrived before after_send even started.
+    assert run_order == ["run:first", "compaction-1", "run:second"]
+
+
 async def test_convergence_guard_proceeds_with_enough_fresh_items(env):
     """When summaries exist AND enough fresh items have accumulated,
     compaction proceeds normally — the guard is a floor, not a ceiling."""
