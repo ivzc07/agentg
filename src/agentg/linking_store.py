@@ -212,6 +212,15 @@ def _add_missing_columns(conn: Connection) -> None:
                     "ALTER TABLE forget_me_requests ADD COLUMN language VARCHAR(2)"
                 )
             )
+        # issue #212 P1: durable consumed state so a concurrent loser
+        # sees deletion in progress and never reaches the model.
+        if "status" not in fme_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE forget_me_requests ADD COLUMN status "
+                    "VARCHAR(10) NOT NULL DEFAULT 'pending'"
+                )
+            )
     # FK indexes for Gym-scoped reads (issue #178): Coach lookup, roster,
     # and the check-in sweep join on these columns.
     members_indexes = {i["name"] for i in inspect(conn).get_indexes("members")}

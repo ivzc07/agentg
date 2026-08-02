@@ -172,6 +172,11 @@ class ForgetMeRequest(Base):
     One Member can hold at most one pending request; a new request replaces
     any old one.  The confirmation phrase is checked from normalized raw
     text before the model runs — the model never sees or acts on it.
+
+    ``status`` is ``"pending"`` until the winner atomically claims it
+    (``"consumed"``).  The consumed row stays until ``forget_member``
+    completes so a concurrent loser sees a durable in-progress signal
+    and never reaches the model (issue #212, P1).
     """
 
     __tablename__ = "forget_me_requests"
@@ -183,6 +188,7 @@ class ForgetMeRequest(Base):
     gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
     confirmation_phrase: Mapped[str] = mapped_column(String(64))
     language: Mapped[str | None] = mapped_column(String(2), default=None)
+    status: Mapped[str] = mapped_column(String(10), default="pending")
     expires_at: Mapped[datetime] = mapped_column(TZDateTime())
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
 

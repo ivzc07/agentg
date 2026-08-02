@@ -59,6 +59,10 @@ _FORGET_ME_TRIGGERS_ES: tuple[str, ...] = (
 # Combined list for backward-compatible is_forget_me_request checks.
 _FORGET_ME_TRIGGERS: tuple[str, ...] = _FORGET_ME_TRIGGERS_EN + _FORGET_ME_TRIGGERS_ES
 
+# ForgetMeRequest.status values (issue #212).
+STATUS_PENDING = "pending"
+STATUS_CONSUMED = "consumed"
+
 
 class ForgetStore:
     def __init__(self, engine: AsyncEngine) -> None:
@@ -165,20 +169,48 @@ class ForgetStore:
     async def get_pending_request(
         self, member_id: int
     ) -> ForgetMeRequest | None:
-        """Return the pending confirmation for this Member, or None."""
+        """Return the pending confirmation for this Member, or None.
+
+        Only returns rows with ``status == 'pending'`` — a ``consumed``
+        row means deletion is in progress (or interrupted), which is
+        handled by ``get_consumed_request``.
+        """
         async with self._sessions() as db:
             return await db.scalar(
                 select(ForgetMeRequest).where(
-                    ForgetMeRequest.member_id == member_id
+                    ForgetMeRequest.member_id == member_id,
+                    ForgetMeRequest.status == STATUS_PENDING,
+                )
+            )
+
+    async def get_consumed_request(
+        self, member_id: int
+    ) -> ForgetMeRequest | None:
+        """Return a consumed (in-progress or interrupted) deletion request.
+
+        When this returns a row, the confirmation was already claimed by
+        a winner — the caller must complete the deletion (if interrupted)
+        or return a safe reply without reaching the model.
+        """
+        async with self._sessions() as db:
+            return await db.scalar(
+                select(ForgetMeRequest).where(
+                    ForgetMeRequest.member_id == member_id,
+                    ForgetMeRequest.status == STATUS_CONSUMED,
                 )
             )
 
     async def cancel_forget_me(self, member_id: int) -> None:
-        """Remove any pending confirmation without deleting Member data."""
+        """Remove any pending confirmation without deleting Member data.
+
+        Only cancels rows still in ``pending`` status — a ``consumed``
+        row means deletion is in progress and must not be disturbed.
+        """
         async with self._sessions() as db:
             await db.execute(
                 delete(ForgetMeRequest).where(
-                    ForgetMeRequest.member_id == member_id
+                    ForgetMeRequest.member_id == member_id,
+                    ForgetMeRequest.status == STATUS_PENDING,
                 )
             )
             await db.commit()
@@ -186,22 +218,29 @@ class ForgetStore:
     async def consume_pending_forget_me(
         self, member_id: int, confirmation_phrase: str, now: datetime
     ) -> bool:
-        """Atomically delete the pending request only when the confirmation
+        """Atomically claim the pending request only when the confirmation
         phrase matches and hasn't expired yet.
 
-        A single conditional DELETE is the compare-and-consume primitive:
-        two concurrent sessions can't both delete the same row — exactly
-        one sees ``rowcount > 0`` and becomes the winner.  The loser
-        (wrong phrase, expired, or beaten by a concurrent winner) sees
-        zero rows deleted and must not proceed.
+        A single conditional UPDATE (``pending`` → ``consumed``) is the
+        compare-and-consume primitive: two concurrent sessions can't both
+        update the same row — exactly one sees ``rowcount > 0`` and becomes
+        the winner.  The loser (wrong phrase, expired, or beaten by a
+        concurrent winner) sees zero rows updated and must not proceed.
+
+        The row stays with status ``consumed`` so a concurrent loser can
+        detect that deletion is in progress and never reach the model.
+        ``forget_member`` deletes the row when it completes.
         """
         async with self._sessions() as db:
             result = await db.execute(
-                delete(ForgetMeRequest).where(
+                update(ForgetMeRequest)
+                .where(
                     ForgetMeRequest.member_id == member_id,
                     ForgetMeRequest.confirmation_phrase == confirmation_phrase,
                     ForgetMeRequest.expires_at > now,
+                    ForgetMeRequest.status == STATUS_PENDING,
                 )
+                .values(status=STATUS_CONSUMED)
             )
             await db.commit()
             return result.rowcount > 0

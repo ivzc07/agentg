@@ -487,6 +487,16 @@ class AgentRuntime:
                 await self.stores.forget.cancel_forget_me(linked.member.id)
             return None
 
+        # P1: Check for a consumed (in-progress or interrupted) deletion
+        # first — if a previous confirmation won but deletion was
+        # interrupted, complete it now before any other processing.
+        consumed_req = await self.stores.forget.get_consumed_request(
+            linked.member.id
+        )
+        if consumed_req is not None:
+            await self.stores.forget.forget_member(linked.member.id)
+            return Reply(_FORGET_GOODBYE[consumed_req.language or "es"])
+
         pending = await self.stores.forget.get_pending_request(
             linked.member.id
         )
@@ -501,31 +511,29 @@ class AgentRuntime:
                     # P1: atomic compare-and-consume so concurrent
                     # confirmations across runtimes have exactly one
                     # winner and a stale confirmation cannot delete.
-                    consumed = await self.stores.forget.consume_pending_forget_me(
+                    won = await self.stores.forget.consume_pending_forget_me(
                         linked.member.id, normalized, now
                     )
-                    if consumed:
+                    if won:
                         await self.stores.forget.forget_member(
                             linked.member.id
                         )
                         lang = pending.language or "es"
                         return Reply(_FORGET_GOODBYE[lang])
-                    # P1: Lost the race — another runtime already consumed
-                    # this request and may have already deleted the Member.
-                    # Re-verify the identity: if the Member is already gone,
-                    # return a dead-end reply without touching the model.
-                    identity = await self.stores.linking.identity_for(
-                        msg.channel, msg.channel_user_id
+                    # P1: Lost the race — another runtime already claimed
+                    # this request and may be deleting the Member right
+                    # now. The row now has status "consumed" (not deleted),
+                    # so check for it to prevent falling through to the
+                    # model while deletion is still in progress.
+                    consumed_req = await self.stores.forget.get_consumed_request(
+                        linked.member.id
                     )
-                    if identity is None:
-                        # The winning runtime already deleted the Member.
-                        # Return a goodbye — the language was stored on the
-                        # now-consumed pending, so fall back to Spanish
-                        # (ADR-0002 default).
-                        return Reply(_FORGET_GOODBYE["es"])
-                    # The pending was consumed by another runtime but the
-                    # Member wasn't deleted yet (transient).  Fall through
-                    # to normal processing — the model runs.
+                    if consumed_req is not None:
+                        return Reply(
+                            _FORGET_GOODBYE[consumed_req.language or "es"]
+                        )
+                    # The pending was cancelled (not consumed) — fall
+                    # through to normal processing.
                 else:
                     # Wrong phrase — cancel the pending request.  A new
                     # forget-me trigger below will create a fresh one.
@@ -556,6 +564,15 @@ class AgentRuntime:
                 s="s" if minutes != 1 else "",
             )
             return Reply(warning)
+
+        # P1 safety net: before falling through to the model, re-verify
+        # the Member still exists.  Another runtime may have deleted the
+        # Member since we started processing.
+        identity = await self.stores.linking.identity_for(
+            msg.channel, msg.channel_user_id
+        )
+        if identity is None:
+            return Reply(_FORGET_GOODBYE["es"])
 
         return None
 
