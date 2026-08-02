@@ -199,6 +199,7 @@ HERDR_CONTRACT = [
     (("agent", "wait"), ("--status", "--timeout")),
     (("pane", "split"), ("--current", "--direction", "--cwd", "--no-focus")),
     (("pane", "run"), ()),
+    (("pane", "send-keys"), ()),
 ]
 
 
@@ -214,7 +215,10 @@ def _script_invocations():
         for token in rest.split():
             if token.startswith("--"):
                 flags.append(token)
-            elif not words or (token.isalpha() and len(words) < 2):
+            # Subcommand names can carry hyphens (`send-keys`), so strip them
+            # before the alpha test - otherwise the word is skipped and the
+            # call is mis-parsed as a different command.
+            elif not words or (token.replace("-", "").isalpha() and len(words) < 2):
                 words.append(token)
         calls.append((tuple(words[:2]), tuple(flags)))
     return calls
@@ -359,6 +363,22 @@ def test_declared_herdr_commands_exist(words, flags):
             f"`herdr {group} {sub}` has no {flag} in this herdr build; "
             f"its usage is: {usage_line.strip()}"
         )
+
+
+def test_prompt_states_the_signature_convention_the_counter_enforces():
+    """The success gate is a comment count, so the prompt and the counter must
+    agree on what a signature looks like.
+
+    ``comment_count`` requires the signature on its own line; if the prompt
+    only said "sign every comment with ...", an agent signing inline would post
+    a real review that the gate then reports as "settled without posting
+    comments".
+    """
+    body = SCRIPT.read_text(encoding="utf-8")
+    assert "on a line of its own" in body, (
+        "the PROMPT must tell the reviewer to put the signature on its own "
+        "line, because comment_count matches \n- pi code-review"
+    )
 
 
 def test_installed_herdr_must_be_a_regular_file():

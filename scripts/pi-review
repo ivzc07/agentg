@@ -51,7 +51,7 @@ Prioritize correctness bugs, broken imports, security problems, and test-coverag
 Then act like the Greptile review bot: for each verified finding, post one comment on PR ${PR} via 'gh pr comment' with a severity prefix [P1] (bug or correctness issue, must fix), [P2] (should fix), or [P3] (optional), naming the file and line. \
 Only post findings the workflow verified as real; do not pad. Post at most 3 [P3] comments - keep only the most valuable ones. \
 If there are no real findings, post a single comment saying the automated review found no issues. \
-Sign every comment with '- pi code-review'. \
+Sign every comment with '- pi code-review' on a line of its own. \
 When done, reply with just the number of findings posted."
 
 # Herdr client binary: PATH may hold a stale copy that cannot talk to a newer
@@ -147,14 +147,15 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
         fi
         i=$((i + 1))
     done
-    # The prompt was already typed and submitted above, so it is still live in
-    # the pane: pi may pick it up after this budget expires and run a stray
-    # review. Say so, rather than leaving the operator to discover a duplicate.
-    # A re-run is still safe on its own: it waits for `idle` before snapshotting
-    # BEFORE, so a stray already in flight is counted as prior state.
+    # The prompt was already typed and submitted, so on this path it is still
+    # pending in the pane. Leaving it there is not safe: a later re-run finds
+    # the agent idle, snapshots BEFORE without the stray, submits a second
+    # prompt, and then attributes the stray's comments to itself - a silent
+    # overcount plus a duplicate review. So clear it rather than warn about it.
     [ "$picked_up" = 1 ] || {
+        "$H" pane send-keys "$PANE" Escape >/dev/null 2>&1 || true
         echo "pi-review: pi never picked up the review for PR ${PR}" >&2
-        echo "pi-review: the prompt is still pending in pane ${PANE} - it may yet run; check for a duplicate review before re-running" >&2
+        echo "pi-review: sent Escape to pane ${PANE} to clear the pending prompt; confirm the pane is idle before re-running" >&2
         exit 1
     }
     "$H" agent wait pi-review --status idle --timeout 3000000 >/dev/null
