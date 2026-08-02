@@ -112,12 +112,20 @@ class Screen:
 
 @dataclass
 class Rendered:
-    """What one screen measured at 375px."""
+    """What one screen measured at 375px, or why it could not be measured.
+
+    A screen that fails to load is recorded rather than raised: the fixture is
+    shared, so an exception mid-pass would abort every screen after it and
+    surface as one ERROR on both tests, throwing away the diagnostics - and the
+    screenshots - for everything still unrendered. `test_every_screen_renders`
+    turns these into a normal failure listing all of them at once.
+    """
 
     name: str
-    scroll_width: int
-    widest: str
+    scroll_width: int = 0
+    widest: str = ""
     offenders: list[str] = field(default_factory=list)
+    error: str | None = None
 
 
 @pytest_asyncio.fixture(scope="module", loop_scope="module")
@@ -283,20 +291,30 @@ async def rendered(live_dashboard) -> list[Rendered]:
                     ]
                 )
                 page = await context.new_page()
+                # `load`, not `networkidle`: Playwright documents networkidle as
+                # discouraged, and it is what hid the login redirect in the first
+                # version of this file. These pages are static server-rendered
+                # HTML, so `load` is both sufficient and less prone to hanging.
                 response = await page.goto(
-                    f"{env['base']}{screen.path}",
-                    wait_until="domcontentloaded"
-                    if not screen.javascript
-                    else "networkidle",
+                    f"{env['base']}{screen.path}", wait_until="load"
                 )
-                assert response is not None and response.ok, (
-                    f"{screen.name}: HTTP {response.status if response else 'no response'}"
-                )
+                if response is None or not response.ok:
+                    status = response.status if response else "no response"
+                    results.append(Rendered(screen.name, error=f"HTTP {status}"))
+                    await context.close()
+                    continue
                 # Proves we are on the intended screen before measuring it.
-                assert await page.query_selector(screen.marker) is not None, (
-                    f"{screen.name}: marker {screen.marker!r} absent - the browser is not on "
-                    f"this screen (redirected?), so its 375px result would be meaningless"
-                )
+                if await page.query_selector(screen.marker) is None:
+                    results.append(
+                        Rendered(
+                            screen.name,
+                            error=f"marker {screen.marker!r} absent - the browser is not on "
+                            f"this screen (redirected?), so its 375px result "
+                            f"would be meaningless",
+                        )
+                    )
+                    await context.close()
+                    continue
                 await page.screenshot(
                     path=str(SHOT_DIR / f"{screen.name}-375.png"), full_page=True
                 )
@@ -343,8 +361,19 @@ async def rendered(live_dashboard) -> list[Rendered]:
         finally:
             await browser.close()
 
-    assert len(results) == len(_screens(env)), "not every screen was rendered"
+    assert len(results) == len(_screens(env)), "not every screen was visited"
     return results
+
+
+async def test_every_screen_renders(rendered):
+    """Loaded, and showing the screen we asked for.
+
+    Separate from the layout assertions so a screen that never rendered reads as
+    a render failure rather than a 375px failure - and so all of them are
+    reported together instead of the first one aborting the pass.
+    """
+    failures = [f"{r.name}: {r.error}" for r in rendered if r.error]
+    assert not failures, "screens failed to render:\n  " + "\n  ".join(failures)
 
 
 async def test_no_screen_overflows_horizontally_at_375px(rendered):
@@ -354,7 +383,7 @@ async def test_no_screen_overflows_horizontally_at_375px(rendered):
         # the screenshot alone rarely identifies which element did it.
         f"{r.name}: scrollWidth {r.scroll_width}px > {WIDTH}px; widest: {r.widest}"
         for r in rendered
-        if r.scroll_width > WIDTH
+        if not r.error and r.scroll_width > WIDTH
     ]
     assert not failures, "horizontal overflow at 375px:\n  " + "\n  ".join(failures)
 
@@ -365,6 +394,7 @@ async def test_primary_actions_stay_inside_the_viewport_at_375px(rendered):
     failures = [
         f"{r.name}: {offender} outside 0..{WIDTH}"
         for r in rendered
+        if not r.error
         for offender in r.offenders
     ]
     assert not failures, "primary actions unreachable at 375px:\n  " + "\n  ".join(
