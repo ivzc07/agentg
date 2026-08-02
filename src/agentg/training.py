@@ -14,6 +14,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from agentg.catalog import (
@@ -125,10 +126,33 @@ class TrainingStore:
                 days, last = await self._previous_session_info(db, member_id, existing.id, now)
                 return OpenedSession(existing.id, True, days, last)
             days, last = await self._previous_session_info(db, member_id, None, now)
-            session = Session(gym_id=gym_id, member_id=member_id, started_at=now)
-            db.add(session)
-            await db.commit()
-            return OpenedSession(session.id, False, days, last)
+            # Race-safe INSERT: a savepoint isolates the attempt so a
+            # unique-constraint loser can recover without trashing the
+            # outer transaction (issue #213).
+            nested = await db.begin_nested()
+            try:
+                session = Session(gym_id=gym_id, member_id=member_id, started_at=now)
+                db.add(session)
+                await db.flush()
+                await nested.commit()
+                await db.commit()
+                return OpenedSession(session.id, False, days, last)
+            except IntegrityError:
+                await nested.rollback()
+                # Another caller won the race — use their Session.
+                winner = await db.scalar(
+                    select(Session)
+                    .where(Session.member_id == member_id, Session.closed_at.is_(None))
+                    .order_by(Session.started_at.desc())
+                    .limit(1)
+                )
+                if winner is None:
+                    raise RuntimeError(
+                        f"Failed to create or find open session for member {member_id}"
+                    )
+                await db.commit()
+                days, last = await self._previous_session_info(db, member_id, winner.id, now)
+                return OpenedSession(winner.id, True, days, last)
 
     async def close_session(self, member_id: int) -> SessionSummary:
         async with self._sessions() as db:
@@ -513,11 +537,34 @@ class TrainingStore:
         self, db: AsyncSession, member_id: int, gym_id: int
     ) -> Session:
         session = await self._open_session_row(db, member_id)
-        if session is None:  # logging sets implies being at the gym
-            session = Session(gym_id=gym_id, member_id=member_id, started_at=self._clock())
+        if session is not None:
+            return session
+        # logging sets implies being at the gym — create one race-safely.
+        # A savepoint isolates the INSERT so a unique-constraint loser can
+        # recover without trashing the outer transaction (issue #213).
+        now = self._clock()
+        nested = await db.begin_nested()
+        try:
+            session = Session(gym_id=gym_id, member_id=member_id, started_at=now)
             db.add(session)
             await db.flush()
-        return session
+            await nested.commit()
+            return session
+        except IntegrityError:
+            await nested.rollback()
+            # Another caller won the race — use their Session.
+            winner = await db.scalar(
+                select(Session)
+                .where(Session.member_id == member_id, Session.closed_at.is_(None))
+                .order_by(Session.started_at.desc())
+                .limit(1)
+            )
+            if winner is None:
+                raise RuntimeError(
+                    f"Failed to create or find open session for member {member_id}: "
+                    "unique constraint violation but no open session exists"
+                )
+            return winner
 
     async def _last_activity(self, db: AsyncSession, session: Session) -> datetime:
         newest_set = await db.scalar(
