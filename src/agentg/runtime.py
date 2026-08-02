@@ -30,6 +30,12 @@ from agentg.stores import Stores
 
 logger = logging.getLogger(__name__)
 
+# How long a turn waits for the previous turn's compaction to signal before
+# giving up and proceeding.  This only covers the window before after_send
+# starts; once compaction runs it holds the per-identity lock, which
+# serialises the turns regardless.
+COMPACTION_SIGNAL_GRACE_SECONDS = 5.0
+
 
 @dataclass
 class AgentRuntime:
@@ -46,6 +52,9 @@ class AgentRuntime:
     # The dashboard door (`/dashboard` -> magic link); None in tests that
     # don't exercise the dashboard.
     dashboard: DashboardDoor | None = None
+    # How long a turn waits for the previous turn's compaction to signal
+    # before proceeding without it (see COMPACTION_SIGNAL_GRACE_SECONDS).
+    compaction_grace_seconds: float = COMPACTION_SIGNAL_GRACE_SECONDS
     # One lock per channel identity so a rapid double message can't interleave
     # turns (or linking steps). Unbounded, but one entry per person who
     # ever messaged this process — fine at this scale.
@@ -56,6 +65,11 @@ class AgentRuntime:
     # handle_message awaits the previous turn's compaction (if any) outside
     # the lock — after_send still acquires the lock to compact, so the
     # event-based wait avoids a deadlock (issue #173 criterion 2).
+    #
+    # after_send is caller-driven: the runtime hands it back and trusts the
+    # channel to run it.  A channel that drops it (or dies first) must never
+    # wedge that Member, so the wait is bounded and the entry is consumed on
+    # read — ordering is a nicety, liveness is not negotiable.
     _compaction_done: dict[tuple[str, str], asyncio.Event] = field(default_factory=dict)
 
     async def ensure_schema(self) -> None:
@@ -87,9 +101,26 @@ class AgentRuntime:
         # Await the previous turn's compaction (if any) before acquiring the
         # lock.  This is done outside the lock so that after_send (which
         # also acquires the lock) can still make progress (issue #173).
-        prev = self._compaction_done.get(key)
-        if prev is not None:
-            await prev.wait()
+        #
+        # The wait is bounded: it only covers the window before after_send
+        # starts.  Once compaction is actually running it holds the lock, so
+        # the acquire below serialises us anyway.  If the signal never comes
+        # (a channel that dropped after_send), we proceed with an uncompacted
+        # prompt — the pre-#173 behaviour — rather than wedging the Member.
+        # popping consumes the event so one dropped after_send costs one
+        # grace period, not every turn thereafter, and the dict cannot grow
+        # without bound.
+        prev = self._compaction_done.pop(key, None)
+        if prev is not None and not prev.is_set():
+            try:
+                await asyncio.wait_for(prev.wait(), self.compaction_grace_seconds)
+            except TimeoutError:
+                logger.warning(
+                    "previous turn's compaction never signalled for %s:%s; "
+                    "proceeding (the per-identity lock still serialises it)",
+                    msg.channel,
+                    msg.channel_user_id,
+                )
         async with self._locks[key]:
             linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
             reply = await self.linking.handle(msg, linked)
@@ -132,27 +163,31 @@ class AgentRuntime:
             self._compaction_done[key] = compaction_done
 
             async def after_send() -> None:
-                # Serve demos first — they don't need the lock and
-                # shouldn't wait for the summarizer (timeout=60,
-                # num_retries=1 → up to ~2 min).
-                if sender is not None:
-                    for exercise in demo_requests:
+                # Whatever happens in here, the next turn must be released:
+                # the signal is set in a finally covering the whole body, not
+                # just the compaction call (issue #173).
+                try:
+                    # Serve demos first — they don't need the lock and
+                    # shouldn't wait for the summarizer (timeout=60,
+                    # num_retries=1 → up to ~2 min).
+                    if sender is not None:
+                        for exercise in demo_requests:
+                            try:
+                                await serve_demo(
+                                    self.stores.demos, sender, exercise, gym_id, channel, user_id
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "failed to serve demo %r to %s", exercise, user_id
+                                )
+                    async with lock:
                         try:
-                            await serve_demo(
-                                self.stores.demos, sender, exercise, gym_id, channel, user_id
+                            await maybe_compact(
+                                session, summarizer, notes_store, member_id, gym_id
                             )
                         except Exception:
-                            logger.exception(
-                                "failed to serve demo %r to %s", exercise, user_id
-                            )
-                async with lock:
-                    try:
-                        await maybe_compact(
-                            session, summarizer, notes_store, member_id, gym_id
-                        )
-                    except Exception:
-                        logger.exception("compaction failed for member %d", member_id)
-                    finally:
-                        compaction_done.set()
+                            logger.exception("compaction failed for member %d", member_id)
+                finally:
+                    compaction_done.set()
 
             return Reply(text, after_send=after_send)

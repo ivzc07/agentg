@@ -651,3 +651,69 @@ async def test_multiple_old_summaries_are_merged(env):
     assert "Summary epoch 2" in str(items[0])
     # The new summary is second
     assert "Summary of earlier conversation" in str(items[1])
+
+
+async def test_a_channel_that_never_runs_after_send_does_not_wedge_the_member(
+    env, monkeypatch
+):
+    """A channel that drops ``after_send`` must not wedge the Member forever.
+
+    ``after_send`` is caller-driven: the runtime hands it back and trusts the
+    channel to run it.  A channel that ignores it (or dies before it) must
+    still be able to serve that Member's next turn — a cosmetic ordering
+    guarantee may never cost liveness (issue #173).
+    """
+    import asyncio
+    from types import SimpleNamespace
+
+    import agentg.runtime as runtime_module
+
+    async def fake_run(agent, text, *, session, context=None):
+        return SimpleNamespace(final_output="ok")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+    env.runtime.compaction_grace_seconds = 0.05
+
+    msg = IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
+    # First turn: the reply comes back with an after_send the channel drops.
+    first = await env.runtime.handle_message(msg)
+    assert first.after_send is not None
+
+    # Second turn from the same Member must still be served.
+    second = await asyncio.wait_for(env.runtime.handle_message(msg), timeout=5)
+    assert str(second) == "ok"
+
+    # The stale signal is consumed, so the wedge costs one grace period
+    # once — not a fresh stall on every later turn.
+    third = await asyncio.wait_for(env.runtime.handle_message(msg), timeout=0.5)
+    assert str(third) == "ok"
+
+
+async def test_a_failing_after_send_does_not_wedge_the_member(env, monkeypatch):
+    """``after_send`` raising before it reaches compaction must not wedge
+    the Member either — the completion signal has to survive failure."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import agentg.runtime as runtime_module
+
+    async def fake_run(agent, text, *, session, context=None):
+        return SimpleNamespace(final_output="ok")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+
+    msg = IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
+    first = await env.runtime.handle_message(msg)
+
+    class Boom(Exception):
+        pass
+
+    # The channel starts after_send but it blows up part-way through.
+    async def exploding_compact(*args, **kwargs):
+        raise Boom("compaction exploded")
+
+    monkeypatch.setattr(runtime_module, "maybe_compact", exploding_compact)
+    await first.after_send()
+
+    second = await asyncio.wait_for(env.runtime.handle_message(msg), timeout=5)
+    assert str(second) == "ok"
