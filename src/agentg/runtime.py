@@ -467,6 +467,8 @@ async def _clear_if_forgotten(
         async for chunk in inner:
             yield chunk
     finally:
+        # Propagate the close inward before wiping (see _finish_turn).
+        await inner.aclose()
         if context.forgotten:
             await session.clear_session()
 
@@ -486,6 +488,11 @@ async def _finish_turn(
         async for chunk in inner:
             yield chunk
     finally:
+        # ``async for ... yield`` does NOT propagate aclose() to the delegated
+        # generator, so close it explicitly: the channel's aclose() on the
+        # outermost wrapper must still drive the #166 wipe and the lock release
+        # deterministically, not leave them to async-gen GC.
+        await inner.aclose()
         turn.finish()
 
 
@@ -508,6 +515,8 @@ async def _hold_lock(
             async for chunk in inner:
                 yield chunk
         finally:
+            # Propagate the close inward before releasing (see _finish_turn).
+            await inner.aclose()
             lock.release()
             released = True
     except GeneratorExit:

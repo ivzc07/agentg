@@ -871,3 +871,73 @@ async def _stream_events(text: str):
             type="raw_response_event",
             data=_text_delta(ch, i),
         )
+
+
+async def test_aclose_releases_the_lock_synchronously(tmp_path):
+    """``aclose()`` on the outermost wrapper must release the per-identity
+    lock and run the forget-me wipe *before it returns* -- not eventually,
+    when asyncio finalizes an abandoned generator.
+
+    ``async for ... yield`` does not propagate ``aclose()`` to the delegated
+    generator, so every wrapper closes its inner chain explicitly.  Without
+    that, a delivery error leaves the lock held until async-gen GC, and
+    ``after_send``'s compaction can acquire the lock and summarise a
+    forgotten Member's history *before* the deferred wipe runs (#166/#176).
+
+    Revert-proof: drop the ``await inner.aclose()`` from ``_finish_turn`` and
+    the lock is still held when this assertion runs.
+    """
+    from agentg.db import create_engine
+    from agentg.linking import Linking
+    from agentg.messages import IncomingMessage
+    from agentg.runtime import AgentRuntime
+    from agentg.stores import Stores
+    from conftest import unused_phraser
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'aclose.db'}")
+    stores = Stores.from_engine(engine)
+    runtime = AgentRuntime(
+        agent=object(),
+        engine=engine,
+        stores=stores,
+        linking=Linking(stores.linking, unused_phraser),
+        summarizer=None,
+        stream_replies=True,
+    )
+    await runtime.ensure_schema()
+    gym = await stores.linking.create_gym("Iron Temple")
+    await stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    class FakeStreamResult:
+        async def stream_events(self):
+            from agents.stream_events import RawResponsesStreamEvent
+
+            for i, char in enumerate("Hello there, Ana. "):
+                yield RawResponsesStreamEvent(
+                    type="raw_response_event", data=_text_delta(char, i)
+                )
+
+    import agentg.runtime as runtime_module
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            runtime_module.Runner,
+            "run_streamed",
+            lambda *a, **k: FakeStreamResult(),
+        )
+        reply = await runtime.handle_message(
+            IncomingMessage(channel="telegram", channel_user_id="42", text="hi")
+        )
+
+        key = ("telegram", "42")
+        assert runtime._locks[key].locked(), "the stream should hold the lock"
+
+        # Consume one chunk, then abandon the stream the way a delivery error
+        # does, and close it.
+        await reply.stream.__anext__()
+        await reply.stream.aclose()
+
+        assert not runtime._locks[key].locked(), (
+            "aclose() must release the per-identity lock before it returns, "
+            "not leave it to async-generator finalization"
+        )

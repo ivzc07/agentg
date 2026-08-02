@@ -1,0 +1,59 @@
+Everything verified. Here is my review.
+
+---
+
+## Review: merge commit `2942ca6` on `issue-176`
+
+I traced the stream-wrapper chain, reproduced its `aclose()` semantics with standalone asyncio scripts, and checked every must-hold criterion against the code (not the diff prose).
+
+### [P1] `_finish_turn` as the outermost wrapper defeats deterministic lock release (and the #166 wipe) on the delivery-error path
+`src/agentg/runtime.py:328-333` composes the stream as `_finish_turn( _hold_lock( _clear_if_forgotten( _stream_text ) ) )`, making `_finish_turn` (added by this commit) the **outermost** generator. Before this commit `_hold_lock` was outermost, so the channel's `await reply.stream.aclose()` (`telegram.py:159`) closed `_hold_lock` directly and its `finally` released the per-identity lock **deterministically** ÔÇö the exact guarantee the #199 review shipped as a P1 fix ("stream never aclose()d so the lock leaked until GC").
+
+`async for ÔÇª : yield` does **not** propagate `aclose()` to the delegated generator (there is no `yield from` for async generators). I verified this:
+
+- After `await reply.stream.aclose()` returns, `_hold_lock.finally` (lock release) and `_clear_if_forgotten.finally` (#166 wipe) have **not** run ÔÇö `lock.locked()` is still `True`. They only run later, when the abandoned inner generators are finalized by asyncio's async-gen GC hook.
+- In the realistic channel ordering (aclose ÔåÆ typing-task teardown await ÔåÆ `after_send`), the finalizer had **not** run after a single loop turn, and `after_send`'s `async with lock` compaction acquired the lock and ran **before** `_clear_if_forgotten` executed the `session.clear_session()` wipe.
+
+Consequences on the production-default streaming path, on the *reachable* delivery-error path (the whole `deliver_media=False` design assumes streamed delivery can error):
+1. Lock release regresses from deterministic to GC-finalizer-dependent ÔÇö reintroducing the class of bug previously fixed as P1. (Not a *permanent* hang on CPython: the finalizer eventually releases it ÔÇö see the P2 test note.)
+2. `#166` forget-me: on a forgotten turn that errors mid-stream, `maybe_compact` can run over the session **before** the deferred `clear_session()`, summarising to-be-forgotten content into persistent notes ÔÇö residue that #166 says must not exist.
+
+**Fix (verified):** make every wrapper that can be the target of `aclose()` explicitly close its inner chain in its `finally`, e.g.
+
+```python
+async def _finish_turn(inner, turn):
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        await inner.aclose()   # propagate close down the chain
+        turn.finish()
+```
+
+and the same `await inner.aclose()` in `_hold_lock` (before `lock.release()`) and in `_clear_if_forgotten`. With this, `aclose()` drives `stream_text ÔåÆ clear_if_forgotten (wipe) ÔåÆ lock release ÔåÆ turn.finish()` all synchronously before it returns (confirmed in a standalone repro). On normal exhaustion these `aclose()` calls are no-ops, so nothing else changes.
+
+### [P2] The dedicated deadlock test no longer guards the invariant it claims to
+`tests/test_streaming.py:747 test_second_message_not_deadlocked_after_stream_error` asserts only that a second `handle_message` does not hang forever. Because the async-gen finalizer *eventually* releases the lock (during the second turn's compaction-grace wait), this test **still passes** despite the P1 regression ÔÇö it catches permanent hangs, not loss of deterministic release. `test_stream_aclosed_on_delivery_error` only asserts `aclose()` was *called*, not that the lock was released by it. Add a test that asserts release is synchronous:
+
+```python
+await reply.stream.aclose()
+assert not runtime._locks[key].locked()   # fails today; passes after the P1 fix
+```
+
+This is the "does the test still fail if the production change is reverted?" gap: nothing currently fails when the ordering regresses.
+
+### [P3] Dead `GeneratorExit` branch in `_hold_lock`
+`src/agentg/runtime.py:513-516` ÔÇö `_hold_lock`'s `except GeneratorExit` (the documented belt-and-braces for aclose-before-start) is now unreachable on the aclose path, since `aclose()` hits `_finish_turn`, never `_hold_lock`. The P1 fix (propagating `aclose()`) makes it live again.
+
+---
+
+### Criteria that DO hold (checked, not assumed)
+- **#161 / the "measures setup only" NOTE:** correctly resolved. The old NOTE is gone; `TurnContext.__exit__` now resets the contextvar but defers the log line via `defer_logging`, and `_finish_turn` emits it in a `finally` after the stream is consumed, so duration and counts cover the whole generation. The new `test_streaming_turn_is_logged_after_the_stream_not_at_setup` is genuinely revert-proof (asserts no line at setup, then non-zero model calls after consumption). Sound.
+- **Deliberate behaviour change (always run `after_send`, `deliver_media=False` on error):** correct and correctly wired end-to-end. `Reply.after_send` widened to `Callable[..., Awaitable[None]]` (`messages.py:24`); `after_send(*, deliver_media: bool = True)` (`runtime.py:370`); both call sites compatible ÔÇö `telegram.py:182` passes `deliver_media=not stream_errored`, `telegram.py:243` calls it bare. Setting `compaction_done` in a `finally` around the whole body means #173's signal is set even on the error path, and the rhythm reset (#169) and pings (#172) survive a failed delivery. Good call, correctly implemented.
+- **#175** `_SNAPSHOT_RUN_CONFIG` reaches both paths (`runtime.py:288` blocking, `:322` streaming). **#174** `await self.member_context(...)`. **#172** pings drained on raise (handle_message `except` + `after_send`). **#169** reset created once, awaited on every exit path. **#173** bounded grace wait + event pop, compaction under lock in `after_send`. All present.
+- **`compaction_done` cannot fail to be set:** it's in the outer `finally` of `after_send`. Holds ÔÇö *provided* `after_send` actually runs, which the P1 does not affect.
+
+The P1 is the "fifth" concurrency bug: deterministic lock release (and the #166 wipe) on the aclose path is silently defeated by inserting `_finish_turn` outside `_hold_lock`.
+
+VERDICT: RED
+RC=0
