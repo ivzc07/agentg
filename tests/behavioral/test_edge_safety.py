@@ -244,6 +244,76 @@ async def test_forget_me_group_message_clears_pending_without_deletion(tmp_path)
         assert await h.stores.training.last_sets(member_id, "bench press") is not None
 
 
+async def test_forget_me_expired_request_cancels_and_falls_through_to_model(tmp_path):
+    """An expired forget-me request must not delete — the runtime cancels
+    the pending intent silently and falls through to the model (issue #212)."""
+    from datetime import datetime, timezone
+
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        await h.seed_closed_session("bench 60 8,8,8")
+        member_id = h.member_id
+
+        # Create an expired pending request directly.
+        past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        phrase = await h.stores.forget.request_forget_me(
+            member_id, h.gym_id, past, 1
+        )
+
+        # Confirm the pending exists but is expired.
+        pending = await h.stores.forget.get_pending_request(member_id)
+        assert pending is not None
+
+        # Sending the confirmation phrase on an *expired* request must
+        # not delete — the runtime cancels the pending and falls through
+        # to the model (which runs normally).
+        await h.say(
+            phrase,
+            steps=[message("Hey! What can I help you with today?")],
+        )
+
+        # Data still intact.
+        assert await _count(h._engine, Member, id=member_id) == 1
+        assert await h.stores.training.last_sets(member_id, "bench press") is not None
+        # Pending intent cleared.
+        pending = await h.stores.forget.get_pending_request(member_id)
+        assert pending is None
+
+
+async def test_forget_me_expired_request_any_message_falls_through(tmp_path):
+    """Any message on an expired forget-me request must cancel the pending
+    silently and let the model run — no deletion (issue #212)."""
+    from datetime import datetime, timezone
+
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        await h.seed_closed_session("bench 60 8,8,8")
+        member_id = h.member_id
+
+        # Create an expired pending request.
+        past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        await h.stores.forget.request_forget_me(
+            member_id, h.gym_id, past, 1
+        )
+
+        # Any message — even a new forget-me trigger — on an expired
+        # request must cancel first, then re-evaluate (the trigger text
+        # below will issue a fresh request).
+        request_reply = await h.say("forget me")
+        assert "permanentemente" in request_reply.lower()
+        # The old expired pending is gone; a fresh request was created.
+        pending = await h.stores.forget.get_pending_request(member_id)
+        assert pending is not None
+        # Data still intact.
+        assert await _count(h._engine, Member, id=member_id) == 1
+
+        # Now confirm with the fresh phrase to prove it works.
+        phrase = _extract_confirmation_phrase(request_reply)
+        assert phrase is not None
+        await h.say(phrase)
+        assert await _count(h._engine, Member, id=member_id) == 0
+
+
 async def test_gym_switch_creates_fresh_member_and_keeps_old(tmp_path):
     async with ConversationHarness.create(tmp_path) as h:
         await h.linked_member(name="Dani", gym_name="Iron Temple")
