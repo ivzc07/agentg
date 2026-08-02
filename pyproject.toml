@@ -31,7 +31,7 @@ dev = [
 # Deliberately NOT in `dev`: playwright pulls ~115 MB of browser binaries, and
 # CI installs `dev` on every run. tests/test_375px_playwright.py skips itself
 # when this is absent, so the default suite is unaffected.
-#   uv pip install --extra browser . && uv run playwright install chromium
+#   uv pip install ".[browser]" && uv run playwright install chromium
 browser = [
     "playwright>=1.40",
 ]

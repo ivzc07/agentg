@@ -45,6 +45,8 @@ pytest.importorskip(
 from dataclasses import dataclass, field  # noqa: E402
 from pathlib import Path  # noqa: E402
 
+import pytest_asyncio  # noqa: E402
+
 from aiohttp.test_utils import TestServer  # noqa: E402
 from playwright.async_api import async_playwright  # noqa: E402
 
@@ -96,8 +98,8 @@ class Rendered:
     offenders: list[str] = field(default_factory=list)
 
 
-@pytest.fixture
-async def live_dashboard(tmp_path):
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
+async def live_dashboard(tmp_path_factory):
     """A real HTTP server on a real port, seeded with a populated gym.
 
     Playwright drives a browser over the network, so the in-process aiohttp
@@ -105,6 +107,7 @@ async def live_dashboard(tmp_path):
     The gym is *populated* deliberately: empty screens collapse to a narrow
     column and would hide precisely the overflow this module exists to catch.
     """
+    tmp_path = tmp_path_factory.mktemp("px375")
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'domain.db'}")
     clock = FakeClock()
     linking = LinkingStore(engine)
@@ -187,6 +190,9 @@ def _screens(env) -> list[Screen]:
     return [
         Screen("table", "/?view=table", "#search"),
         Screen("cards", "/?view=cards", ".grid"),
+        # Both Split variants: the roster-level one renders _split_placeholder
+        # in the right pane, a different layout from the member-open variant.
+        Screen("split-empty", "/?view=split", ".split"),
         Screen("split", f"/members/{member}?view=split", ".split"),
         Screen("member", f"/members/{member}", "header.mhead"),
         Screen("routine-editor", f"/members/{member}/routine", ".editor-wrap"),
@@ -198,12 +204,14 @@ def _screens(env) -> list[Screen]:
     ]
 
 
-@pytest.fixture
+@pytest_asyncio.fixture(scope="module", loop_scope="module")
 async def rendered(live_dashboard) -> list[Rendered]:
     """Render every screen once at 375px and collect the measurements.
 
-    One browser launch for both assertions: they examine the same render rather
-    than paying to load the whole dashboard twice.
+    Module-scoped so this really is one browser launch for both assertions -
+    function scope would silently re-run the whole pass per test, paying for
+    nine page loads and a second set of screenshots to look at identical
+    numbers. The tests only read from the result, so sharing it is safe.
     """
     env = live_dashboard
     SHOT_DIR.mkdir(parents=True, exist_ok=True)
