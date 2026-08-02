@@ -18,6 +18,7 @@ from agentg.linking_store import LinkingStore
 from agentg.context import MemberContext
 from agentg.stores import Stores
 from agentg.tools import open_session_payload
+from agentg.advice import suggest_for_today
 from agentg.training import TrainingStore
 
 ROUTINE_TOOLS = {"get_rules_doc", "list_exercises", "save_routine", "get_routine"}
@@ -133,3 +134,176 @@ async def test_snapshot_names_todays_workout_when_a_routine_exists(env):
 async def test_snapshot_without_a_routine_says_so(env):
     snapshot = await member_snapshot(env.context)
     assert "no routine" in snapshot.lower()
+
+
+class _CountingRoutineStore:
+    """Wraps a RoutineStore to count active_routine calls (#162)."""
+
+    def __init__(self, store: RoutineStore) -> None:
+        self._store = store
+        self.active_routine_calls = 0
+
+    async def active_routine(self, member_id: int):
+        self.active_routine_calls += 1
+        return await self._store.active_routine(member_id)
+
+    # Delegate everything else so the cache helper's duck-type access works.
+    def __getattr__(self, name: str):
+        return getattr(self._store, name)
+
+
+async def test_active_routine_is_loaded_exactly_once_per_turn(env):
+    """A full turn (snapshot + open_session + suggest_weights) loads
+    the active Routine exactly once — the cache reuses it (#162)."""
+    await env.routines.save_routine(env.member_id, env.gym_id, wednesday_push())
+
+    counter = _CountingRoutineStore(env.routines)
+    context = MemberContext(
+        stores=Stores(
+            linking=env.context.stores.linking,
+            training=env.context.stores.training,
+            notes=env.context.stores.notes,
+            routines=counter,
+            checkins=env.context.stores.checkins,
+            demos=env.context.stores.demos,
+            forget=env.context.stores.forget,
+            dashboard=env.context.stores.dashboard,
+        ),
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        member_name="Dani",
+        gym_name="Iron Temple",
+        weight_unit="kg",
+    )
+
+    # Simulate a full turn: snapshot first, then session opener, then suggestions.
+    snapshot = await member_snapshot(context)
+    assert "Push" in snapshot
+
+    payload = await open_session_payload(context)
+    assert payload["todays_workout"] is not None
+    assert payload["todays_workout"]["name"] == "Push"
+
+    # Exercise the same code path suggest_weights uses: get the cached
+    # Routine via the public TurnCache API (not the private field), then
+    # pass it to suggest_for_today.
+    routine = await context.turn_cache.get_or_load_routine(
+        context.stores.routines, context.member_id
+    )
+    suggestions = await suggest_for_today(
+        context.stores.training,
+        context.stores.routines,
+        context.member_id,
+        context.gym_id,
+        context.timezone,
+        routine=routine,
+    )
+    assert len(suggestions) == 1
+    assert suggestions[0].exercise == "bench press"
+
+    # The active Routine was loaded exactly once — the cache fed the rest.
+    assert counter.active_routine_calls == 1
+
+
+async def test_no_routine_loads_exactly_once_per_turn(env):
+    """When a Member has no Routine, a full turn still queries active_routine
+    exactly once — cached None avoids a re-query via the sentinel (#162)."""
+    counter = _CountingRoutineStore(env.routines)
+    context = MemberContext(
+        stores=Stores(
+            linking=env.context.stores.linking,
+            training=env.context.stores.training,
+            notes=env.context.stores.notes,
+            routines=counter,
+            checkins=env.context.stores.checkins,
+            demos=env.context.stores.demos,
+            forget=env.context.stores.forget,
+            dashboard=env.context.stores.dashboard,
+        ),
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        member_name="Dani",
+        gym_name="Iron Temple",
+        weight_unit="kg",
+    )
+
+    # Full turn: snapshot, session opener, weight suggestions.
+    snapshot = await member_snapshot(context)
+    assert "no routine" in snapshot.lower()
+
+    payload = await open_session_payload(context)
+    assert payload["todays_workout"] is None
+
+    # Exercise the same code path suggest_weights uses.
+    routine = await context.turn_cache.get_or_load_routine(
+        context.stores.routines, context.member_id
+    )
+    suggestions = await suggest_for_today(
+        context.stores.training,
+        context.stores.routines,
+        context.member_id,
+        context.gym_id,
+        context.timezone,
+        routine=routine,  # None — cached, sentinel tells suggest_for_today not to re-query
+    )
+    assert suggestions == []
+
+    # Exactly one DB load — cached None fed the rest, no fallback re-query.
+    assert counter.active_routine_calls == 1
+
+
+async def test_the_cache_lives_exactly_one_turn(env):
+    """A fresh MemberContext (a new turn) reloads the Routine from the DB,
+    and a Routine edited between turns shows the new content (#162)."""
+    await env.routines.save_routine(env.member_id, env.gym_id, wednesday_push())
+
+    counter = _CountingRoutineStore(env.routines)
+
+    # First turn.
+    ctx1 = MemberContext(
+        stores=Stores(
+            linking=env.context.stores.linking,
+            training=env.context.stores.training,
+            notes=env.context.stores.notes,
+            routines=counter,
+            checkins=env.context.stores.checkins,
+            demos=env.context.stores.demos,
+            forget=env.context.stores.forget,
+            dashboard=env.context.stores.dashboard,
+        ),
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        member_name="Dani",
+        gym_name="Iron Temple",
+        weight_unit="kg",
+    )
+    snapshot1 = await member_snapshot(ctx1)
+    assert "Push" in snapshot1
+    assert counter.active_routine_calls == 1
+
+    # Edit the Routine between turns — save a Pull workout instead.
+    await env.routines.save_routine(
+        env.member_id,
+        env.gym_id,
+        [
+            WorkoutSpec(
+                weekday=2,
+                name="Pull",
+                exercises=[ExerciseSpec("deadlift", sets=1, reps="5")],
+            )
+        ],
+    )
+
+    # Second turn with a fresh context — should re-query and see the new name.
+    ctx2 = MemberContext(
+        stores=ctx1.stores,
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        member_name="Dani",
+        gym_name="Iron Temple",
+        weight_unit="kg",
+    )
+    snapshot2 = await member_snapshot(ctx2)
+    assert "Pull" in snapshot2
+    assert "Push" not in snapshot2
+    assert counter.active_routine_calls == 2

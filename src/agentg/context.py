@@ -7,9 +7,36 @@ delegate to (coaching.py) — neither imports the other's internals through it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from agentg.checkin_sweep import Notifier
 from agentg.stores import Stores
+
+
+@dataclass
+class TurnCache:
+    """Mutable per-turn cache — lives exactly one Agent run.
+
+    A MemberContext is built fresh each time the Agent runs, so anything
+    cached here is automatically dropped between turns.
+    """
+
+    _active_routine: dict[str, Any] | None = None
+    _routine_loaded: bool = False
+
+    async def get_or_load_routine(
+        self, routines_store: Any, member_id: int
+    ) -> dict[str, Any] | None:
+        """Return the active Routine, loading it once per turn (#162)."""
+        if not self._routine_loaded:
+            self._active_routine = await routines_store.active_routine(member_id)
+            self._routine_loaded = True
+        return self._active_routine
+
+    def set_routine(self, routine: dict[str, Any] | None) -> None:
+        """Replace the cached Routine — call after saving a new one."""
+        self._active_routine = routine
+        self._routine_loaded = True
 
 
 @dataclass(frozen=True)
@@ -33,6 +60,9 @@ class MemberContext:
     # Exercises the Agent asked to demo this turn; the channel sends them
     # after the reply so the agent loop stays channel-agnostic (ADR 0001).
     demo_requests: list[str] = field(default_factory=list)
+    # Per-turn cache so the active Routine is loaded once and reused
+    # across the snapshot, session opener, and weight suggestions (#162).
+    turn_cache: TurnCache = field(default_factory=TurnCache)
     # True when delete_my_data confirmed and wiped everything; the runtime
     # clears the SDK session again after the run to remove the turn's own
     # residue (issue #166).
