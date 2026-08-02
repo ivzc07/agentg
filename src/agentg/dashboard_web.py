@@ -65,9 +65,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
-from html import escape
 from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 
 import qrcode
 import qrcode.image.svg
@@ -110,7 +109,6 @@ SESSION_TTL = timedelta(days=90)
 
 Clock = Callable[[], datetime]
 
-VIEWS = ("table", "cards", "split")
 
 
 def _utcnow() -> datetime:
@@ -159,91 +157,30 @@ SETS_MIN, SETS_MAX = 1, 99
 REGENERATE_CONFIRM = STRINGS["es"]["confirm_word"]
 
 
-# --- The design tokens and shared shell (issue: the UX/UI redesign) ---
-#
-# One dark editorial language for every page, adopted from the parked
-# docs/prototypes/coach-dashboard-v3-dark.html ("the look is wanted"):
-# pure black ground, two flat surfaces, hairline rules instead of card
-# chrome, zero corner radius except pill chips, white as the loudest
-# accent, a mono-uppercase eyebrow as the one typographic signature, and
-# color reserved for training state — magenta kept, coral missed/red, amber
-# slipping, purple extra. All values live here as custom properties; the
-# per-surface style blocks below only compose them.
-
-# Login door and bounce pages: one centered column, one action.
-# Every form disables its submit buttons once a submit is on its way —
-# a double-clicked Apply must not message every Member twice. The timeout
-# lets the click's own submit complete before the buttons grey out. A
-# cancelled confirm (the retire form) prevents the default but still
-# bubbles here — defaultPrevented keeps the button alive. And a page
-# restored from the back/forward cache comes back with its frozen DOM, so
-# pageshow re-arms what a past submit disabled.
-SUBMIT_GUARD_SCRIPT = """
-document.addEventListener("submit", function (e) {
-  if (e.defaultPrevented) return;
-  var buttons = e.target.querySelectorAll("button[type=submit]");
-  setTimeout(function () { buttons.forEach(function (b) { b.disabled = true; }); }, 0);
-});
-window.addEventListener("pageshow", function (e) {
-  if (!e.persisted) return;
-  document.querySelectorAll("form button[type=submit]").forEach(function (b) {
-    if (!b.closest("form[data-confirm]")) b.disabled = false;
-  });
-});
-"""
-
-
-STATIC_DIR = Path(__file__).parent / "static"
-
-
-@lru_cache(maxsize=4)
-def _asset_version(filename: str) -> str:
-    """A content hash in a static asset's URL, so a deploy never serves a
-    90-day-cookie Coach last release's copy from their browser cache."""
-    digest = hashlib.md5((STATIC_DIR / filename).read_bytes(), usedforsecurity=False).hexdigest()
-    return digest[:8]
-
-
-def _document(
-    title: str, lang: str, body: str, *, scripts: str = "", with_htmx: bool = False
-) -> str:
-    """The one page skeleton every surface renders through. All styling
-    lives in static/dashboard.css (ADR 0003): one cacheable sheet, served
-    whole from the package - no build step. Pages that save in place
-    (issue #128) opt into the vendored htmx with ``with_htmx``."""
-    script_html = f"<script>{SUBMIT_GUARD_SCRIPT}{scripts}</script>"
-    htmx_tag = (
-        f'\n<script src="/static/htmx.min.js?v={_asset_version("htmx.min.js")}" defer></script>'
-        if with_htmx
-        else ""
-    )
+def _bounce_page() -> str:
+    """The friendly dead end for anonymous or demoted visitors — a small
+    self-contained page (its styles inline: the SPA bundle is the only
+    other asset the dashboard serves since #154)."""
     return f"""<!DOCTYPE html>
-<html lang="{lang}">
+<html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<link rel="stylesheet" href="/static/dashboard.css?v={_asset_version("dashboard.css")}">{htmx_tag}
+<title>{BOUNCE_TITLE}</title>
+<style>
+body {{ margin: 0; background: #000; color: #ececee;
+  font: 15px/1.5 system-ui, sans-serif; display: flex; min-height: 100vh;
+  align-items: center; justify-content: center; }}
+main {{ max-width: 26rem; padding: 2rem; border: 1px solid #2a2b2e;
+  background: #121316; text-align: center; }}
+h1 {{ font-size: 20px; margin: 0 0 .75rem; }}
+p {{ color: #a5a5aa; margin: 0; }}
+</style>
 </head>
 <body>
-{body}
-{script_html}
+<main><h1>{BOUNCE_TITLE}</h1><p>{BOUNCE_BODY}</p></main>
 </body>
 </html>"""
-
-
-def _page(title: str, body: str, extra: str = "", lang: str = "es") -> str:
-    inner = f"""<h1>{title}</h1>"""
-    if body:
-        inner += f"<p>{body}</p>"
-    if extra:
-        inner += extra
-    content = f"""<div class="door"><div class="card">{inner}</div></div>"""
-    return _document(title, lang, content)
-
-
-def _bounce_page() -> str:
-    return _page(BOUNCE_TITLE, BOUNCE_BODY)
 
 
 def _invite_url(bot_username: str, code: str) -> str:
@@ -269,46 +206,10 @@ def _qr_svg(data: str) -> str:
 # --- Language plumbing (issue #106) ---
 
 
-def _next_path_sans_done(request: web.Request) -> str:
-    """The page's own URL for round-trips (the language toggle), with the
-    one-shot ``done`` flash stripped - a notice should not survive a
-    toggle, a refresh of the toggled page, or a bookmark."""
-    url = request.rel_url
-    if "done" not in url.query:
-        return url.path_qs
-    return str(url.with_query([(k, v) for k, v in url.query.items() if k != "done"]))
-
-
-def _done_notice(done: str | None, t: dict) -> str:
-    """The one-line confirmation a ``?done=<key>`` redirect carries (issue
-    #129). Only keys the copy table knows render; anything else is
-    nothing — never an error, never echoed back."""
-    key = f"done_{done}" if done else ""
-    return f'<p class="notice-ok">{t[key]}</p>' if key in t else ""
-
-
-def _is_htmx(request: web.Request) -> bool:
-    """True when htmx is asking for a fragment swap (issue #128)."""
-    return request.headers.get("HX-Request") == "true"
-
-
 def _lang_of(request: web.Request) -> str:
     """The language this browser reads: the toggle's cookie, else
     ``Accept-Language``, else Spanish."""
     return resolve_lang(request.cookies.get(LANG_COOKIE), request.headers.get("Accept-Language"))
-
-
-def _lang_toggle(next_path: str, lang: str) -> str:
-    """The EN/ES toggle in the chrome; both links round-trip through
-    ``/lang/<lang>`` and land back on the page the Coach was reading. The
-    language being read is the marked one."""
-    target = quote(next_path, safe="")
-    links = " · ".join(
-        f'<a href="/lang/{code}?next={target}"'
-        f'{" aria-current=\"true\"" if code == lang else ""}>{code.upper()}</a>'
-        for code in ("en", "es")
-    )
-    return f'<span class="lang-toggle">{links}</span>'
 
 
 def _safe_next(raw: str | None) -> str:
@@ -328,97 +229,6 @@ def _safe_next(raw: str | None) -> str:
         if not candidate.startswith("/") or candidate.startswith("//"):
             return "/"
     return raw
-
-
-# --- The shared chrome: segmented view control, search, toggle, settings ---
-
-SEARCH_SCRIPT = """
-// Live, name-only, accent-insensitive filter. It only hides rows — the Gap
-// sort never moves — and a lapsed match auto-expands the tail (a manually
-// opened tail is never slammed shut). Identical in the three views
-// (spec-dashboard §The roster).
-const box = document.getElementById("search");
-const lapsed = document.getElementById("lapsed");
-const nomatch = document.getElementById("no-matches");
-// The chrome's Members (N), rewritten to "X de N" while a query filters
-// (issue #127); its resting label is restored when the box empties.
-const counter = document.getElementById("members-count");
-const restingLabel = counter ? counter.textContent : "";
-const norm = (s) => s.normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").toLowerCase();
-box.addEventListener("input", () => {
-  const q = norm(box.value.trim());
-  let lapsedHit = false;
-  let shown = 0;
-  let activeShown = 0;  // lapsed stay out of the counters (spec §The roster)
-  document.querySelectorAll("[data-name]").forEach((row) => {
-    const hit = !q || norm(row.dataset.name).includes(q);
-    row.hidden = !hit;
-    if (hit) {
-      shown += 1;
-      if (lapsed && lapsed.contains(row)) { if (q) lapsedHit = true; }
-      else activeShown += 1;
-    }
-  });
-  if (lapsed && lapsedHit) lapsed.open = true;
-  if (nomatch) nomatch.hidden = shown > 0;
-  if (counter) {
-    counter.textContent = q
-      ? counter.dataset.fmt.replaceAll("{shown}", activeShown).replaceAll("{total}", counter.dataset.total)
-      : restingLabel;
-  }
-});
-"""
-
-
-def _seg(view: str, t: dict) -> str:
-    """The Table / Cards / Split segmented control — a product control, not
-    a designer's shortlist (spec-dashboard §The roster)."""
-    links = "".join(
-        f'<a href="/?view={v}"{" aria-current=\"true\"" if v == view else ""}>'
-        f'{t[f"view_{v}"]}</a>'
-        for v in VIEWS
-    )
-    return f'<nav class="seg" aria-label="{escape(t["nav_views"], quote=True)}">{links}</nav>'
-
-
-def _chrome(
-    gym_name: str,
-    t: dict,
-    next_path: str,
-    lang: str,
-    *,
-    view: str | None = None,
-    count: int | None = None,
-    active: str | None = None,
-) -> str:
-    """The top bar every screen shares: gym name, the view switcher with the
-    search beside it on roster pages (``view`` set), the Presets and
-    Settings links with an active state, and the language toggle."""
-    count_html = (
-        f'<span class="count" id="members-count" data-total="{count}"'
-        f' data-fmt="{escape(t["match_count"], quote=True)}">'
-        f'{t["members_count"].format(n=count)}</span>' if count is not None else ""
-    )
-    seg = _seg(view, t) if view is not None else ""
-    search = (
-        f'<label class="sr" for="search">{t["search_placeholder"]}</label>'
-        f'<input id="search" type="search" placeholder="{t["search_placeholder"]}" autocomplete="off">'
-        if view is not None
-        else ""
-    )
-
-    def quick(href: str, key: str) -> str:
-        current = ' aria-current="true"' if active == key else ""
-        return f'<a href="{href}"{current}>{t[key]}</a>'
-
-    return f"""<header class="top">
-<h1>{escape(gym_name)}</h1>{count_html}
-{seg}
-{search}
-<span class="spacer"></span>
-<nav class="quick" aria-label="{escape(t["nav_sections"], quote=True)}">{quick("/presets", "presets")}{quick("/settings", "settings")}</nav>
-{_lang_toggle(next_path, lang)}
-</header>"""
 
 
 # --- The Member page (issue #99, spec-dashboard §The Member page) ---
@@ -446,9 +256,6 @@ def _not_found() -> web.Response:
 # without a weekday, a weekday without exercises — is a refused mistake,
 # never a silent drop.
 
-EditorDay = tuple[int | None, str, str]  # (weekday, workout name, exercise lines)
-
-
 @dataclass(frozen=True)
 class RoutineEditorView:
     """The shared editor-facing subset for Members and Preset masters."""
@@ -465,22 +272,6 @@ class RoutineEditorView:
 # deterministic and chat-side, so it follows the chat rule (Spanish like
 # the nudges), never the dashboard's per-browser language.
 ROUTINE_NOTICE = "Tu coach {coach} actualizó tu Rutina 📋\n{plan}"
-
-
-def _days_from_view(view: MemberPage | RoutineEditorView) -> list[EditorDay]:
-    """The active Routine as editor blocks, exercises back to one-per-line."""
-    days: list[EditorDay] = []
-    for day in view.routine:
-        lines = []
-        for name, sets, reps in day.exercises:
-            line = name
-            if sets is not None or reps is not None:
-                line += f", {sets if sets is not None else ''}"
-            if reps is not None:
-                line += f", {reps}"
-            lines.append(line)
-        days.append((day.weekday, day.name, "\n".join(lines)))
-    return days
 
 
 def _parse_workouts_from_json(raw_workouts: list, lang: str) -> list[WorkoutSpec]:
@@ -641,10 +432,6 @@ def build_app(
         if identity is None:
             return None
         return await store.coach_identity(*identity)
-
-    def _view_of(request: web.Request) -> str:
-        view = request.query.get("view", "table")
-        return view if view in VIEWS else "table"
 
     async def set_language(request: web.Request) -> web.Response:
         """The chrome's EN/ES toggle: persist the pick in the long-lived
@@ -1553,7 +1340,6 @@ def build_app(
     # login-token flow the bot depends on).
     app.router.add_get("/login/{token}", spa_login_shell)
     app.router.add_post("/login/{token}", login_redeem)
-    app.router.add_static("/static/", STATIC_DIR)
     app.router.add_get("/members/{member_id}/routine", spa_shell)
     # The JSON API is the dashboard's only data surface after the React
     # cutover (#154) — registered unconditionally.
