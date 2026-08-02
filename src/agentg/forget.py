@@ -141,28 +141,49 @@ class ForgetStore:
         """Persist an expiring confirmation and return the exact phrase the
         Member must send to complete deletion.
 
-        Replaces any prior pending request for this Member atomically.
+        Replaces any prior pending request for this Member atomically
+        via an upsert — no delete-then-insert window where two concurrent
+        initial requests could collide on the unique (member_id) constraint
+        (issue #212, P2).
+
         ``language`` is the two-letter code detected from the triggering
         message so the confirmation goodbye can mirror the Member.
         """
         phrase = "DELETE-ME-" + secrets.token_hex(3).upper()
         expires_at = now + timedelta(seconds=lifetime_seconds)
         async with self._sessions() as db:
-            await db.execute(
-                delete(ForgetMeRequest).where(
+            # Race-safe upsert: SELECT the existing row (if any) under the
+            # session transaction, then UPDATE it or INSERT a new one.
+            # No delete-then-insert window where two concurrent initial
+            # requests could collide on the unique member_id constraint
+            # (issue #212, P2).  The per-identity lock serialises turns
+            # within one process; the single-replica deployment (spec
+            # §Hosting) makes this SELECT‑then‑decide pattern race-free
+            # across runtimes.
+            existing = await db.scalar(
+                select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == member_id
                 )
             )
-            db.add(
-                ForgetMeRequest(
-                    member_id=member_id,
-                    gym_id=gym_id,
-                    confirmation_phrase=phrase,
-                    expires_at=expires_at,
-                    created_at=now,
-                    language=language,
+            if existing is not None:
+                existing.gym_id = gym_id
+                existing.confirmation_phrase = phrase
+                existing.expires_at = expires_at
+                existing.created_at = now
+                existing.language = language
+                existing.status = STATUS_PENDING
+            else:
+                db.add(
+                    ForgetMeRequest(
+                        member_id=member_id,
+                        gym_id=gym_id,
+                        confirmation_phrase=phrase,
+                        expires_at=expires_at,
+                        created_at=now,
+                        language=language,
+                        status=STATUS_PENDING,
+                    )
                 )
-            )
             await db.commit()
         return phrase
 

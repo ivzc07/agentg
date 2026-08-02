@@ -566,8 +566,16 @@ class AgentRuntime:
             return Reply(warning)
 
         # P1 safety net: before falling through to the model, re-verify
-        # the Member still exists.  Another runtime may have deleted the
-        # Member since we started processing.
+        # the Member still exists AND that no consumed request appeared
+        # since our initial check.  A concurrent runtime may have claimed
+        # the pending request and begun deletion while we processed this
+        # ordinary message — the consumed row is the durable signal that
+        # the model must never see this message.
+        consumed_now = await self.stores.forget.get_consumed_request(
+            linked.member.id
+        )
+        if consumed_now is not None:
+            return Reply(_FORGET_GOODBYE[consumed_now.language or "es"])
         identity = await self.stores.linking.identity_for(
             msg.channel, msg.channel_user_id
         )

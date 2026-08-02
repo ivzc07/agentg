@@ -911,3 +911,221 @@ async def test_forget_me_detects_language_from_chat_history_not_trigger(env):
     assert lang == "es", (
         "whole-conversation language must be Spanish despite English trigger"
     )
+
+
+# -- P1: end-of-method safety-net consumed re-check (issue #212, fix-r4) --
+
+
+async def test_ordinary_message_caught_by_end_of_method_consumed_check(env):
+    """P1 from fix-r4: an ordinary message that enters _handle_forget_me
+    before the consumed row exists but reaches the end-of-method safety net
+    after a concurrent runtime consumed the request MUST be caught by the
+    safety net's re-check of get_consumed_request — before the identity
+    check and before the model ever sees the message.
+
+    The scenario (true interleaving):
+    1. Runtime B enters _handle_forget_me with an ordinary message ("hola")
+    2. get_consumed_request → None (no request yet)
+    3. get_pending_request → None
+    4. is_forget_me_request("hola") → False
+    5. [RUNTIME A consumes the request and starts deletion]
+    6. End-of-method: consumed re-check → catches the row → returns goodbye
+
+    Without the re-check, step 6 would see identity still exists (Member
+    not yet deleted) and fall through to the model while deletion is in
+    progress — chat-history residue."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Seed chat history to prove nothing new is added.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+    ])
+    items_before = await session.get_items()
+    assert len(items_before) == 1
+
+    # Simulates initial checks passing (no consumed, no pending matching
+    # an ordinary message).
+    consumed_initial = await env.forget.get_consumed_request(member.id)
+    assert consumed_initial is None
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None  # a pending exists, but...
+    # ...the message is ordinary, not a confirmation.
+    normalized = "hola".strip().upper()
+    assert normalized != pending.confirmation_phrase
+
+    # Runtime A consumes the request while Runtime B is mid-method.
+    won = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert won
+
+    # Now simulate the end-of-method safety net: re-check consumed state
+    # BEFORE checking identity.  This is what our P1 fix adds.
+    consumed_now = await env.forget.get_consumed_request(member.id)
+    assert consumed_now is not None, (
+        "end-of-method consumed re-check MUST find the consumed row"
+    )
+    assert consumed_now.language == "en"
+    # The safety net returns a goodbye; the model is never touched.
+    items_after = await session.get_items()
+    assert len(items_after) == 1  # no new model residue
+    # Member still exists (winner hasn't called forget_member yet).
+    assert await count(env, Member, id=member.id) == 1
+
+
+async def test_ordinary_message_caught_after_consumed_but_before_identity_gone(env):
+    """The critical interleaving gap: consumed row exists but identity still
+    resolves.  The old safety net only checked identity (which still
+    resolves → falls through to model).  The new safety net checks consumed
+    state FIRST and catches the in-progress deletion."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
+
+    # Consume the request (deletion in progress, Member still exists).
+    won = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert won
+
+    # At this point: consumed row exists, identity still resolves.
+    consumed = await env.forget.get_consumed_request(member.id)
+    assert consumed is not None
+    identity = await env.linking.identity_for("telegram", "42")
+    assert identity is not None, "Member still exists mid-deletion"
+
+    # The safety net must check consumed FIRST.  If it checked identity
+    # first (it resolves → pass), the model would see the message while
+    # deletion is in progress.  Consumed check catches it.
+    assert consumed.language == "es"
+    # The runtime returns a goodbye here, never calls the model.
+    assert await count(env, Member, id=member.id) == 1  # not yet deleted
+
+
+async def test_safety_net_consumed_check_before_identity(env):
+    """Explicit ordering test: the safety net must check consumed state
+    BEFORE re-verifying identity.  If consumed exists, return goodbye
+    regardless of identity — even if the Member row still exists."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Consume → consumed row exists, identity still intact.
+    won = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert won
+
+    # Simulate the safety net in the correct order:
+    # 1. Check consumed first.
+    consumed = await env.forget.get_consumed_request(member.id)
+    assert consumed is not None
+    # If consumed found → goodbye.  Identity check is skipped.
+    assert consumed.language == "en"
+
+    # If the check were identity-first, it would resolve successfully
+    # (Member row still exists) and the model would run — the bug.
+    identity = await env.linking.identity_for("telegram", "42")
+    assert identity is not None, (
+        "identity still resolves — but consumed check must gate first"
+    )
+
+
+# -- P2: concurrent initial requests via upsert (issue #212, fix-r4) ------
+
+
+async def test_concurrent_initial_requests_no_integrity_error(env):
+    """P2 from fix-r4: two initial forget-me requests (no prior row for
+    this Member) must not collide on the unique member_id constraint.
+    The upsert in request_forget_me replaces the old delete-then-insert
+    so concurrent initial requests are race-safe."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # Two rapid initial requests — the second overwrites the first
+    # without ever seeing a delete-then-insert race window.
+    phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+    phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
+
+    # Both returned valid phrases.
+    assert phrase1.startswith("DELETE-ME-")
+    assert phrase2.startswith("DELETE-ME-")
+
+    # Exactly one row exists (the second one won).
+    assert await _pending_count(env, member.id) == 1
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.confirmation_phrase == phrase2
+    assert pending.language == "es"  # second request's language
+    assert pending.status == "pending"
+
+
+async def test_upsert_replaces_consumed_row_back_to_pending(env):
+    """When a new forget-me request arrives after a consumed (but not yet
+    deleted) row exists, the upsert must revert status to 'pending' so
+    the new request is a clean slate.  The Member re-asked after a
+    previous delete was interrupted."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Consume the first request (status -> 'consumed').
+    won = await env.forget.consume_pending_forget_me(
+        member.id, phrase1, datetime.now(UTC)
+    )
+    assert won
+
+    # Verify consumed row exists.
+    consumed = await env.forget.get_consumed_request(member.id)
+    assert consumed is not None
+    assert consumed.status == "consumed"
+
+    # Member sends a new forget-me trigger — the upsert resets to pending.
+    phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
+    assert phrase2.startswith("DELETE-ME-")
+    assert phrase2 != phrase1
+
+    # The row is now pending with the new phrase and language.
+    assert await _pending_count(env, member.id) == 1
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.confirmation_phrase == phrase2
+    assert pending.language == "es"
+    assert pending.status == "pending"
+
+    # Consumed is gone (overwritten by upsert).
+    consumed_after = await env.forget.get_consumed_request(member.id)
+    assert consumed_after is None
+
+
+async def test_upsert_over_replaced_consumed_still_deletes_on_confirm(env):
+    """End-to-end: a consumed-then-overwritten request where the Member
+    confirms with the NEW phrase must delete correctly."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # First request → consume → consumed row exists.
+    phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+    won = await env.forget.consume_pending_forget_me(
+        member.id, phrase1, datetime.now(UTC)
+    )
+    assert won
+
+    # Second request overwrites consumed → back to pending with new phrase.
+    phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
+
+    # Confirm with the NEW phrase.
+    consumed = await env.forget.consume_pending_forget_me(
+        member.id, phrase2, datetime.now(UTC)
+    )
+    assert consumed
+    await env.forget.forget_member(member.id)
+
+    # Full deletion completed.
+    assert await count(env, Member, id=member.id) == 0
+    assert await _pending_count(env, member.id) == 0
