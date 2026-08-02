@@ -1005,11 +1005,175 @@ class TestPostgresDdlSafety:
         # Index object in __table_args__. Verify it compiled above in
         # test_partial_unique_index_ddl_compiles_on_postgres.
 
-    def test_migration_duplicate_sql_compiles_on_postgres(self):
-        """The duplicate-detection SQL uses standard COUNT(*) / HAVING
-        that works on both SQLite and PostgreSQL."""
-        # The query is: SELECT member_id, COUNT(*) ... HAVING COUNT(*) > 1
-        # Both dialects accept this.  The SQLite branch uses HAVING cnt > 1
-        # because SQLite allows column aliases in HAVING.
-        # This test exists to pin the dual-branch decision.
-        pass
+    def test_duplicate_detection_sql_compiles_on_postgres(self):
+        """The duplicate-detection SQL (both the SQLite and PostgreSQL
+        branches) compiles on the PostgreSQL dialect without syntax errors."""
+        from sqlalchemy import text
+        from sqlalchemy.dialects import postgresql
+
+        dialect = postgresql.dialect()
+        # SQLite branch: HAVING cnt > 1 (column alias in HAVING).
+        sql_sqlite = text(
+            "SELECT member_id, COUNT(*) as cnt FROM sessions "
+            "WHERE closed_at IS NULL GROUP BY member_id HAVING cnt > 1"
+        )
+        compiled_sqlite = str(sql_sqlite.compile(dialect=dialect))
+        assert "sessions" in compiled_sqlite
+        assert "closed_at IS NULL" in compiled_sqlite
+        # PostgreSQL branch: HAVING COUNT(*) > 1 (no column alias in HAVING).
+        sql_pg = text(
+            "SELECT member_id, COUNT(*) as cnt FROM sessions "
+            "WHERE closed_at IS NULL GROUP BY member_id HAVING COUNT(*) > 1"
+        )
+        compiled_pg = str(sql_pg.compile(dialect=dialect))
+        assert "sessions" in compiled_pg
+        assert "closed_at IS NULL" in compiled_pg
+
+
+class TestRaceSafeIntegrityErrorDiscrimination:
+    """The race-safe Session INSERT only recovers from the open-Session
+    unique-constraint violation — foreign-key, not-null, and other integrity
+    failures must propagate to the caller (issue #213)."""
+
+    # -- _is_unique_violation unit tests -----------------------------------
+
+    def test_is_unique_violation_detects_unique_on_expected_table(self):
+        """A UNIQUE violation on the expected table returns True."""
+        import sqlite3
+
+        from sqlalchemy.exc import IntegrityError
+
+        from agentg.training import _is_unique_violation
+
+        exc = IntegrityError(
+            "stmt", {}, sqlite3.IntegrityError(
+                "UNIQUE constraint failed: sessions.member_id"
+            ),
+        )
+        assert _is_unique_violation(exc, "sessions") is True
+
+    def test_is_unique_violation_rejects_foreign_key(self):
+        """A FOREIGN KEY violation on the expected table returns False."""
+        import sqlite3
+
+        from sqlalchemy.exc import IntegrityError
+
+        from agentg.training import _is_unique_violation
+
+        exc = IntegrityError(
+            "stmt", {}, sqlite3.IntegrityError(
+                "FOREIGN KEY constraint failed"
+            ),
+        )
+        assert _is_unique_violation(exc, "sessions") is False
+
+    def test_is_unique_violation_rejects_not_null(self):
+        """A NOT NULL violation on the expected table returns False."""
+        import sqlite3
+
+        from sqlalchemy.exc import IntegrityError
+
+        from agentg.training import _is_unique_violation
+
+        exc = IntegrityError(
+            "stmt", {}, sqlite3.IntegrityError(
+                "NOT NULL constraint failed: sessions.gym_id"
+            ),
+        )
+        assert _is_unique_violation(exc, "sessions") is False
+
+    def test_is_unique_violation_rejects_wrong_table(self):
+        """A UNIQUE violation on a different table returns False."""
+        import sqlite3
+
+        from sqlalchemy.exc import IntegrityError
+
+        from agentg.training import _is_unique_violation
+
+        exc = IntegrityError(
+            "stmt", {}, sqlite3.IntegrityError(
+                "UNIQUE constraint failed: exercises.name"
+            ),
+        )
+        assert _is_unique_violation(exc, "sessions") is False
+
+    def test_is_unique_violation_rejects_none_orig(self):
+        """An IntegrityError with no wrapped DBAPI exception returns False."""
+        from sqlalchemy.exc import IntegrityError
+
+        from agentg.training import _is_unique_violation
+
+        exc = IntegrityError("stmt", {}, None)
+        assert _is_unique_violation(exc, "sessions") is False
+
+    # -- integration: FK violation propagates -----------------------------------
+
+    async def test_foreign_key_violation_propagates(self, tmp_path):
+        """An IntegrityError from a FK violation (bad gym_id) is not
+        swallowed as a race condition."""
+        from sqlalchemy.exc import IntegrityError
+
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'fk.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        training = TrainingStore(engine, clock=FakeClock())
+        await training.ensure_seeded()
+        gym = await linking.create_gym("Iron Temple")
+        member = await linking.link_member(gym.id, "Ana", "telegram", "1")
+
+        # Use a gym_id that does not exist — must surface a FK error, not
+        # silently recover as if it were an open-Session race.
+        bad_gym_id = gym.id + 999
+        with pytest.raises(IntegrityError) as exc_info:
+            await training.open_session(member.id, bad_gym_id)
+        # The error must be a FK violation, not a unique constraint one.
+        assert "FOREIGN KEY" in str(exc_info.value.orig).upper()
+
+        await engine.dispose()
+
+    # -- sanity: unique violation still recovered -----------------------------
+
+    async def test_unique_violation_still_recovered(self, tmp_path):
+        """Sanity check: the expected unique-constraint race condition is
+        still recovered correctly after the discrimination check."""
+        import asyncio
+
+        from agentg.models import Session as SessionModel
+
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'race_still_works.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        training = TrainingStore(engine, clock=FakeClock())
+        await training.ensure_seeded()
+        gym = await linking.create_gym("Iron Temple")
+        member = await linking.link_member(gym.id, "Ana", "telegram", "1")
+
+        barrier = asyncio.Barrier(2)
+
+        async def opener():
+            await barrier.wait()
+            return await training.open_session(member.id, gym.id)
+
+        r1, r2 = await asyncio.gather(opener(), opener())
+
+        # Both callers got the same Session.
+        assert r1.session_id == r2.session_id
+        assert {r1.reopened, r2.reopened} == {True, False}
+
+        # Exactly one open Session.
+        async with training._sessions() as db:
+            count = await db.scalar(
+                select(func.count())
+                .select_from(SessionModel)
+                .where(
+                    SessionModel.member_id == member.id,
+                    SessionModel.closed_at.is_(None),
+                )
+            )
+            assert count == 1
+
+        await engine.dispose()

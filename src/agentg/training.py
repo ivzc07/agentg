@@ -33,6 +33,21 @@ SESSION_AUTO_CLOSE = timedelta(hours=3)
 
 KG_PER_LB = 0.45359237
 
+
+def _is_unique_violation(error: IntegrityError, table: str) -> bool:
+    """True when *error* is a unique-constraint violation on *table*.
+
+    Portable across SQLite (``sqlite3.IntegrityError``) and PostgreSQL
+    (``asyncpg.exceptions.UniqueViolationError``) — the message for a
+    unique-constraint violation always contains "UNIQUE" and the table name,
+    while foreign-key, not-null, and check violations have distinct wording.
+    """
+    orig = error.orig
+    if orig is None:
+        return False
+    msg = str(orig)
+    return "UNIQUE" in msg.upper() and table.lower() in msg.lower()
+
 # A logged weight beyond this multiple of the Member's own last top set is
 # still stored (the Member is right once they confirm) but flagged so the
 # Agent double-checks conversationally — guards against plausible-but-wrong
@@ -530,8 +545,13 @@ class TrainingStore:
             await db.flush()
             await nested.commit()
             return session, False
-        except IntegrityError:
+        except IntegrityError as exc:
             await nested.rollback()
+            # Only recover from the open-session unique-index race.
+            # Re-raise foreign-key, not-null, or unrelated integrity failures
+            # so the caller gets the real error instead of a masked one (issue #213).
+            if not _is_unique_violation(exc, "sessions"):
+                raise
             # Another caller won the race — use their Session.
             winner = await db.scalar(
                 select(Session)
