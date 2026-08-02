@@ -85,6 +85,10 @@ SHOT_DIR = Path(__file__).resolve().parents[1] / "docs" / "design" / "375px"
 # cannot reach is a broken screen even if nothing technically overflows.
 REACHABLE = "button.btn-primary, button[type=submit], .seg a"
 
+MISSING_BROWSER = (
+    "playwright browsers not installed: run `uv run playwright install chromium`"
+)
+
 
 @dataclass
 class Screen:
@@ -196,6 +200,7 @@ async def live_dashboard(tmp_path_factory):
             "cookie": sign_session(coach.id, gym.id, SECRET, clock()),
             "token": await store.create_login_token(coach.id, gym.id),
             "members": members,
+            "preset": preset.id,
         }
     finally:
         await server.close()
@@ -214,6 +219,13 @@ def _screens(env) -> list[Screen]:
         Screen("split", f"/members/{member}?view=split", ".split"),
         Screen("member", f"/members/{member}", "header.mhead"),
         Screen("routine-editor", f"/members/{member}/routine", ".editor-wrap"),
+        # The Preset master editor is a separate route and was the last
+        # coach-facing screen with no 375px verification at all.
+        Screen(
+            "preset-routine-editor",
+            f"/presets/{env['preset']}/routine",
+            ".editor-wrap",
+        ),
         Screen("presets", "/presets", ".actions"),
         Screen("settings", "/settings", ".setcard"),
         # JS off: the interstitial's inline script submits the form on load, so
@@ -236,21 +248,26 @@ async def rendered(live_dashboard) -> list[Rendered]:
     results: list[Rendered] = []
 
     async with async_playwright() as pw:
+        # The package can be installed while the browser binaries are not -
+        # `pip install ".[browser]"` without the `playwright install chromium`
+        # half. importorskip cannot see that, and without this the module ERRORs
+        # instead of skipping, the opposite of what this file promises.
+        #
+        # Checked via executable_path (an API) rather than only by matching the
+        # error prose, which is not a stable interface: a Playwright release that
+        # rephrases its message would otherwise silently turn this skip back into
+        # an error. The prose match stays as a backstop for launch failures the
+        # path check cannot foresee.
+        if not Path(pw.chromium.executable_path).exists():
+            pytest.skip(MISSING_BROWSER)
         try:
             browser = await pw.chromium.launch()
         except PlaywrightError as exc:
-            # The package can be installed while the browser binaries are not -
-            # `pip install ".[browser]"` without the `playwright install
-            # chromium` half. importorskip cannot see that, and without this the
-            # module ERRORs instead of skipping, which is the opposite of the
-            # graceful degradation this file promises.
             if "playwright install" not in str(
                 exc
             ) and "Executable doesn't exist" not in str(exc):
                 raise
-            pytest.skip(
-                f"playwright browsers not installed: run `uv run playwright install chromium` ({exc.__class__.__name__})"
-            )
+            pytest.skip(f"{MISSING_BROWSER} ({exc.__class__.__name__})")
         try:
             for screen in _screens(env):
                 context = await browser.new_context(
@@ -302,7 +319,13 @@ async def rendered(live_dashboard) -> list[Rendered]:
                       const out = [];
                       for (const el of document.querySelectorAll(selector)) {
                         const r = el.getBoundingClientRect();
-                        if (r.width === 0 && r.height === 0) continue;  // hidden
+                        // Skip anything the user cannot see. A zero-sized box is
+                        // the common case, but visibility:hidden keeps a real
+                        // rect, and reporting one of those as an unreachable
+                        // action would be a phantom failure.
+                        if (r.width === 0 && r.height === 0) continue;
+                        const cs = getComputedStyle(el);
+                        if (cs.visibility === 'hidden' || cs.display === 'none') continue;
                         // Horizontal only, deliberately - see the module
                         // docstring: pages are routinely taller than the
                         // viewport and scrolling down is not a defect.
