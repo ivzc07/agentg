@@ -85,8 +85,10 @@ async def test_group_messages_are_rejected_before_agent_work():
     # The rejection reply must be sent exactly once.
     message.answer.assert_awaited_once()
     rejection_text = message.answer.await_args[0][0]
-    from agentg.channels.telegram import GROUP_REJECTION_REPLY
-    assert rejection_text == GROUP_REJECTION_REPLY
+    assert rejection_text == (
+        "👋 ¡Hola! Solo puedo entrenarte por chat directo, no en grupos. "
+        "Envíame un mensaje privado y empezamos."
+    )
 
 
 async def test_group_messages_get_no_typing_indicator():
@@ -146,8 +148,10 @@ async def test_anonymous_admin_group_message_gets_rejection():
     # Rejection must be sent.
     message.answer.assert_awaited_once()
     rejection_text = message.answer.await_args[0][0]
-    from agentg.channels.telegram import GROUP_REJECTION_REPLY
-    assert rejection_text == GROUP_REJECTION_REPLY
+    assert rejection_text == (
+        "👋 ¡Hola! Solo puedo entrenarte por chat directo, no en grupos. "
+        "Envíame un mensaje privado y empezamos."
+    )
 
 
 async def test_handler_answers_even_when_the_agent_loop_fails():
