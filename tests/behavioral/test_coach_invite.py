@@ -13,6 +13,19 @@ from agentg.models import Gym, Member
 from behavioral.harness import ConversationHarness, message
 
 
+def _snapshot_from_calls(h: ConversationHarness) -> str:
+    """Extract the developer-message snapshot text injected by
+    call_model_input_filter from the most recent model call's input items."""
+    items = h.model.calls[-1]["input"]
+    if not isinstance(items, list):
+        return ""
+    parts: list[str] = []
+    for item in items:
+        if isinstance(item, dict) and item.get("role") == "developer":
+            parts.append(str(item.get("content", "")))
+    return "\n".join(parts)
+
+
 async def _count(engine, model, **where) -> int:
     async with async_sessionmaker(engine)() as db:
         q = select(func.count()).select_from(model)
@@ -59,8 +72,8 @@ async def test_newcomer_joining_via_coach_code_becomes_a_coach(tmp_path):
             channel_user_id="99",
             display_name="Sam",
         )
-        instructions = h.model.calls[-1]["system_instructions"]
-        assert "Coach (coach tools available): Sam, at Iron Temple" in instructions
+        snapshot = _snapshot_from_calls(h)
+        assert "Coach (coach tools available): Sam, at Iron Temple" in snapshot
 
 
 async def test_existing_member_typing_the_coach_code_is_promoted_in_place(tmp_path):
@@ -82,8 +95,8 @@ async def test_existing_member_typing_the_coach_code_is_promoted_in_place(tmp_pa
         assert last is not None and last["weight"] == 60.0
 
         await h.say("what's on today", steps=[message("Your members await.")])
-        instructions = h.model.calls[-1]["system_instructions"]
-        assert "Coach (coach tools available): Dani, at Iron Temple" in instructions
+        snapshot = _snapshot_from_calls(h)
+        assert "Coach (coach tools available): Dani, at Iron Temple" in snapshot
 
 
 async def test_other_gyms_coach_code_switches_gyms_arriving_coach_flagged(tmp_path):
@@ -179,9 +192,9 @@ async def test_member_invite_code_still_links_as_a_plain_member(tmp_path):
             channel_user_id="99",
             display_name="Sam",
         )
-        instructions = h.model.calls[-1]["system_instructions"]
-        assert "Member: Sam, at Iron Temple" in instructions
-        assert "coach tools available" not in instructions
+        snapshot = _snapshot_from_calls(h)
+        assert "Member: Sam, at Iron Temple" in snapshot
+        assert "coach tools available" not in snapshot
 
 
 async def test_member_retapping_the_member_link_stays_a_plain_member(tmp_path):

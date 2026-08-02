@@ -9,6 +9,7 @@ suggestions are ephemeral, never written to Routine/Workout rows.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from agentg.progression import (
     SessionResult,
@@ -18,6 +19,8 @@ from agentg.progression import (
 )
 from agentg.routines import RoutineStore
 from agentg.training import TrainingStore
+
+_UNSET_ROUTINE: Any = object()
 
 
 @dataclass(frozen=True)
@@ -46,21 +49,33 @@ async def suggest_for_today(
     member_id: int,
     gym_id: int,
     timezone: str = "UTC",
+    *,
+    routine: Any = _UNSET_ROUTINE,
 ) -> list[ExerciseSuggestion]:
     """Weight suggestions for each Exercise in today's Workout (empty on a
-    rest day or with no Routine)."""
-    workout = await routines.todays_workout(member_id, timezone)
+    rest day or with no Routine).
+
+    When *routine* is provided (the pre-loaded active Routine from the
+    per-turn cache), today's Workout is derived from it without a re-query.
+    ``None`` means the cache was consulted and there is no Routine — no
+    re-query.  Omit the argument to fall back to ``todays_workout``."""
+    if routine is not _UNSET_ROUTINE:
+        workout = routines.pick_todays_workout(routine, timezone)
+    else:
+        workout = await routines.todays_workout(member_id, timezone)
     if workout is None:
         return []
     rules = parse_progression_rules(await routines.effective_rules_doc(gym_id))
     gap_days, _last = await training.latest_session_info(member_id)
 
+    exercise_names = [ex["exercise"] for ex in workout["exercises"]]
+    limit = rules.stall_sessions + 1
+    histories = await training.exercise_history_batch(member_id, exercise_names, limit)
+
     suggestions: list[ExerciseSuggestion] = []
     for exercise in workout["exercises"]:
         target_top = parse_top_reps(exercise.get("reps"))
-        rows = await training.exercise_history(
-            member_id, exercise["exercise"], limit=rules.stall_sessions + 1
-        )
+        rows = histories.get(exercise["exercise"], [])
         history = [
             SessionResult(
                 weight=row["top_weight"],

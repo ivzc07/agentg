@@ -7,6 +7,7 @@ import pytest
 import agentg.runtime as runtime_module
 from agentg.db import create_engine
 from agentg.demo_media import SentAnimation
+from agentg.demos import DemoRef
 from agentg.messages import IncomingMessage
 from agentg.linking import Linking
 from agentg.runtime import AgentRuntime
@@ -58,9 +59,12 @@ async def env(tmp_path):
 
 
 async def test_a_queued_demo_is_sent_after_the_reply(env, monkeypatch):
-    async def fake_run(agent, text, *, session, context=None):
-        # the show_demo tool would append the resolved exercise name
-        context.demo_requests.append("goblet squat")
+    ref = await env.demos.resolve("goblet squat", 1)  # gym 1 = Iron Temple
+    assert ref is not None
+
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
+        # the show_demo tool would append the resolved DemoRef
+        context.demo_requests.append(ref)
         return SimpleNamespace(final_output="on its way — knees out, chest tall!")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
@@ -76,15 +80,16 @@ async def test_a_queued_demo_is_sent_after_the_reply(env, monkeypatch):
 
 
 async def test_no_send_when_nothing_was_queued(env, monkeypatch):
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         return SimpleNamespace(final_output="hey!")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
     reply = await env.runtime.handle_message(
         IncomingMessage(channel="telegram", channel_user_id="42", text="hi")
     )
-    # after_send is always set (compaction is deferred behind every reply — issue #173),
-    # but calling it is safe even when no demos are queued.
+    # after_send always fires now: it carries the deferred rhythm reset (#169)
+    # and compaction (#173).  Calling it is safe, and no demo should be sent
+    # when nothing was queued.
     assert reply.after_send is not None
     await reply.after_send()
     assert env.sender.sent == []

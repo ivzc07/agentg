@@ -214,7 +214,7 @@ async def test_handle_message_defers_compaction_until_after_the_reply(env, monke
 
     history_sizes = []
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         history_sizes.append(len(await session.get_items()))
         return SimpleNamespace(final_output="ok")
 
@@ -282,7 +282,7 @@ async def test_failing_summarizer_in_handle_message_does_not_block_reply(env, mo
     import agentg.runtime as runtime_module
     from types import SimpleNamespace
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         return SimpleNamespace(final_output="ok")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
@@ -476,7 +476,7 @@ async def test_compaction_in_after_send_serializes_with_next_turn(env, monkeypat
         running.discard("compaction")
         return CompactionSummary(summary="Dani benched 60.", notes=[])
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         if "compaction" in running:
             overlapped.append(f"run-during-compaction:{text}")
         running.add("run")
@@ -548,7 +548,7 @@ async def test_compaction_completes_before_next_turn_even_when_after_send_is_del
         run_order.append("compaction-1")
         return CompactionSummary(summary="Dani benched 60.", notes=[])
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         run_order.append(f"run:{text}")
         return SimpleNamespace(final_output="ok")
 
@@ -668,7 +668,7 @@ async def test_a_channel_that_never_runs_after_send_does_not_wedge_the_member(
 
     import agentg.runtime as runtime_module
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         return SimpleNamespace(final_output="ok")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
@@ -697,7 +697,7 @@ async def test_a_failing_after_send_does_not_wedge_the_member(env, monkeypatch):
 
     import agentg.runtime as runtime_module
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         return SimpleNamespace(final_output="ok")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
