@@ -67,6 +67,26 @@ def contrast_ratio(fg: str, bg: str) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Comment stripping (line + block) — keep the regex parser honest
+# ---------------------------------------------------------------------------
+
+_TS_LINE_COMMENT = re.compile(r"//[^\n]*")
+_TS_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _strip_comments(source: str) -> str:
+    """Remove JavaScript/TypeScript line and block comments.
+
+    Stripping before extraction means a commented-out old ``ink``,
+    ``bg``, or ``"elevation-N"`` block cannot satisfy the parser after
+    the real token is removed — the token must be live in the config.
+    """
+    stripped = _TS_BLOCK_COMMENT.sub("", source)
+    stripped = _TS_LINE_COMMENT.sub("", stripped)
+    return stripped
+
+
+# ---------------------------------------------------------------------------
 # Token extraction from tailwind.config.ts
 # ---------------------------------------------------------------------------
 
@@ -92,26 +112,6 @@ def _extract_nested_hex(block: str, key: str) -> str | None:
     return default_m.group(1) if default_m else None
 
 
-def _extract_simple_hex(block: str, key: str) -> str | None:
-    """Return the hex literal for a simple (non-nested) color entry like::
-
-        ink: "#fff",
-    """
-    pat = re.compile(r'"' + re.escape(key) + r'"\s*:\s*"([^"]*)"')
-    m = pat.search(block)
-    return m.group(1) if m else None
-
-
-def _extract_simple_hex_from_block(block: str, key: str) -> str | None:
-    """Like ``_extract_simple_hex`` but matches an unquoted numeric key::
-
-        2: "#9a9a9a",
-    """
-    pat = re.compile(r'\b' + re.escape(key) + r'\s*:\s*"([^"]*)"')
-    m = pat.search(block)
-    return m.group(1) if m else None
-
-
 def _load_token_pairs(
     raw: str | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
@@ -126,6 +126,8 @@ def _load_token_pairs(
     """
     if raw is None:
         raw = TAILWIND_CONFIG.read_text(encoding="utf-8")
+
+    raw = _strip_comments(raw)
 
     # --- inks: all parsed from the unquoted ink block, fail-closed ---
     ink_block_m = re.search(r'ink\s*:\s*\{(.*?)\}', raw, re.DOTALL)
@@ -294,6 +296,73 @@ def test_missing_ink_3_fails_closed() -> None:
 
 
 # ---------------------------------------------------------------------------
+# P2 regression — commented-out tokens must not satisfy the parser
+# ---------------------------------------------------------------------------
+
+
+def test_commented_out_ink_block_does_not_satisfy() -> None:
+    """A //-commented ink block must not satisfy extraction.
+
+    If every ink key in the live block is deleted but a commented-out
+    old block remains, the parser must still fail closed.
+    """
+    config = """
+    // ink: { DEFAULT: "#fff", 2: "#9a9a9a", 3: "#85858a" }
+    ink: { DEFAULT: "#eee" }
+    bg: "#000"
+    "elevation-0": { DEFAULT: "#000", stroke: "#2a2b2d" }
+    "elevation-1": { DEFAULT: "#131313", stroke: "#2a2b2d" }
+    "elevation-2": { DEFAULT: "#1b1c1e", stroke: "#3a3a3c" }
+    "elevation-3": { DEFAULT: "#1c1d1f", stroke: "#4a4b4e" }
+    """
+    # ink.2 and ink.3 are gone; the commented-out block must NOT supply them.
+    with pytest.raises(AssertionError, match="ink.2"):
+        _load_token_pairs(config)
+
+
+def test_commented_out_bg_does_not_satisfy() -> None:
+    """A //-commented bg must not satisfy extraction."""
+    config = """
+    ink: { DEFAULT: "#fff", 2: "#9a9a9a", 3: "#85858a" }
+    // bg: "#000"
+    "elevation-0": { DEFAULT: "#000", stroke: "#2a2b2d" }
+    "elevation-1": { DEFAULT: "#131313", stroke: "#2a2b2d" }
+    "elevation-2": { DEFAULT: "#1b1c1e", stroke: "#3a3a3c" }
+    "elevation-3": { DEFAULT: "#1c1d1f", stroke: "#4a4b4e" }
+    """
+    with pytest.raises(AssertionError, match="Could not parse bg"):
+        _load_token_pairs(config)
+
+
+def test_block_commented_tokens_do_not_satisfy() -> None:
+    """/* ... */ commented tokens must not satisfy extraction."""
+    config = """
+    ink: { DEFAULT: "#fff", 2: "#9a9a9a", 3: "#85858a" }
+    /* bg: "#000" */
+    "elevation-0": { DEFAULT: "#000", stroke: "#2a2b2d" }
+    "elevation-1": { DEFAULT: "#131313", stroke: "#2a2b2d" }
+    "elevation-2": { DEFAULT: "#1b1c1e", stroke: "#3a3a3c" }
+    "elevation-3": { DEFAULT: "#1c1d1f", stroke: "#4a4b4e" }
+    """
+    with pytest.raises(AssertionError, match="Could not parse bg"):
+        _load_token_pairs(config)
+
+
+def test_commented_out_elevation_block_does_not_satisfy() -> None:
+    """A //-commented elevation-N block must not satisfy extraction."""
+    config = """
+    ink: { DEFAULT: "#fff", 2: "#9a9a9a", 3: "#85858a" }
+    bg: "#000"
+    "elevation-0": { DEFAULT: "#000", stroke: "#2a2b2d" }
+    // "elevation-1": { DEFAULT: "#131313", stroke: "#2a2b2d" }
+    "elevation-2": { DEFAULT: "#1b1c1e", stroke: "#3a3a3c" }
+    "elevation-3": { DEFAULT: "#1c1d1f", stroke: "#4a4b4e" }
+    """
+    with pytest.raises(AssertionError, match="elevation-1"):
+        _load_token_pairs(config)
+
+
+# ---------------------------------------------------------------------------
 # P2 regression — bg surface included in contrast matrix
 # ---------------------------------------------------------------------------
 
@@ -301,11 +370,16 @@ def test_missing_ink_3_fails_closed() -> None:
 def test_bg_is_in_surface_audit(
     token_pairs: tuple[dict[str, str], dict[str, str]],
 ) -> None:
-    """bg from tailwind.config.ts must be included as a surface."""
+    """bg from tailwind.config.ts must be included as a surface.
+
+    The exact hex value is not locked — the meaningful gate is that bg
+    participates in the contrast matrix so an inaccessible value is caught.
+    """
     _, surfaces = token_pairs
     assert "bg" in surfaces, "bg surface not extracted from tailwind.config.ts"
-    assert surfaces["bg"] == "#000", (
-        f"bg surface value mismatch: {surfaces['bg']}"
+    # Sanity: parsed bg must look like a hex colour.
+    assert re.match(r"^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$", surfaces["bg"]), (
+        f"bg surface is not a hex colour: {surfaces['bg']}"
     )
 
 
@@ -314,3 +388,47 @@ def test_missing_bg_fails_closed() -> None:
     no_bg = _VALID_SKELETON.replace('bg: "#000"', "")
     with pytest.raises(AssertionError, match="Could not parse bg"):
         _load_token_pairs(no_bg)
+
+
+def test_non_black_bg_passes_when_accessible() -> None:
+    """A non-#000 bg with sufficient ink contrast must pass the matrix."""
+    config = """
+    ink: { DEFAULT: "#111", 2: "#222", 3: "#333" }
+    bg: "#fff"
+    "elevation-0": { DEFAULT: "#f0f0f0", stroke: "#ccc" }
+    "elevation-1": { DEFAULT: "#e8e8e8", stroke: "#bbb" }
+    "elevation-2": { DEFAULT: "#e0e0e0", stroke: "#aaa" }
+    "elevation-3": { DEFAULT: "#d8d8d8", stroke: "#999" }
+    """
+    inks, surfaces = _load_token_pairs(config)
+    assert surfaces["bg"] == "#fff"
+    # All pairs must clear AA (dark ink on light bg).
+    for ink_hex in inks.values():
+        for surf_hex in surfaces.values():
+            assert contrast_ratio(ink_hex, surf_hex) >= AA_MINIMUM
+
+
+def test_inaccessible_bg_is_caught_by_matrix() -> None:
+    """A bg that is too close to ink must fail the contrast sweep."""
+    config = """
+    ink: { DEFAULT: "#444", 2: "#555", 3: "#666" }
+    bg: "#333"
+    "elevation-0": { DEFAULT: "#222", stroke: "#111" }
+    "elevation-1": { DEFAULT: "#2a2a2a", stroke: "#1a1a1a" }
+    "elevation-2": { DEFAULT: "#333", stroke: "#222" }
+    "elevation-3": { DEFAULT: "#3a3a3a", stroke: "#2a2a2a" }
+    """
+    inks, surfaces = _load_token_pairs(config)
+    assert surfaces["bg"] == "#333"
+    # At least one pair must fail AA — because ink.DEFAULT (#444) on
+    # bg (#333) yields ~2.1:1, well under 4.5.
+    failures: list[str] = []
+    for ink_name, ink_hex in inks.items():
+        for surf_name, surf_hex in surfaces.items():
+            cr = contrast_ratio(ink_hex, surf_hex)
+            if cr < AA_MINIMUM:
+                failures.append(
+                    f"{ink_name} ({ink_hex}) on {surf_name} ({surf_hex}): "
+                    f"{cr:.2f}:1 < {AA_MINIMUM}:1"
+                )
+    assert failures, "Expected at least one failing pair but none failed AA"
