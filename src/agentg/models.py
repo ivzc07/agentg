@@ -77,6 +77,7 @@ class Member(Base):
     """A person who trains at a Gym; coaches are coach-flagged Members."""
 
     __tablename__ = "members"
+    __table_args__ = (Index("ix_members_gym_id", "gym_id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
@@ -99,6 +100,8 @@ class MemberChannel(Base):
     __tablename__ = "member_channels"
     __table_args__ = (
         UniqueConstraint("channel", "channel_user_id", name="uq_member_channels_identity"),
+        Index("ix_member_channels_member_id", "member_id"),
+        Index("ix_member_channels_gym_id", "gym_id"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

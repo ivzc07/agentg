@@ -160,6 +160,9 @@ async def dynamic_instructions(
 
 
 def build_agent(settings: Settings) -> Agent:
+    # Model-call counting is done by a global wrapper on litellm.acompletion
+    # installed at import time in agentg.instrument; it attributes each call
+    # to the active turn via a ContextVar (issue #161).
     return Agent(
         name="Agent",
         instructions=dynamic_instructions,
@@ -168,6 +171,14 @@ def build_agent(settings: Settings) -> Agent:
         # tool-calling completion; we never run that proxy, so skip the import
         # rather than ship its dependencies. The SDK forwards extra_args to
         # litellm.acompletion. See tests/test_model_backend.py.
-        model_settings=ModelSettings(extra_args={"_skip_mcp_handler": True}),
+        model_settings=ModelSettings(
+            extra_args={
+                "_skip_mcp_handler": True,
+                "timeout": 30,  # interactive — per-attempt; ~2×30s + backoff worst case under lock
+                "num_retries": 1,  # at least one retry for transient 5xx
+            },
+            max_tokens=2000,  # cap runaway generations
+            temperature=0.7,  # creative but grounded coaching
+        ),
         tools=build_tools(),
     )

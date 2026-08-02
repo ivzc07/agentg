@@ -16,4 +16,9 @@ def create_engine(database_url: str) -> AsyncEngine:
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
 
+    # Per-turn SQL-statement counter (issue #161).
+    from agentg.instrument import register_sql_counter
+
+    register_sql_counter(engine)
+
     return engine

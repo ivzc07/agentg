@@ -10,6 +10,8 @@ import agentg.runtime as runtime_module
 from agentg.db import create_engine
 from agentg.messages import IncomingMessage
 from agentg.linking import Linking
+from agentg.linking_store import LinkedIdentity
+from agentg.routines import ExerciseSpec, WorkoutSpec
 from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 from conftest import unused_phraser
@@ -211,3 +213,65 @@ async def test_plain_linked_message_issues_few_queries(runtime, monkeypatch):
     # The exact count depends on compaction internals, but it must be
     # bounded — a plain message should never trigger dozens of queries.
     assert len(counts) < 30, f"expected <30 queries for a plain message, got {len(counts)}"
+
+
+# --- member_context gating flags (issue #174) ---
+
+
+def bench_spec():
+    return [WorkoutSpec(weekday=0, name="Push", exercises=[ExerciseSpec("bench press", sets=3, reps="5")])]
+
+
+async def test_member_context_can_author_routine_no_routine(runtime):
+    """A new Member with no routine: can_author_routine is True."""
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    member = await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "1")
+    linked = LinkedIdentity(member=member, gym=gym)
+
+    ctx = await runtime.member_context(linked)
+    assert ctx.can_author_routine is True
+
+
+async def test_member_context_can_author_routine_after_agent_routine(runtime):
+    """A Member with an agent-generated routine: can_author_routine is True
+    (the Agent can restructure it on request)."""
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    member = await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "1")
+    # An agent-generated routine (coach_authored omitted / defaults to False).
+    await runtime.stores.routines.save_routine(member.id, gym.id, bench_spec())
+    linked = LinkedIdentity(member=member, gym=gym)
+
+    ctx = await runtime.member_context(linked)
+    assert ctx.can_author_routine is True
+
+
+async def test_member_context_can_author_routine_after_coach_routine(runtime):
+    """A Member with a coach-authored routine: can_author_routine is False
+    (the Agent never restructures coach-authored routines)."""
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    member = await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "1")
+    await runtime.stores.routines.save_routine(
+        member.id, gym.id, bench_spec(), coach_authored=True
+    )
+    linked = LinkedIdentity(member=member, gym=gym)
+
+    ctx = await runtime.member_context(linked)
+    assert ctx.can_author_routine is False
+
+
+async def test_member_context_can_author_routine_for_coach_with_own_routine(runtime):
+    """A Coach always gets can_author_routine=True, even with their own
+    coach-authored routine (is_coach dominates)."""
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    coach = await runtime.stores.linking.link_member(gym.id, "Coach Sam", "telegram", "2")
+    await runtime.stores.linking.set_coach(coach.id)
+    await runtime.stores.routines.save_routine(
+        coach.id, gym.id, bench_spec(), coach_authored=True
+    )
+    # Re-fetch to get the fresh is_coach flag from the DB (set_coach writes
+    # through SQL without refreshing the in-memory model).
+    linked = await runtime.stores.linking.identity_for("telegram", "2")
+
+    ctx = await runtime.member_context(linked)
+    assert ctx.can_author_routine is True
+

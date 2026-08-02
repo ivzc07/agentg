@@ -199,6 +199,20 @@ def _add_missing_columns(conn: Connection) -> None:
     token_columns = {c["name"] for c in inspect(conn).get_columns("dashboard_login_tokens")}
     if "next_path" not in token_columns:
         conn.execute(text(ADD_NEXT_PATH_DDL))
+    # FK indexes for Gym-scoped reads (issue #178): Coach lookup, roster,
+    # and the check-in sweep join on these columns.
+    members_indexes = {i["name"] for i in inspect(conn).get_indexes("members")}
+    if "ix_members_gym_id" not in members_indexes:
+        conn.execute(text("CREATE INDEX ix_members_gym_id ON members (gym_id)"))
+    channels_indexes = {i["name"] for i in inspect(conn).get_indexes("member_channels")}
+    if "ix_member_channels_member_id" not in channels_indexes:
+        conn.execute(
+            text("CREATE INDEX ix_member_channels_member_id ON member_channels (member_id)")
+        )
+    if "ix_member_channels_gym_id" not in channels_indexes:
+        conn.execute(
+            text("CREATE INDEX ix_member_channels_gym_id ON member_channels (gym_id)")
+        )
 
 
 @dataclass(frozen=True)

@@ -141,15 +141,19 @@ def build_phraser(settings: Settings) -> Phraser:
     """The production phraser: one plain model call per linking reply."""
 
     async def phrase(instruction: str, member_text: str) -> str:
-        from litellm import acompletion  # deferred: import cost and test isolation
+        import litellm  # deferred: import cost and test isolation
 
-        response = await acompletion(
+        response = await litellm.acompletion(
             model=settings.model,
             api_key=settings.model_api_key,
             messages=[
                 {"role": "system", "content": _PHRASER_PROMPT},
                 {"role": "user", "content": f'They just said: "{member_text}"\n\n{instruction}'},
             ],
+            timeout=15,  # interactive but short — linking replies are one sentence
+            num_retries=1,
+            max_tokens=200,  # linking replies are brief
+            temperature=0.7,  # warm and natural
         )
         return (response.choices[0].message.content or "").strip()
 
