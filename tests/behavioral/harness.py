@@ -233,4 +233,11 @@ class ConversationHarness:
                 is_group=is_group,
             )
         )
+        # Run the post-send hook the way a real channel does (see
+        # ``channels/telegram.py``): demo delivery, the rhythm reset and
+        # compaction all live there.  A harness that drops it does not
+        # exercise the contract the runtime is written against -- that gap
+        # hid a deadlock once already (#173).
+        if reply.after_send is not None:
+            await reply.after_send()
         return str(reply)

@@ -307,7 +307,7 @@ async def test_streaming_handler_runs_after_send_when_stream_is_done():
         order.append("stream-chunk")
         yield "On its way — knees out, chest tall!"
 
-    async def after_send():
+    async def after_send(**_):
         order.append("demo")
 
     reply = Reply("", stream=stream_chunks(), after_send=after_send)
@@ -824,17 +824,25 @@ async def test_second_message_not_deadlocked_after_stream_error(tmp_path):
 
 
 async def test_no_demo_after_stream_error():
-    """When the stream errors during delivery, ``after_send`` is skipped
-    so a demo animation does not land beneath the error reply."""
+    """A stream delivery error suppresses the demo animation but still runs
+    ``after_send``.
 
-    demo_called = False
+    ``after_send`` no longer carries only demo media: it also settles the
+    deferred rhythm reset (#169), fires the Coach safety pings (#172) and
+    releases the compaction signal the next turn waits on (#173).  Skipping
+    it wholesale on a delivery error would mean a flagged Member's Coach is
+    never pinged and a lapsed Member is never revived -- far worse than a
+    cosmetic animation under an error message.  So the hook always runs and
+    is told to suppress media instead.
+    """
+
+    after_send_calls = []
 
     async def stream_chunks():
         yield "Welcome back, Ana!"
 
-    async def after_send():
-        nonlocal demo_called
-        demo_called = True
+    async def after_send(*, deliver_media=True):
+        after_send_calls.append(deliver_media)
 
     reply = Reply("", stream=stream_chunks(), after_send=after_send)
 
@@ -848,8 +856,8 @@ async def test_no_demo_after_stream_error():
 
     await make_message_handler(reply_fn)(message)
 
-    assert not demo_called, (
-        "after_send must not run when stream delivery errored"
+    assert after_send_calls == [False], (
+        "after_send must still run after a stream error, with media suppressed"
     )
     assert ERROR_REPLY in message.answer.await_args_list[-1].args[0]
 

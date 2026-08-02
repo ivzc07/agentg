@@ -342,7 +342,7 @@ async def test_declining_the_switch_keeps_the_old_gym(runtime):
 async def test_linked_chat_runs_the_agent_with_a_member_keyed_session(runtime, monkeypatch):
     seen = {}
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         seen["text"], seen["session_id"] = text, session.session_id
         return SimpleNamespace(final_output="nice!")
 
@@ -360,7 +360,7 @@ async def test_linked_chat_runs_the_agent_with_a_member_keyed_session(runtime, m
 async def test_switching_gyms_leaves_the_old_history_behind(runtime, monkeypatch):
     sessions_seen = []
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         sessions_seen.append(session.session_id)
         return SimpleNamespace(final_output="ok")
 
@@ -382,7 +382,7 @@ async def test_switching_gyms_leaves_the_old_history_behind(runtime, monkeypatch
 
 
 async def test_linked_member_messages_go_to_the_agent(runtime, monkeypatch):
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         return SimpleNamespace(final_output="let's go!")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
@@ -541,3 +541,78 @@ async def test_pasting_a_coach_code_mid_name_flow_restarts_linking(runtime):
     linked = await runtime.stores.linking.identity_for("telegram", "42")
     assert linked is not None
     assert linked.gym.id == gym_b.id and linked.member.is_coach is True
+
+
+# --- AC: a message that cannot be an Invite code performs no Invite code lookups (#169) ---
+
+
+async def test_an_ordinary_message_skips_invite_code_lookups(runtime, monkeypatch):
+    """A message like 'hola' can't be a code — skip the DB lookups entirely."""
+    calls: list[str] = []
+
+    original_gym_by_code = runtime.stores.linking.gym_by_invite_code
+    original_gym_by_coach = runtime.stores.linking.gym_by_coach_invite_code
+
+    async def spy_gym_by_code(text: str):
+        calls.append("invite")
+        return await original_gym_by_code(text)
+
+    async def spy_gym_by_coach(text: str):
+        calls.append("coach")
+        return await original_gym_by_coach(text)
+
+    runtime.stores.linking.gym_by_invite_code = spy_gym_by_code  # type: ignore[method-assign]
+    runtime.stores.linking.gym_by_coach_invite_code = spy_gym_by_coach  # type: ignore[method-assign]
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+
+    # An unlinked user sending a greeting: no code lookups
+    calls.clear()
+    reply = await runtime.handle_message(incoming("hola"))
+    assert reply == DEAD_END_INSTRUCTION
+    assert calls == []
+
+    # A linked member sending a normal message skips lookups too
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
+        return SimpleNamespace(final_output="ok")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    calls.clear()
+    reply = await runtime.handle_message(incoming("I'm here today"))
+    assert reply == "ok"
+    assert calls == []
+
+
+async def test_typing_a_real_invite_code_still_does_the_lookup(runtime):
+    """AC: Typing a real Invite or Coach code still links, exactly as today."""
+    calls: list[str] = []
+
+    original_gym_by_code = runtime.stores.linking.gym_by_invite_code
+    original_gym_by_coach = runtime.stores.linking.gym_by_coach_invite_code
+
+    async def spy_gym_by_code(text: str):
+        calls.append("invite")
+        return await original_gym_by_code(text)
+
+    async def spy_gym_by_coach(text: str):
+        calls.append("coach")
+        return await original_gym_by_coach(text)
+
+    runtime.stores.linking.gym_by_invite_code = spy_gym_by_code  # type: ignore[method-assign]
+    runtime.stores.linking.gym_by_coach_invite_code = spy_gym_by_coach  # type: ignore[method-assign]
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+
+    # Typing a real invite code triggers the lookup and links
+    calls.clear()
+    reply = await runtime.handle_message(incoming(f"  {gym.invite_code.upper()} "))
+    assert "Iron Temple" in reply
+    assert calls == ["invite"]  # one lookup, found it — no need for the coach lookup
+
+    # Typing (only) a real coach code also triggers the lookup
+    calls.clear()
+    reply = await runtime.handle_message(incoming(f"{gym.coach_invite_code}"))
+    assert "Iron Temple" in reply
+    assert calls == ["invite", "coach"]  # both lookups — invite miss, coach hit

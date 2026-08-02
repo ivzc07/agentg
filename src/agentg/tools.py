@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from agents import RunContextWrapper, Tool, function_tool
+from agents import AgentBase, RunContextWrapper, Tool, function_tool
 from pydantic import BaseModel, Field
 
 from agentg.advice import suggest_for_today
@@ -22,6 +22,22 @@ from agentg.coaching import (
 from agentg.context import MemberContext
 from agentg.routines import ExerciseSpec, WorkoutSpec
 from agentg.training import LoggedSets
+
+
+def _coach_only(ctx: RunContextWrapper[MemberContext], _agent: AgentBase) -> bool:
+    """Coach-only tools are enabled only when the Member is flagged as a Coach."""
+    return ctx.context.is_coach
+
+
+def _routine_authoring_enabled(
+    ctx: RunContextWrapper[MemberContext], _agent: AgentBase
+) -> bool:
+    """Routine-authoring tools are enabled when the Member is a Coach, has no
+    Routine, or has an agent-generated Routine they can ask to restructure
+    (issue #174). The ``can_author_routine`` flag is precomputed when
+    ``MemberContext`` is built so this check is a cheap field read."""
+    c = ctx.context
+    return c.is_coach or c.can_author_routine
 
 
 class ExerciseInput(BaseModel):
@@ -57,12 +73,13 @@ async def open_session_payload(c: MemberContext) -> dict[str, Any]:
     """Open (or resume) the Member's Session and assemble the opener facts:
     the gap, the last Session's numbers, and today's Workout from the Routine."""
     opened = await c.stores.training.open_session(c.member_id, c.gym_id)
+    routine = await c.turn_cache.get_or_load_routine(c.stores.routines, c.member_id)
     return {
         "session_id": opened.session_id,
         "resumed_existing": opened.reopened,
         "days_since_last_session": opened.days_since_last,
         "last_session": opened.last_session,
-        "todays_workout": await c.stores.routines.todays_workout(c.member_id, c.timezone),
+        "todays_workout": c.stores.routines.pick_todays_workout(routine, c.timezone),
         "weight_unit": c.weight_unit,
     }
 
@@ -221,14 +238,14 @@ async def get_rules_doc(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]
     return {"rules_doc": await c.stores.routines.effective_rules_doc(c.gym_id)}
 
 
-@function_tool
+@function_tool(is_enabled=_routine_authoring_enabled)
 async def list_exercises(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     """The Exercise catalog to draw a Routine from. Prescribe only these names."""
     c = ctx.context
     return {"exercises": await c.stores.training.catalog_names()}
 
 
-@function_tool
+@function_tool(is_enabled=_routine_authoring_enabled)
 async def save_routine(
     ctx: RunContextWrapper[MemberContext], workouts: list[WorkoutInput]
 ) -> dict[str, Any]:
@@ -269,6 +286,9 @@ async def save_routine(
         # list_exercises and try again.
         return {"error": str(error)}
     saved = await c.stores.routines.active_routine(c.member_id)
+    # Update the per-turn cache so subsequent calls in this turn
+    # (open_session_payload, suggest_weights) see the new Routine (#162).
+    c.turn_cache.set_routine(saved)
     return {
         "routine_id": routine.id,
         "workouts_saved": len(saved["workouts"]) if saved is not None else len(specs),
@@ -298,8 +318,10 @@ async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, An
     the suggestions ease back; open warm and guilt-free.
     """
     c = ctx.context
+    routine = await c.turn_cache.get_or_load_routine(c.stores.routines, c.member_id)
     suggestions = await suggest_for_today(
-        c.stores.training, c.stores.routines, c.member_id, c.gym_id, c.timezone
+        c.stores.training, c.stores.routines, c.member_id, c.gym_id, c.timezone,
+        routine=routine,
     )
     return {
         "weight_unit": c.weight_unit,
@@ -320,7 +342,7 @@ async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, An
 # The gate and the behavior live in coaching.py; these wrappers only adapt.
 
 
-@function_tool
+@function_tool(is_enabled=_coach_only)
 async def update_rules_doc(ctx: RunContextWrapper[MemberContext], new_doc: str) -> dict[str, Any]:
     """(Coach only) Replace the gym's rules doc with new plain text.
 
@@ -333,7 +355,7 @@ async def update_rules_doc(ctx: RunContextWrapper[MemberContext], new_doc: str) 
     return await update_rules_doc_action(ctx.context, new_doc)
 
 
-@function_tool
+@function_tool(is_enabled=_coach_only)
 async def write_routine(
     ctx: RunContextWrapper[MemberContext],
     member_name: str,
@@ -416,7 +438,7 @@ async def show_demo(ctx: RunContextWrapper[MemberContext], exercise: str) -> dic
     ref = await c.stores.demos.resolve(exercise, c.gym_id)
     if ref is None:
         return {"available": False, "exercise": exercise}
-    c.demo_requests.append(ref.exercise_name)
+    c.demo_requests.append(ref)
     return {"available": True, "exercise": ref.exercise_name}
 
 

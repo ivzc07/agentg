@@ -172,16 +172,16 @@ async def _deliver_streamed(
     if not sent_messages:
         await message.answer(EMPTY_REPLY_FALLBACK)
 
-    # Follow-up media lands beneath the final reply text — skipped when
-    # the stream errored so a demo animation doesn't land beneath an
-    # error message.
-    if not stream_errored and reply.after_send is not None:
+    # after_send carries the deferred rhythm reset (#169), the Coach safety
+    # pings (#172) and the compaction signal (#173) as well as demo media, so
+    # it must run even when the stream errored -- a failed delivery must never
+    # cost a Coach their safety ping.  Only the media is suppressed, which is
+    # all #176 wanted: no animation beneath an error message.
+    if reply.after_send is not None:
         try:
-            await reply.after_send()
+            await reply.after_send(deliver_media=not stream_errored)
         except Exception:
-            logger.exception(
-                "post-reply delivery failed for sender %s", sender_id
-            )
+            logger.exception("post-reply delivery failed for sender %s", sender_id)
 
 
 def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[None]]:
@@ -218,26 +218,31 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
                 # Streaming path (#176): send the first chunk as a new message,
                 # then edit it with progressively longer text at sentence
                 # boundaries.  Sentence-granularity respects Telegram's rate
-                # limits — no per-token edits.
+                # limits -- no per-token edits.
                 await _deliver_streamed(
                     message, reply, typing_task, message.from_user.id
                 )
                 # typing_task already cancelled inside _deliver_streamed
                 return
             # Non-streaming path: split long replies and send in order.
-            for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
-                if reply.disable_preview:  # keep the call shape unchanged otherwise
-                    await message.answer(
-                        chunk, link_preview_options=LinkPreviewOptions(is_disabled=True)
-                    )
-                else:
-                    await message.answer(chunk)
-            # Follow-up media (demo animations) lands beneath the reply text.
-            if reply.after_send is not None:
-                try:
-                    await reply.after_send()
-                except Exception:
-                    logger.exception("post-reply delivery failed for sender %s", message.from_user.id)
+            # after_send always runs in a finally so a Telegram 403 / 429 /
+            # network error on the reply text does not silently drop the
+            # deferred coach pings, rhythm reset or demos (issue #172).
+            try:
+                for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
+                    if reply.disable_preview:  # keep the call shape unchanged otherwise
+                        await message.answer(
+                            chunk, link_preview_options=LinkPreviewOptions(is_disabled=True)
+                        )
+                    else:
+                        await message.answer(chunk)
+            finally:
+                # Follow-up media (demo animations) lands beneath the reply text.
+                if reply.after_send is not None:
+                    try:
+                        await reply.after_send()
+                    except Exception:
+                        logger.exception("post-reply delivery failed for sender %s", message.from_user.id)
         finally:
             typing_task.cancel()
             try:

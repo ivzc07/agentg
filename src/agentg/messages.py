@@ -18,7 +18,10 @@ class Reply(str):
     Each yield is the full accumulated text so far, growing monotonically.
     """
 
-    after_send: Callable[[], Awaitable[None]] | None
+    # Takes an optional ``deliver_media`` keyword: the channel passes False
+    # when a streamed delivery errored, suppressing demo animations while the
+    # safety pings, rhythm reset and compaction signal still run.
+    after_send: Callable[..., Awaitable[None]] | None
     # Suppress the channel's link preview (magic links: a preview fetch could
     # spend a one-time token before the human taps it).
     disable_preview: bool
@@ -28,7 +31,7 @@ class Reply(str):
     def __new__(
         cls,
         text: str,
-        after_send: Callable[[], Awaitable[None]] | None = None,
+        after_send: Callable[..., Awaitable[None]] | None = None,
         disable_preview: bool = False,
         stream: AsyncIterator[str] | None = None,
     ) -> "Reply":
