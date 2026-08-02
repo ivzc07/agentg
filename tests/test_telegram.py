@@ -200,6 +200,114 @@ async def test_edited_channel_post_gets_rejection():
     )
 
 
+# ── edited-update dispatch ────────────────────────────────────────────
+
+
+async def test_edited_private_message_dropped_silently():
+    """An edited private DM must be silently dropped — no Agent invocation,
+    no reply, no typing.  Private conversations must remain unchanged (#211)."""
+    from agentg.channels.telegram import _edited_handler
+
+    inner = AsyncMock()
+    edited = _edited_handler(inner)
+
+    message = FakeMessage(
+        user_id=42, text="edited private dm", chat_type="private",
+    )
+    await edited(message)
+
+    inner.assert_not_awaited()
+    message.answer.assert_not_awaited()
+
+
+async def test_edited_supergroup_message_passes_through_to_rejection():
+    """An edited supergroup message must flow through to the inner handler
+    which rejects it.  The wrapper must not drop non-private edits (#211)."""
+    from agentg.channels.telegram import _edited_handler
+
+    inner = AsyncMock()
+    edited = _edited_handler(inner)
+
+    message = FakeMessage(
+        user_id=99, text="edited in group", chat_type="supergroup",
+    )
+    await edited(message)
+
+    inner.assert_awaited_once_with(message)
+
+
+async def test_edited_channel_post_private_dropped_silently():
+    """An edited channel post in a private chat is still private;
+    it must be silently dropped (#211)."""
+    from agentg.channels.telegram import _edited_handler
+
+    inner = AsyncMock()
+    edited = _edited_handler(inner)
+
+    message = FakeMessage(
+        user_id=42, text="edited in channel", chat_type="private",
+    )
+    await edited(message)
+
+    inner.assert_not_awaited()
+    message.answer.assert_not_awaited()
+
+
+async def test_edited_channel_post_non_private_passes_through_to_rejection():
+    """An edited channel post in a non-private chat must flow through
+    to the inner handler which rejects it (#211)."""
+    from agentg.channels.telegram import _edited_handler
+
+    inner = AsyncMock()
+    edited = _edited_handler(inner)
+
+    message = FakeMessage(
+        user_id=123, text="edited channel post", chat_type="channel",
+    )
+    await edited(message)
+
+    inner.assert_awaited_once_with(message)
+
+
+async def test_edited_handler_integration_private_dropped():
+    """End-to-end: an edited private DM dispatched through the full
+    create_dispatcher wiring must not invoke reply_fn or send a reply (#211)."""
+    reply_fn = AsyncMock(return_value=Reply("should not send"))
+    dispatcher = create_dispatcher(reply_fn)
+
+    # Feed an edited private message through the dispatcher.
+    message = FakeMessage(
+        user_id=42, text="edited private dm", chat_type="private",
+    )
+    # The edited_message observer carries the edited-handler wrapper.
+    for handler_obj in dispatcher.edited_message.handlers:
+        await handler_obj.callback(message)
+
+    reply_fn.assert_not_awaited()
+    message.answer.assert_not_awaited()
+
+
+async def test_edited_handler_integration_group_rejected():
+    """End-to-end: an edited group message dispatched through the full
+    create_dispatcher wiring must receive the rejection (#211)."""
+    reply_fn = AsyncMock(return_value=Reply("should not send"))
+    dispatcher = create_dispatcher(reply_fn)
+
+    message = FakeMessage(
+        user_id=99, text="edited in group", chat_type="supergroup",
+    )
+    for handler_obj in dispatcher.edited_message.handlers:
+        await handler_obj.callback(message)
+
+    reply_fn.assert_not_awaited()
+    message.answer.assert_awaited_once()
+    rejection_text = message.answer.await_args[0][0]
+    assert rejection_text == (
+        "👋 ¡Hola! Solo puedo entrenarte por chat directo, no en grupos. "
+        "Envíame un mensaje privado y empezamos."
+    )
+
+
 async def test_anonymous_admin_group_message_gets_rejection():
     """Messages with no from_user (e.g. anonymous admin / sender-chat)
     in non-private chats must still receive the rejection reply (#211)."""

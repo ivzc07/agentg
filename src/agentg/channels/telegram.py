@@ -269,6 +269,21 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
     return on_text
 
 
+def _edited_handler(handler: Callable[[Message], Awaitable[None]]) -> Callable[[Message], Awaitable[None]]:
+    """Wrap a message handler so edited private messages are silently dropped.
+
+    Edited non-private text still flows through to receive the deterministic
+    rejection; edited private DMs are dropped without invoking the Agent or
+    sending any reply — private conversations must remain unchanged (#211).
+    """
+    async def on_edited(message: Message) -> None:
+        if message.chat.type == "private":
+            return  # Private conversations must remain unchanged.
+        await handler(message)
+
+    return on_edited
+
+
 def create_dispatcher(reply_fn: ReplyFn) -> Dispatcher:
     dispatcher = Dispatcher()
     handler = make_message_handler(reply_fn)
@@ -276,11 +291,13 @@ def create_dispatcher(reply_fn: ReplyFn) -> Dispatcher:
     # (where the bot is an admin) arrive as channel_post updates (#211).
     dispatcher.message.register(handler, F.text)
     dispatcher.channel_post.register(handler, F.text)
-    # Edited messages arrive through separate observers — register both
-    # so that edited shared-chat text still receives the non-private
-    # rejection (#211).
-    dispatcher.edited_message.register(handler, F.text)
-    dispatcher.edited_channel_post.register(handler, F.text)
+    # Edited messages arrive through separate observers — register the
+    # edited-update wrapper on both so that edited shared-chat text still
+    # receives the non-private rejection while edited private DMs are
+    # silently dropped (#211).
+    eh = _edited_handler(handler)
+    dispatcher.edited_message.register(eh, F.text)
+    dispatcher.edited_channel_post.register(eh, F.text)
     return dispatcher
 
 
