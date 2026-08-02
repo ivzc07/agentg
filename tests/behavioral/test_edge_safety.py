@@ -89,7 +89,7 @@ async def test_forget_me_wipes_every_member_row(tmp_path):
 
         # Turn 1: request forget-me (pre-model — no model steps needed).
         request_reply = await h.say("forget me")
-        assert "permanently erase" in request_reply.lower()
+        assert "permanentemente" in request_reply.lower()
         # The reply must include a confirmation phrase like DELETE-ME-XXXXXX.
         phrase = _extract_confirmation_phrase(request_reply)
         assert phrase is not None, f"no confirmation phrase in reply: {request_reply!r}"
@@ -98,7 +98,7 @@ async def test_forget_me_wipes_every_member_row(tmp_path):
 
         # Turn 2: confirm with the exact phrase (pre-model — no model steps).
         confirm_reply = await h.say(phrase)
-        assert "deleted" in confirm_reply.lower()
+        assert "eliminados" in confirm_reply.lower()
 
         # Everything must be gone.
         assert await _count(h._engine, Member, id=member_id) == 0
@@ -121,7 +121,7 @@ async def test_forget_me_wrong_phrase_cancels_and_leaves_data(tmp_path):
 
         # Request forget-me.
         request_reply = await h.say("delete my account")
-        assert "permanently erase" in request_reply.lower()
+        assert "permanentemente" in request_reply.lower()
         assert await _count(h._engine, Member, id=member_id) == 1
 
         # Send a wrong phrase — the model runs normally.
@@ -210,6 +210,38 @@ async def test_forget_me_phrase_from_old_request_does_not_delete(tmp_path):
         # didn't match.
         pending = await h.stores.forget.get_pending_request(member_id)
         assert pending is None
+
+
+async def test_forget_me_group_message_clears_pending_without_deletion(tmp_path):
+    """A group message when a forget-me request is pending must clear the
+    pending intent without deleting data (issue #212)."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        await h.seed_closed_session("bench 60 8,8,8")
+        member_id = h.member_id
+
+        # Request forget-me (private).
+        request_reply = await h.say("forget me")
+        assert "permanentemente" in request_reply.lower()
+        phrase = _extract_confirmation_phrase(request_reply)
+        assert phrase is not None
+        # Pending request exists.
+        pending = await h.stores.forget.get_pending_request(member_id)
+        assert pending is not None
+
+        # A group message must clear the pending request without deletion.
+        await h.say(
+            "hey group",
+            is_group=True,
+            steps=[message("Group training — what's everyone working on today?")],
+        )
+
+        # Pending request is cancelled.
+        pending = await h.stores.forget.get_pending_request(member_id)
+        assert pending is None
+        # Data still intact.
+        assert await _count(h._engine, Member, id=member_id) == 1
+        assert await h.stores.training.last_sets(member_id, "bench press") is not None
 
 
 async def test_gym_switch_creates_fresh_member_and_keeps_old(tmp_path):

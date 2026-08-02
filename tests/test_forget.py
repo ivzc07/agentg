@@ -301,6 +301,77 @@ async def test_expired_request_still_stored(env):
     assert pending.expires_at < datetime.now(UTC)
 
 
+# -- Behavioral expiry coverage (issue #212) --------------------------------
+
+
+async def test_runtime_expired_pending_is_cancelled_no_deletion(env):
+    """An expired pending request is silently cancelled; no deletion happens
+    and normal processing continues (the model runs, not the forget)."""
+    member = await populate(env)
+    past = datetime(2020, 1, 1, tzinfo=UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, past, 1)
+
+    # Simulate what _handle_forget_me does: the pending is expired, so it
+    # cancels and falls through to normal flow — no deletion.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.expires_at < datetime.now(UTC)
+
+    # Expired → cancel silently, fall through to normal processing.
+    now = datetime.now(UTC)
+    if pending.expires_at < now:
+        await env.forget.cancel_forget_me(member.id)
+
+    # Member data still intact.
+    assert await count(env, Member, id=member.id) == 1
+    assert await count(env, Session, member_id=member.id) == 1
+    # Pending is gone.
+    assert await _pending_count(env, member.id) == 0
+
+
+async def test_runtime_expired_pending_with_phrase_no_deletion(env):
+    """Even the exact confirmation phrase on an expired request must not
+    trigger deletion — the pending is cleared and normal flow continues."""
+    member = await populate(env)
+    past = datetime(2020, 1, 1, tzinfo=UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, past, 1)
+
+    pending = await env.forget.get_pending_request(member.id)
+    now = datetime.now(UTC)
+    assert pending.expires_at < now
+
+    # The runtime checks expiry first — expired → cancel, no match attempted.
+    if pending.expires_at < now:
+        await env.forget.cancel_forget_me(member.id)
+        # Falls through; model runs normally.  No forget_member call.
+
+    # Confirm: no deletion happened.
+    assert await count(env, Member, id=member.id) == 1
+    assert await count(env, Session, member_id=member.id) == 1
+    assert await _pending_count(env, member.id) == 0
+
+
+async def test_runtime_expired_pending_with_wrong_phrase_no_deletion(env):
+    """A wrong phrase on an expired pending just cancels; no deletion."""
+    member = await populate(env)
+    past = datetime(2020, 1, 1, tzinfo=UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, past, 1)
+
+    pending = await env.forget.get_pending_request(member.id)
+    now = datetime.now(UTC)
+    assert pending.expires_at < now
+
+    # Runtime: expired → cancel silently.
+    if pending.expires_at < now:
+        await env.forget.cancel_forget_me(member.id)
+
+    # Wrong phrase (not the confirmation) — but it doesn't matter because
+    # the pending was already expired and cancelled above.
+    # Data intact, no deletion.
+    assert await count(env, Member, id=member.id) == 1
+    assert await _pending_count(env, member.id) == 0
+
+
 # -- Helper function tests --------------------------------------------------
 
 

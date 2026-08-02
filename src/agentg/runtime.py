@@ -432,16 +432,20 @@ class AgentRuntime:
         Returns a Reply when the message was fully handled (request or
         confirmation), or None to let normal processing continue.
         """
-        # Group messages never trigger or confirm forget-me.
-        if msg.is_group:
-            return None
-
         from agentg.forget import is_forget_me_request, normalize_confirmation
 
         now = datetime.now(timezone.utc)
         pending = await self.stores.forget.get_pending_request(
             linked.member.id
         )
+
+        # Group messages never trigger or confirm forget-me, but a
+        # group/different message from a Member with a pending request
+        # must clear the pending intent without deletion.
+        if msg.is_group:
+            if pending is not None:
+                await self.stores.forget.cancel_forget_me(linked.member.id)
+            return None
 
         if pending is not None:
             # Expired — cancel silently and fall through.
@@ -453,7 +457,7 @@ class AgentRuntime:
                     # Exact match — execute the wipe.
                     await self.stores.forget.forget_member(linked.member.id)
                     return Reply(
-                        "Your data has been permanently deleted. Goodbye!"
+                        "Tus datos han sido eliminados permanentemente. \u00a1Adi\u00f3s!"
                     )
                 # Wrong phrase — cancel the pending request.  A new
                 # forget-me trigger below will create a fresh one.
@@ -470,13 +474,13 @@ class AgentRuntime:
             )
             minutes = max(1, self.forget_me_confirmation_seconds // 60)
             warning = (
-                f"\u26a0\ufe0f This will permanently erase ALL your data \u2014 "
-                f"every session, routine, note, and all chat history. "
-                f"This cannot be undone.\n\n"
-                f"To confirm, reply with this exact phrase:\n\n"
+                f"\u26a0\ufe0f Esto borrar\u00e1 PERMANENTEMENTE TODOS tus datos \u2014 "
+                f"cada sesi\u00f3n, rutina, nota y todo el historial de chat. "
+                f"No se puede deshacer.\n\n"
+                f"Para confirmar, responde con esta frase exacta:\n\n"
                 f"{phrase}\n\n"
-                f"Any other reply will cancel the request. "
-                f"This confirmation expires in {minutes} minute"
+                f"Cualquier otra respuesta cancelar\u00e1 la solicitud. "
+                f"Esta confirmaci\u00f3n expira en {minutes} minuto"
                 f"{'s' if minutes != 1 else ''}."
             )
             return Reply(warning)
