@@ -100,8 +100,10 @@ function looksLikeColor(value: string): boolean {
  *  `text-[font-size:14px]`, and ambiguous bare CSS variables like
  *  `text-[--custom]`. */
 function isArbitraryTextColor(cls: string): boolean {
-  // Match text-[<value>] or text-[<type>:<value>] with an optional /<alpha-modifier>
-  const m = cls.match(/^text-\[(.+?)\](?:\/\d+)?$/);
+  // Match text-[<value>] or text-[<type>:<value>] with an optional
+  // /<alpha-modifier>.  Modifiers may be numeric (/50) or arbitrary
+  // bracket opacity (/[.5], /[var(--my-opacity)]).
+  const m = cls.match(/^text-\[(.+?)\](?:\/(?:\d+|\[[^\]]*\]))?$/);
   if (!m) return false;
   const inner = m[1];
 
@@ -118,7 +120,11 @@ function isArbitraryTextColor(cls: string): boolean {
  *  text-red-500/25 → text-red-500) so the base utility can be classified
  *  against the inventory.  Non-slash classes are returned unchanged. */
 function stripOpacityModifier(cls: string): string {
-  return cls.replace(/\/\d+$/, "");
+  // Strip arbitrary bracket opacity (/[.5], /[0.5]) first, then
+  // numeric opacity (/50, /25).  Both are valid Tailwind modifiers.
+  return cls
+    .replace(/\/\[[^\]]*\]$/, "")
+    .replace(/\/\d+$/, "");
 }
 
 /** True when `cls` is a `text-*` colour utility.  Also detects arbitrary-value
@@ -796,6 +802,49 @@ describe("RoutineEditor", () => {
         // Arbitrary non-colour values with a slash should still be rejected
         expect(isTextColorClass("text-[14px]/50")).toBe(false);
         expect(isTextColorClass("text-[font-size:14px]/50")).toBe(false);
+      });
+
+      // P2, fix-r3: arbitrary bracket opacity variants
+      it("recognises slash-opacity colour variants with arbitrary bracket opacity", () => {
+        // Standard keywords with arbitrary opacity
+        expect(isTextColorClass("text-white/[.5]")).toBe(true);
+        expect(isTextColorClass("text-black/[0.5]")).toBe(true);
+        expect(isTextColorClass("text-current/[.25]")).toBe(true);
+
+        // Project design tokens with arbitrary opacity
+        expect(isTextColorClass("text-bg/[.5]")).toBe(true);
+        expect(isTextColorClass("text-magenta/[.25]")).toBe(true);
+        expect(isTextColorClass("text-ink/[.8]")).toBe(true);
+        expect(isTextColorClass("text-ink-2/[.6]")).toBe(true);
+
+        // Standard palette with arbitrary opacity
+        expect(isTextColorClass("text-red-500/[.5]")).toBe(true);
+        expect(isTextColorClass("text-slate-950/[.05]")).toBe(true);
+
+        // Arbitrary-value colour classes with arbitrary opacity modifier
+        expect(isTextColorClass("text-[#fff]/[.5]")).toBe(true);
+        expect(isTextColorClass("text-[color:var(--foreground)]/[.75]")).toBe(true);
+
+        // Non-colour arbitrary values with bracket opacity must still be rejected
+        expect(isTextColorClass("text-[14px]/[.5]")).toBe(false);
+        expect(isTextColorClass("text-[font-size:14px]/[.5]")).toBe(false);
+      });
+
+      it("rejects conflicting arbitrary-opacity text-color tokens", () => {
+        // text-bg text-white/[.5] must be flagged as a conflict — the
+        // arbitrary-opacity utility is still a colour class.
+        const tokens = classTokens("text-bg text-white/[.5] bg-magenta");
+        const colorClasses = tokens.filter(isTextColorClass);
+        expect(colorClasses).toHaveLength(2);
+        expect(colorClasses).toContain("text-bg");
+        expect(colorClasses).toContain("text-white/[.5]");
+
+        // Same with a project token + arbitrary opacity
+        const tokens2 = classTokens("text-bg text-bg/[.5] bg-magenta");
+        const colorClasses2 = tokens2.filter(isTextColorClass);
+        expect(colorClasses2).toHaveLength(2);
+        expect(colorClasses2).toContain("text-bg");
+        expect(colorClasses2).toContain("text-bg/[.5]");
       });
     });
 
