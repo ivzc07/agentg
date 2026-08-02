@@ -83,8 +83,8 @@ describe("Dashboard", () => {
       sortedBy: "gap_days",
     });
     window.__I18N__ = { member_eyebrow: "member", settings: "Settings" };
-    // The router mounts with basename="/dashboard", the URL aiohttp serves it at.
-    window.history.pushState({}, "", "/dashboard/");
+    // The router mounts at the site root — the URLs aiohttp serves it at (#154).
+    window.history.pushState({}, "", "/");
 
     renderDashboard();
 
@@ -109,7 +109,7 @@ describe("Dashboard", () => {
     // fetchSession still fires (React hooks always execute), but its
     // result is irrelevant because LoginRoutes is returned first.
     fetchSession.mockReturnValue(new Promise(() => {}));
-    window.history.pushState({}, "", "/dashboard/login/token-abc");
+    window.history.pushState({}, "", "/login/token-abc");
 
     // LoginPage inside LoginRoutes will fetch the peek API.
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
@@ -166,9 +166,9 @@ describe("Dashboard", () => {
       view_split: "Split",
     };
     // Unknown deep link — the catch-all must redirect to /.
-    // /dashboard/settings is a real route now (issue #153), so use
+    // /settings is a real route now (issue #153), so use
     // a truly unknown path.
-    window.history.pushState({}, "", "/dashboard/unknown-deep-link");
+    window.history.pushState({}, "", "/unknown-deep-link");
 
     renderDashboard();
 

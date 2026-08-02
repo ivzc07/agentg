@@ -1,3 +1,4 @@
+import { LangToggle } from "./LangToggle";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -123,11 +124,13 @@ export function SettingsPage() {
           className="quick flex gap-2 text-[13px] text-ink-2"
           aria-label={t("nav_sections")}
         >
-          <Link to="/dashboard" className="hover:text-ink transition-colors duration-fast">
+          <Link to="/" className="hover:text-ink transition-colors duration-fast">
             {t("nav_dashboard")}
           </Link>
           <span className="text-ink">{t("settings")}</span>
         </nav>
+
+        <LangToggle />
       </header>
 
       {/* Settings body */}
@@ -369,7 +372,7 @@ export function SettingsPage() {
 
         {/* Back link */}
         <Link
-          to="/dashboard"
+          to="/"
           className="inline-block text-[14px] text-ink-2 hover:text-ink transition-colors duration-fast"
         >
           ← {t("back_to_dashboard")}

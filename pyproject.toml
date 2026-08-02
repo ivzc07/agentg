@@ -29,8 +29,10 @@ dev = [
     "mypy>=1.11",
 ]
 # Deliberately NOT in `dev`: playwright pulls ~115 MB of browser binaries, and
-# CI installs `dev` on every run. tests/test_375px_playwright.py skips itself
-# when this is absent, so the default suite is unaffected.
+# the required `pytest` CI job installs `dev` on every run.
+# tests/test_375px_playwright.py skips itself when this is absent, so the
+# default suite is unaffected; the separate `e2e-375px` CI job installs this
+# extra and runs it for real (#154).
 #   uv pip install ".[browser]" && uv run playwright install chromium
 browser = [
     "playwright>=1.40",

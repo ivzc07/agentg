@@ -5,10 +5,9 @@ Store level: the Cards attendance grid — 4 weeks as a 7-column Mon–Sun day
 grid, one square per day, driven by the same day-grained Routine
 reconstruction as the severity engine (a Session on an unplanned day shows
 trained but never cancels a miss square; today never counts until it is
-over). Page level: the segmented control switching Table / Cards / Split
-with the search beside it, the severity bands, the shared lapsed tail, and
-the switcher-visibility rules (hidden on a Member opened from Table or
-Cards, always visible in Split).
+over). API level: the grid's serialization on /api/roster (#154). The view
+chrome — the Table/Cards/Split switcher, search, bands, rail — is React's
+now and covered by the frontend RTL tests.
 """
 
 from datetime import date, timedelta
@@ -116,218 +115,22 @@ async def test_a_mid_window_routine_change_rejudges_the_days_it_governs(env):
     assert states[date(2026, 7, 13)] == "plain"  # Mon, no longer planned
 
 
-async def test_the_switcher_offers_the_three_views_with_the_search_beside_it(env):
-    await env.add_member("Luis")
+async def test_the_api_serves_the_attendance_grid_with_hit_squares(env):
+    """The /api/roster attendance cells carry the store's day states —
+    including a hit on an unplanned-day Session — so the React Cards view
+    renders the same grid the server computed (#154; the view chrome
+    itself is covered by the frontend RTL tests)."""
+    import json
 
-    for view in ("table", "cards", "split"):
-        text = await env.page(f"/?view={view}")
-        assert 'class="seg"' in text
-        assert 'href="/?view=table"' in text
-        assert 'href="/?view=cards"' in text
-        assert 'href="/?view=split"' in text
-        assert 'id="search"' in text
-        assert f'?view={view}" aria-current="true"' in text
-        assert f'data-name="Luis"' in text
-
-
-async def test_an_unknown_view_falls_back_to_the_table(env):
-    await env.add_member("Luis")
-
-    text = await env.page("/?view=mosaic")
-
-    assert '?view=table" aria-current="true"' in text
-    assert 'data-name="Luis"' in text
-
-
-async def test_cards_group_members_into_severity_bands_with_day_grids(env):
-    red = await env.add_member("Rojo")
-    # Mon+Tue planned since 2026-07-05, never trained: 4 misses -> red.
-    await env.give_planned_routine(red, weekdays=[0, 1], days_ago=10)
-    amber = await env.add_member("Ambar")
-    # Sundays planned since 2026-07-05, never trained: 2 misses -> amber.
-    await env.give_planned_routine(amber, weekdays=[6], days_ago=10)
-    fine = await env.add_member("Aldia")
-    await env.train(fine, days_ago=0)
-    new = await env.add_member("Novata")
-
-    text = await env.page("/?view=cards")
-
-    hot = text.split('id="band-hot"')[1].split('id="band-warm"')[0]
-    warm = text.split('id="band-warm"')[1].split('id="band-cool"')[0]
-    cool = text.split('id="band-cool"')[1]
-    assert "Te necesitan ya" in hot and 'data-name="Rojo"' in hot
-    assert "Aflojando" in warm and 'data-name="Ambar"' in warm
-    assert "Al día" in cool
-    assert 'data-name="Aldia"' in cool and 'data-name="Novata"' in cool
-    # Severity colours and the new tag ride along from the Table view.
-    assert "sev-red" in hot and "sev-amber" in warm
-    assert "nuevo" in cool
-    # Rojo's card carries the 4-week grid: 4 misses (07-06, 07-07, 07-13,
-    # 07-14), 4 future days (07-16..07-19), no hits, Mon-first initials.
-    card = hot.split('data-name="Rojo"')[1]
-    assert card.count('class="miss"') == 4
-    assert card.count('class="future"') == 4
-    assert 'class="hit"' not in card
-    assert '<span class="wd" aria-hidden="true">lu</span>' in card
-    # A session on an unplanned day draws a hit square.
-    assert "últimas 4 semanas" in card
-
-
-async def test_a_cards_hit_square_marks_an_unplanned_session(env):
     member = await env.add_member("Luis")
     await env.give_planned_routine(member, weekdays=[0], days_ago=10)
     await env.train(member, days_ago=1)  # Tue 2026-07-14, unplanned
 
-    text = await env.page("/?view=cards")
+    data = json.loads(await env.page("/api/roster"))
 
-    card = text.split(f'data-name="Luis"')[1]
-    assert card.count('class="hit"') == 1
-    assert 'title="14 jul 2026"' in card
-    assert card.count('class="miss"') == 2  # 07-06 and 07-13
-
-
-async def test_all_views_share_the_gap_sort_and_the_lapsed_tail(env):
-    away = await env.add_member("Lejos")
-    await env.train(away, days_ago=9)
-    near = await env.add_member("Cerca")
-    await env.train(near, days_ago=1)
-    lost = await env.add_member("Perdido")
-    await env.train(lost, days_ago=30)
-    await env.checkins.lapse(lost.id)
-
-    for view in ("table", "cards", "split"):
-        text = await env.page(f"/?view={view}")
-        main = text.split('<details id="lapsed">')[0]
-        assert main.index("Lejos") < main.index("Cerca")
-        assert "Perdido" not in main
-        assert "Se perdieron (1)" in text
-
-
-async def test_split_keeps_the_roster_rail_and_a_pick_a_member_placeholder(env):
-    member = await env.add_member("Luis")
-
-    text = await env.page("/?view=split")
-
-    assert 'class="split"' in text
-    assert f'href="/members/{member.id}?view=split"' in text
-    assert "Elige un miembro" in text
-
-
-async def test_a_member_opened_in_split_keeps_the_rail_and_the_switcher(env):
-    member = await env.add_member("Luis")
-    other = await env.add_member("Otra")
-
-    text = await env.page(f"/members/{member.id}?view=split")
-
-    # The Member page fills the right pane…
-    assert "Miembro desde" in text
-    # …the rail never leaves…
-    assert 'class="split"' in text
-    assert f'data-name="Otra"' in text
-    # …and the switcher stays visible, still on Split.
-    assert 'class="seg"' in text
-    assert '?view=split" aria-current="true"' in text
-    # No back link: nothing was left.
-    assert "Todos los miembros" not in text
-
-
-async def test_a_member_opened_from_table_or_cards_hides_the_switcher(env):
-    member = await env.add_member("Luis")
-
-    for view in ("table", "cards"):
-        text = await env.page(f"/members/{member.id}?view={view}")
-        assert 'class="seg"' not in text
-        assert 'id="search"' not in text
-        assert f'href="/?view={view}"' in text  # the way back to the view
-
-    # The roster's member links carry the view they were opened from.
-    for view in ("table", "cards"):
-        roster = await env.page(f"/?view={view}")
-        assert f'href="/members/{member.id}?view={view}"' in roster
-
-
-async def test_the_header_count_is_wired_for_live_filtering(env):
-    """Issue #127: the chrome's Members (N) carries the hooks the search
-    script rewrites into "X de N" while a query is filtering."""
-    await env.add_member("Marta")
-    await env.add_member("Luis")
-
-    for view in ("table", "cards", "split"):
-        text = await env.page(f"/?view={view}")
-        assert 'id="members-count"' in text
-        assert 'data-total="2"' in text
-        assert 'data-fmt="{shown} de {total}"' in text
-
-
-# --- fragment-level rendering (issue #135 fix) ---
-
-
-async def test_roster_row_gap_renders_a_numeral_span(env):
-    """The per-row Gap (days away) renders as a large bold numeral, not
-    prose — the ``.row .numeral`` CSS rule applies (issue #135)."""
-    member = await env.add_member("Beto")
-    await env.train(member, days_ago=5)
-    await env.give_routine(member)
-
-    text = await env.page("/?view=table")
-
-    assert '<span class="numeral">5</span>' in text
-    assert 'días sin venir' in text
-
-
-async def test_countbar_renders_a_numeral_span(env):
-    """The countbar count renders as a large bold numeral."""
-    await env.add_member("Luis")
-    await env.add_member("Ana")
-
-    text = await env.page("/?view=table")
-
-    assert '<span class="numeral">2</span>' in text
-    assert 'class="countbar"' in text
-
-
-async def test_gap_numeral_on_cards_view(env):
-    """The per-row Gap numeral appears in the Table (and Split rail), not
-    inside member cards — cards use their own ``.mcard .away`` styling."""
-    member = await env.add_member("Cerca")
-    await env.train(member, days_ago=1)
-    await env.give_routine(member)
-    # Also add a second member so the countbar numeral fires.
-    await env.add_member("Otro")
-
-    text = await env.page("/?view=table")
-
-    # Table rows carry the numeral.
-    assert '<span class="numeral">1</span>' in text
-    assert 'día sin venir' in text
-
-
-async def test_cards_section_chip_spans_exist(env):
-    """Each severity band heading carries a chip-icon span."""
-    red = await env.add_member("Rojo")
-    await env.give_planned_routine(red, weekdays=[0, 1], days_ago=10)
-    amber = await env.add_member("Ambar")
-    await env.give_planned_routine(amber, weekdays=[6], days_ago=10)
-
-    text = await env.page("/?view=cards")
-
-    assert 'id="band-hot"' in text
-    assert 'id="band-warm"' in text
-    assert 'id="band-cool"' in text
-    # Every band heading has a chip-icon.
-    assert text.count('class="chip-icon"') >= 3
-
-
-async def test_elevation_classes_on_rows_and_cards(env):
-    """Rows and cards carry elevation-1 background/shadow/stroke classes
-    from the CSS token scale."""
-    await env.add_member("Luis")
-    await env.give_routine(await env.add_member("Ana"))
-
-    table = await env.page("/?view=table")
-    cards = await env.page("/?view=cards")
-
-    # Table rows use elevation-1 styling.
-    assert 'class="row"' in table
-    # Cards use mcard with elevation-1 styling.
-    assert 'class="mcard"' in cards
+    row = next(r for r in data["active"] if r["name"] == "Luis")
+    states = {cell["on"]: cell["state"] for cell in row["attendance"]}
+    assert states["2026-07-14"] == "hit"  # the unplanned Session
+    assert states["2026-07-06"] == "miss" and states["2026-07-13"] == "miss"
+    assert sum(1 for s in states.values() if s == "hit") == 1
+    assert sum(1 for s in states.values() if s == "miss") == 2

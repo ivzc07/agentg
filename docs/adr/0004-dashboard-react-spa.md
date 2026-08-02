@@ -1,6 +1,6 @@
 # ADR 0004: Dashboard moves to a React SPA + JSON API — ADR 0003 superseded
 
-- **Status:** Accepted
+- **Status:** Accepted — implemented; the [#154](https://github.com/ivzc07/agentg/issues/154) cutover flipped and the flag-gated migration below is complete (`DASHBOARD_SPA_ENABLED` no longer exists; `DASHBOARD_SPA_DIST` remains for container deploys). Rollback during the burn-in window is by redeploying the pre-cutover image — see spec-dashboard §Stack.
 - **Date:** 2026-08-01
 - **Supersedes:** [ADR 0003](0003-dashboard-stays-server-rendered.md)
 - **Decision drivers:** After three in-stack design attempts (`fix/shadcn` Pico cleanup, `feat/UXUI`, and the [#134](https://github.com/ivzc07/agentg/issues/134)–[#139](https://github.com/ivzc07/agentg/issues/139) token redesign), the Owner judges the dashboard still reads competent-but-flat — short of the reference-level look ([#133](https://github.com/ivzc07/agentg/issues/133)). A design interview (2026-08-01) reopened ADR 0003 and resolved the shape of the move.

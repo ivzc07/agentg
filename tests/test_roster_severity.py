@@ -12,12 +12,10 @@ The fixture clock starts on Wednesday 2026-07-15 18:00 UTC, so "yesterday"
 is Tuesday the 14th throughout.
 """
 
-import re
+import json
 from datetime import timedelta
 
 import pytest
-
-from agentg.dashboard_i18n import fmt_date
 
 @pytest.fixture
 async def env(roster_env):
@@ -26,12 +24,6 @@ async def env(roster_env):
 
 # Weekday numbers (0=Monday) for the fixture week of 2026-07-13 .. 07-15.
 SATURDAY, MONDAY, TUESDAY, WEDNESDAY = 5, 0, 1, 2
-
-
-def row_html(text: str, name: str) -> str:
-    match = re.search(rf'<li class="row" data-name="{name}">.*?</li>', text)
-    assert match is not None, f"no roster row for {name}"
-    return match.group(0)
 
 
 async def test_one_missed_planned_day_is_amber(env):
@@ -154,7 +146,7 @@ async def test_a_snoozed_member_shows_no_colour_while_the_snooze_runs(env):
     assert row.severity is None  # …but the snooze shows no colour
 
 
-async def test_the_page_colours_rows_and_keeps_the_counters(env):
+async def test_the_api_colours_rows_and_keeps_the_counters(env):
     amber = await env.add_member("Ambar")
     await env.give_planned_routine(amber, [TUESDAY], days_ago=5)
     await env.train(amber, days_ago=3)
@@ -168,15 +160,17 @@ async def test_the_page_colours_rows_and_keeps_the_counters(env):
     until = env.clock.now.date() + timedelta(days=5)
     await env.checkins.snooze_until(paused.id, until)
 
-    text = await env.page()
+    data = json.loads(await env.page("/api/roster"))
 
-    assert "sev-amber" in row_html(text, "Ambar")
-    assert "sev-red" in row_html(text, "Roja")
-    assert "sev-" not in row_html(text, "Novata")
-    assert "sev-" not in row_html(text, "Pausado")
-    assert f"en pausa hasta el {fmt_date(until, 'es')}" in text
+    by_name = {r["name"]: r for r in data["active"]}
+    assert by_name["Ambar"]["severity"] == "amber"
+    assert by_name["Roja"]["severity"] == "red"
+    assert by_name["Novata"]["severity"] is None
+    # A snoozed member's colour is suppressed while the pause runs.
+    assert by_name["Pausado"]["severity"] is None
+    assert by_name["Pausado"]["snoozed_until"] == until.isoformat()
     # The counter still just counts Members — the lapsed tail stays out.
-    assert "Miembros (4)" in text
+    assert data["counts"]["active"] == 4
 
 
 async def test_the_colour_never_moves_the_gap_sort(env):
@@ -195,6 +189,5 @@ async def test_the_colour_never_moves_the_gap_sort(env):
         ("Roja", "red"),
     ]
 
-    text = await env.page()
-    main = text.split('<details id="lapsed">')[0]
-    assert main.index("Ambar") < main.index("Roja")
+    data = json.loads(await env.page("/api/roster"))
+    assert [r["name"] for r in data["active"]] == ["Ambar", "Roja"]

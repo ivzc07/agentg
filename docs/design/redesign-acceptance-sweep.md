@@ -1,7 +1,15 @@
 # Redesign acceptance sweep — results (issue #140)
 
+> **Historical.** This sweep measured the server-rendered dashboard and its
+> stylesheet, both deleted by the [#154](https://github.com/ivzc07/agentg/issues/154)
+> React cutover (`tests/test_redesign_acceptance_sweep.py` went with them).
+> The living successors: `tests/test_375px_playwright.py` (real-browser
+> layout, run by the `e2e-375px` CI job), the frontend RTL suite
+> (behavior), and [#156](https://github.com/ivzc07/agentg/issues/156)
+> (token contrast audit against `frontend/tailwind.config.ts`).
+
 Closing verification gate of the [#133 redesign](../spec-dashboard.md).
-Run: `uv run pytest tests/test_redesign_acceptance_sweep.py -v`
+Run (at the time): `uv run pytest tests/test_redesign_acceptance_sweep.py -v`
 
 ## Gate results
 

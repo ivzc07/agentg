@@ -14,8 +14,8 @@ function renderLoginPage(initialEntry: string) {
     <QueryClientProvider client={qc}>
       <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
-          <Route path="/dashboard/login/:token" element={<LoginPage />} />
-          <Route path="/dashboard/login" element={<LoginPage />} />
+          <Route path="/login/:token" element={<LoginPage />} />
+          <Route path="/login" element={<LoginPage />} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -33,7 +33,7 @@ describe("LoginPage", () => {
       new Promise(() => {}),
     );
 
-    renderLoginPage("/dashboard/login/token-abc");
+    renderLoginPage("/login/token-abc");
 
     expect(screen.getByText("Loading…")).toBeInTheDocument();
   });
@@ -43,7 +43,7 @@ describe("LoginPage", () => {
       ok: false,
     } as Response);
 
-    renderLoginPage("/dashboard/login/expired-token");
+    renderLoginPage("/login/expired-token");
 
     await waitFor(() => {
       expect(
@@ -60,7 +60,7 @@ describe("LoginPage", () => {
       json: () => Promise.resolve({ valid: false }),
     } as Response);
 
-    renderLoginPage("/dashboard/login/stale-token");
+    renderLoginPage("/login/stale-token");
 
     await waitFor(() => {
       expect(
@@ -77,7 +77,7 @@ describe("LoginPage", () => {
       json: () => Promise.resolve({ valid: true }),
     } as Response);
 
-    renderLoginPage("/dashboard/login/valid-token");
+    renderLoginPage("/login/valid-token");
 
     await waitFor(() => {
       expect(
@@ -101,7 +101,7 @@ describe("LoginPage", () => {
       ok: false,
     } as Response);
 
-    renderLoginPage("/dashboard/login");
+    renderLoginPage("/login");
 
     await waitFor(() => {
       expect(
@@ -117,7 +117,7 @@ describe("LoginPage", () => {
       new Error("Network error"),
     );
 
-    renderLoginPage("/dashboard/login/net-fail-token");
+    renderLoginPage("/login/net-fail-token");
 
     // react-query surfaces fetch rejections as !valid (error → data stays
     // undefined, so the !valid branch renders).

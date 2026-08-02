@@ -211,9 +211,11 @@ Removed: `share_with_coach` on `flag_to_coach` ([#80](https://github.com/ivzc07/
 **The dashboard lives inside the bot's process** - the same single Coolify application, one deploy, one container:
 
 - **HTTP server**: aiohttp (already in the tree via aiogram), started on the existing asyncio event loop next to the long poller and APScheduler. A later polling-to-webhook switch reuses this same server.
-- **Rendering**: moving to a **React SPA over JSON `/api/*` routes**, served as static assets by this same aiohttp app and authenticated by the existing signed session cookie ([ADR 0004](adr/0004-dashboard-react-spa.md), which supersedes ADR 0003 and lifts its "no frontend build step, no SPA, no API layer" cap). A Vite/TypeScript build step is therefore part of the repo.
+- **Rendering**: a **React SPA over JSON `/api/*` routes**, served as static assets by this same aiohttp app and authenticated by the existing signed session cookie ([ADR 0004](adr/0004-dashboard-react-spa.md), which supersedes ADR 0003 and lifts its "no frontend build step, no SPA, no API layer" cap). A Vite/TypeScript build step is therefore part of the repo.
 
-  The cutover is **flag-gated and not yet flipped**: with `DASHBOARD_SPA_ENABLED` unset - the default - the server-rendered HTML from typed **Python f-string renderers** plus **vendored htmx** described below is still what ships. (`DASHBOARD_SPA_DIST` locates the built bundle for container deploys, where it does not sit next to the source tree.) Retiring that path is tracked by [#154](https://github.com/ivzc07/agentg/issues/154); until it lands, both descriptions are live and this section documents the current default first.
+  The cutover **is flipped** ([#154](https://github.com/ivzc07/agentg/issues/154)): the SPA serves at the same root URLs the server-rendered pages lived on (`/`, `/members/{id}`, `/presets`, `/settings`, `/login/{token}`), so magic links, deep links, and the signed cookie are unchanged. The f-string renderers, vendored htmx, and `/static/` are deleted; the `DASHBOARD_SPA_ENABLED` flag is gone with them. `DASHBOARD_SPA_DIST` remains: it locates the built bundle for container deploys, where it does not sit next to the source tree. A missing bundle degrades the dashboard to 503 with a logged warning - it never prevents the bot from booting.
+
+  **Rollback (burn-in window)**: with the renderers deleted there is no flag to flip back; rollback = redeploy the last pre-cutover image (or `git revert` the #154 merge and redeploy). Keep the pre-cutover image tag deployable for a **two-week burn-in** after the cutover deploy; after that the tag can be garbage-collected and this paragraph is historical.
 - **Public origin**: a subdomain of the flowstate domain attached in Coolify (automatic TLS). The exact hostname is a deploy-time detail behind a `DASHBOARD_BASE_URL` env var that `/dashboard` magic links point at.
 - Delivery stays **long polling**, single replica; only the "no public endpoint" property of [docs/spec.md](spec.md) `§Channel plan` retires.
 
@@ -221,7 +223,7 @@ Removed: `share_with_coach` on `flag_to_coach` ([#80](https://github.com/ivzc07/
 
 *Issues [#127](https://github.com/ivzc07/agentg/issues/127), [#128](https://github.com/ivzc07/agentg/issues/128), [#129](https://github.com/ivzc07/agentg/issues/129).*
 
-*Historical: shipped under [ADR 0003](adr/0003-dashboard-stays-server-rendered.md), which [ADR 0004](adr/0004-dashboard-react-spa.md) has since superseded. These interactions still ship while the SPA flag is off; they are re-implemented in React as part of [#154](https://github.com/ivzc07/agentg/issues/154) and the htmx path retires with it. The cap below bound the work at the time and is no longer binding on new work.*
+*Historical: shipped under [ADR 0003](adr/0003-dashboard-stays-server-rendered.md), which [ADR 0004](adr/0004-dashboard-react-spa.md) has since superseded. [#154](https://github.com/ivzc07/agentg/issues/154) retired the htmx path: these interactions now live in the React screens (client-side filtering and counts, in-place editor saves through the JSON API, client-rendered confirmation notices). The description below is kept as the record of what the server-rendered era shipped.*
 
 The interaction upgrades the redesign deferred, inside ADR 0003's then-hard cap (HTML fragments from the same renderers - no client templating, no JSON endpoints, no build step):
 
@@ -229,7 +231,7 @@ The interaction upgrades the redesign deferred, inside ADR 0003's then-hard cap 
 - **In-place Routine editor saves** (#128): the editor (Member and Preset master) posts through vendored htmx; with the `HX-Request` header the server returns the re-rendered editor - a success line naming the save and the notified Member, or today's exact refusals - so scroll and typed work survive. Without JS the POST/redirect flow stands unchanged.
 - **Confirmation notices on the redirect writes** (#129): tick-off, preset create/apply/default/retire, and the Settings saves redirect with `?done=<key>`; the landing renderer turns a known key into a one-line notice, anything else renders nothing.
 
-htmx ships vendored in `/static/` beside the stylesheet, on the same content-hash URL scheme.
+htmx shipped vendored in `/static/` beside the stylesheet, on the same content-hash URL scheme, until [#154](https://github.com/ivzc07/agentg/issues/154) removed both.
 
 ## Out of scope for v1
 

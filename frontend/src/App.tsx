@@ -27,7 +27,7 @@ const queryClient = new QueryClient({
 function LoginRoutes() {
   return (
     <MotionConfig reducedMotion="user">
-      <BrowserRouter basename="/dashboard">
+      <BrowserRouter>
         <Routes>
           <Route path="login/:token" element={<LoginPage />} />
           {/* Any unmatched login path shows a fallback bounce */}
@@ -47,7 +47,7 @@ export function Dashboard() {
   // Check if we're on a login route — those don't need a session.
   const isLoginRoute =
     typeof window !== "undefined" &&
-    window.location.pathname.startsWith("/dashboard/login");
+    window.location.pathname.startsWith("/login");
 
   if (isLoginRoute) {
     return <LoginRoutes />;
@@ -93,7 +93,7 @@ export function Dashboard() {
 
   return (
     <MotionConfig reducedMotion="user">
-      <BrowserRouter basename="/dashboard">
+      <BrowserRouter>
         <Routes>
           {/* The roster in table, cards, or split view.  Split keeps the
               rail and renders the member inline, not via a deep link. */}
@@ -116,6 +116,12 @@ export function Dashboard() {
           <Route
             path="members/:memberId/routine"
             element={<RoutineEditor />}
+          />
+          {/* The Preset master editor — the same editor pointed at a
+              Preset (#154), reached from the Presets screen. */}
+          <Route
+            path="presets/:presetId/routine"
+            element={<RoutineEditor preset />}
           />
           {/* Unknown deep links: get the coach back to the roster. */}
           <Route path="*" element={<Navigate to="/" replace />} />

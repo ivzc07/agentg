@@ -1,9 +1,10 @@
 """The dashboard's HTTP door, end to end over a real aiohttp server.
 
-Covers the acceptance flow: magic link -> interstitial (GET never spends the
-token, so a link-preview fetch can't burn it) -> POST redeem -> session
-cookie -> signed-in shell, refreshed on every visit; every bad state bounces
-to the friendly page.
+Covers the acceptance flow: magic link -> SPA login shell (GET never spends
+the token, so a link-preview fetch can't burn it; the React interstitial
+validates via /api/login/{token}) -> POST redeem -> session cookie ->
+signed-in SPA shell, refreshed on every visit; every bad state bounces to
+the friendly page.
 """
 
 import json
@@ -39,8 +40,13 @@ async def _setup_stores(tmp_path):
 
 
 @pytest.fixture
-async def env(tmp_path):
+async def env(tmp_path, monkeypatch):
+    """A test app with a stub built bundle under *tmp_path* so the SPA
+    routes find it without touching the real ``frontend/dist/``."""
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+    stub_dist = tmp_path / "dist"
+    _write_stub_dist(stub_dist)
+    monkeypatch.setattr("agentg.dashboard_web._FRONTEND_DIST", stub_dist)
     app = build_app(
         store,
         linking,
@@ -73,21 +79,20 @@ async def test_anonymous_visit_bounces_to_the_friendly_page(env):
     assert response.status == 200
     text = await response.text()
     assert BOUNCE_MARKER in text and "Iron Temple" not in text
-    # Issue #139: the bounce page uses the same card language.
-    assert 'class="door"' in text and 'class="card"' in text
+    # The anonymous visitor never receives the SPA shell.
+    assert "window.__I18N__" not in text and 'id="root"' not in text
 
 
 async def test_the_full_login_flow_signs_the_coach_in(env):
     raw = await env.new_token()
 
-    # GET shows the interstitial and does NOT spend the token (the
-    # link-preview guard: a fetcher only ever GETs).
+    # GET serves the public SPA login shell and does NOT spend the token
+    # (the link-preview guard: a fetcher only ever GETs; the React
+    # interstitial validates via /api/login/{token} which never spends).
     response = await env.client.get(f"/login/{raw}")
     assert response.status == 200
     text = await response.text()
-    assert 'method="post"' in text
-    # Issue #139: the door pages use the same card language as the inside.
-    assert 'class="door"' in text and 'class="card"' in text
+    assert "window.__I18N__" in text and 'id="root"' in text
     assert await env.store.peek_login_token(raw) is not None
 
     # POST redeems: one redirect home, one session cookie.
@@ -100,7 +105,7 @@ async def test_the_full_login_flow_signs_the_coach_in(env):
     response = await env.client.get("/")
     text = await response.text()
     assert response.status == 200
-    assert "Iron Temple" in text
+    assert "window.__I18N__" in text and 'id="root"' in text
     assert SESSION_COOKIE in response.cookies  # refreshed on the visit
 
 
@@ -108,30 +113,36 @@ async def test_a_token_is_single_use(env):
     raw = await env.new_token()
     assert (await env.client.post(f"/login/{raw}", allow_redirects=False)).status == 302
 
-    # Second redemption (or its interstitial) bounces.
+    # Second redemption bounces, and the peek reports the token dead.
     assert BOUNCE_MARKER in await (await env.client.post(f"/login/{raw}")).text()
-    assert BOUNCE_MARKER in await (await env.client.get(f"/login/{raw}")).text()
+    peek = await env.client.get(f"/api/login/{raw}")
+    assert json.loads(await peek.text())["valid"] is False
 
 
 async def test_unknown_and_expired_links_bounce(env):
-    assert BOUNCE_MARKER in await (await env.client.get("/login/no-such-token")).text()
+    # The POST redemption of an unknown token bounces server-side; the GET
+    # serves the SPA shell whose interstitial peeks and renders the bounce
+    # client-side — the peek must report invalid.
     assert BOUNCE_MARKER in await (await env.client.post("/login/no-such-token")).text()
+    peek = await env.client.get("/api/login/no-such-token")
+    assert json.loads(await peek.text())["valid"] is False
 
     raw = await env.new_token()
     env.clock.advance(timedelta(days=1))  # well past the token TTL
-    assert BOUNCE_MARKER in await (await env.client.get(f"/login/{raw}")).text()
+    peek = await env.client.get(f"/api/login/{raw}")
+    assert json.loads(await peek.text())["valid"] is False
 
 
 async def test_a_demoted_coach_is_locked_out_with_a_live_cookie(env):
     raw = await env.new_token()
     await env.client.post(f"/login/{raw}")  # sign in (redirect followed)
-    assert "Iron Temple" in await (await env.client.get("/")).text()
+    assert "window.__I18N__" in await (await env.client.get("/")).text()
 
     await env.linking.set_coach(env.member.id, False)  # demoted in chat
 
     text = await (await env.client.get("/")).text()
     assert BOUNCE_MARKER in text
-    assert "Iron Temple" not in text
+    assert "window.__I18N__" not in text
 
 
 async def test_a_forged_cookie_does_not_open_the_door(env):
@@ -266,10 +277,10 @@ async def test_api_session_rejects_forged_cookie(env):
     assert response.status == 401
 
 
-# --- SPA serving (issue #155) ---
+# --- SPA serving (issue #155; root URLs since the #154 cutover) ---
 
 
-SPA_SHELL_ROUTE = "/dashboard"
+SPA_SHELL_ROUTE = "/"
 
 
 def _write_stub_dist(dist_dir: Path, *, assets: bool = True) -> None:
@@ -279,7 +290,9 @@ def _write_stub_dist(dist_dir: Path, *, assets: bool = True) -> None:
     that triggers the missing-assets guard."""
     dist_dir.mkdir(parents=True, exist_ok=True)
     (dist_dir / "index.html").write_text(
-        '<!DOCTYPE html><html><head><title>SPA</title></head>'
+        # lang="en" hardcoded like the real Vite template - the server must
+        # rewrite it to the resolved language (P2, PR #206 review round 2).
+        '<!DOCTYPE html><html lang="en"><head><title>SPA</title></head>'
         '<body><div id="root"></div></body></html>',
         encoding="utf-8",
     )
@@ -290,33 +303,15 @@ def _write_stub_dist(dist_dir: Path, *, assets: bool = True) -> None:
 
 
 @pytest.fixture
-async def spa_env(tmp_path, monkeypatch):
-    """A test app with dashboard_spa_enabled=True and a stub built bundle
-    under *tmp_path* so nothing touches the real ``frontend/dist/``."""
-    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
-
-    stub_dist = tmp_path / "dist"
-    _write_stub_dist(stub_dist)
-    monkeypatch.setattr(
-        "agentg.dashboard_web._FRONTEND_DIST", stub_dist
-    )
-
-    app = build_app(
-        store,
-        linking,
-        session_secret=SECRET,
-        bot_username="testbot",
-        secure_cookies=False,
-        clock=clock,
-        spa_enabled=True,
-    )
-    async with TestClient(TestServer(app)) as client:
-        yield SimpleEnv(clock, engine, linking, store, client, gym, member)
-    await engine.dispose()
+async def spa_env(env):
+    """Alias of ``env`` — kept so the JSON-contract tests written while the
+    SPA was flag-gated (issues #149–#153) read unchanged after the #154
+    cutover made the SPA the only dashboard."""
+    return env
 
 
 async def test_spa_shell_serves_authenticated(spa_env):
-    """With the flag on, an authenticated coach gets the SPA shell."""
+    """An authenticated coach gets the SPA shell at the site root."""
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
     response = await spa_env.client.get(
@@ -331,26 +326,12 @@ async def test_spa_shell_serves_authenticated(spa_env):
     assert 'id="root"' in text
 
 
-async def test_spa_shell_trailing_slash_serves_authenticated(spa_env):
-    """The trailing-slash URL (Vite's canonical origin) also serves the shell."""
-    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
-
-    response = await spa_env.client.get(
-        f"{SPA_SHELL_ROUTE}/", cookies={SESSION_COOKIE: cookie}
-    )
-
-    assert response.status == 200
-    text = await response.text()
-    assert "window.__I18N__" in text
-    assert 'id="root"' in text
-
-
 async def test_spa_index_html_not_served_unauthenticated(spa_env):
-    """``/dashboard/index.html`` must not hand out the built bundle without a
-    cookie: the static handler is scoped to /dashboard/assets/, so the path
-    falls through to the deep-link catch-all (issue #149) and an anonymous
-    caller gets the same bounce page every other dashboard URL gives them."""
-    response = await spa_env.client.get("/dashboard/index.html")
+    """``/index.html`` must not hand out the built bundle without a cookie:
+    the static handler is scoped to /assets/, so the path falls through to
+    the deep-link catch-all (issue #149) and an anonymous caller gets the
+    same bounce page every other dashboard URL gives them."""
+    response = await spa_env.client.get("/index.html")
 
     assert response.status == 200
     text = await response.text()
@@ -455,7 +436,6 @@ async def test_spa_shell_escapes_script_close_tag(tmp_path, monkeypatch):
             bot_username="testbot",
             secure_cookies=False,
             clock=clock,
-            spa_enabled=True,
         )
         async with TestClient(TestServer(app)) as client:
             cookie = sign_session(member.id, gym.id, SECRET, clock())
@@ -493,16 +473,17 @@ async def test_spa_shell_rejects_unauthenticated(spa_env):
 
 
 async def test_spa_serves_static_assets(spa_env):
-    """The built assets are served under ``/dashboard/assets/``."""
-    response = await spa_env.client.get("/dashboard/assets/index.js")
+    """The built assets are served under ``/assets/``."""
+    response = await spa_env.client.get("/assets/index.js")
     assert response.status == 200
     text = await response.text()
     assert "stub" in text
 
 
-async def test_spa_enabled_no_dist_builds_app(tmp_path, monkeypatch):
-    """With the flag on and no ``dist/`` directory the app builds without
-    crashing and the shell route returns a 404."""
+async def test_missing_dist_builds_app(tmp_path, monkeypatch):
+    """With no ``dist/`` directory the app still builds without crashing —
+    a missing bundle must degrade the dashboard, never kill the bot at
+    boot — and the shell answers 503."""
     from agentg import dashboard_web
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
@@ -516,68 +497,30 @@ async def test_spa_enabled_no_dist_builds_app(tmp_path, monkeypatch):
             bot_username="testbot",
             secure_cookies=False,
             clock=clock,
-            spa_enabled=True,
         )
         async with TestClient(TestServer(app)) as client:
             cookie = sign_session(member.id, gym.id, SECRET, clock())
-            # The shell route is not registered — aiohttp falls back to 404.
             response = await client.get(
                 SPA_SHELL_ROUTE, cookies={SESSION_COOKIE: cookie}
             )
-            assert response.status == 404
+            assert response.status == 503
+            # No asset mount: the path falls to the catch-all shell (503
+            # here too), never a file off a nonexistent disk path.
+            asset = await client.get("/assets/index.js", cookies={SESSION_COOKIE: cookie})
+            assert asset.status == 503
     finally:
         await engine.dispose()
 
 
-async def test_flag_off_dashboard_unaffected(env):
-    """With the spa flag off (default), the existing dashboard is unchanged.
-    The SPA routes (/dashboard*, /api/roster, /api/seed) must not be reachable
-    so that the rollback guarantee holds."""
-    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
-
-    # The server-HTML dashboard at / is served, not the SPA shell.
-    response = await env.client.get("/", cookies={SESSION_COOKIE: cookie})
-    assert response.status == 200
-    text = await response.text()
-    assert "Iron Temple" in text
-    assert "window.__I18N__" not in text
-    assert 'id="root"' not in text
-
-    # /dashboard is flag-gated — 404 when the flag is off.
-    dash = await env.client.get("/dashboard", cookies={SESSION_COOKIE: cookie})
-    assert dash.status == 404
-
-    # /api/roster is flag-gated — 404 when the flag is off.
-    roster = await env.client.get("/api/roster", cookies={SESSION_COOKIE: cookie})
-    assert roster.status == 404
-
-    # /api/seed is removed from the HTTP surface entirely — 404 in all configs.
-    seed = await env.client.post("/api/seed", cookies={SESSION_COOKIE: cookie})
-    assert seed.status == 404
-
-    # /api/login/{token} peek is flag-gated — 404 when the flag is off (issue #153, review).
-    peek = await env.client.get("/api/login/no-such-token")
-    assert peek.status == 404
-
-    # SPA shell route is not registered.
-    response = await env.client.get(SPA_SHELL_ROUTE)
-    assert response.status == 404
-
-    # Bundle asset route is not registered.
-    response = await env.client.get("/dashboard/assets/index.js")
-    assert response.status == 404
-
-
-async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
-    """The production wiring — Settings.dashboard_spa_enabled +
-    Settings.dashboard_spa_dist → build_app — runs through
-    ``main.build_dashboard_app``, the one place ``run()`` builds the app.
+async def test_spa_dist_wired_from_settings(tmp_path, monkeypatch):
+    """The production wiring — Settings.dashboard_spa_dist → build_app —
+    runs through ``main.build_dashboard_app``, the one place ``run()``
+    builds the app.
 
     ``_FRONTEND_DIST`` is pointed at a non-existent path so the only way the
     SPA shell is reachable is through the ``spa_dist=`` kwarg wired from
     ``DASHBOARD_SPA_DIST``.  Dropping that kwarg from the call site turns
-    this test red — the same dead-flag class of bug this PR already fixed
-    once for ``spa_enabled``.
+    this test red — the dead-flag class of bug (issue #154).
     """
     from types import SimpleNamespace
 
@@ -588,12 +531,10 @@ async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
         {
             "TELEGRAM_BOT_TOKEN": "dummy",
             "MODEL_API_KEY": "dummy",
-            "DASHBOARD_SPA_ENABLED": "1",
             "DASHBOARD_SPA_DIST": str(tmp_path / "dist"),
             "DASHBOARD_SESSION_SECRET": SECRET,
         }
     )
-    assert settings.dashboard_spa_enabled is True
     assert settings.dashboard_spa_dist == str(tmp_path / "dist")
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
@@ -633,9 +574,11 @@ async def test_spa_enabled_wired_from_settings(tmp_path, monkeypatch):
         await engine.dispose()
 
 
-async def test_spa_enabled_partial_bundle(tmp_path, monkeypatch):
+async def test_partial_bundle_does_not_crash_boot(tmp_path, monkeypatch):
     """A dist/ with index.html but no assets/ must not crash at build_app
-    — the guard must catch the missing assets directory (P1, PR review 2)."""
+    — the guard must catch the missing assets directory (P1, PR review 2:
+    ``add_static`` raises on a missing directory, which used to kill the
+    whole bot at boot)."""
     from agentg import dashboard_web
 
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
@@ -650,15 +593,21 @@ async def test_spa_enabled_partial_bundle(tmp_path, monkeypatch):
             bot_username="testbot",
             secure_cookies=False,
             clock=clock,
-            spa_enabled=True,
         )
         async with TestClient(TestServer(app)) as client:
+            # The asset mount is skipped rather than raising at boot: the
+            # path falls through to the catch-all, which never serves a
+            # bundle file — an anonymous caller just gets the bounce page.
+            asset = await client.get("/assets/index.js")
+            assert asset.status == 200
+            text = await asset.text()
+            assert "stub" not in text and BOUNCE_MARKER in text
+            # And a signed-in coach gets the honest 503, not a shell whose
+            # bundle files cannot load — a blank page hiding the real
+            # problem (P3, PR #206 review).
             cookie = sign_session(member.id, gym.id, SECRET, clock())
-            # The SPA route is not registered — aiohttp falls back to 404.
-            response = await client.get(
-                SPA_SHELL_ROUTE, cookies={SESSION_COOKIE: cookie}
-            )
-            assert response.status == 404
+            shell = await client.get("/", cookies={SESSION_COOKIE: cookie})
+            assert shell.status == 503
     finally:
         await engine.dispose()
 
@@ -688,7 +637,6 @@ async def test_spa_dist_override_packaged_layout(tmp_path, monkeypatch):
             bot_username="testbot",
             secure_cookies=False,
             clock=clock,
-            spa_enabled=True,
             spa_dist=override_dist,
         )
         async with TestClient(TestServer(app)) as client:
@@ -705,8 +653,6 @@ async def test_spa_dist_override_packaged_layout(tmp_path, monkeypatch):
 
 
 # --- /api/roster JSON contract (issue #149) ---
-# The roster JSON endpoint is flag-gated behind spa_enabled, so all
-# tests in this section use ``spa_env`` (the env fixture with the flag on).
 
 
 async def test_api_roster_returns_json_shape(spa_env):
@@ -1007,24 +953,129 @@ async def test_api_roster_slides_session_cookie(spa_env):
 
 
 async def test_api_seed_not_an_http_endpoint(spa_env):
-    """/api/seed was removed from the HTTP surface — it returns 404 even
-    with the SPA flag on.  Use ``python -m agentg.scripts.seed_demo`` instead."""
+    """/api/seed was removed from the HTTP surface — an unknown /api/* path
+    answers the JSON 404 for any method.  Use
+    ``python -m agentg.scripts.seed_demo`` instead."""
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
     response = await spa_env.client.post(
         "/api/seed", cookies={SESSION_COOKIE: cookie}
     )
     assert response.status == 404
+    assert response.content_type == "application/json"
 
 
 # --- SPA fallback for React Router deep links (issue #149) ---
 
 
-async def test_spa_fallback_serves_shell_for_deep_links(spa_env):
-    """GET /dashboard/members/1 serves the SPA shell, not a 404 (issue #149)."""
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/members/{id}"),
+        ("GET", "/api/members/{id}/routine"),
+        ("PUT", "/api/members/{id}/routine"),
+        ("POST", "/api/members/{id}/flags/{id}/tick-off"),
+        ("POST", "/api/presets/{id}/apply"),
+        ("POST", "/api/presets/{id}/default"),
+        ("POST", "/api/presets/{id}/retire"),
+        ("GET", "/api/presets/{id}/routine"),
+        ("PUT", "/api/presets/{id}/routine"),
+    ],
+)
+async def test_every_route_id_rejects_values_outside_the_database_range(
+    spa_env, method, path
+):
+    """Python integers are unbounded; database primary keys are not. Every
+    route rejects oversized IDs before a driver can raise OverflowError."""
+    huge = "1" + "0" * 100
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.request(
+        method, path.format(id=huge), cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 404
+    assert response.content_type == "application/json"
+
+
+async def test_unknown_api_paths_answer_json_404_not_the_shell(spa_env):
+    """A typo'd /api/* GET must 404 as JSON — the HTML catch-all would
+    mask it as a 200 during development (P3, PR #206 review)."""
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
 
     response = await spa_env.client.get(
-        "/dashboard/members/1", cookies={SESSION_COOKIE: cookie}
+        "/api/no-such-endpoint", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 404
+    assert response.content_type == "application/json"
+    assert json.loads(await response.text()) == {"error": "not found"}
+
+    # Any method, not just GET: a typo'd POST endpoint must not get an
+    # HTML 405 (P3, PR #206 review round 2).
+    posted = await spa_env.client.post(
+        "/api/no-such-endpoint", cookies={SESSION_COOKIE: cookie}
+    )
+    assert posted.status == 404
+    assert posted.content_type == "application/json"
+
+
+async def test_the_shell_lang_attribute_follows_the_resolved_language(spa_env):
+    """The Vite template hardcodes <html lang="en">; the server rewrites it
+    to the resolved language before serving — screen readers and translators
+    read this attribute (P2, PR #206 review round 2)."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    es = await spa_env.client.get(
+        "/", cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "es"}
+    )
+    assert '<html lang="es">' in await es.text()
+
+    en = await spa_env.client.get(
+        "/", cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "en"}
+    )
+    assert '<html lang="en">' in await en.text()
+
+    # The public login shell follows the same rule (Spanish no-signal default).
+    login = await spa_env.client.get("/login/some-token")
+    assert '<html lang="es">' in await login.text()
+
+
+async def test_a_bundle_built_after_boot_stays_503_until_restart(tmp_path, monkeypatch):
+    """The /assets/ mount is decided at boot; a bundle appearing later must
+    not flip the shell to 200 — its asset requests would still miss the
+    unregistered mount and come back as HTML. The consistent honest answer
+    is 503 until a restart (P3, PR #206 review round 2)."""
+    from agentg import dashboard_web
+
+    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+    late_dist = tmp_path / "late-dist"
+    monkeypatch.setattr(dashboard_web, "_FRONTEND_DIST", late_dist)
+    try:
+        app = build_app(
+            store,
+            linking,
+            session_secret=SECRET,
+            bot_username="testbot",
+            secure_cookies=False,
+            clock=clock,
+        )
+        async with TestClient(TestServer(app)) as client:
+            cookie = sign_session(member.id, gym.id, SECRET, clock())
+            # The bundle lands after the server booted.
+            _write_stub_dist(late_dist)
+            response = await client.get("/", cookies={SESSION_COOKIE: cookie})
+            assert response.status == 503
+    finally:
+        await engine.dispose()
+
+
+async def test_spa_fallback_serves_shell_for_deep_links(spa_env):
+    """An unmatched GET path serves the SPA shell, not a 404, so React
+    Router deep links resolve on a cold load (issue #149)."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        "/some/unknown/deep-link", cookies={SESSION_COOKIE: cookie}
     )
 
     assert response.status == 200
@@ -1035,7 +1086,7 @@ async def test_spa_fallback_serves_shell_for_deep_links(spa_env):
 
 async def test_spa_fallback_requires_auth(spa_env):
     """The SPA fallback also requires authentication."""
-    response = await spa_env.client.get("/dashboard/members/1")
+    response = await spa_env.client.get("/some/unknown/deep-link")
     assert response.status == 200
     text = await response.text()
     assert BOUNCE_MARKER in text
@@ -1043,7 +1094,7 @@ async def test_spa_fallback_requires_auth(spa_env):
 
 async def test_spa_fallback_static_assets_still_served(spa_env):
     """The SPA fallback does not shadow static asset routes."""
-    response = await spa_env.client.get("/dashboard/assets/index.js")
+    response = await spa_env.client.get("/assets/index.js")
     assert response.status == 200
     text = await response.text()
     assert "stub" in text
@@ -1053,8 +1104,8 @@ async def test_spa_fallback_static_assets_still_served(spa_env):
 
 
 async def test_spa_login_shell_serves_without_auth(spa_env):
-    """GET /dashboard/login/:token serves the SPA shell without requiring auth."""
-    response = await spa_env.client.get("/dashboard/login/test-token-42")
+    """GET /login/:token serves the SPA shell without requiring auth."""
+    response = await spa_env.client.get("/login/test-token-42")
 
     assert response.status == 200
     text = await response.text()
@@ -1064,7 +1115,7 @@ async def test_spa_login_shell_serves_without_auth(spa_env):
 
 async def test_spa_login_shell_injects_default_language(spa_env):
     """The login shell injects i18n with the no-signal default (Spanish)."""
-    response = await spa_env.client.get("/dashboard/login/test-token-42")
+    response = await spa_env.client.get("/login/test-token-42")
 
     assert response.status == 200
     text = await response.text()
@@ -1075,7 +1126,7 @@ async def test_spa_login_shell_injects_default_language(spa_env):
 async def test_spa_login_shell_respects_language_cookie(spa_env):
     """The login shell uses the language cookie when set."""
     response = await spa_env.client.get(
-        "/dashboard/login/test-token-42",
+        "/login/test-token-42",
         cookies={"agentg_dashboard_lang": "en"},
     )
 
@@ -1088,7 +1139,7 @@ async def test_spa_login_shell_respects_language_cookie(spa_env):
 async def test_spa_login_shell_no_cookie_set(spa_env):
     """Unlike the authenticated shell, the login shell does NOT set a
     session cookie — there is no session to slide."""
-    response = await spa_env.client.get("/dashboard/login/test-token-42")
+    response = await spa_env.client.get("/login/test-token-42")
 
     assert response.status == 200
     assert SESSION_COOKIE not in response.cookies
@@ -1453,21 +1504,6 @@ async def test_api_tick_off_idempotent(spa_env):
     assert d2["acknowledged"] is True
 
 
-async def test_api_member_and_tick_off_flag_off_404(env):
-    """With spa_enabled=False, /api/members/{id} and tick-off return 404."""
-    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
-
-    member_resp = await env.client.get(
-        "/api/members/1", cookies={SESSION_COOKIE: cookie}
-    )
-    assert member_resp.status == 404
-
-    tick_resp = await env.client.post(
-        "/api/members/1/flags/1/tick-off", cookies={SESSION_COOKIE: cookie}
-    )
-    assert tick_resp.status == 404
-
-
 # --- overflow member id → 404 (issue #150, PR review) ---
 
 
@@ -1620,26 +1656,8 @@ async def test_api_tick_off_idempotent_read_back(spa_env):
 
 # --- /api/presets JSON endpoint (issue #152) ---
 #
-# The presets API is flag-gated behind spa_enabled; every mutating endpoint is
-# a POST that requires cookie auth via require_coach and reuses existing store
-# methods.
-
-
-async def test_api_presets_flag_off_404(env):
-    """When spa_enabled=False, /api/presets routes return 404."""
-    cookie = sign_session(env.member.id, env.gym.id, SECRET, env.clock())
-    for method, path in [
-        ("get", "/api/presets"),
-        ("post", "/api/presets"),
-        ("post", "/api/presets/1/apply"),
-        ("post", "/api/presets/1/default"),
-        ("post", "/api/presets/1/retire"),
-    ]:
-        if method == "get":
-            resp = await env.client.get(path, cookies={SESSION_COOKIE: cookie})
-        else:
-            resp = await env.client.post(path, json={}, cookies={SESSION_COOKIE: cookie})
-        assert resp.status == 404, f"{method.upper()} {path} should 404 when flag off, got {resp.status}"
+# Every mutating endpoint is a POST that requires cookie auth via
+# require_coach and reuses existing store methods.
 
 
 async def test_api_presets_list_requires_auth(spa_env):

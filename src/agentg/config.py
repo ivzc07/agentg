@@ -32,9 +32,6 @@ class Settings:
     # HMAC key for the session cookie; falls back to the bot token (already
     # a stable per-deploy secret) when unset.
     dashboard_session_secret: str | None = None
-    # Feature flag: serve the React SPA dashboard instead of server-rendered
-    # HTML. Defaults OFF so production is unaffected (ADR 0004 §Migration 5b).
-    dashboard_spa_enabled: bool = False
     # Optional override for the Vite-built React bundle directory; defaults
     # to the repo-relative path ``frontend/dist/``. Set this in container
     # deploys where the package is installed into site-packages.
@@ -64,15 +61,8 @@ class Settings:
             ).rstrip("/"),
             dashboard_port=port,
             dashboard_session_secret=env.get("DASHBOARD_SESSION_SECRET") or None,
-            dashboard_spa_enabled=_bool_env(env, "DASHBOARD_SPA_ENABLED"),
             dashboard_spa_dist=env.get("DASHBOARD_SPA_DIST") or "",
         )
-
-
-def _bool_env(env: Mapping[str, str], key: str) -> bool:
-    """A boolean environment variable: ``"1"``, ``"true"``, ``"yes"`` (case-insensitive)."""
-    raw = env.get(key, "")
-    return raw.strip().lower() in ("1", "true", "yes")
 
 
 def _as_asyncpg_url(url: str) -> str:

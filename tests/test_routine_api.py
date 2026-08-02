@@ -2,7 +2,7 @@
 
 GET /api/members/{id}/routine — returns routine data + catalog.
 PUT /api/members/{id}/routine — saves a coach-authored Routine through JSON.
-Flag-gated behind spa_enabled; both endpoints reuse require_coach auth.
+Both endpoints reuse require_coach auth.
 """
 
 import pytest
@@ -46,7 +46,6 @@ async def env(tmp_path):
     gym = await linking.create_gym("Iron Temple")
     coach = await linking.link_member(gym.id, "Coach Ana", "telegram", "1")
     await linking.set_coach(coach.id, True)
-    # spa_enabled=True so the JSON API routes are registered.
     app = build_app(
         store,
         linking,
@@ -55,7 +54,6 @@ async def env(tmp_path):
         secure_cookies=False,
         clock=clock,
         notifier=notifier,
-        spa_enabled=True,
     )
     async with TestClient(TestServer(app)) as client:
         yield Env(clock, engine, linking, store, notifier, client, gym, coach)
@@ -107,34 +105,6 @@ class Env:
                 self.coach.id, self.gym.id, SECRET, self.clock()
             )
         }
-
-
-# --- /api/members/{id}/routine flag-off (404) ---
-
-
-async def test_api_routine_flag_off_answers_404(tmp_path):
-    """When spa_enabled is False the JSON endpoint does not exist."""
-    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'db.db'}")
-    clock = FakeClock()
-    linking = LinkingStore(engine)
-    store = DashboardStore(engine, clock=clock)
-    await linking.ensure_schema()
-    gym = await linking.create_gym("Iron Temple")
-    coach = await linking.link_member(gym.id, "Coach Ana", "telegram", "1")
-    await linking.set_coach(coach.id, True)
-    app = build_app(
-        store, linking, session_secret=SECRET, bot_username="testbot",
-        secure_cookies=False, clock=clock, spa_enabled=False,
-    )
-    async with TestClient(TestServer(app)) as client:
-        cookies = {
-            SESSION_COOKIE: sign_session(coach.id, gym.id, SECRET, clock())
-        }
-        response = await client.get("/api/members/1/routine", cookies=cookies)
-        assert response.status == 404
-        response = await client.put("/api/members/1/routine", json={}, cookies=cookies)
-        assert response.status == 404
-    await engine.dispose()
 
 
 # --- GET /api/members/{id}/routine ---
@@ -490,6 +460,32 @@ async def test_put_refuses_bad_sets(env):
     assert "entre 1 y 99" in body["error"]
 
 
+async def test_put_accepts_an_integer_equivalent_json_number_for_sets(env):
+    """JSON Schema integers include 3.0 even though Python decodes it as a
+    float; normalize it at the contract boundary."""
+    member = await env.add_member("Luis")
+    await env.training.ensure_seeded()
+
+    response = await env.client.put(
+        f"/api/members/{member.id}/routine",
+        json={
+            "base_routine_id": None,
+            "workouts": [
+                {
+                    "weekday": 0,
+                    "name": "X",
+                    "exercises": [{"exercise": "squat", "sets": 3.0, "reps": "8"}],
+                },
+            ],
+        },
+        cookies=env.cookies(),
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["routine"][0]["exercises"][0]["sets"] == 3
+
+
 async def test_put_refuses_overlong_workout_name(env):
     member = await env.add_member("Luis")
 
@@ -656,3 +652,242 @@ async def test_first_routine_write_via_api_is_coach_stamped(env):
     assert active is not None
     assert active["coach_authored"] is True
     assert active["created_by_name"] == "Coach Ana"
+
+
+# --- The Preset master editor API: /api/presets/{id}/routine (#154) ---
+
+
+async def _make_preset(env, name="Beginner", with_master=True):
+    await env.training.ensure_seeded()
+    preset = await env.routines.create_preset(env.gym.id, name)
+    if with_master:
+        await env.routines.save_preset_master(
+            preset.id,
+            env.gym.id,
+            env.coach.id,
+            [WorkoutSpec(weekday=0, name="Preset day", exercises=[ExerciseSpec("squat", 3, "10")])],
+            base_routine_id=None,
+        )
+    return preset
+
+
+async def test_get_preset_routine_returns_master_and_catalog(env):
+    preset = await _make_preset(env)
+
+    response = await env.client.get(
+        f"/api/presets/{preset.id}/routine", cookies=env.cookies()
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["preset_id"] == preset.id
+    assert body["name"] == "Beginner"
+    [day] = body["routine"]
+    assert day["weekday"] == 0 and day["name"] == "Preset day"
+    assert day["exercises"] == [{"exercise": "squat", "sets": 3, "reps": "10"}]
+    assert body["routine_id"] is not None  # the stale-save stamp
+    assert body["routine_author"] == "Coach Ana"
+    assert "squat" in body["catalog"]
+
+
+async def test_get_preset_routine_empty_master(env):
+    preset = await _make_preset(env, with_master=False)
+
+    response = await env.client.get(
+        f"/api/presets/{preset.id}/routine", cookies=env.cookies()
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["routine"] == []
+    assert body["routine_id"] is None
+
+
+async def test_get_preset_routine_requires_auth(env):
+    preset = await _make_preset(env)
+    response = await env.client.get(f"/api/presets/{preset.id}/routine")
+    assert response.status == 401
+
+
+async def test_get_preset_routine_404_for_unknown_or_foreign(env):
+    other_gym = await env.linking.create_gym("Other Gym")
+    await env.training.ensure_seeded()
+    foreign = await env.routines.create_preset(other_gym.id, "Theirs")
+
+    for preset_id in (99999, foreign.id, "abc"):
+        response = await env.client.get(
+            f"/api/presets/{preset_id}/routine", cookies=env.cookies()
+        )
+        assert response.status == 404
+
+
+async def test_put_preset_routine_saves_a_master(env):
+    preset = await _make_preset(env, with_master=False)
+
+    response = await env.client.put(
+        f"/api/presets/{preset.id}/routine",
+        json={
+            "base_routine_id": None,
+            "workouts": [
+                {
+                    "weekday": 2,
+                    "name": "Piernas",
+                    "exercises": [{"exercise": "squat", "sets": 4, "reps": "8-10"}],
+                },
+            ],
+        },
+        cookies=env.cookies(),
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["ok"] is True
+    [day] = body["routine"]
+    assert day["name"] == "Piernas"
+    master = await env.routines.preset_master(preset.id)
+    assert master is not None
+    assert master["workouts"][0]["name"] == "Piernas"
+
+
+async def test_put_preset_routine_refuses_a_stale_save(env):
+    preset = await _make_preset(env)
+    master = await env.routines.preset_master(preset.id)
+
+    # Another coach saves in between (the master's routine_id moves on).
+    await env.routines.save_preset_master(
+        preset.id,
+        env.gym.id,
+        env.coach.id,
+        [WorkoutSpec(weekday=1, name="Newer", exercises=[ExerciseSpec("squat")])],
+        base_routine_id=master["routine_id"],
+    )
+
+    response = await env.client.put(
+        f"/api/presets/{preset.id}/routine",
+        json={
+            "base_routine_id": master["routine_id"],  # the superseded stamp
+            "workouts": [
+                {
+                    "weekday": 3,
+                    "name": "Mine",
+                    "exercises": [{"exercise": "squat", "sets": 3, "reps": "8"}],
+                },
+            ],
+        },
+        cookies=env.cookies(),
+    )
+
+    assert response.status == 409
+    body = await response.json()
+    assert "fresh_routine" in body and body["fresh_routine_id"] is not None
+    assert body["fresh_routine"][0]["name"] == "Newer"
+    # The stale save wrote nothing.
+    fresh = await env.routines.preset_master(preset.id)
+    assert fresh["workouts"][0]["name"] == "Newer"
+
+
+async def test_put_preset_routine_validation_errors(env):
+    preset = await _make_preset(env)
+    master = await env.routines.preset_master(preset.id)
+    base = master["routine_id"]
+
+    # Empty routine.
+    r = await env.client.put(
+        f"/api/presets/{preset.id}/routine",
+        json={"base_routine_id": base, "workouts": []},
+        cookies=env.cookies(),
+    )
+    assert r.status == 400
+
+    # Unknown exercise.
+    r = await env.client.put(
+        f"/api/presets/{preset.id}/routine",
+        json={
+            "base_routine_id": base,
+            "workouts": [
+                {"weekday": 0, "name": "Day", "exercises": [{"exercise": "no-such-lift"}]},
+            ],
+        },
+        cookies=env.cookies(),
+    )
+    assert r.status == 400
+    assert "no-such-lift" in (await r.json())["error"]
+
+    # Bad JSON body.
+    r = await env.client.put(
+        f"/api/presets/{preset.id}/routine",
+        data=b"not json",
+        cookies=env.cookies(),
+    )
+    assert r.status == 400
+
+
+async def test_put_preset_routine_requires_auth(env):
+    preset = await _make_preset(env)
+    response = await env.client.put(
+        f"/api/presets/{preset.id}/routine", json={"workouts": []}
+    )
+    assert response.status == 401
+
+
+async def test_put_preset_routine_notifies_linked_members(env):
+    """Editing a master updates every linked copy and notifies those
+    Members — the same contract as the server form path."""
+    preset = await _make_preset(env)
+    member = await env.add_member("Luis")
+    await env.routines.apply_preset(preset.id, env.gym.id, env.coach.id, [member.id])
+    master = await env.routines.preset_master(preset.id)
+
+    response = await env.client.put(
+        f"/api/presets/{preset.id}/routine",
+        json={
+            "base_routine_id": master["routine_id"],
+            "workouts": [
+                {
+                    "weekday": 5,
+                    "name": "Updated day",
+                    "exercises": [{"exercise": "squat", "sets": 5, "reps": "5"}],
+                },
+            ],
+        },
+        cookies=env.cookies(),
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["notified"] == 1
+    [(channel, uid, text)] = env.notifier.sent
+    assert channel == "telegram"
+    assert "Coach Ana" in text and "Updated day" in text
+    # The linked copy follows the master.
+    active = await env.routines.active_routine(member.id)
+    assert active["workouts"][0]["name"] == "Updated day"
+
+
+async def test_put_preset_routine_notifier_failure_does_not_block_save(env):
+    preset = await _make_preset(env)
+    member = await env.add_member("Luis")
+    await env.routines.apply_preset(preset.id, env.gym.id, env.coach.id, [member.id])
+    master = await env.routines.preset_master(preset.id)
+    env.notifier.fail = True
+
+    response = await env.client.put(
+        f"/api/presets/{preset.id}/routine",
+        json={
+            "base_routine_id": master["routine_id"],
+            "workouts": [
+                {
+                    "weekday": 5,
+                    "name": "Updated day",
+                    "exercises": [{"exercise": "squat", "sets": 5, "reps": "5"}],
+                },
+            ],
+        },
+        cookies=env.cookies(),
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["ok"] is True and body["notified"] == 0
+    fresh = await env.routines.preset_master(preset.id)
+    assert fresh["workouts"][0]["name"] == "Updated day"

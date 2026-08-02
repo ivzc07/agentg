@@ -1,10 +1,12 @@
-"""The tenant Settings screen (spec-dashboard §Settings), end to end over a
-real aiohttp server.
+"""The tenant Settings screen (spec-dashboard §Settings) since the React
+cutover (#154): the screen itself is the SPA (SettingsPage RTL covers the
+cards, the typed confirm, and the copy button); what lives here is the
+web-layer contract it runs on — /api/settings and its writes — asserted
+against the *linking read path* Members actually meet, plus the shared
+shell gate and the QR memoization.
 
-Covers the acceptance flow: any Coach of the gym opens Settings and copies
-both links (member link with a QR, coach link without); regenerating either
-code requires the typed confirm and invalidates the old code; renaming the
-gym takes effect where Members see it (the Linking read path).
+The JSON contract itself (shapes, confirm word, 401s, caps) is
+tests/test_api_settings.py.
 """
 
 import pytest
@@ -22,7 +24,7 @@ BOUNCE_MARKER = "/dashboard"  # the bounce page tells you to send /dashboard
 
 
 @pytest.fixture
-async def env(tmp_path):
+async def env(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'domain.db'}")
     clock = FakeClock()  # one shared clock, like test_dashboard_web.py
     linking = LinkingStore(engine)
@@ -31,6 +33,15 @@ async def env(tmp_path):
     gym = await linking.create_gym("Iron Temple")
     member = await linking.link_member(gym.id, "Ana", "telegram", "42")
     await linking.set_coach(member.id, True)
+    stub_dist = tmp_path / "dist"
+    stub_dist.mkdir()
+    (stub_dist / "index.html").write_text(
+        '<!DOCTYPE html><html><head><title>SPA</title></head>'
+        '<body><div id="root"></div></body></html>',
+        encoding="utf-8",
+    )
+    (stub_dist / "assets").mkdir()
+    monkeypatch.setattr("agentg.dashboard_web._FRONTEND_DIST", stub_dist)
     app = build_app(
         store,
         linking,
@@ -53,105 +64,72 @@ class SimpleEnv:
         self.gym = gym
         self.member = member
 
-    async def settings_page(self) -> str:
-        response = await self.client.get("/settings")
+    async def settings(self) -> dict:
+        response = await self.client.get("/api/settings")
         assert response.status == 200
-        return await response.text()
+        return await response.json()
 
 
 async def test_a_coach_sees_both_links_and_exactly_one_qr(env):
-    page = await env.settings_page()
+    data = await env.settings()
 
     member_url = f"https://t.me/{BOT_USERNAME}?start={env.gym.invite_code}"
     coach_url = f"https://t.me/{BOT_USERNAME}?start={env.gym.coach_invite_code}"
-    assert member_url in page
-    assert coach_url in page
+    assert data["invite_url"] == member_url
+    assert data["coach_invite_url"] == coach_url
 
     # The member link carries a QR (a printable poster); the coach link does
-    # not — it is forwarded privately, never posted.
-    invite_section = page.split('id="invite"', 1)[1].split('id="coach-link"', 1)[0]
-    coach_section = page.split('id="coach-link"', 1)[1].split('id="gym-name"', 1)[0]
-    assert "<svg" in invite_section
-    assert "<svg" not in coach_section
-
-    # Issue #139: five distinct card blocks — invite+QR, regenerate-invite,
-    # coach-link, regenerate-coach, gym-name — with the regenerate cards
-    # carrying the consequential accent.
-    assert page.count('class="setcard') == 5
-    assert page.count('class="setcard consequential') == 2
-
-    # Both regenerates sit behind the typed confirm, and the gym name is
-    # editable — nothing else is on the screen: exactly three forms, whose
-    # only inputs are the two confirms and the name. (A raw substring check
-    # for "UTC"/"kg" would be flaky — random invite codes can contain them.)
-    assert page.count(f'data-confirm="{REGENERATE_CONFIRM}"') == 2
-    assert 'value="Iron Temple"' in page
-    assert page.count("<form") == 3
-    assert page.count('name="confirm"') == 2
-    assert page.count('name="name"') == 1
-    assert 'name="timezone"' not in page
-    assert 'name="weight_unit"' not in page
+    # not — it is forwarded privately, never posted. The API mirrors that:
+    # one qr_svg field, for the member invite only.
+    assert "<svg" in data["qr_svg"]
+    assert "coach_qr_svg" not in data
+    assert env.gym.invite_code in data["qr_svg"] or "svg" in data["qr_svg"]
 
 
-async def test_the_shell_links_to_settings(env):
-    page = await (await env.client.get("/")).text()
-    assert 'href="/settings"' in page
-
-
-async def test_regenerating_the_member_link_requires_the_typed_confirm(env):
+async def test_regenerating_the_member_link_kills_the_old_code_on_the_linking_path(env):
     old_code = env.gym.invite_code
 
-    # No confirm at all, and a wrong confirm: nothing changes.
-    for data in ({}, {"confirm": "no"}):
-        response = await env.client.post("/settings/regenerate-invite", data=data)
-        assert REGENERATE_CONFIRM in await response.text()
-        assert await env.linking.gym_by_invite_code(old_code) is not None
+    # A wrong confirm changes nothing — on the linking read path either.
+    response = await env.client.post(
+        "/api/settings/regenerate-invite", json={"confirm": "no"}
+    )
+    assert response.status == 400
+    assert await env.linking.gym_by_invite_code(old_code) is not None
 
     response = await env.client.post(
-        "/settings/regenerate-invite", data={"confirm": REGENERATE_CONFIRM}
+        "/api/settings/regenerate-invite", json={"confirm": REGENERATE_CONFIRM}
     )
-    assert response.status == 200  # redirected back to /settings
+    assert response.status == 200
+    body = await response.json()
 
     # The old code is dead — including linking flows it started — and the
-    # new one resolves and shows on the screen.
+    # new one resolves.
     assert await env.linking.gym_by_invite_code(old_code) is None
-    page = await env.settings_page()
-    assert old_code not in page
-    new_code = page.split(f"<code>https://t.me/{BOT_USERNAME}?start=", 1)[1].split("<", 1)[0]
-    assert new_code != old_code
-    assert await env.linking.gym_by_invite_code(new_code) is not None
+    assert body["invite_code"] != old_code
+    assert await env.linking.gym_by_invite_code(body["invite_code"]) is not None
+    # The coach link is untouched.
+    assert await env.linking.gym_by_coach_invite_code(env.gym.coach_invite_code) is not None
 
 
-async def test_regenerating_the_coach_link_requires_the_typed_confirm(env):
+async def test_regenerating_the_coach_link_kills_the_old_code_on_the_linking_path(env):
     old_code = env.gym.coach_invite_code
 
-    response = await env.client.post("/settings/regenerate-coach", data={})
-    assert REGENERATE_CONFIRM in await response.text()
-    assert await env.linking.gym_by_coach_invite_code(old_code) is not None
-
-    await env.client.post(
-        "/settings/regenerate-coach", data={"confirm": REGENERATE_CONFIRM}
+    response = await env.client.post(
+        "/api/settings/regenerate-coach", json={"confirm": REGENERATE_CONFIRM}
     )
+    assert response.status == 200
+    body = await response.json()
 
     assert await env.linking.gym_by_coach_invite_code(old_code) is None
-    page = await env.settings_page()
-    assert old_code not in page
-    assert "coach-" in page
-
-
-async def test_regenerating_the_member_link_leaves_the_coach_link_alone(env):
-    old_coach_code = env.gym.coach_invite_code
-    await env.client.post(
-        "/settings/regenerate-invite", data={"confirm": REGENERATE_CONFIRM}
-    )
-    assert await env.linking.gym_by_coach_invite_code(old_coach_code) is not None
+    assert body["coach_invite_code"].startswith("coach-")
+    assert await env.linking.gym_by_coach_invite_code(body["coach_invite_code"]) is not None
 
 
 async def test_renaming_the_gym_takes_effect_where_members_see_it(env):
     response = await env.client.post(
-        "/settings/gym-name", data={"name": "  Templo de Hierro  "}
+        "/api/settings/gym-name", json={"name": "  Templo de Hierro  "}
     )
-    assert response.status == 200  # redirected back to /settings
+    assert response.status == 200
 
     # Members meet the gym name on the linking read path — it resolves fresh.
     gym = await env.linking.gym_by_invite_code(env.gym.invite_code)
@@ -159,98 +137,55 @@ async def test_renaming_the_gym_takes_effect_where_members_see_it(env):
     identity = await env.linking.identity_for("telegram", "42")
     assert identity.gym.name == "Templo de Hierro"
 
-    page = await env.settings_page()
-    assert 'value="Templo de Hierro"' in page
-    assert "Iron Temple" not in page
-
-    shell = await (await env.client.get("/")).text()
-    assert "Templo de Hierro" in shell
-
-
-async def test_an_empty_gym_name_is_refused(env):
-    response = await env.client.post("/settings/gym-name", data={"name": "   "})
-    assert "vacío" in await response.text()
-    gym = await env.linking.gym_by_invite_code(env.gym.invite_code)
-    assert gym.name == "Iron Temple"
-
-
-async def test_an_overlong_gym_name_is_capped_at_the_column_width(env):
-    """The form's maxlength is client-side only; the store caps at 200."""
-    await env.client.post("/settings/gym-name", data={"name": "Gimnasio " + "x" * 300})
-    gym = await env.linking.gym_by_invite_code(env.gym.invite_code)
-    assert gym.name == ("Gimnasio " + "x" * 300)[:200]
-    assert len(gym.name) == 200
-
-
-async def test_the_copy_button_handles_clipboard_failures(env):
-    """navigator.clipboard is undefined on plain-HTTP origins and writeText
-    can reject; the success label must only appear after the promise
-    resolves, with a visible failure state otherwise."""
-    page = await env.settings_page()
-    script = page.split("<script>", 1)[1]
-
-    assert "if (!navigator.clipboard)" in script  # plain-HTTP guard
-    # The labels ride on the button as data attributes (the page language
-    # decides them); the success label is assigned only inside the
-    # writeText().then() success path.
-    assert 'data-failed="No se pudo copiar"' in page
-    assert 'data-done="Copiado"' in page
-    then_at = script.index("writeText(button.dataset.copy).then(")
-    assert script.index("button.dataset.done") > then_at
-
-
-async def test_the_language_toggle_round_trips_from_a_validation_error_page(env):
-    """A validation-error render of Settings must point the EN/ES toggle
-    back at /settings — not at the POST-only action the error came from,
-    where a GET would 405."""
-    import re
-
-    for post in (
-        env.client.post("/settings/regenerate-invite", data={"confirm": "no"}),
-        env.client.post("/settings/gym-name", data={"name": "  "}),
-    ):
-        page = await (await post).text()
-        href = re.search(r'href="(/lang/en\?next=[^"]+)"', page).group(1)
-        toggle = await env.client.get(href, allow_redirects=False)
-        assert toggle.status == 302
-        assert toggle.headers["Location"] == "/settings"
-        assert (await env.client.get(toggle.headers["Location"])).status == 200
+    # The React screens read it back off the API — renamed there too.
+    data = await env.settings()
+    assert data["gym_name"] == "Templo de Hierro"
+    session = await (await env.client.get("/api/session")).json()
+    assert session["gym"] == "Templo de Hierro"
 
 
 async def test_the_settings_screen_is_coach_only(env):
     await env.linking.set_coach(env.member.id, False)  # demoted in chat
 
-    assert BOUNCE_MARKER in await (await env.client.get("/settings")).text()
-    for route, data in (
-        ("/settings/regenerate-invite", {"confirm": REGENERATE_CONFIRM}),
-        ("/settings/regenerate-coach", {"confirm": REGENERATE_CONFIRM}),
-        ("/settings/gym-name", {"name": "Nope"}),
+    # The shell URL bounces; the API answers 401 and writes nothing.
+    text = await (await env.client.get("/settings")).text()
+    assert BOUNCE_MARKER in text and 'id="root"' not in text
+    for route, body in (
+        ("/api/settings/regenerate-invite", {"confirm": REGENERATE_CONFIRM}),
+        ("/api/settings/regenerate-coach", {"confirm": REGENERATE_CONFIRM}),
+        ("/api/settings/gym-name", {"name": "Nope"}),
     ):
-        page = await (await env.client.post(route, data=data)).text()
-        assert BOUNCE_MARKER in page
+        response = await env.client.post(route, json=body)
+        assert response.status == 401
 
-    # Nothing changed behind the bounced POSTs.
+    # Nothing changed behind the refused writes.
     assert await env.linking.gym_by_invite_code(env.gym.invite_code) is not None
     gym = await env.linking.gym_by_invite_code(env.gym.invite_code)
     assert gym.name == "Iron Temple"
 
 
-async def test_anonymous_visits_to_settings_bounce(tmp_path):
+async def test_anonymous_visits_to_settings_bounce(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'domain.db'}")
     linking = LinkingStore(engine)
     store = DashboardStore(engine)
     await linking.ensure_schema()
+    stub_dist = tmp_path / "dist"
+    stub_dist.mkdir()
+    (stub_dist / "index.html").write_text(
+        '<html><body><div id="root"></div></body></html>', encoding="utf-8"
+    )
+    (stub_dist / "assets").mkdir()
+    monkeypatch.setattr("agentg.dashboard_web._FRONTEND_DIST", stub_dist)
     app = build_app(
         store, linking, session_secret=SECRET, bot_username=BOT_USERNAME, secure_cookies=False
     )
     async with TestClient(TestServer(app)) as client:
-        assert BOUNCE_MARKER in await (await client.get("/settings")).text()
-        page = await (
-            await client.post(
-                "/settings/regenerate-invite", data={"confirm": REGENERATE_CONFIRM}
-            )
-        ).text()
-        assert BOUNCE_MARKER in page
+        text = await (await client.get("/settings")).text()
+        assert BOUNCE_MARKER in text and 'id="root"' not in text
+        response = await client.post(
+            "/api/settings/regenerate-invite", json={"confirm": REGENERATE_CONFIRM}
+        )
+        assert response.status == 401
     await engine.dispose()
 
 
@@ -265,27 +200,3 @@ def test_the_qr_svg_is_memoized_per_invite_url():
     assert _qr_svg.cache_info().misses == 1
     _qr_svg(f"https://t.me/{BOT_USERNAME}?start=newcode99")  # a "regenerated" URL
     assert _qr_svg.cache_info().misses == 2
-
-
-async def test_settings_writes_redirect_with_their_done_keys_and_confirm(env):
-    """Issue #129: gym-name and both regenerations land with a notice."""
-    saved = await env.client.post(
-        "/settings/gym-name", data={"name": "Templo"}, allow_redirects=False
-    )
-    assert saved.headers["Location"] == "/settings?done=saved"
-
-    regenerated = await env.client.post(
-        "/settings/regenerate-invite",
-        data={"confirm": REGENERATE_CONFIRM},
-        allow_redirects=False,
-    )
-    assert regenerated.headers["Location"] == "/settings?done=link_regenerated"
-
-    page = await env.client.get("/settings?done=saved")
-    text = await page.text()
-    assert "notice-ok" in text and "Guardado." in text
-
-    english = await env.client.get(
-        "/settings?done=saved", headers={"Accept-Language": "en"}
-    )
-    assert "Saved." in await english.text()

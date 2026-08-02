@@ -77,32 +77,6 @@ def test_a_non_numeric_dashboard_port_raises_config_error_naming_the_variable():
         Settings.from_env({**FULL_ENV, "DASHBOARD_PORT": "abc"})
 
 
-def test_spa_enabled_default_is_false():
-    """The SPA flag must default to False so production is unaffected (ADR 0004)."""
-    settings = Settings.from_env(FULL_ENV)
-    assert settings.dashboard_spa_enabled is False
-
-
-@pytest.mark.parametrize(
-    "raw,expected",
-    [
-        ("1", True),
-        ("true", True),
-        ("TRUE", True),
-        (" yes ", True),
-        ("0", False),
-        ("false", False),
-        ("", False),
-        ("no", False),
-    ],
-)
-def test_spa_enabled_bool_env_table(raw, expected):
-    """_bool_env parses a boolean environment variable with the expected
-    truthy/falsy table."""
-    settings = Settings.from_env({**FULL_ENV, "DASHBOARD_SPA_ENABLED": raw})
-    assert settings.dashboard_spa_enabled is expected
-
-
 def test_spa_dist_default_is_empty():
     """dashboard_spa_dist defaults to empty so the repo-relative path is used."""
     settings = Settings.from_env(FULL_ENV)

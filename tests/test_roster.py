@@ -1,17 +1,18 @@
 """The Table roster (issue #97, spec-dashboard §The roster).
 
 Store level: exactly the Gym's live-channel, non-coach Members, Gap-sorted,
-with lapsed Members folded into a most-recently-active tail. Page level:
-the new/snoozed tags, the collapsed lapsed tail outside the counters, and
-the live search box markup.
+with lapsed Members folded into a most-recently-active tail. API level:
+the new/snoozed tags, the lapsed tail outside the counters, and the gap
+facts the React roster renders (#154 — the screen itself is covered by the
+frontend RTL tests).
 """
 
+import json
 from datetime import timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from agentg.dashboard_i18n import fmt_date
 from agentg.models import Member
 
 
@@ -118,11 +119,11 @@ async def test_lapsed_members_fold_into_a_most_recently_active_tail(env):
     assert [row.name for row in lapsed] == ["Perdido A", "Perdido B"]
 
 
-async def test_the_page_renders_rows_tags_and_the_collapsed_tail(env):
+async def test_the_api_serves_rows_tags_and_the_lapsed_tail(env):
     away = await env.add_member("Beto")
     await env.train(away, days_ago=5)
     await env.give_routine(away)
-    new_member = await env.add_member("Novata")
+    await env.add_member("Novata")
     paused = await env.add_member("Pausado")
     await env.train(paused, days_ago=3)
     until = env.clock.now.date() + timedelta(days=5)
@@ -131,25 +132,20 @@ async def test_the_page_renders_rows_tags_and_the_collapsed_tail(env):
     await env.train(lost, days_ago=30)
     await env.checkins.lapse(lost.id)
 
-    text = await env.page()
+    data = json.loads(await env.page("/api/roster"))
 
-    # Gap order holds in the markup; the lapsed row is not in the main list.
+    # Gap order holds; the lapsed row is not in the active list.
     # (Novata has no Session yet, so her Gap is smallest.)
-    main = text.split('<details id="lapsed">')[0]
-    assert main.index("Beto") < main.index("Pausado") < main.index("Novata")
-    assert "Perdido" not in main
+    assert [r["name"] for r in data["active"]] == ["Beto", "Pausado", "Novata"]
     # The counter excludes the lapsed tail.
-    assert "Miembros (3)" in text
-    # Tags and row text.
-    assert "nuevo" in text
-    assert f"en pausa hasta el {fmt_date(until, 'es')}" in text
-    assert '<span class="numeral">5</span> días sin venir' in text
-    assert "Aún sin sesiones" in text
-    # The tail is collapsed by default and labelled with its size.
-    assert '<details id="lapsed">' in text
-    assert '<details id="lapsed" open>' not in text
-    assert "Se perdieron (1)" in text
-    # Search: live box, name-only filter hooks, accent-insensitive matching.
-    assert 'id="search"' in text
-    assert 'data-name="Beto"' in text
-    assert 'normalize("NFD")' in text
+    assert data["counts"] == {"active": 3, "lapsed": 1}
+    # The tags and gap facts the React rows render.
+    by_name = {r["name"]: r for r in data["active"]}
+    assert by_name["Novata"]["is_new"] is True
+    assert by_name["Beto"]["is_new"] is False
+    assert by_name["Pausado"]["snoozed_until"] == until.isoformat()
+    assert by_name["Beto"]["gap_days"] == 5
+    assert by_name["Beto"]["has_sessions"] is True
+    assert by_name["Novata"]["has_sessions"] is False
+    # The lapsed tail is its own list, labelled by its own count.
+    assert [r["name"] for r in data["lapsed"]] == ["Perdido"]

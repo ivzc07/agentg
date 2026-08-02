@@ -1,6 +1,7 @@
+import { LangToggle } from "./LangToggle";
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { Search, LayoutList, LayoutGrid, Columns2, Users } from "lucide-react";
 import { fetchRoster } from "../api/roster";
 import type { RosterView } from "../types/roster";
@@ -25,7 +26,16 @@ const VIEW_ICONS: Record<RosterView, typeof LayoutList> = {
 
 export function RosterShell({ name: _name, gym }: RosterShellProps) {
   const t = useT();
-  const [view, setView] = useState<RosterView>("table");
+  // The view rides in the URL (?view=cards|split) exactly as it did on the
+  // server-rendered roster, so bookmarks and the deep links other screens
+  // build keep working across the #154 cutover. An unknown value falls
+  // back to the table, like the server's _view_of did.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawView = searchParams.get("view");
+  const view: RosterView =
+    rawView === "cards" || rawView === "split" ? rawView : "table";
+  const setView = (v: RosterView) =>
+    setSearchParams(v === "table" ? {} : { view: v }, { replace: true });
   const [query, setQuery] = useState("");
   const [lapsedOpen, setLapsedOpen] = useState(false);
 
@@ -122,8 +132,10 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
         {/* Presets & Settings quick links */}
         <nav className="quick flex gap-2 text-[13px] text-ink-2" aria-label={t("nav_sections")}>
           <Link to="/presets" className="transition-colors hover:text-ink">{t("presets")}</Link>
-          <span>{t("settings")}</span>
+          <Link to="/settings" className="transition-colors hover:text-ink">{t("settings")}</Link>
         </nav>
+
+        <LangToggle />
       </header>
 
       {/* Search bar */}

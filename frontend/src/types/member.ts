@@ -17,6 +17,8 @@ export interface SessionSet {
   weight: number | null;
   reps: number;
   note: string | null;
+  /** Detected source language of the note ("en" | "es"), null without one. */
+  note_lang: string | null;
 }
 
 export interface SessionView {
@@ -34,6 +36,8 @@ export interface LastWeight {
 export interface NoteView {
   kind: string;
   text: string;
+  /** Detected source language of the Member's own words ("en" | "es"). */
+  lang: string;
   on: string;
   retired_on: string | null;
 }

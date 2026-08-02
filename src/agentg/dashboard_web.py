@@ -61,18 +61,17 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
-from html import escape
 from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import unquote
 
 import qrcode
 import qrcode.image.svg
 from aiohttp import web
-from multidict import MultiDictProxy
 
 from agentg.checkin_sweep import Notifier
 from agentg.dashboard_i18n import (
@@ -81,27 +80,19 @@ from agentg.dashboard_i18n import (
     LANG_COOKIE_TTL_SECONDS,
     LANGS,
     MONTHS,
-    NOTE_KIND_LABELS,
     STRINGS,
     WEEKDAY_INITIALS,
     WEEKDAYS,
-    away_text,
     detect_language,
-    fmt_date,
-    fmt_number,
     resolve_lang,
-    verbatim,
 )
 from agentg.dashboard_store import (
-    GRID_WEEKS,
     DashboardStore,
-    DayCell,
     MemberPage,
-    NoteView,
     RosterRow,
     RoutineDayView,
 )
-from agentg.linking_store import GYM_NAME_MAX_LENGTH, LinkingStore
+from agentg.linking_store import LinkingStore
 from agentg.models import Gym, Member, RoutinePreset
 from agentg.routines import (
     DuplicatePresetNameError,
@@ -119,7 +110,6 @@ SESSION_TTL = timedelta(days=90)
 
 Clock = Callable[[], datetime]
 
-VIEWS = ("table", "cards", "split")
 
 
 def _utcnow() -> datetime:
@@ -133,8 +123,6 @@ BOUNCE_BODY = (
     "Los enlaces al dashboard caducan y solo se pueden usar una vez. "
     "Envía <b>/dashboard</b> a tu bot en Telegram para recibir uno nuevo."
 )
-INTERSTITIAL_TITLE = "Abriendo tu dashboard…"
-INTERSTITIAL_BUTTON = "Entrar al dashboard"
 
 # Spanish aliases of the editor's STRINGS keys, for chat-side use (the
 # member notice follows the chat rule, not the dashboard's language) and
@@ -170,101 +158,30 @@ SETS_MIN, SETS_MAX = 1, 99
 REGENERATE_CONFIRM = STRINGS["es"]["confirm_word"]
 
 
-# --- The design tokens and shared shell (issue: the UX/UI redesign) ---
-#
-# One dark editorial language for every page, adopted from the parked
-# docs/prototypes/coach-dashboard-v3-dark.html ("the look is wanted"):
-# pure black ground, two flat surfaces, hairline rules instead of card
-# chrome, zero corner radius except pill chips, white as the loudest
-# accent, a mono-uppercase eyebrow as the one typographic signature, and
-# color reserved for training state — magenta kept, coral missed/red, amber
-# slipping, purple extra. All values live here as custom properties; the
-# per-surface style blocks below only compose them.
-
-# Login door and bounce pages: one centered column, one action.
-# Every form disables its submit buttons once a submit is on its way —
-# a double-clicked Apply must not message every Member twice. The timeout
-# lets the click's own submit complete before the buttons grey out. A
-# cancelled confirm (the retire form) prevents the default but still
-# bubbles here — defaultPrevented keeps the button alive. And a page
-# restored from the back/forward cache comes back with its frozen DOM, so
-# pageshow re-arms what a past submit disabled.
-SUBMIT_GUARD_SCRIPT = """
-document.addEventListener("submit", function (e) {
-  if (e.defaultPrevented) return;
-  var buttons = e.target.querySelectorAll("button[type=submit]");
-  setTimeout(function () { buttons.forEach(function (b) { b.disabled = true; }); }, 0);
-});
-window.addEventListener("pageshow", function (e) {
-  if (!e.persisted) return;
-  document.querySelectorAll("form button[type=submit]").forEach(function (b) {
-    if (!b.closest("form[data-confirm]")) b.disabled = false;
-  });
-});
-"""
-
-
-STATIC_DIR = Path(__file__).parent / "static"
-
-
-@lru_cache(maxsize=4)
-def _asset_version(filename: str) -> str:
-    """A content hash in a static asset's URL, so a deploy never serves a
-    90-day-cookie Coach last release's copy from their browser cache."""
-    digest = hashlib.md5((STATIC_DIR / filename).read_bytes(), usedforsecurity=False).hexdigest()
-    return digest[:8]
-
-
-def _document(
-    title: str, lang: str, body: str, *, scripts: str = "", with_htmx: bool = False
-) -> str:
-    """The one page skeleton every surface renders through. All styling
-    lives in static/dashboard.css (ADR 0003): one cacheable sheet, served
-    whole from the package - no build step. Pages that save in place
-    (issue #128) opt into the vendored htmx with ``with_htmx``."""
-    script_html = f"<script>{SUBMIT_GUARD_SCRIPT}{scripts}</script>"
-    htmx_tag = (
-        f'\n<script src="/static/htmx.min.js?v={_asset_version("htmx.min.js")}" defer></script>'
-        if with_htmx
-        else ""
-    )
+def _bounce_page() -> str:
+    """The friendly dead end for anonymous or demoted visitors — a small
+    self-contained page (its styles inline: the SPA bundle is the only
+    other asset the dashboard serves since #154)."""
     return f"""<!DOCTYPE html>
-<html lang="{lang}">
+<html lang="es">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<link rel="stylesheet" href="/static/dashboard.css?v={_asset_version("dashboard.css")}">{htmx_tag}
+<title>{BOUNCE_TITLE}</title>
+<style>
+body {{ margin: 0; background: #000; color: #ececee;
+  font: 15px/1.5 system-ui, sans-serif; display: flex; min-height: 100vh;
+  align-items: center; justify-content: center; }}
+main {{ max-width: 26rem; padding: 2rem; border: 1px solid #2a2b2e;
+  background: #121316; text-align: center; }}
+h1 {{ font-size: 20px; margin: 0 0 .75rem; }}
+p {{ color: #a5a5aa; margin: 0; }}
+</style>
 </head>
 <body>
-{body}
-{script_html}
+<main><h1>{BOUNCE_TITLE}</h1><p>{BOUNCE_BODY}</p></main>
 </body>
 </html>"""
-
-
-def _page(title: str, body: str, extra: str = "", lang: str = "es") -> str:
-    inner = f"""<h1>{title}</h1>"""
-    if body:
-        inner += f"<p>{body}</p>"
-    if extra:
-        inner += extra
-    content = f"""<div class="door"><div class="card">{inner}</div></div>"""
-    return _document(title, lang, content)
-
-
-def _bounce_page() -> str:
-    return _page(BOUNCE_TITLE, BOUNCE_BODY)
-
-
-def _interstitial_page(token: str) -> str:
-    """A self-submitting POST form: one tap (or zero, with JS) for the human,
-    a harmless GET for any link-preview fetcher."""
-    form = f"""<form method="post" action="/login/{token}" id="go">
-<button type="submit" class="btn-primary big">{INTERSTITIAL_BUTTON}</button>
-</form>
-<script>document.getElementById("go").submit();</script>"""
-    return _page(INTERSTITIAL_TITLE, "", form)
 
 
 def _invite_url(bot_username: str, code: str) -> str:
@@ -290,46 +207,10 @@ def _qr_svg(data: str) -> str:
 # --- Language plumbing (issue #106) ---
 
 
-def _next_path_sans_done(request: web.Request) -> str:
-    """The page's own URL for round-trips (the language toggle), with the
-    one-shot ``done`` flash stripped - a notice should not survive a
-    toggle, a refresh of the toggled page, or a bookmark."""
-    url = request.rel_url
-    if "done" not in url.query:
-        return url.path_qs
-    return str(url.with_query([(k, v) for k, v in url.query.items() if k != "done"]))
-
-
-def _done_notice(done: str | None, t: dict) -> str:
-    """The one-line confirmation a ``?done=<key>`` redirect carries (issue
-    #129). Only keys the copy table knows render; anything else is
-    nothing — never an error, never echoed back."""
-    key = f"done_{done}" if done else ""
-    return f'<p class="notice-ok">{t[key]}</p>' if key in t else ""
-
-
-def _is_htmx(request: web.Request) -> bool:
-    """True when htmx is asking for a fragment swap (issue #128)."""
-    return request.headers.get("HX-Request") == "true"
-
-
 def _lang_of(request: web.Request) -> str:
     """The language this browser reads: the toggle's cookie, else
     ``Accept-Language``, else Spanish."""
     return resolve_lang(request.cookies.get(LANG_COOKIE), request.headers.get("Accept-Language"))
-
-
-def _lang_toggle(next_path: str, lang: str) -> str:
-    """The EN/ES toggle in the chrome; both links round-trip through
-    ``/lang/<lang>`` and land back on the page the Coach was reading. The
-    language being read is the marked one."""
-    target = quote(next_path, safe="")
-    links = " · ".join(
-        f'<a href="/lang/{code}?next={target}"'
-        f'{" aria-current=\"true\"" if code == lang else ""}>{code.upper()}</a>'
-        for code in ("en", "es")
-    )
-    return f'<span class="lang-toggle">{links}</span>'
 
 
 def _safe_next(raw: str | None) -> str:
@@ -351,370 +232,6 @@ def _safe_next(raw: str | None) -> str:
     return raw
 
 
-# --- The shared chrome: segmented view control, search, toggle, settings ---
-
-SEARCH_SCRIPT = """
-// Live, name-only, accent-insensitive filter. It only hides rows — the Gap
-// sort never moves — and a lapsed match auto-expands the tail (a manually
-// opened tail is never slammed shut). Identical in the three views
-// (spec-dashboard §The roster).
-const box = document.getElementById("search");
-const lapsed = document.getElementById("lapsed");
-const nomatch = document.getElementById("no-matches");
-// The chrome's Members (N), rewritten to "X de N" while a query filters
-// (issue #127); its resting label is restored when the box empties.
-const counter = document.getElementById("members-count");
-const restingLabel = counter ? counter.textContent : "";
-const norm = (s) => s.normalize("NFD").replace(/[\\u0300-\\u036f]/g, "").toLowerCase();
-box.addEventListener("input", () => {
-  const q = norm(box.value.trim());
-  let lapsedHit = false;
-  let shown = 0;
-  let activeShown = 0;  // lapsed stay out of the counters (spec §The roster)
-  document.querySelectorAll("[data-name]").forEach((row) => {
-    const hit = !q || norm(row.dataset.name).includes(q);
-    row.hidden = !hit;
-    if (hit) {
-      shown += 1;
-      if (lapsed && lapsed.contains(row)) { if (q) lapsedHit = true; }
-      else activeShown += 1;
-    }
-  });
-  if (lapsed && lapsedHit) lapsed.open = true;
-  if (nomatch) nomatch.hidden = shown > 0;
-  if (counter) {
-    counter.textContent = q
-      ? counter.dataset.fmt.replaceAll("{shown}", activeShown).replaceAll("{total}", counter.dataset.total)
-      : restingLabel;
-  }
-});
-"""
-
-
-def _seg(view: str, t: dict) -> str:
-    """The Table / Cards / Split segmented control — a product control, not
-    a designer's shortlist (spec-dashboard §The roster)."""
-    links = "".join(
-        f'<a href="/?view={v}"{" aria-current=\"true\"" if v == view else ""}>'
-        f'{t[f"view_{v}"]}</a>'
-        for v in VIEWS
-    )
-    return f'<nav class="seg" aria-label="{escape(t["nav_views"], quote=True)}">{links}</nav>'
-
-
-def _chrome(
-    gym_name: str,
-    t: dict,
-    next_path: str,
-    lang: str,
-    *,
-    view: str | None = None,
-    count: int | None = None,
-    active: str | None = None,
-) -> str:
-    """The top bar every screen shares: gym name, the view switcher with the
-    search beside it on roster pages (``view`` set), the Presets and
-    Settings links with an active state, and the language toggle."""
-    count_html = (
-        f'<span class="count" id="members-count" data-total="{count}"'
-        f' data-fmt="{escape(t["match_count"], quote=True)}">'
-        f'{t["members_count"].format(n=count)}</span>' if count is not None else ""
-    )
-    seg = _seg(view, t) if view is not None else ""
-    search = (
-        f'<label class="sr" for="search">{t["search_placeholder"]}</label>'
-        f'<input id="search" type="search" placeholder="{t["search_placeholder"]}" autocomplete="off">'
-        if view is not None
-        else ""
-    )
-
-    def quick(href: str, key: str) -> str:
-        current = ' aria-current="true"' if active == key else ""
-        return f'<a href="{href}"{current}>{t[key]}</a>'
-
-    return f"""<header class="top">
-<h1>{escape(gym_name)}</h1>{count_html}
-{seg}
-{search}
-<span class="spacer"></span>
-<nav class="quick" aria-label="{escape(t["nav_sections"], quote=True)}">{quick("/presets", "presets")}{quick("/settings", "settings")}</nav>
-{_lang_toggle(next_path, lang)}
-</header>"""
-
-
-def _member_href(member_id: int, view: str) -> str:
-    """Member links carry the view they were opened from, so the way back
-    (or the Split pane) matches where the Coach was."""
-    return f"/members/{member_id}?view={view}"
-
-
-def _initials(name: str) -> str:
-    """The row tile's two-letter monogram."""
-    parts = name.split()
-    return "".join(part[0] for part in parts[:2]).upper() or "?"
-
-
-def _severity_text(row: RosterRow, lang: str) -> str:
-    """The severity sentence beside the away text — the count in words, so
-    urgency is never conveyed by color alone."""
-    if not row.severity:
-        return ""
-    t = STRINGS[lang]
-    label = (
-        t["missed_one"] if row.missed_days == 1 else t["missed_n"].format(n=row.missed_days)
-    )
-    return f'<span class="sev sev-{row.severity}">{label}</span>'
-
-
-def _row_gap_html(has_sessions: bool, gap_days: int, lang: str) -> str:
-    """Gap text with a large bold numeral for roster rows.
-
-    When there is a numeric gap the number renders as ``<span class="numeral">N</span>``
-    so the ``.row .numeral`` CSS rule (gradient, large mono numeral) applies.
-    """
-    t = STRINGS[lang]
-    if not has_sessions:
-        return t["no_sessions_yet"]
-    if gap_days == 0:
-        return t["trained_today"]
-    if gap_days == 1:
-        return f'<span class="numeral">1</span> {t["gap_label_one"]}'
-    return f'<span class="numeral">{gap_days}</span> {t["gap_label"]}'
-
-
-def _roster_row(
-    row: RosterRow, view: str, lang: str, current_member_id: int | None = None
-) -> str:
-    t = STRINGS[lang]
-    tags = ""
-    if row.is_new:
-        tags += f' <span class="tag tag-new">{t["new_tag"]}</span>'
-    if row.snoozed_until is not None:
-        until = fmt_date(row.snoozed_until, lang)
-        tags += f' <span class="tag">{t["snoozed_tag"].format(date=until)}</span>'
-    if row.has_safety_flag:
-        # A marker on the row, never a re-sort (spec-dashboard §Safety flags).
-        tags += f' <span class="tag tag-flag">{t["flag_tag"]}</span>'
-    current = ' aria-current="true"' if row.member_id == current_member_id else ""
-    # One physical line per row: the whole row is the link.
-    return (
-        f'<li class="row" data-name="{escape(row.name)}">'
-        f'<a href="{_member_href(row.member_id, view)}"{current}>'
-        f'<span class="tile" aria-hidden="true">{escape(_initials(row.name))}</span>'
-        f'<span><span class="t"><span class="nm">{escape(row.name)}</span>{tags}</span>'
-        f'<span class="meta"><span class="away">{_row_gap_html(row.has_sessions, row.gap_days, lang)}</span>'
-        f"{_severity_text(row, lang)}</span></span></a></li>"
-    )
-
-
-def _lapsed_section(
-    lapsed: list[RosterRow], view: str, lang: str, current_member_id: int | None = None
-) -> str:
-    """The collapsed tail, identical in the three views: out of the Gap sort
-    and the counters, most-recently-active first (spec-dashboard §The
-    roster)."""
-    if not lapsed:
-        return ""
-    t = STRINGS[lang]
-    items = "".join(_roster_row(row, view, lang, current_member_id) for row in lapsed)
-    return f"""<details id="lapsed">
-<summary>{t["lapsed_tail"].format(n=len(lapsed))}</summary>
-<ul>{items}</ul>
-</details>"""
-
-
-def _countbar(t: dict, count: int = 0) -> str:
-    """The line that names the ordering with an icon chip and a large bold
-    numeral of the active Member count, so the sort is never mysterious."""
-    numeral = f' <span class="numeral">{count}</span>' if count else ""
-    return f'<div class="countbar"><span class="chip-icon" aria-hidden="true">≡</span>{t["sorted_by_gap"]}{numeral}</div>'
-
-
-def _no_matches(t: dict) -> str:
-    """The search's zero-result line; the filter script unhides it."""
-    return f'<p id="no-matches" class="emptystate" hidden>{t["no_matches"]}</p>'
-
-
-def _empty_roster(t: dict) -> str:
-    """A brand-new gym: no Members at all — point at the invite link."""
-    return f"""<div class="emptystate">
-<div class="chip-icon" aria-hidden="true">◎</div>
-<h2>{t["empty_roster_title"]}</h2>
-<p>{t["empty_roster_body"]}</p>
-</div>"""
-
-
-def _roster_document(
-    gym_name: str, view: str, lang: str, next_path: str, count: int | None, body: str, split: bool
-) -> str:
-    t = STRINGS[lang]
-    content = f"""{_chrome(gym_name, t, next_path, lang, view=view, count=count)}
-{body}"""
-    return _document(
-        f"{escape(gym_name)} — Dashboard", lang, content, scripts=SEARCH_SCRIPT
-    )
-
-
-def _table_page(
-    gym_name: str, rows: list[RosterRow], lapsed: list[RosterRow], lang: str, next_path: str
-) -> str:
-    t = STRINGS[lang]
-    if not rows and not lapsed:
-        body = f'<div class="roster-body">{_empty_roster(t)}</div>'
-    else:
-        items = "".join(_roster_row(row, "table", lang) for row in rows)
-        body = f"""{_countbar(t, count=len(rows))}
-<div class="roster-body">
-<ul id="roster">{items}</ul>
-{_no_matches(t)}
-{_lapsed_section(lapsed, "table", lang)}
-</div>"""
-    return _roster_document(gym_name, "table", lang, next_path, len(rows), body, split=False)
-
-
-def _member_card(row: RosterRow, cells: list[DayCell], lang: str) -> str:
-    """One Cards card: the shared markers and Gap text, plus the 4-week
-    Mon–Sun day grid — one square per day, dashed for future days, judged
-    per date against the Routine active on it. Hit squares fill magenta;
-    missed squares are hollow coral rings, so the two never read by hue
-    alone."""
-    t = STRINGS[lang]
-    initials = "".join(
-        f'<span class="wd" aria-hidden="true">{w}</span>' for w in WEEKDAY_INITIALS[lang]
-    )
-    # Missed days carry their date for screen readers — the one fact a
-    # Coach acts on ("you missed Monday"); hits and future days stay
-    # decorative so the count sentence isn't buried under 28 dates.
-    squares = "".join(
-        f'<i class="miss" title="{fmt_date(cell.on, lang)}">'
-        f'<span class="sr">{t["sr_missed"].format(date=fmt_date(cell.on, lang))}</span></i>'
-        if cell.state == "miss"
-        else f'<i class="{cell.state}" title="{fmt_date(cell.on, lang)}" aria-hidden="true"></i>'
-        for cell in cells
-    )
-    tags = ""
-    if row.is_new:
-        tags += f' <span class="tag tag-new">{t["new_tag"]}</span>'
-    if row.snoozed_until is not None:
-        until = fmt_date(row.snoozed_until, lang)
-        tags += f' <span class="tag">{t["snoozed_tag"].format(date=until)}</span>'
-    if row.has_safety_flag:
-        # A marker on the card, never a re-sort (spec-dashboard §Safety flags).
-        tags += f' <span class="tag tag-flag">{t["flag_tag"]}</span>'
-    severity = _severity_text(row, lang)
-    return f"""<div class="mcard" data-name="{escape(row.name)}">
-<div class="top-row"><a class="name" href="{_member_href(row.member_id, "cards")}">{escape(row.name)}</a>
-<span class="away">{away_text(row.has_sessions, row.gap_days, lang)}</span></div>
-{f'<div class="meta">{severity}</div>' if severity else ""}
-<div class="daygrid">{initials}{squares}</div>
-<div class="sparklab">{t["grid_label"].format(n=GRID_WEEKS)}</div>
-{f"<div>{tags}</div>" if tags else ""}
-</div>"""
-
-
-def _legend(t: dict) -> str:
-    """What the day-grid squares mean, said once per Cards page."""
-    return f"""<div class="legend">
-<span><i class="l-hit"></i>{t["legend_hit"]}</span>
-<span><i class="l-miss"></i>{t["legend_miss"]}</span>
-</div>"""
-
-
-def _cards_page(
-    gym_name: str,
-    rows: list[RosterRow],
-    lapsed: list[RosterRow],
-    grids: dict[int, list[DayCell]],
-    lang: str,
-    next_path: str,
-) -> str:
-    """The urgency bands — a reading of the same schedule-aware severity the
-    Table colours with, never a new field: red needs you now, amber is
-    slipping, the rest are on track. A Member with no Routine yet sits in a
-    quiet fourth group instead of masquerading as on-track (the spec's
-    grey-new rule). The three severity bands always render — an empty hot
-    band saying 0 is good news, not a missing feature. The Gap sort holds
-    inside each band."""
-    t = STRINGS[lang]
-    if not rows and not lapsed:
-        body = f'<div class="roster-body">{_empty_roster(t)}</div>'
-        return _roster_document(gym_name, "cards", lang, next_path, 0, body, split=False)
-    bands: list[tuple[str, str, list[RosterRow]]] = [
-        ("hot", t["band_hot"], []),
-        ("warm", t["band_warm"], []),
-        ("cool", t["band_cool"], []),
-        ("new", t["band_new"], []),
-    ]
-    for row in rows:
-        if row.severity == "red":
-            band = "hot"
-        elif row.severity == "amber":
-            band = "warm"
-        elif row.is_new:
-            band = "new"
-        else:
-            band = "cool"
-        next(b for b in bands if b[0] == band)[2].append(row)
-    # Icon chips for each band so they read as marked sections.
-    band_icons = {"hot": "●", "warm": "◐", "cool": "○", "new": "✦"}
-    sections = ""
-    for band_id, title, members in bands:
-        if band_id == "new" and not members:
-            continue  # a transient group, not a permanent fixture
-        cards = "".join(_member_card(row, grids.get(row.member_id, []), lang) for row in members)
-        icon = band_icons.get(band_id, "")
-        sections += f"""<section class="band band-{band_id}" id="band-{band_id}">
-<h2><span class="chip-icon" aria-hidden="true">{icon}</span>{title} <span class="count">{len(members)}</span></h2>
-{f'<div class="grid">{cards}</div>' if members else ""}
-</section>"""
-    body = f"""<div class="roster-body">
-{sections}
-{_legend(t)}
-{_no_matches(t)}
-{_lapsed_section(lapsed, "cards", lang)}
-</div>"""
-    return _roster_document(gym_name, "cards", lang, next_path, len(rows), body, split=False)
-
-
-def _split_page(
-    gym_name: str,
-    rows: list[RosterRow],
-    lapsed: list[RosterRow],
-    pane: str,
-    lang: str,
-    next_path: str,
-    current_member_id: int | None = None,
-) -> str:
-    """Split: a permanent left rail with the roster, the right pane holding
-    a Member page or the pick-a-member placeholder. The switcher (and the
-    search) stay visible with a Member open — nothing was left. The rail
-    scrolls on its own, the open Member's row stays marked, and below 900px
-    the two columns stack (no back link: still nothing was left)."""
-    t = STRINGS[lang]
-    if not rows and not lapsed:
-        rail = _empty_roster(t)
-    else:
-        items = "".join(_roster_row(row, "split", lang, current_member_id) for row in rows)
-        rail = f"""{_countbar(t, count=len(rows))}
-<ul id="roster">{items}</ul>
-{_no_matches(t)}
-{_lapsed_section(lapsed, "split", lang, current_member_id)}"""
-    body = f"""<div class="split">
-<div class="rail">
-{rail}
-</div>
-<div class="pane">{pane}</div>
-</div>"""
-    return _roster_document(gym_name, "split", lang, next_path, len(rows), body, split=True)
-
-
-def _split_placeholder(lang: str) -> str:
-    return (
-        f'<div class="pane-empty"><div class="emptystate">'
-        f'<h2>{STRINGS[lang]["pick_a_member"]}</h2></div></div>'
-    )
-
-
 # --- The Member page (issue #99, spec-dashboard §The Member page) ---
 #
 # Read-only apart from the safety-flag banner's Tick off (issue #101); the
@@ -730,292 +247,6 @@ def _not_found() -> web.Response:
     return web.Response(status=404, text="404", content_type="text/plain")
 
 
-def _fmt_load(weight: float | None, unit: str, lang: str) -> str:
-    """One wording for a set's load — Sessions and Últimos pesos never drift.
-    The decimal mark follows the page language."""
-    if weight is None:
-        return STRINGS[lang]["bodyweight"]
-    return f"{fmt_number(weight, lang)} {unit}"
-
-
-def _scheme(sets: int | None, reps: str | None) -> str:
-    if sets is not None and reps is not None:
-        return f" — {sets} × {escape(reps)}"
-    if reps is not None:
-        return f" — {escape(reps)}"
-    if sets is not None:
-        return f" — {sets}"
-    return ""
-
-
-def _verbatim_quote(text: str, lang: str) -> str:
-    """The Member's own words: never translated, carrying a small
-    source-language tag when they differ from the language the Coach reads
-    (spec-dashboard §Language)."""
-    tag = verbatim(detect_language(text), lang)
-    tag_html = f'<span class="langtag">{escape(tag)}</span>' if tag else ""
-    return f'<span class="verbatim">{escape(text)}{tag_html}</span>'
-
-
-def _set_lines(sets: list[tuple[str, float | None, int, str | None]], unit: str, lang: str) -> str:
-    """Collapse a Session's sets into one line per (Exercise, weight):
-    ``bench press 60 kg × 8,8,8`` — warm-ups at another weight stay separate.
-    Set comments render below their line, verbatim, as the Member's words."""
-    lines = []
-    grouped: dict[tuple[str, float | None], list[int]] = {}
-    comments: dict[tuple[str, float | None], list[str]] = {}
-    for name, weight, reps, note in sets:
-        grouped.setdefault((name, weight), []).append(reps)
-        # log_sets stamps the same comment on every rep Set of the line —
-        # quote it once per collapsed line, not once per rep.
-        if note and note not in comments.setdefault((name, weight), []):
-            comments[(name, weight)].append(note)
-    for (name, weight), reps_list in grouped.items():
-        lines.append(
-            f'<div class="set">{escape(name)} {_fmt_load(weight, unit, lang)} × {",".join(str(r) for r in reps_list)}</div>'
-        )
-        for note in comments.get((name, weight), []):
-            lines.append(f'<div class="said">“{_verbatim_quote(note, lang)}”</div>')
-    return "".join(lines)
-
-
-def _ownership_chip(
-    coach_authored: bool, author: str | None, lang: str, preset_name: str | None = None
-) -> str:
-    """The ownership chip (issue #86): named Coach-authored while the actor
-    stamp survives, plain when it has blanked, Agent-managed until the
-    first coach save. Always visible — the fork is silent but never a
-    surprise."""
-    t = STRINGS[lang]
-    if preset_name is not None:
-        label = t["preset_chip"].format(name=escape(preset_name))
-    elif coach_authored:
-        label = t["chip_coach_named"].format(name=escape(author)) if author else t["chip_coach"]
-    else:
-        label = t["chip_agent"]
-    return f'<span class="tag chip">{label}</span>'
-
-
-def _routine_card(view: MemberPage, lang: str, roster_view: str) -> str:
-    t = STRINGS[lang]
-    if not view.routine:
-        body = f'<p class="muted">{t["no_routine"]}</p>'
-    else:
-        days = []
-        for day in view.routine:
-            exercises = "".join(
-                f"<li>{escape(name)}{_scheme(sets, reps)}</li>"
-                for name, sets, reps in day.exercises
-            )
-            days.append(
-                f'<div class="day"><b>{WEEKDAYS[lang][day.weekday]}</b>'
-                f'<span class="dayname">{escape(day.name)}</span><ul>{exercises}</ul></div>'
-            )
-        body = "".join(days)
-    # The Edit journey keeps the view it started from, like tick-off does.
-    chip = f'<span class="icon-chip"><span class="ic-icon">📋</span> {t["routine"]}</span>'
-    header = (
-        f'<h2>{chip} {_ownership_chip(view.coach_authored, view.routine_author, lang, view.routine_preset_name)} '
-        f'<a class="edit" href="/members/{view.member_id}/routine?view={roster_view}">{t["edit"]}</a></h2>'
-    )
-    return f'<section class="card card-elevated">{header}{body}</section>'
-
-
-def _sessions_card(view: MemberPage, lang: str, roster_view: str) -> str:
-    t = STRINGS[lang]
-    items = []
-    for session in view.sessions:
-        count = len(session.sets)
-        if count == 0:
-            headline = t["visit_no_sets"]
-        elif count == 1:
-            headline = t["one_set"]
-        else:
-            headline = t["n_sets"].format(n=count)
-        items.append(
-            f'<div class="sess"><b>{fmt_date(session.on, lang)}</b> '
-            f'<span class="muted">{headline}</span>'
-            f"{_set_lines(session.sets, view.weight_unit, lang)}</div>"
-        )
-    if not items:
-        items.append(f'<p class="muted">{t["no_sessions_yet"]}</p>')
-    nav = ""
-    if view.pages > 1:
-        # Pagination keeps the view the Member page was opened in, so Split
-        # never drops the Coach out of the pane — and lands on #sessions so
-        # paging never teleports the Coach back to the top of the page.
-        newer = (
-            f'<a href="/members/{view.member_id}?page={view.page - 1}&view={roster_view}#sessions">{t["newer_page"]}</a>'
-            if view.page > 1
-            else ""
-        )
-        older = (
-            f'<a href="/members/{view.member_id}?page={view.page + 1}&view={roster_view}#sessions">{t["older_page"]}</a>'
-            if view.page < view.pages
-            else ""
-        )
-        nav = (
-            f'<nav class="pages" aria-label="{escape(t["sessions"], quote=True)}">{newer}'
-            f'<span class="muted">{t["page_x_of_y"].format(page=view.page, pages=view.pages)}</span>{older}</nav>'
-        )
-    chip = f'<span class="icon-chip"><span class="ic-icon">📊</span> {t["sessions"]}</span>'
-    return f'<section class="card card-elevated" id="sessions"><h2>{chip}</h2>{"".join(items)}{nav}</section>'
-
-
-def _weights_card(view: MemberPage, lang: str) -> str:
-    t = STRINGS[lang]
-    if not view.weights:
-        rows = f'<p class="muted">{t["nothing_logged"]}</p>'
-    else:
-        rows = "".join(
-            f'<li class="weight-line"><b>{escape(w.exercise)}</b> '
-            f'<span class="numeral-sm">{_fmt_load(w.weight, view.weight_unit, lang)}</span>'
-            f' × {",".join(str(r) for r in w.reps)}'
-            f' <span class="muted">· {fmt_date(w.on, lang)}</span></li>'
-            for w in view.weights
-        )
-        rows = f"<ul>{rows}</ul>"
-    chip = f'<span class="icon-chip"><span class="ic-icon">⚖️</span> {t["last_weights"]}</span>'
-    return f'<section class="card card-elevated"><h2>{chip}</h2>{rows}</section>'
-
-
-def _note_row(note: NoteView, lang: str) -> str:
-    t = STRINGS[lang]
-    label = NOTE_KIND_LABELS[lang].get(note.kind, note.kind)
-    retired = (
-        f' <span class="muted">· {t["retired_on"].format(date=fmt_date(note.retired_on, lang))}</span>'
-        if note.retired_on is not None
-        else ""
-    )
-    return (
-        f'<div class="note"><span class="tag">{escape(label)}</span> '
-        f"{_verbatim_quote(note.text, lang)}"
-        f' <span class="muted">· {fmt_date(note.on, lang)}</span>{retired}</div>'
-    )
-
-
-def _notes_card(view: MemberPage, lang: str) -> str:
-    t = STRINGS[lang]
-    body = "".join(_note_row(note, lang) for note in view.notes) or (
-        f'<p class="muted">{t["no_notes"]}</p>'
-    )
-    if view.retired_notes:
-        retired = "".join(_note_row(note, lang) for note in view.retired_notes)
-        body += f"""<details class="tail">
-<summary>{t["retired_tail"].format(n=len(view.retired_notes))}</summary>
-{retired}
-</details>"""
-    return f'<section class="card"><h2>{t["notes"]}</h2>{body}</section>'
-
-
-def _safety_banner(view: MemberPage, lang: str, roster_view: str) -> str:
-    """The safety-flag banner above the Member page's columns.
-
-    Open flags carry the Tick off action; acknowledged ones name the Coach
-    and the date (acknowledging is not retiring — the Note stays in the
-    Notes card too); an expired unacknowledged flag stays labelled
-    "expired, never seen" (spec-dashboard §Safety flags). The form keeps
-    the view the page was opened from, so ticking off never bounces a
-    Split or Cards Coach back to Table."""
-    if not view.safety_flags:
-        return ""
-    t = STRINGS[lang]
-    items = []
-    for flag in view.safety_flags:
-        if flag.status == "open":
-            action = (
-                f'<form method="post" '
-                f'action="/members/{view.member_id}/flags/{flag.note_id}/tick-off'
-                f'?view={roster_view}">'
-                f'<button type="submit">{t["tick_off"]}</button></form>'
-            )
-        elif flag.status == "acknowledged":
-            who = flag.acknowledged_by or "—"
-            when = fmt_date(flag.acknowledged_on, lang) if flag.acknowledged_on else ""
-            action = (
-                f'<span class="flag-feedback ack">'
-                f'{t["flag_seen_by"].format(who=escape(who), date=when)}</span>'
-            )
-        else:
-            action = f'<span class="flag-feedback exp">{t["flag_expired_unseen"]}</span>'
-        body = f'<div class="flag-body"><b>{escape(flag.text)}</b>'
-        body += f'<div class="flag-meta">{fmt_date(flag.on, lang)}</div></div>'
-        items.append(f'<div class="flag">{body} {action}</div>')
-    return (
-        f'<section class="card safety-banner"><h2>{t["safety_section"]}</h2>'
-        + "".join(items)
-        + "</section>"
-    )
-
-
-def _member_content(view: MemberPage, lang: str, roster_view: str, notice: str = "") -> str:
-    """The one Member page body, shared by the standalone page and Split's
-    right pane. Status chips live in their own row — never inside the
-    ``<h1>``, where a screen reader would announce them as the page name."""
-    t = STRINGS[lang]
-    tags = ""
-    if view.lapsed:
-        tags += f'<span class="tag">{t["lapsed_tag"]}</span> '
-    if view.snoozed_until is not None:
-        until = fmt_date(view.snoozed_until, lang)
-        tags += f'<span class="tag">{t["snoozed_tag"].format(date=until)}</span> '
-    chips = f'<div class="chips">{tags.rstrip()}</div>' if tags else ""
-    count = t["one_session"] if view.session_count == 1 else t["n_sessions"].format(n=view.session_count)
-    dot = '<span class="dot"></span>'
-    if view.has_sessions:
-        if view.gap_days == 0:
-            gap_html = t["trained_today"]
-        else:
-            n_html = f'<span class="numeral-sm">{view.gap_days}</span>'
-            gap_html = t["one_day_away"] if view.gap_days == 1 else t["days_away"].format(n=n_html)
-    else:
-        gap_html = t["no_sessions_yet"]
-    facts = (
-        f"{t['member_since'].format(date=fmt_date(view.member_since, lang))}{dot}{count}"
-        f"{dot}{gap_html}"
-    )
-    if view.last_session_on is not None:
-        facts += f"{dot}{t['last_session'].format(date=fmt_date(view.last_session_on, lang))}"
-    return f"""<header class="mhead">
-<span class="eyebrow">{t["member_eyebrow"]}</span>
-<h1>{escape(view.name)}</h1>
-{chips}
-<div class="facts">{facts}</div>
-</header>
-{notice}
-{_safety_banner(view, lang, roster_view)}
-<div class="columns">
-<div class="col">
-{_routine_card(view, lang, roster_view)}
-{_sessions_card(view, lang, roster_view)}
-</div>
-<div class="col">
-{_weights_card(view, lang)}
-{_notes_card(view, lang)}
-</div>
-</div>"""
-
-
-def _member_page(
-    gym_name: str, view: MemberPage, roster_view: str, lang: str, next_path: str, notice: str = ""
-) -> str:
-    """The standalone Member page: the switcher (and the search) hide per
-    the spec, but the rest of the chrome stays, and a back link returns to
-    the view the Member was opened from."""
-    t = STRINGS[lang]
-    back = f'<a class="back" href="/?view={roster_view}">{t["back_to_roster"]}</a>'
-    content = f"""{_chrome(gym_name, t, next_path, lang)}
-<div class="member-wrap">
-{back}
-{_member_content(view, lang, roster_view, notice)}
-</div>"""
-    return _document(
-        f"{escape(view.name)} — {escape(gym_name)}",
-        lang,
-        content,
-    )
-
-
 # --- The Routine editor (issue #100, spec-dashboard §Routines & Presets) ---
 #
 # One form: a block per pinned day (weekday select, Workout name, exercises
@@ -1025,9 +256,6 @@ def _member_page(
 # the whole block (exercises AND weekday); a half-filled block — content
 # without a weekday, a weekday without exercises — is a refused mistake,
 # never a silent drop.
-
-EditorDay = tuple[int | None, str, str]  # (weekday, workout name, exercise lines)
-
 
 @dataclass(frozen=True)
 class RoutineEditorView:
@@ -1045,67 +273,26 @@ class RoutineEditorView:
 # deterministic and chat-side, so it follows the chat rule (Spanish like
 # the nudges), never the dashboard's per-browser language.
 ROUTINE_NOTICE = "Tu coach {coach} actualizó tu Rutina 📋\n{plan}"
+_DB_ID_LIMIT = 2**63
 
 
-def _days_from_view(view: MemberPage | RoutineEditorView) -> list[EditorDay]:
-    """The active Routine as editor blocks, exercises back to one-per-line."""
-    days: list[EditorDay] = []
-    for day in view.routine:
-        lines = []
-        for name, sets, reps in day.exercises:
-            line = name
-            if sets is not None or reps is not None:
-                line += f", {sets if sets is not None else ''}"
-            if reps is not None:
-                line += f", {reps}"
-            lines.append(line)
-        days.append((day.weekday, day.name, "\n".join(lines)))
-    return days
+def _parse_db_id(raw: object) -> int:
+    """Parse one positive SQLite/Postgres-compatible primary-key value.
 
-
-def _days_from_form(form: MultiDictProxy) -> list[EditorDay]:
-    """The raw submitted form back into editor blocks, verbatim — the
-    rejection page for a form that wouldn't parse (bad sets, half-filled
-    blocks) must show exactly what the Coach typed, bad line included."""
-    days: list[EditorDay] = []
-
-    def texts(key: str) -> list[str]:
-        return [v if isinstance(v, str) else "" for v in form.getall(key, [])]
-
-    for weekday_raw, name, body in zip(
-        texts("weekday"), texts("workout_name"), texts("exercises")
-    ):
-        if not weekday_raw.strip() and not name.strip() and not body.strip():
-            continue  # the spare blank block the page always appends
-        try:
-            parsed = int(weekday_raw)
-            weekday = parsed if 0 <= parsed <= 6 else None
-        except ValueError:
-            weekday = None
-        days.append((weekday, name, body))
-    return days
-
-
-def _editor_day(day: EditorDay, lang: str, *, spare: bool = False) -> str:
-    weekday, name, exercises_text = day
-    t = STRINGS[lang]
-    options = [f'<option value="">{t["pick_day"]}</option>']
-    for i, weekday_name in enumerate(WEEKDAYS[lang]):
-        selected = " selected" if weekday == i else ""
-        options.append(f'<option value="{i}"{selected}>{weekday_name}</option>')
-    spare_class = " spare" if spare else ""
-    legend = "" if spare else f'<legend class="day-legend">{WEEKDAYS[lang][weekday] if weekday is not None else t["pick_day"]}</legend>'
-    return f"""<fieldset class="day-edit{spare_class}">
-{legend}
-<label>{t["label_weekday"]}
-<select name="weekday">{"".join(options)}</select></label>
-<label>{t["label_workout_name"]}
-<input type="text" name="workout_name" value="{escape(name, quote=True)}"
-placeholder="{escape(t["workout_name_placeholder"], quote=True)}" maxlength="100"></label>
-<label>{t["label_exercises"]}
-<textarea name="exercises" rows="4"
-placeholder="squat, 4, 8-10">{escape(exercises_text)}</textarea></label>
-</fieldset>"""
+    Keeping the bound at the web boundary prevents Python's arbitrary-size
+    integers from reaching drivers that only accept signed 64-bit values.
+    """
+    if isinstance(raw, bool):
+        raise ValueError("invalid database id")
+    if isinstance(raw, float) and not raw.is_integer():
+        raise ValueError("invalid database id")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("invalid database id") from error
+    if not 0 < value < _DB_ID_LIMIT:
+        raise ValueError("invalid database id")
+    return value
 
 
 def _parse_workouts_from_json(raw_workouts: list, lang: str) -> list[WorkoutSpec]:
@@ -1138,7 +325,13 @@ def _parse_workouts_from_json(raw_workouts: list, lang: str) -> list[WorkoutSpec
                 raise ValueError(t["empty_workout_error"])
             sets = ex.get("sets")
             if sets is not None:
-                if not isinstance(sets, int):
+                # JSON Schema's integer type includes mathematically integral
+                # numbers such as 3.0. Python's decoder preserves that token
+                # as float, so normalize it before applying the integer range.
+                if isinstance(sets, float) and sets.is_integer():
+                    sets = int(sets)
+                # bool is an int subclass but is not a meaningful set count.
+                if not isinstance(sets, int) or isinstance(sets, bool):
                     raise ValueError(t["bad_sets_error"])
                 if not SETS_MIN <= sets <= SETS_MAX:
                     raise ValueError(t["sets_range_error"])
@@ -1149,67 +342,6 @@ def _parse_workouts_from_json(raw_workouts: list, lang: str) -> list[WorkoutSpec
                 if len(reps) > REPS_MAX_LENGTH:
                     raise ValueError(t["reps_too_long"])
             exercises.append(ExerciseSpec(exercise_name, sets, reps))
-        if len(name) > WORKOUT_NAME_MAX_LENGTH:
-            raise ValueError(t["workout_name_too_long"])
-        specs.append(WorkoutSpec(weekday, name or WEEKDAYS[lang][weekday], exercises))
-    return specs
-
-
-def _parse_workouts(form: MultiDictProxy, lang: str) -> list[WorkoutSpec]:
-    """The editor form into WorkoutSpecs. A fully blank block (the spare one
-    the page always appends) is dropped; anything malformed or half-filled —
-    content without a weekday, a weekday without exercises, a duplicate
-    weekday — raises ``ValueError`` with a Coach-readable message."""
-
-    def texts(key: str) -> list[str]:
-        return [v.strip() if isinstance(v, str) else "" for v in form.getall(key, [])]
-
-    t = STRINGS[lang]
-    specs = []
-    seen_weekdays: set[int] = set()
-    for weekday_raw, name, body in zip(
-        texts("weekday"), texts("workout_name"), texts("exercises")
-    ):
-        if not weekday_raw:
-            if name or body.strip():
-                # Half-filled blocks are a mistake, never a silent drop — a
-                # day comes off the Routine by clearing its exercises too.
-                raise ValueError(t["undated_block_error"])
-            continue
-        try:
-            weekday = int(weekday_raw)
-        except ValueError:
-            raise ValueError(t["bad_weekday_error"]) from None
-        if not 0 <= weekday <= 6:
-            raise ValueError(t["bad_weekday_error"])
-        if weekday in seen_weekdays:
-            # Downstream pickers disagree on duplicate days (first vs last
-            # wins) — the editor refuses to write the ambiguity.
-            raise ValueError(t["duplicate_weekday_error"])
-        seen_weekdays.add(weekday)
-        exercises = []
-        for line in body.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parts = [part.strip() for part in line.split(",")]
-            sets = None
-            if len(parts) > 1 and parts[1]:
-                try:
-                    sets = int(parts[1])
-                except ValueError:
-                    raise ValueError(t["bad_sets_error"]) from None
-                if not SETS_MIN <= sets <= SETS_MAX:
-                    raise ValueError(t["sets_range_error"])
-            reps = parts[2] if len(parts) > 2 and parts[2] else None
-            if reps is not None and len(reps) > REPS_MAX_LENGTH:
-                raise ValueError(t["reps_too_long"])
-            exercises.append(ExerciseSpec(parts[0], sets, reps))
-        if not exercises:
-            # A picked weekday with no exercises is a mistake, not a rest
-            # day — a day comes off the Routine via the empty-day selector,
-            # never by saving an empty Workout.
-            raise ValueError(t["empty_workout_error"])
         if len(name) > WORKOUT_NAME_MAX_LENGTH:
             raise ValueError(t["workout_name_too_long"])
         specs.append(WorkoutSpec(weekday, name or WEEKDAYS[lang][weekday], exercises))
@@ -1240,115 +372,6 @@ def routine_notice(coach_name: str, workouts: list[WorkoutSpec]) -> str:
 
 
 
-def _fresh_version_block(fresh_days: list[EditorDay], lang: str) -> str:
-    """The active Routine as a read-only reference beside a refused stale
-    save — the Coach's own edits stay in the form below it."""
-    t = STRINGS[lang]
-    days_html = []
-    for weekday, name, exercises_text in fresh_days:
-        weekday_html = (
-            f"<b>{WEEKDAYS[lang][weekday]}</b>" if weekday is not None else ""
-        )
-        lines = "".join(
-            f"<li>{escape(line)}</li>" for line in exercises_text.splitlines() if line.strip()
-        )
-        days_html.append(
-            f'<div class="day">{weekday_html}<span class="dayname">{escape(name)}</span>'
-            f"<ul>{lines}</ul></div>"
-        )
-    return f"""<details class="fresh-version" open>
-<summary>{t["current_version_label"]}</summary>
-{"".join(days_html)}
-</details>"""
-
-
-def _routine_editor_page(
-    gym_name: str,
-    view: MemberPage | RoutineEditorView,
-    days: list[EditorDay],
-    catalog: list[str],
-    lang: str,
-    next_path: str,
-    error: str = "",
-    base: str | None = None,
-    action: str | None = None,
-    back_href: str | None = None,
-    title_key: str = "editor_title",
-    consequence_key: str | None = None,
-    fresh_days: list[EditorDay] | None = None,
-    success: str = "",
-    fragment_only: bool = False,
-) -> str:
-    t = STRINGS[lang]
-    chip = _ownership_chip(
-        view.coach_authored, view.routine_author, lang, view.routine_preset_name
-    )
-    if consequence_key is None:
-        consequence_key = (
-            "chip_consequence"
-            if not view.coach_authored or view.routine_preset_name is not None
-            else None
-        )
-    consequence = (
-        f'<p class="consequence">{t[consequence_key]}</p>' if consequence_key else ""
-    )
-    notice = f'<p class="notice-ok">{success}</p>' if success else ""
-    notice += f'<p class="error">{escape(error)}</p>' if error else ""
-    if fresh_days is not None:
-        notice += _fresh_version_block(fresh_days, lang)
-    # One spare blank block per weekday still off the Routine, so a whole week
-    # can be written in a single save — and the Member gets one notice, not
-    # one per round-trip. The parser drops the blocks left blank.
-    used = {day[0] for day in days if day[0] is not None}
-    spares = max(1, 7 - len(used))
-    blocks = "".join(_editor_day(day, lang) for day in days) + "".join(
-        _editor_day((None, "", ""), lang, spare=True) for _ in range(spares)
-    )
-    # The stale-check stamp: the view's active Routine by default, but a
-    # rejected save keeps the SUBMITTED stamp — rebuilding it from the fresh
-    # view would let a retry slip past the stale check (review round 4).
-    if base is None:
-        base = "" if view.routine_id is None else str(view.routine_id)
-    title = t[title_key].format(name=escape(view.name))
-    action = action or f"/members/{view.member_id}/routine"
-    back_href = back_href or f"/members/{view.member_id}"
-    # The editor's own body is one swappable fragment: an htmx save answers
-    # with just this div, so scroll and page state survive (issue #128).
-    fragment = f"""<div id="editor-root">
-<a class="back" href="{back_href}">← {escape(view.name)}</a>
-<header>
-<h1>{title} {chip}</h1>
-{consequence}
-</header>
-{notice}
-<form method="post" action="{action}" hx-post="{action}" hx-target="#editor-root" hx-swap="outerHTML"
- hx-disabled-elt="find button[type=submit]">
-<input type="hidden" name="base_routine_id" value="{base}">
-<p class="editor-help">{t["editor_help"]}</p>
-<div id="days">
-{blocks}
-</div>
-<details>
-<summary>{t["catalog_label"]}</summary>
-<div class="catalog">{"".join(f'<span class="catchip">{escape(name)}</span>' for name in catalog)}</div>
-</details>
-<p><button type="submit" class="btn-primary big">{t["save_routine"]}</button></p>
-</form>
-</div>"""
-    if fragment_only:
-        return fragment
-    content = f"""{_chrome(gym_name, t, next_path, lang)}
-<div class="editor-wrap">
-{fragment}
-</div>"""
-    return _document(
-        f"{title} — {escape(gym_name)}",
-        lang,
-        content,
-        with_htmx=True,
-    )
-
-
 def _preset_editor_view(preset: RoutinePreset, master: dict | None) -> RoutineEditorView:
     routine = [
         RoutineDayView(
@@ -1369,197 +392,7 @@ def _preset_editor_view(preset: RoutinePreset, master: dict | None) -> RoutineEd
     )
 
 
-def _presets_page(
-    gym_name: str,
-    presets: list[RoutinePreset],
-    members: list[Member],
-    default_preset_id: int | None,
-    lang: str,
-    next_path: str,
-    error: str = "",
-    create_name: str = "",
-    success: str = "",
-) -> str:
-    """The Coach-only Presets index and copy-on-apply forms (issue #102).
-    A rejected create keeps the typed name in the form."""
-    t = STRINGS[lang]
-    notice = success + (f'<p class="error">{escape(error)}</p>' if error else "")
-    create = f"""<section class="create-preset">
-<h2>{t["create_preset"]}</h2>
-<form method="post" action="/presets">
-<label>{t["preset_name"]}</label>
-<input type="text" name="name" value="{escape(create_name, quote=True)}" maxlength="100" required>
-<button type="submit" class="btn-primary">{t["create_preset"]}</button>
-</form></section>"""
-    if not presets:
-        cards = f'<div class="emptystate"><h2>{t["no_presets"]}</h2></div>'
-    else:
-        card_blocks: list[str] = []
-        for preset in presets:
-            member_choices = "".join(
-                f'<label><input type="checkbox" name="member_ids" value="{member.id}">'
-                f"{escape(member.name)}</label>"
-                for member in members
-            )
-            is_default = default_preset_id == preset.id
-            card_class = "pcard default" if is_default else "pcard"
-            preset_badge = (
-                f' <span class="preset-badge">{t["preset_default"]}</span>'
-                if is_default
-                else ""
-            )
-            if members:
-                apply_form = f"""<form method="post" action="/presets/{preset.id}/apply">
-<fieldset><legend>{t["apply_preset"]}</legend>
-<div class="pick"><label><input type="checkbox" name="apply_all" value="1">{t["apply_all"]}</label></div>
-<div class="pick">{member_choices}</div>
-<button type="submit" class="btn-primary">{t["apply"]}</button>
-</fieldset></form>"""
-            else:
-                apply_form = f'<p class="muted">{t["no_members_to_apply"]}</p>'
-            default_label = (
-                t["clear_default_preset"]
-                if is_default
-                else t["set_default_preset"]
-            )
-            default_form = (
-                f'<form method="post" action="/presets/{preset.id}/default">'
-                f'<button type="submit">{default_label}</button></form>'
-            )
-            # Retiring is quiet next to Apply — a browser confirm stands
-            # between one stray click and every Member keeping a copy of a
-            # plan the Coach meant to keep editing.
-            retire_form = (
-                f'<form method="post" action="/presets/{preset.id}/retire" '
-                f'onsubmit="return confirm(this.dataset.confirm)" '
-                f'data-confirm="{escape(t["retire_confirm"], quote=True)}">'
-                f'<button type="submit" class="btn-retire">{t["retire_preset"]}</button></form>'
-            )
-            card_blocks.append(
-                f'<section class="{card_class}"><h2>{escape(preset.name)}{preset_badge} '
-                f'<a class="edit" href="/presets/{preset.id}/routine">{t["edit_preset"]}</a></h2>'
-                f'{apply_form}<div class="actions">{default_form}{retire_form}</div></section>'
-            )
-        cards = "".join(card_blocks)
-    body = f'<main class="editor-wrap">{notice}{create}{cards}</main>'
-    content = f"""{_chrome(gym_name, t, next_path, lang, active="presets")}
-{body}"""
-    return _document(
-        f'{t["presets_title"]} — {escape(gym_name)}',
-        lang,
-        content,
-    )
-
-
 # --- The tenant Settings screen (spec-dashboard §Settings) ---
-
-
-def _copy_button(url: str, t: dict) -> str:
-    return (
-        f'<button type="button" class="copy" data-copy="{escape(url, quote=True)}"'
-        f' data-done="{escape(t["copied"], quote=True)}"'
-        f' data-failed="{escape(t["copy_failed"], quote=True)}">'
-        f'{t["copy"]}</button>'
-    )
-
-
-def _regenerate_form(action: str, warning: str, t: dict) -> str:
-    """A Regenerate button the page script keeps disabled until the confirm
-    word is typed. The script also applies the initial disable: without JS
-    the button stays live and the POST's own word check — the load-bearing
-    one — still refuses a wrong confirm."""
-    word = t["confirm_word"]
-    return f"""<form method="post" action="{action}" data-confirm="{word}">
-<p>{warning}</p>
-<p><label>{t["confirm_prompt"].format(word=word)}
-<input type="text" name="confirm" autocomplete="off" required></label>
-<button type="submit">{t["regenerate"]}</button></p>
-</form>"""
-
-
-SETTINGS_SCRIPT = """
-document.querySelectorAll("button.copy").forEach(function (button) {
-  button.addEventListener("click", function () {
-    // navigator.clipboard needs a secure context — plain-HTTP origins leave
-    // it undefined — and writeText itself can reject (denied permission).
-    var restore = function () {
-      setTimeout(function () { button.textContent = button.dataset.idle; }, 2000);
-    };
-    button.dataset.idle = button.dataset.idle || button.textContent;
-    if (!navigator.clipboard) {
-      button.textContent = button.dataset.failed;
-      restore();
-      return;
-    }
-    navigator.clipboard.writeText(button.dataset.copy).then(
-      function () { button.textContent = button.dataset.done; restore(); },
-      function () { button.textContent = button.dataset.failed; restore(); }
-    );
-  });
-});
-document.querySelectorAll("form[data-confirm]").forEach(function (form) {
-  var input = form.querySelector("input[name=confirm]");
-  var submit = form.querySelector("button[type=submit]");
-  submit.disabled = true;
-  input.addEventListener("input", function () {
-    submit.disabled = input.value.trim().toLowerCase() !== form.dataset.confirm;
-  });
-});
-"""
-
-
-def _settings_page(
-    gym: Gym, bot_username: str, lang: str, next_path: str, error: str = "", success: str = ""
-) -> str:
-    """The whole tenant Settings screen: two invite links, two regenerations,
-    and the gym name — each a distinct card block (spec-dashboard §Settings,
-    issue #139)."""
-    t = STRINGS[lang]
-    member_url = _invite_url(bot_username, gym.invite_code)
-    coach_url = _invite_url(bot_username, gym.coach_invite_code or "")
-    # The error strings are the dashboard's own (confirm_mismatch carries
-    # markup), never user input — rendered as-is like every STRINGS value.
-    notice = success + (f'<p class="error">{error}</p>' if error else "")
-    content = f"""{_chrome(gym.name, t, next_path, lang, active="settings")}
-<div class="settings-wrap">
-<h1>{t["settings_title"]}</h1>
-{notice}
-<section class="setcard" id="invite">
-<h2>{t["invite_section"]}</h2>
-<p>{t["invite_blurb"]} <b>{escape(gym.name)}</b>.</p>
-<p><code>{escape(member_url)}</code> {_copy_button(member_url, t)}</p>
-<div class="qr">{_qr_svg(member_url)}</div>
-</section>
-<section class="setcard consequential" id="regenerate-invite">
-<h2>{t["regenerate"]}: {t["invite_section"].lower()}</h2>
-{_regenerate_form("/settings/regenerate-invite", t["invite_warning"], t)}
-</section>
-<section class="setcard" id="coach-link">
-<h2>{t["coach_section"]}</h2>
-<p>{t["coach_blurb"]}</p>
-<p><code>{escape(coach_url)}</code> {_copy_button(coach_url, t)}</p>
-</section>
-<section class="setcard consequential" id="regenerate-coach">
-<h2>{t["regenerate"]}: {t["coach_section"].lower()}</h2>
-{_regenerate_form("/settings/regenerate-coach", t["coach_warning"], t)}
-</section>
-<section class="setcard" id="gym-name">
-<h2>{t["gym_name_section"]}</h2>
-<p>{t["gym_name_help"]}</p>
-<form method="post" action="/settings/gym-name">
-<p><input type="text" name="name" value="{escape(gym.name, quote=True)}"
-maxlength="{GYM_NAME_MAX_LENGTH}" required>
-<button type="submit">{t["save"]}</button></p>
-</form>
-</section>
-<p><a class="back" href="/">{t["back_to_dashboard"]}</a></p>
-</div>"""
-    return _document(
-        f"{t['settings_title']} — {escape(gym.name)}",
-        lang,
-        content,
-        scripts=SETTINGS_SCRIPT,
-    )
 
 
 def sign_session(member_id: int, gym_id: int, secret: str, now: datetime) -> str:
@@ -1588,8 +421,6 @@ def verify_session(value: str, secret: str, now: datetime) -> tuple[int, int] | 
 
 # The directory where the Vite-built React bundle lives.
 _FRONTEND_DIST = Path(__file__).parent.parent.parent / "frontend" / "dist"
-# The hidden route the SPA shell mounts at (ADR 0004 §Migration 5b).
-SPA_MOUNT = "/dashboard"
 
 
 def build_app(
@@ -1601,7 +432,6 @@ def build_app(
     secure_cookies: bool = True,
     clock: Clock = _utcnow,
     notifier: Notifier | None = None,
-    spa_enabled: bool = False,
     spa_dist: Path | None = None,
 ) -> web.Application:
     def set_session(response: web.StreamResponse, member_id: int, gym_id: int) -> None:
@@ -1630,63 +460,6 @@ def build_app(
             return None
         return await store.coach_identity(*identity)
 
-    def _view_of(request: web.Request) -> str:
-        view = request.query.get("view", "table")
-        return view if view in VIEWS else "table"
-
-    async def home(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        view = _view_of(request)
-        next_path = request.rel_url.path_qs
-        rows, lapsed = await store.roster(gym.id)
-        if view == "cards":
-            grids = await store.attendance(gym.id, [row.member_id for row in rows])
-            text = _cards_page(gym.name, rows, lapsed, grids, lang, next_path)
-        elif view == "split":
-            text = _split_page(gym.name, rows, lapsed, _split_placeholder(lang), lang, next_path)
-        else:
-            text = _table_page(gym.name, rows, lapsed, lang, next_path)
-        response = web.Response(text=text, content_type="text/html")
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
-        return response
-
-    async def member_page(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        try:
-            member_id = int(request.match_info["member_id"])
-        except ValueError:
-            return _not_found()
-        try:
-            page = int(request.query.get("page", "1"))
-        except ValueError:
-            page = 1
-        view = await store.member_page(gym.id, member_id, page=page)
-        if view is None:  # departed, forgotten, or another Gym's: the shared 404
-            return _not_found()
-        lang = _lang_of(request)
-        roster_view = _view_of(request)
-        next_path = _next_path_sans_done(request)
-        notice = _done_notice(request.query.get("done"), STRINGS[lang])
-        if roster_view == "split":
-            # Split keeps the rail and the switcher with a Member open.
-            rows, lapsed = await store.roster(gym.id)
-            pane = _member_content(view, lang, roster_view, notice)
-            text = _split_page(
-                gym.name, rows, lapsed, pane, lang, next_path, current_member_id=member_id
-            )
-        else:
-            text = _member_page(gym.name, view, roster_view, lang, next_path, notice)
-        response = web.Response(text=text, content_type="text/html")
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
-        return response
-
     async def set_language(request: web.Request) -> web.Response:
         """The chrome's EN/ES toggle: persist the pick in the long-lived
         cookie beside the session cookie and land back where the Coach was.
@@ -1704,622 +477,6 @@ def build_app(
                 samesite="Lax",
             )
         raise response
-
-    async def routine_editor(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        _, gym = coach
-        try:
-            member_id = int(request.match_info["member_id"])
-        except ValueError:
-            return _not_found()
-        view = await store.member_page(gym.id, member_id)
-        if view is None:  # same rule as the Member page: the shared 404
-            return _not_found()
-        lang = _lang_of(request)
-        roster_view = _view_of(request)
-        catalog = await store.catalog_exercises()
-        response = web.Response(
-            text=_routine_editor_page(
-                gym.name,
-                view,
-                _days_from_view(view),
-                catalog,
-                lang,
-                request.rel_url.path_qs,
-                action=f"/members/{member_id}/routine?view={roster_view}",
-                back_href=f"/members/{member_id}?view={roster_view}",
-            ),
-            content_type="text/html",
-        )
-        set_session(response, coach[0].id, gym.id)  # sliding 90-day refresh
-        return response
-
-    async def routine_save(request: web.Request) -> web.Response:
-        """The editor's save. Three ways to say no, all with the form back:
-        a malformed form, exercises outside the catalog (the Coach's edits
-        stay on the page, base stamp included), and a stale save (the fresh
-        version replaces them). On yes: supersede, notify the Member, back
-        to the page."""
-        coach = await require_coach(request)
-        if coach is None:
-            if _is_htmx(request):
-                # The session died mid-edit: swapping the door page into the
-                # form would be nonsense — send the whole browser there.
-                return web.Response(headers={"HX-Redirect": "/"})
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        coach_member, gym = coach
-        try:
-            member_id = int(request.match_info["member_id"])
-        except ValueError:
-            return _not_found()
-        target = await store.roster_member(gym.id, member_id)
-        if target is None:  # another Gym's, a coach's, a ghost: the shared 404
-            return _not_found()
-        lang = _lang_of(request)
-        t = STRINGS[lang]
-        roster_view = _view_of(request)
-
-        form = await request.post()
-        base_raw = form.get("base_routine_id", "")
-        base_routine_id = None
-        if isinstance(base_raw, str) and base_raw.strip():
-            try:
-                base_routine_id = int(base_raw)
-            except ValueError:
-                return _not_found()
-
-        async def reject(
-            error: str,
-            status: int,
-            days: list[EditorDay] | None = None,
-            base: str | None = None,
-            show_fresh: bool = False,
-        ) -> web.Response:
-            view = await store.member_page(gym.id, member_id)
-            assert view is not None  # roster_member above already scoped it
-            catalog = await store.catalog_exercises()
-            response = web.Response(
-                # An htmx refusal still swaps the re-rendered form in, so it
-                # answers 200 — htmx leaves error statuses unswapped.
-                status=200 if _is_htmx(request) else status,
-                text=_routine_editor_page(
-                    gym.name,
-                    view,
-                    days if days is not None else _days_from_view(view),
-                    catalog,
-                    lang,
-                    # The language toggle must not point at this POST-only
-                    # path (it would 405 a GET) — aim it at the editor GET.
-                    f"/members/{member_id}/routine?view={roster_view}",
-                    error=error,
-                    base=base,
-                    action=f"/members/{member_id}/routine?view={roster_view}",
-                    back_href=f"/members/{member_id}?view={roster_view}",
-                    fresh_days=_days_from_view(view) if show_fresh else None,
-                    fragment_only=_is_htmx(request),
-                ),
-                content_type="text/html",
-            )
-            set_session(response, coach_member.id, gym.id)
-            return response
-
-        submitted_base = base_raw if isinstance(base_raw, str) else ""
-        try:
-            workouts = _parse_workouts(form, lang)
-        except ValueError as error:
-            # The Coach's edits stay on the page, bad line included — and the
-            # submitted base too, or a retry would slip past the stale check.
-            return await reject(
-                str(error), 400, days=_days_from_form(form), base=submitted_base
-            )
-        if not workouts:
-            return await reject(
-                t["empty_routine_error"], 400, days=_days_from_form(form), base=submitted_base
-            )
-        try:
-            await store.save_routine_from_web(
-                gym.id, member_id, coach_member.id, base_routine_id, workouts
-            )
-        except StaleRoutineError:
-            # The fresh version renders read-only above the form, and the
-            # Coach's own edits survive in it (base=None re-stamps the fresh
-            # Routine, so saving again applies them on top, knowingly).
-            return await reject(
-                t["stale_error"], 409, days=_days_from_form(form), show_fresh=True
-            )
-        except UnknownExercisesError as error:
-            # Spanish and coach-facing like every other rejection — never
-            # the raw English agent-tool message.
-            message = t["unknown_exercises_error"].format(names=", ".join(error.names))
-            return await reject(
-                message, 400, days=_days_from_form(form), base=submitted_base
-            )
-
-        notified = False
-        if notifier is not None:
-            # Best-effort, whole block: the save already committed, so any
-            # failure on the notify path — the channel lookup included —
-            # logs and still redirects. A lost message never eats a save.
-            try:
-                channel = await store.member_channel(member_id)
-                if channel is not None:
-                    await notifier.send(
-                        channel[0],
-                        channel[1],
-                        routine_notice(coach_member.name, workouts),
-                    )
-                    notified = True
-            except Exception:
-                logger.exception("failed to notify member %s of the routine save", member_id)
-        if _is_htmx(request):
-            # In place: the editor again, fresh from the save, with the
-            # success line — honest about whether the Member was told.
-            view = await store.member_page(gym.id, member_id)
-            assert view is not None
-            success = t["routine_saved"]
-            if notified:
-                success += " " + t["member_notified"].format(name=escape(target.name))
-            response = web.Response(
-                text=_routine_editor_page(
-                    gym.name,
-                    view,
-                    _days_from_view(view),
-                    await store.catalog_exercises(),
-                    lang,
-                    f"/members/{member_id}/routine?view={roster_view}",
-                    action=f"/members/{member_id}/routine?view={roster_view}",
-                    back_href=f"/members/{member_id}?view={roster_view}",
-                    success=success,
-                    fragment_only=True,
-                ),
-                content_type="text/html",
-            )
-            set_session(response, coach_member.id, gym.id)
-            return response
-        response = web.HTTPFound(f"/members/{member_id}?view={roster_view}")
-        set_session(response, coach_member.id, gym.id)  # sliding 90-day refresh
-        raise response
-
-    async def presets_page(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        response = web.Response(
-            text=_presets_page(
-                gym.name,
-                await store.presets(gym.id),
-                await store.preset_members(gym.id),
-                await store.default_preset_id(gym.id),
-                lang,
-                _next_path_sans_done(request),
-                success=_done_notice(request.query.get("done"), STRINGS[lang]),
-            ),
-            content_type="text/html",
-        )
-        set_session(response, member.id, gym.id)
-        return response
-
-    async def preset_create(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        t = STRINGS[lang]
-        form = await request.post()
-        name = form.get("name", "")
-        if not isinstance(name, str) or not name.strip():
-            error = t["preset_name_empty"]
-        elif len(name.strip()) > 100:
-            error = t["preset_name_too_long"]
-        else:
-            try:
-                await store.create_preset(gym.id, name)
-            except DuplicatePresetNameError:
-                error = t["duplicate_preset_name"]
-            except ValueError:
-                error = t["preset_name_empty"]
-            else:
-                found = web.HTTPFound("/presets?done=preset_created")
-                set_session(found, member.id, gym.id)
-                raise found
-        response = web.Response(
-            status=400,
-            text=_presets_page(
-                gym.name,
-                await store.presets(gym.id),
-                await store.preset_members(gym.id),
-                await store.default_preset_id(gym.id),
-                lang,
-                "/presets",
-                error=error,
-                # The rejected name stays in the form — no retyping.
-                create_name=name if isinstance(name, str) else "",
-            ),
-            content_type="text/html",
-        )
-        set_session(response, member.id, gym.id)
-        return response
-
-    async def preset_editor(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        _, gym = coach
-        try:
-            preset_id = int(request.match_info["preset_id"])
-        except ValueError:
-            return _not_found()
-        preset = await store.preset_for_gym(gym.id, preset_id)
-        if preset is None:
-            return _not_found()
-        master = await store.preset_master(preset.id)
-        view = _preset_editor_view(preset, master)
-        lang = _lang_of(request)
-        response = web.Response(
-            text=_routine_editor_page(
-                gym.name,
-                view,
-                _days_from_view(view),
-                await store.catalog_exercises(),
-                lang,
-                request.rel_url.path_qs,
-                action=f"/presets/{preset.id}/routine",
-                back_href="/presets",
-                title_key="preset_editor_title",
-                consequence_key="preset_master_consequence",
-            ),
-            content_type="text/html",
-        )
-        set_session(response, coach[0].id, gym.id)
-        return response
-
-    async def preset_save(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            if _is_htmx(request):
-                return web.Response(headers={"HX-Redirect": "/"})
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        coach_member, gym = coach
-        try:
-            preset_id = int(request.match_info["preset_id"])
-        except ValueError:
-            return _not_found()
-        preset = await store.preset_for_gym(gym.id, preset_id)
-        if preset is None:
-            return _not_found()
-        lang = _lang_of(request)
-        t = STRINGS[lang]
-        form = await request.post()
-        base_raw = form.get("base_routine_id", "")
-        base_routine_id = None
-        if isinstance(base_raw, str) and base_raw.strip():
-            try:
-                base_routine_id = int(base_raw)
-            except ValueError:
-                return _not_found()
-        submitted_base = base_raw if isinstance(base_raw, str) else ""
-
-        async def reject(
-            error: str,
-            status: int,
-            days: list[EditorDay] | None = None,
-            base: str | None = None,
-            show_fresh: bool = False,
-        ) -> web.Response:
-            fresh = await store.preset_master(preset.id)
-            view = _preset_editor_view(preset, fresh)
-            response = web.Response(
-                status=200 if _is_htmx(request) else status,
-                text=_routine_editor_page(
-                    gym.name,
-                    view,
-                    days if days is not None else _days_from_view(view),
-                    await store.catalog_exercises(),
-                    lang,
-                    f"/presets/{preset.id}/routine",
-                    error=error,
-                    base=base,
-                    action=f"/presets/{preset.id}/routine",
-                    back_href="/presets",
-                    title_key="preset_editor_title",
-                    consequence_key="preset_master_consequence",
-                    fresh_days=_days_from_view(view) if show_fresh else None,
-                    fragment_only=_is_htmx(request),
-                ),
-                content_type="text/html",
-            )
-            set_session(response, coach_member.id, gym.id)
-            return response
-
-        try:
-            workouts = _parse_workouts(form, lang)
-        except ValueError as error:
-            return await reject(
-                str(error), 400, days=_days_from_form(form), base=submitted_base
-            )
-        if not workouts:
-            return await reject(
-                t["empty_routine_error"], 400, days=_days_from_form(form), base=submitted_base
-            )
-        try:
-            copies = await store.save_preset_master_from_web(
-                gym.id, preset.id, coach_member.id, base_routine_id, workouts
-            )
-        except StaleRoutineError:
-            # Same contract as the Member editor: the Coach's edits survive
-            # in the form, the fresh master shows read-only above it.
-            return await reject(
-                t["stale_error"], 409, days=_days_from_form(form), show_fresh=True
-            )
-        except UnknownExercisesError as error:
-            message = t["unknown_exercises_error"].format(names=", ".join(error.names))
-            return await reject(message, 400, days=_days_from_form(form), base=submitted_base)
-        for copy in copies:
-            try:
-                channel = await store.member_channel(copy.member_id)
-                if channel is None:
-                    logger.warning(
-                        "failed to notify member %s of the Preset edit: no channel",
-                        copy.member_id,
-                    )
-                elif notifier is not None:
-                    await notifier.send(
-                        channel[0],
-                        channel[1],
-                        routine_notice(coach_member.name, copy.workouts),
-                    )
-            except Exception:
-                logger.exception("failed to notify member %s of the Preset edit", copy.member_id)
-        if _is_htmx(request):
-            fresh = await store.preset_master(preset.id)
-            view = _preset_editor_view(preset, fresh)
-            response = web.Response(
-                text=_routine_editor_page(
-                    gym.name,
-                    view,
-                    _days_from_view(view),
-                    await store.catalog_exercises(),
-                    lang,
-                    f"/presets/{preset.id}/routine",
-                    action=f"/presets/{preset.id}/routine",
-                    back_href="/presets",
-                    title_key="preset_editor_title",
-                    consequence_key="preset_master_consequence",
-                    success=t["preset_master_saved"],
-                    fragment_only=True,
-                ),
-                content_type="text/html",
-            )
-            set_session(response, coach_member.id, gym.id)
-            return response
-        response = web.HTTPFound(f"/presets/{preset.id}/routine")
-        set_session(response, coach_member.id, gym.id)
-        raise response
-
-    async def preset_apply(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        coach_member, gym = coach
-        try:
-            preset_id = int(request.match_info["preset_id"])
-        except ValueError:
-            return _not_found()
-        if await store.preset_for_gym(gym.id, preset_id) is None:
-            return _not_found()
-        lang = _lang_of(request)
-        t = STRINGS[lang]
-
-        async def reject(error: str, status: int) -> web.Response:
-            response = web.Response(
-                status=status,
-                text=_presets_page(
-                    gym.name,
-                    await store.presets(gym.id),
-                    await store.preset_members(gym.id),
-                    await store.default_preset_id(gym.id),
-                    lang,
-                    "/presets",
-                    error=error,
-                ),
-                content_type="text/html",
-            )
-            set_session(response, coach_member.id, gym.id)
-            return response
-
-        form = await request.post()
-        apply_all = bool(form.get("apply_all"))
-        try:
-            raw_ids = form.getall("member_ids", [])
-            member_ids = [int(value) for value in raw_ids if isinstance(value, str)]
-        except ValueError:
-            return _not_found()
-        if apply_all:
-            member_ids = [member.id for member in await store.preset_members(gym.id)]
-        elif not member_ids:
-            return await reject(t["preset_no_selection"], 400)
-        try:
-            copies = await store.apply_preset(gym.id, preset_id, coach_member.id, member_ids)
-        except NoPresetMasterError:
-            return await reject(t["preset_no_master"], 400)
-        except StaleRoutineError:
-            return await reject(t["stale_error"], 409)
-        except ValueError:
-            return _not_found()
-        for copy in copies:
-            try:
-                channel = await store.member_channel(copy.member_id)
-                if channel is None:
-                    logger.warning("failed to notify member %s of the Preset apply: no channel", copy.member_id)
-                elif notifier is not None:
-                    await notifier.send(channel[0], channel[1], routine_notice(coach_member.name, copy.workouts))
-            except Exception:
-                logger.exception("failed to notify member %s of the Preset apply", copy.member_id)
-        response = web.HTTPFound("/presets?done=preset_applied")
-        set_session(response, coach_member.id, gym.id)
-        raise response
-
-    async def preset_default(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        coach_member, gym = coach
-        try:
-            preset_id = int(request.match_info["preset_id"])
-        except ValueError:
-            return _not_found()
-        if await store.preset_for_gym(gym.id, preset_id) is None:
-            return _not_found()
-        try:
-            current_default = await store.default_preset_id(gym.id)
-            clearing = current_default == preset_id
-            await store.set_default_preset(gym.id, None if clearing else preset_id)
-        except ValueError:
-            return _not_found()
-        response = web.HTTPFound(
-            f"/presets?done={'default_cleared' if clearing else 'default_set'}"
-        )
-        set_session(response, coach_member.id, gym.id)
-        raise response
-
-    async def preset_retire(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        coach_member, gym = coach
-        try:
-            preset_id = int(request.match_info["preset_id"])
-        except ValueError:
-            return _not_found()
-        try:
-            await store.retire_preset(gym.id, preset_id)
-        except ValueError:
-            return _not_found()
-        response = web.HTTPFound("/presets?done=preset_retired")
-        set_session(response, coach_member.id, gym.id)
-        raise response
-
-    async def tick_off_flag(request: web.Request) -> web.Response:
-        """Tick a safety flag off: stamp who (this Coach) and when.
-
-        Acknowledging is not retiring — the Note stays live for the Agent.
-        Anything unreachable (unknown, foreign, non-safety, retired) gets
-        the shared 404."""
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        try:
-            member_id = int(request.match_info["member_id"])
-            note_id = int(request.match_info["note_id"])
-        except ValueError:
-            return _not_found()
-        note = await store.acknowledge_flag(gym.id, member_id, note_id, member.id)
-        if note is None:
-            return _not_found()
-        # Back to the Member's page, in the view it was opened from — Split
-        # must not drop the Coach out of the pane.
-        view = request.query.get("view", "table")
-        view = view if view in VIEWS else "table"
-        response = web.HTTPFound(f"/members/{member_id}?view={view}&done=flag_seen")
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
-        raise response
-
-    async def settings(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        response = web.Response(
-            text=_settings_page(
-                gym,
-                bot_username,
-                lang,
-                _next_path_sans_done(request),
-                success=_done_notice(request.query.get("done"), STRINGS[lang]),
-            ),
-            content_type="text/html",
-        )
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
-        return response
-
-    async def _regenerate(request: web.Request, which: str) -> web.Response:
-        """Regenerate one invite code behind the typed confirm. A wrong or
-        missing confirm changes nothing — the form's JS gate is convenience;
-        this check is the load-bearing one."""
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        t = STRINGS[lang]
-        form = await request.post()
-        confirm = form.get("confirm", "")
-        if not isinstance(confirm, str) or confirm.strip().lower() != t["confirm_word"]:
-            # The error re-render points the language toggle at /settings —
-            # this POST-only path would 405 a GET.
-            response = web.Response(
-                text=_settings_page(
-                    gym,
-                    bot_username,
-                    lang,
-                    "/settings",
-                    error=t["confirm_mismatch"].format(word=t["confirm_word"]),
-                ),
-                content_type="text/html",
-            )
-            set_session(response, member.id, gym.id)  # sliding 90-day refresh
-            return response
-        if which == "invite":
-            await linking.regenerate_invite_code(gym.id)
-        else:
-            await linking.regenerate_coach_invite_code(gym.id)
-        response = web.HTTPFound("/settings?done=link_regenerated")
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
-        raise response
-
-    async def regenerate_invite(request: web.Request) -> web.Response:
-        return await _regenerate(request, "invite")
-
-    async def regenerate_coach(request: web.Request) -> web.Response:
-        return await _regenerate(request, "coach")
-
-    async def gym_name(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        t = STRINGS[lang]
-        form = await request.post()
-        name = form.get("name", "")
-        if not isinstance(name, str) or not name.strip():
-            # Same as the confirm mismatch above: the toggle must not point
-            # at this POST-only path.
-            response = web.Response(
-                text=_settings_page(
-                    gym, bot_username, lang, "/settings", error=t["gym_name_empty"]
-                ),
-                content_type="text/html",
-            )
-            set_session(response, member.id, gym.id)  # sliding 90-day refresh
-            return response
-        await linking.rename_gym(gym.id, name)
-        response = web.HTTPFound("/settings?done=saved")
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
-        raise response
-
-    async def login_form(request: web.Request) -> web.Response:
-        token = request.match_info["token"]
-        if await store.peek_login_token(token) is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        return web.Response(text=_interstitial_page(token), content_type="text/html")
 
     async def login_redeem(request: web.Request) -> web.Response:
         token = await store.redeem_login_token(request.match_info["token"])
@@ -2475,7 +632,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         _, gym = coach
         try:
-            member_id = int(request.match_info["member_id"])
+            member_id = _parse_db_id(request.match_info["member_id"])
         except ValueError:
             return web.json_response({"error": "not found"}, status=404)
         view = await store.member_page(gym.id, member_id)
@@ -2519,7 +676,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         coach_member, gym = coach
         try:
-            member_id = int(request.match_info["member_id"])
+            member_id = _parse_db_id(request.match_info["member_id"])
         except ValueError:
             return web.json_response({"error": "not found"}, status=404)
         target = await store.roster_member(gym.id, member_id)
@@ -2685,7 +842,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         coach_member, gym = coach
         try:
-            preset_id = int(request.match_info["preset_id"])
+            preset_id = _parse_db_id(request.match_info["preset_id"])
         except ValueError:
             return web.json_response({"error": "not_found"}, status=404)
         if await store.preset_for_gym(gym.id, preset_id) is None:
@@ -2699,8 +856,8 @@ def build_app(
         if not isinstance(raw_ids, list):
             return web.json_response({"error": "preset_no_selection"}, status=400)
         try:
-            member_ids = [int(v) for v in raw_ids]
-        except (ValueError, TypeError):
+            member_ids = [_parse_db_id(v) for v in raw_ids]
+        except ValueError:
             return web.json_response({"error": "not_found"}, status=404)
         if apply_all:
             member_ids = [m.id for m in await store.preset_members(gym.id)]
@@ -2739,7 +896,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         coach_member, gym = coach
         try:
-            preset_id = int(request.match_info["preset_id"])
+            preset_id = _parse_db_id(request.match_info["preset_id"])
         except ValueError:
             return web.json_response({"error": "not_found"}, status=404)
         if await store.preset_for_gym(gym.id, preset_id) is None:
@@ -2764,7 +921,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         coach_member, gym = coach
         try:
-            preset_id = int(request.match_info["preset_id"])
+            preset_id = _parse_db_id(request.match_info["preset_id"])
         except ValueError:
             return web.json_response({"error": "not_found"}, status=404)
         try:
@@ -2772,6 +929,141 @@ def build_app(
         except ValueError:
             return web.json_response({"error": "not_found"}, status=404)
         response = web.json_response({"retired": True})
+        set_session(response, coach_member.id, gym.id)
+        return response
+
+    # --- /api/presets/{id}/routine JSON endpoints (#154) — the master
+    # editor, mirroring the member Routine editor API (#151). ---
+
+    def _serialise_master(preset: RoutinePreset, master: dict | None) -> dict:
+        view = _preset_editor_view(preset, master)
+        return {
+            "preset_id": preset.id,
+            "name": preset.name,
+            "routine": [
+                {
+                    "weekday": day.weekday,
+                    "name": day.name,
+                    "exercises": [
+                        {"exercise": name, "sets": sets, "reps": reps}
+                        for name, sets, reps in day.exercises
+                    ],
+                }
+                for day in view.routine
+            ],
+            # The master's routine_id — the stale-save stamp, exactly like
+            # the member editor's base_routine_id contract.
+            "routine_id": view.routine_id,
+            "routine_author": view.routine_author,
+        }
+
+    async def api_preset_routine_get(request: web.Request) -> web.Response:
+        """``GET /api/presets/{preset_id}/routine`` — cookie-auth via
+        ``require_coach``; returns the Preset's master routine plus the
+        exercise catalog. 404 for an unknown, retired, or foreign Preset."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        try:
+            preset_id = _parse_db_id(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not found"}, status=404)
+        preset = await store.preset_for_gym(gym.id, preset_id)
+        if preset is None:
+            return web.json_response({"error": "not found"}, status=404)
+        master = await store.preset_master(preset.id)
+        body = _serialise_master(preset, master)
+        body["catalog"] = await store.catalog_exercises()
+        response = web.json_response(body)
+        set_session(response, member.id, gym.id)
+        return response
+
+    async def api_preset_routine_put(request: web.Request) -> web.Response:
+        """``PUT /api/presets/{preset_id}/routine`` — save the Preset's
+        master routine through the same supersession machinery as the
+        server form did: 400 on validation errors, 409 with the fresh
+        master on a stale save, and Member notifications for every linked
+        copy the save forked or updated."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = _parse_db_id(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not found"}, status=404)
+        preset = await store.preset_for_gym(gym.id, preset_id)
+        if preset is None:
+            return web.json_response({"error": "not found"}, status=404)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+
+        base_routine_id = body.get("base_routine_id")
+        raw_workouts = body.get("workouts")
+        if not isinstance(raw_workouts, list):
+            return web.json_response({"error": t["empty_routine_error"]}, status=400)
+        try:
+            workouts = _parse_workouts_from_json(raw_workouts, lang)
+        except ValueError as error:
+            return web.json_response({"error": str(error)}, status=400)
+        if not workouts:
+            return web.json_response({"error": t["empty_routine_error"]}, status=400)
+
+        try:
+            copies = await store.save_preset_master_from_web(
+                gym.id, preset.id, coach_member.id, base_routine_id, workouts
+            )
+        except StaleRoutineError:
+            fresh = await store.preset_master(preset.id)
+            fresh_body = _serialise_master(preset, fresh)
+            return web.json_response(
+                {
+                    "error": t["stale_error"],
+                    "fresh_routine": fresh_body["routine"],
+                    "fresh_routine_id": fresh_body["routine_id"],
+                },
+                status=409,
+            )
+        except UnknownExercisesError as error:
+            message = t["unknown_exercises_error"].format(names=", ".join(error.names))
+            return web.json_response({"error": message}, status=400)
+
+        # Notify every Member whose linked copy the save forked/updated —
+        # the same contract as the form path: a notification failure never
+        # blocks the save.
+        notified = 0
+        for copy in copies:
+            try:
+                channel = await store.member_channel(copy.member_id)
+                if channel is None:
+                    logger.warning(
+                        "failed to notify member %s of the Preset edit: no channel",
+                        copy.member_id,
+                    )
+                elif notifier is not None:
+                    await notifier.send(
+                        channel[0],
+                        channel[1],
+                        routine_notice(coach_member.name, copy.workouts),
+                    )
+                    notified += 1
+            except Exception:
+                logger.exception(
+                    "failed to notify member %s of the Preset edit", copy.member_id
+                )
+
+        fresh = await store.preset_master(preset.id)
+        response_body = _serialise_master(preset, fresh)
+        response_body["ok"] = True
+        response_body["notified"] = notified
+        response = web.json_response(response_body)
         set_session(response, coach_member.id, gym.id)
         return response
 
@@ -2852,7 +1144,17 @@ def build_app(
                 {
                     "on": session.on.isoformat(),
                     "sets": [
-                        {"exercise": name, "weight": weight, "reps": reps, "note": note}
+                        {
+                            "exercise": name,
+                            "weight": weight,
+                            "reps": reps,
+                            "note": note,
+                            # The Member's own words never translate; the
+                            # detected source language lets the React page
+                            # tag foreign quotes ("EN · textual") exactly
+                            # like the server renderer did (#154 parity).
+                            "note_lang": detect_language(note) if note else None,
+                        }
                         for name, weight, reps, note in session.sets
                     ],
                 }
@@ -2873,6 +1175,7 @@ def build_app(
                 {
                     "kind": n.kind,
                     "text": n.text,
+                    "lang": detect_language(n.text),
                     "on": n.on.isoformat(),
                     "retired_on": n.retired_on.isoformat() if n.retired_on else None,
                 }
@@ -2882,6 +1185,7 @@ def build_app(
                 {
                     "kind": n.kind,
                     "text": n.text,
+                    "lang": detect_language(n.text),
                     "on": n.on.isoformat(),
                     "retired_on": n.retired_on.isoformat() if n.retired_on else None,
                 }
@@ -2910,10 +1214,8 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         _, gym = coach
         try:
-            member_id = int(request.match_info["member_id"])
-            if not 0 < member_id < 2**63:
-                return web.json_response({"error": "not found"}, status=404)
-        except (ValueError, OverflowError):
+            member_id = _parse_db_id(request.match_info["member_id"])
+        except ValueError:
             return web.json_response({"error": "not found"}, status=404)
         try:
             page = int(request.query.get("page", "1"))
@@ -2938,11 +1240,9 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         member, gym = coach
         try:
-            member_id = int(request.match_info["member_id"])
-            note_id = int(request.match_info["note_id"])
-            if not (0 < member_id < 2**63 and 0 < note_id < 2**63):
-                return web.json_response({"error": "not found"}, status=404)
-        except (ValueError, OverflowError):
+            member_id = _parse_db_id(request.match_info["member_id"])
+            note_id = _parse_db_id(request.match_info["note_id"])
+        except ValueError:
             return web.json_response({"error": "not found"}, status=404)
         note = await store.acknowledge_flag(gym.id, member_id, note_id, member.id)
         if note is None:
@@ -2956,14 +1256,31 @@ def build_app(
     # --- SPA shell and static assets (issue #155, ADR 0004) ---
 
     resolved_dist = spa_dist or _FRONTEND_DIST
+    # Judged once, at boot: the /assets/ static mount can only be registered
+    # now, so a bundle that appears later must NOT flip the shell to 200 —
+    # its asset requests would still fall through to the catch-all as HTML.
+    # Consistent honest answer until a restart: 503 (P3, PR #206 review
+    # round 2).
+    bundle_ready = (resolved_dist / "assets").is_dir()
+
+    _HTML_LANG = re.compile(r"(<html\b[^>]*\blang=\")[^\"]*(\")")
 
     def _inject_i18n(html: str, t: dict, lang: str) -> str:
         """Inject ``window.__I18N__`` bootstrap into the SPA shell HTML.
 
         Includes STRINGS plus the ``_months``, ``_weekday_initials`` and
         ``_decimal_mark`` keys the frontend's ``i18n.ts`` reads through
-        ``getMonths`` / ``getWeekdayInitials`` / ``getDecimalMark``."""
+        ``getMonths`` / ``getWeekdayInitials`` / ``getDecimalMark``.
+
+        Also rewrites the ``<html lang>`` attribute: the Vite template
+        hardcodes ``en``, and the server is the one place that knows the
+        resolved language before React runs — screen readers and
+        translators read this attribute (P2, PR #206 review round 2)."""
         i18n_payload: dict = dict(t)
+        # The active language rides along so the React chrome can mark the
+        # EN/ES toggle and build /lang/{lang} links (#154 — the toggle
+        # crossed from the server chrome to the SPA in the cutover).
+        i18n_payload["_lang"] = lang
         i18n_payload["_months"] = list(MONTHS[lang])
         i18n_payload["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
         i18n_payload["_weekdays"] = list(WEEKDAYS[lang])
@@ -2977,6 +1294,8 @@ def build_app(
             .replace("\u2029", "\\u2029")
         )
         i18n_script = f"<script>window.__I18N__ = {safe_json};</script>"
+        # The resolved language wins over the template's hardcoded lang.
+        html = _HTML_LANG.sub(rf"\g<1>{lang}\g<2>", html, count=1)
         # Insert after </head> (if present) or at the start of <body>.
         if "</head>" in html:
             html = html.replace("</head>", f"{i18n_script}\n</head>")
@@ -2989,16 +1308,21 @@ def build_app(
         return html
 
     def _read_spa_index() -> str | None:
-        """Read the Vite-built index.html; ``None`` if not built."""
+        """Read the Vite-built index.html; ``None`` if not built.
+
+        A dist/ with index.html but no assets/ at boot is treated as not
+        built too: serving a shell whose bundle files cannot load would
+        render a blank page, where the 503 says what is actually wrong
+        (spec-dashboard §Stack; P3, PR #206 review)."""
         index_path = resolved_dist / "index.html"
-        if not index_path.exists():
+        if not bundle_ready or not index_path.exists():
             return None
         return index_path.read_text(encoding="utf-8")
 
     async def spa_login_shell(request: web.Request) -> web.Response:
         """Serve the SPA shell **without** auth for the login/interstitial
-        screen (issue #153).  The React app at ``/dashboard/login/:token``
-        detects the route and renders the interstitial — no session required.
+        screen (issue #153).  The React app at ``/login/:token`` detects the
+        route and renders the interstitial — no session required.
 
         The i18n bootstrap uses the language cookie if set, else the
         no-signal default (Spanish) — the same rule as the door pages."""
@@ -3021,8 +1345,7 @@ def build_app(
 
     async def spa_shell(request: web.Request) -> web.Response:
         """Serve the Vite-built React bundle shell with ``window.__I18N__``
-        bootstrap injected (ADR 0004 §i18n 7a). Only reachable when the
-        ``spa_enabled`` flag is on."""
+        bootstrap injected (ADR 0004 §i18n 7a)."""
         coach = await require_coach(request)
         if coach is None:
             return web.Response(text=_bounce_page(), content_type="text/html")
@@ -3043,97 +1366,69 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
-    async def spa_catchall(request: web.Request) -> web.Response:
-        """SPA fallback: serve the shell for any unmatched ``/dashboard/*`` path
-        so React Router deep links resolve on a cold load (issue #149).
-
-        Real bundle files are served by the ``/dashboard/assets/`` static mount
-        registered ahead of this route; everything else is a client-side route,
-        and the shell it gets is the authenticated one.
-        """
-        return await spa_shell(request)
-
     app = web.Application()
-    app.router.add_get("/", home)
-    # /api/session is registered unconditionally — the JSON session-info
-    # endpoint is tiny and useful for any non-SPA consumer (CLI scripts,
-    # health-check probes) so there is no value in gating it behind the flag.
+    # The roster — like every dashboard screen since the #154 cutover — is
+    # the React SPA shell; the data lives behind /api/*.
+    app.router.add_get("/", spa_shell)
     app.router.add_get("/api/session", api_session)
-    app.router.add_get("/members/{member_id}", member_page)
-    app.router.add_get("/presets", presets_page)
-    app.router.add_post("/presets", preset_create)
-    app.router.add_get("/presets/{preset_id}/routine", preset_editor)
-    app.router.add_post("/presets/{preset_id}/routine", preset_save)
-    app.router.add_post("/presets/{preset_id}/apply", preset_apply)
-    app.router.add_post("/presets/{preset_id}/default", preset_default)
-    app.router.add_post("/presets/{preset_id}/retire", preset_retire)
-    app.router.add_post("/members/{member_id}/flags/{note_id}/tick-off", tick_off_flag)
-    app.router.add_get("/settings", settings)
-    app.router.add_post("/settings/regenerate-invite", regenerate_invite)
-    app.router.add_post("/settings/regenerate-coach", regenerate_coach)
-    app.router.add_post("/settings/gym-name", gym_name)
+    app.router.add_get("/members/{member_id}", spa_shell)
+    app.router.add_get("/presets", spa_shell)
+    app.router.add_get("/presets/{preset_id}/routine", spa_shell)
+    app.router.add_get("/settings", spa_shell)
     app.router.add_get("/lang/{lang}", set_language)
-    app.router.add_get("/login/{token}", login_form)
+    # GET /login/{token} serves the SPA login shell (public — the React
+    # interstitial validates the token via /api/login/{token} without
+    # spending it); the POST redemption stays server-side so the signed
+    # session cookie is set exactly as before (#154 preserves the
+    # login-token flow the bot depends on).
+    app.router.add_get("/login/{token}", spa_login_shell)
     app.router.add_post("/login/{token}", login_redeem)
-    app.router.add_static("/static/", STATIC_DIR)
-    # The server-HTML Routine editor is production today — registered
-    # unconditionally like member_page and the /presets routes (#151, #154).
-    app.router.add_get("/members/{member_id}/routine", routine_editor)
-    app.router.add_post("/members/{member_id}/routine", routine_save)
-    if spa_enabled:
-        # /api/login/{token} peek is SPA-only — serves the interstitial's
-        # token validation without spending the token.  Flag-gated so the
-        # flag-off rollback contract holds.
-        app.router.add_get("/api/login/{token}", api_login_peek)
-        # /api/roster is the SPA's JSON endpoint — it has no server-HTML
-        # consumer, so flag-gating it keeps the prod surface minimal.
-        app.router.add_get("/api/roster", api_roster)
-        # /api/settings and its write routes (issue #153) — flag-gated like
-        # /api/roster so the flag-off rollback holds.
-        app.router.add_get("/api/settings", api_settings)
-        app.router.add_post("/api/settings/regenerate-invite", api_settings_regenerate_invite)
-        app.router.add_post("/api/settings/regenerate-coach", api_settings_regenerate_coach)
-        app.router.add_post("/api/settings/gym-name", api_settings_gym_name)
-        # JSON endpoints for the SPA — flag-gated so the flag-off rollback
-        # holds (ADR 0004 §Migration 5b).
-        # /api/members/{id}/routine is the JSON Routine editor endpoint
-        # (issue #151).
-        app.router.add_get("/api/members/{member_id}/routine", api_member_routine_get)
-        app.router.add_put("/api/members/{member_id}/routine", api_member_routine_put)
-        # /api/members/{id} and tick-off are the SPA's member-page JSON
-        # endpoints (issue #150).
-        app.router.add_get("/api/members/{member_id}", api_member)
-        app.router.add_post(
-            "/api/members/{member_id}/flags/{note_id}/tick-off", api_tick_off_flag
+    app.router.add_get("/members/{member_id}/routine", spa_shell)
+    # The JSON API is the dashboard's only data surface after the React
+    # cutover (#154) — registered unconditionally.
+    app.router.add_get("/api/login/{token}", api_login_peek)
+    app.router.add_get("/api/roster", api_roster)
+    app.router.add_get("/api/settings", api_settings)
+    app.router.add_post("/api/settings/regenerate-invite", api_settings_regenerate_invite)
+    app.router.add_post("/api/settings/regenerate-coach", api_settings_regenerate_coach)
+    app.router.add_post("/api/settings/gym-name", api_settings_gym_name)
+    app.router.add_get("/api/members/{member_id}/routine", api_member_routine_get)
+    app.router.add_put("/api/members/{member_id}/routine", api_member_routine_put)
+    app.router.add_get("/api/members/{member_id}", api_member)
+    app.router.add_post(
+        "/api/members/{member_id}/flags/{note_id}/tick-off", api_tick_off_flag
+    )
+    app.router.add_get("/api/presets", api_presets_list)
+    app.router.add_post("/api/presets", api_presets_create)
+    app.router.add_get("/api/presets/{preset_id}/routine", api_preset_routine_get)
+    app.router.add_put("/api/presets/{preset_id}/routine", api_preset_routine_put)
+    app.router.add_post("/api/presets/{preset_id}/apply", api_presets_apply)
+    app.router.add_post("/api/presets/{preset_id}/default", api_presets_default)
+    app.router.add_post("/api/presets/{preset_id}/retire", api_presets_retire)
+    # The Vite bundle's asset files.  Guarded so a missing/partial bundle
+    # degrades to a 503 shell instead of killing the bot at boot
+    # (add_static raises on a missing directory).
+    if bundle_ready:
+        app.router.add_static("/assets/", resolved_dist / "assets")
+    else:
+        logger.warning(
+            "SPA bundle missing at %s — dashboard screens will answer 503; "
+            "run `npm run build` in frontend/",
+            resolved_dist / "assets",
         )
-        # /api/presets JSON endpoints (issue #152).
-        app.router.add_get("/api/presets", api_presets_list)
-        app.router.add_post("/api/presets", api_presets_create)
-        app.router.add_post("/api/presets/{preset_id}/apply", api_presets_apply)
-        app.router.add_post("/api/presets/{preset_id}/default", api_presets_default)
-        app.router.add_post("/api/presets/{preset_id}/retire", api_presets_retire)
-        if not (resolved_dist / "assets").is_dir():
-            logger.warning(
-                "SPA enabled but %s missing — not serving /dashboard; "
-                "run `npm run build` in frontend/",
-                resolved_dist / "assets",
-            )
-        else:
-            # Public (no-auth) SPA shell for the login/interstitial screen
-            # (issue #153).  Registered first so the authenticated catch-all
-            # only covers routes that need a session.
-            app.router.add_get(
-                f"{SPA_MOUNT}/login/{{token}}", spa_login_shell
-            )
-            app.router.add_get(SPA_MOUNT, spa_shell)
-            app.router.add_get(f"{SPA_MOUNT}/", spa_shell)
-            # Assets first: the catch-all below would otherwise swallow them.
-            app.router.add_static(
-                f"{SPA_MOUNT}/assets/", resolved_dist / "assets"
-            )
-            # Every other /dashboard/* path is a React Router deep link, so it
-            # gets the authenticated shell (issue #149).
-            app.router.add_get(f"{SPA_MOUNT}/{{tail:.*}}", spa_catchall)
+    # Unknown /api/* paths answer a JSON 404 — they must never fall through
+    # to the HTML shell, which would mask a typo'd endpoint as a 200 during
+    # development (P3, PR #206 review).
+    async def api_not_found(request: web.Request) -> web.Response:
+        return web.json_response({"error": "not found"}, status=404)
+
+    # ``*``: a typo'd POST/PUT/DELETE must get the JSON 404 too, not
+    # aiohttp's HTML 405 (P3, PR #206 review round 2).
+    app.router.add_route("*", "/api/{tail:.*}", api_not_found)
+    # SPA fallback, registered last so every real route above wins: any
+    # unmatched GET is a React Router deep link on a cold load and gets the
+    # authenticated shell (issue #149).
+    app.router.add_get("/{tail:.*}", spa_shell)
     return app
 
 

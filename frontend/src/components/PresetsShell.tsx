@@ -1,3 +1,4 @@
+import { LangToggle } from "./LangToggle";
 import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useT } from "../hooks/useT";
@@ -50,8 +51,15 @@ export function PresetsShell({ name: _name, gym, children }: PresetsShellProps) 
           >
             {t("presets")}
           </Link>
-          <span className="text-ink-2">{t("settings")}</span>
+          <Link
+            to="/settings"
+            className="text-ink-2 hover:text-ink transition-colors"
+          >
+            {t("settings")}
+          </Link>
         </nav>
+
+        <LangToggle />
       </header>
 
       {children}

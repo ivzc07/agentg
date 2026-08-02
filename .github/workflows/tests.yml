@@ -28,3 +28,28 @@ jobs:
       - run: npx vitest run
         working-directory: frontend
         if: always()
+
+  # Real-browser 375px layout gate (issue #157, armed by #154): renders every
+  # React screen in Chromium at 375x812 and fails on horizontal overflow or
+  # unreachable primary actions.  A separate job on purpose: the ~115 MB
+  # browser download must never slow or break `pytest`, which is the required
+  # status check — do NOT fold this into that job or rename either of them.
+  e2e-375px:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      # The server under test serves the built bundle; without it the
+      # Playwright fixture skips and this job would assert nothing.
+      - run: npm run build
+        working-directory: frontend
+      - run: uv sync --extra dev --extra browser
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest tests/test_375px_playwright.py

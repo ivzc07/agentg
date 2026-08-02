@@ -41,7 +41,7 @@ def _cookie(member_id, gym_id, clock):
 
 @pytest.fixture
 async def spa_env(tmp_path):
-    """A test app with spa_enabled=True so /api/settings routes are wired."""
+    """A test app with a stub bundle so the /api/settings routes find it."""
     engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
 
     stub_dist = tmp_path / "dist"
@@ -64,7 +64,6 @@ async def spa_env(tmp_path):
         bot_username=BOT_USERNAME,
         secure_cookies=False,
         clock=clock,
-        spa_enabled=True,
         spa_dist=stub_dist,
     )
     async with TestClient(TestServer(app)) as client:
@@ -345,36 +344,3 @@ async def test_api_gym_name_caps_at_max_length(spa_env):
     assert response.status == 200
     data = json.loads(await response.text())
     assert len(data["gym_name"]) == 200
-
-
-# --- Flag-off ---
-
-
-async def test_api_settings_flag_off_404(tmp_path):
-    """With spa_enabled=False, none of the /api/settings routes are reachable."""
-    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
-    try:
-        app = build_app(
-            store,
-            linking,
-            session_secret=SECRET,
-            bot_username=BOT_USERNAME,
-            secure_cookies=False,
-            clock=clock,
-            spa_enabled=False,
-        )
-        async with TestClient(TestServer(app)) as client:
-            cookie = _cookie(member.id, gym.id, clock)
-            for method, path in [
-                ("get", "/api/settings"),
-                ("post", "/api/settings/regenerate-invite"),
-                ("post", "/api/settings/regenerate-coach"),
-                ("post", "/api/settings/gym-name"),
-            ]:
-                if method == "get":
-                    resp = await client.get(path, cookies=cookie)
-                else:
-                    resp = await client.post(path, json={}, cookies=cookie)
-                assert resp.status == 404, f"{method} {path} should be 404, got {resp.status}"
-    finally:
-        await engine.dispose()

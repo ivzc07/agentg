@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useT } from "../hooks/useT";
 import {
@@ -299,12 +300,12 @@ function PresetCard({
           </span>
         )}
         <span className="flex-1" />
-        <a
-          href={`/presets/${preset.id}/routine`}
+        <Link
+          to={`/presets/${preset.id}/routine`}
           className="text-[13px] text-magenta hover:brightness-110 transition-colors"
         >
           {t("edit_preset")}
-        </a>
+        </Link>
       </div>
 
       {/* Apply section */}

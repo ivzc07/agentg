@@ -234,6 +234,47 @@ describe("RoutineEditor", () => {
     await waitFor(() => {
       expect(screen.getByText("Routine saved.")).toBeDefined();
     });
+    // notified: true -> the banner names the Member.
+    expect(screen.getByText("We told Luis.")).toBeInTheDocument();
+  });
+
+  it("omits the notified suffix when the API says nobody was told (P2, PR review)", async () => {
+    const user = userEvent.setup();
+    const routineData = mockRoutineResponse();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () => Promise.resolve(routineData),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            routine_id: 2,
+            routine: routineData.routine,
+            coach_authored: true,
+            routine_author: "Coach Ana",
+            routine_preset_name: null,
+            notified: false,
+          }),
+      } as Response)
+      .mockResolvedValue({
+        ok: true, status: 200,
+        json: () => Promise.resolve(routineData),
+      } as Response);
+
+    renderEditor("/members/1/routine");
+    await waitFor(() => {
+      expect(screen.getByText("Save Routine")).toBeDefined();
+    });
+
+    await user.click(screen.getByText("Save Routine"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Routine saved.")).toBeDefined();
+    });
+    expect(screen.queryByText(/We told/)).not.toBeInTheDocument();
   });
 
   it("shows stale refusal with fresh version on screen", async () => {
@@ -367,6 +408,22 @@ describe("RoutineEditor", () => {
     expect(screen.getByText("deadlift")).toBeDefined();
   });
 
+  it("fills the first empty exercise from the catalog through form state", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockRoutineResponse()),
+    } as Response);
+
+    renderEditor("/members/1/routine");
+    const exerciseInputs = await screen.findAllByPlaceholderText("squat");
+    await user.clear(exerciseInputs[0]);
+    await user.click(screen.getByText("Exercise catalog"));
+    await user.click(screen.getByRole("button", { name: "deadlift" }));
+
+    expect(exerciseInputs[0]).toHaveValue("deadlift");
+  });
+
   // i18n: Spanish weekday names (issue #151, review 2).
   it("renders Spanish weekday names from window.__I18N__._weekdays", async () => {
     (window as any).__I18N__ = {
@@ -454,5 +511,179 @@ describe("RoutineEditor", () => {
       }
       expect(violations).toEqual([]);
     });
+  });
+});
+
+// --- Preset master mode (#154): the same editor pointed at a Preset ---
+
+function renderPresetEditor(initialPath: string) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+  return {
+    ...render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[initialPath]}>
+          <Routes>
+            <Route
+              path="/presets/:presetId/routine"
+              element={<RoutineEditor preset />}
+            />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    ),
+    queryClient,
+  };
+}
+
+function mockPresetRoutineResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    preset_id: 7,
+    name: "Beginner",
+    routine: [
+      {
+        weekday: 0,
+        name: "Preset day",
+        exercises: [{ exercise: "squat", sets: 3, reps: "10" }],
+      },
+    ],
+    routine_id: 42,
+    routine_author: "Coach Ana",
+    catalog: ["squat", "bench press"],
+    ...overrides,
+  };
+}
+
+describe("RoutineEditor preset mode", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    (window as any).__I18N__ = {
+      ...EN_BOOTSTRAP,
+      presets: "Presets",
+      preset_editor_title: "Preset: {name}",
+      preset_master_consequence:
+        "Saving updates every Member still on this Preset.",
+      preset_master_saved: "Preset saved; every linked copy is up to date.",
+    };
+  });
+
+  it("fetches the master from /api/presets/{id}/routine and titles the screen", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockPresetRoutineResponse()),
+    } as Response);
+
+    renderPresetEditor("/presets/7/routine");
+
+    await waitFor(() => {
+      expect(screen.getByText("Preset: Beginner")).toBeInTheDocument();
+    });
+    expect(fetchSpy).toHaveBeenCalledWith("/api/presets/7/routine");
+    // The consequence line: editing a master touches every linked Member.
+    expect(
+      screen.getByText("Saving updates every Member still on this Preset.")
+    ).toBeInTheDocument();
+    // The way back leads to the Presets screen, not a member page.
+    const back = screen.getByRole("link", { name: /Presets/ });
+    expect(back).toHaveAttribute("href", "/presets");
+    // The master's day is loaded into the form.
+    expect(screen.getByDisplayValue("Preset day")).toBeInTheDocument();
+  });
+
+  it("saves through PUT /api/presets/{id}/routine with the stale-check stamp", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () => Promise.resolve(mockPresetRoutineResponse()),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            preset_id: 7,
+            name: "Beginner",
+            routine: [
+              {
+                weekday: 0,
+                name: "Preset day",
+                exercises: [{ exercise: "squat", sets: 3, reps: "10" }],
+              },
+            ],
+            routine_id: 43,
+            routine_author: "Coach Ana",
+            notified: 2,
+          }),
+      } as Response)
+      .mockResolvedValue({
+        // The post-save invalidation refetches the master.
+        ok: true, status: 200,
+        json: () => Promise.resolve(mockPresetRoutineResponse({ routine_id: 43 })),
+      } as Response);
+
+    renderPresetEditor("/presets/7/routine");
+    await waitFor(() => {
+      expect(screen.getByText("Preset: Beginner")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Save Routine" }));
+
+    await waitFor(() => {
+      // The preset save has its own copy - and never the member-notified
+      // suffix naming the preset as if it were a person (P2, PR review).
+      expect(
+        screen.getByText("Preset saved; every linked copy is up to date.")
+      ).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/We told/)).not.toBeInTheDocument();
+    const [url, init] = fetchSpy.mock.calls[1];
+    expect(url).toBe("/api/presets/7/routine");
+    expect(init?.method).toBe("PUT");
+    const body = JSON.parse(String(init?.body));
+    expect(body.base_routine_id).toBe(42); // the stale-check stamp
+    expect(body.workouts[0].name).toBe("Preset day");
+  });
+
+  it("shows the stale refusal with the fresh master", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () => Promise.resolve(mockPresetRoutineResponse()),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: false, status: 409,
+        json: () =>
+          Promise.resolve({
+            error: "This routine changed while you were editing.",
+            fresh_routine: [
+              {
+                weekday: 1,
+                name: "Newer day",
+                exercises: [{ exercise: "squat", sets: 5, reps: "5" }],
+              },
+            ],
+            fresh_routine_id: 99,
+          }),
+      } as Response);
+
+    renderPresetEditor("/presets/7/routine");
+    await waitFor(() => {
+      expect(screen.getByText("Preset: Beginner")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Save Routine" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("This routine changed while you were editing.")
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Newer day/)).toBeInTheDocument();
   });
 });

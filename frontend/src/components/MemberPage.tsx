@@ -1,7 +1,8 @@
+import { LangToggle } from "./LangToggle";
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useT } from "../hooks/useT";
-import { getMonths, getWeekdayInitials, getDecimalMark } from "../lib/i18n";
+import { getMonths, getWeekdayInitials, getDecimalMark, getLang } from "../lib/i18n";
 import { fetchMember, MemberAuthError, MemberNotFoundError, tickOffFlag } from "../api/member";
 import type { MemberPageData, SafetyFlag } from "../types/member";
 import type { RosterMember } from "../types/roster";
@@ -23,6 +24,27 @@ function fmtWeight(weight: number | null, unit: string, t: (key: string) => stri
   const dm = getDecimalMark();
   const formatted = String(weight).replace(".", dm);
   return `${formatted} ${unit}`;
+}
+
+/**
+ * The small source-language tag a foreign quote carries ("EN · textual" /
+ * "ES · as written") — the Member's own words never translate, so a quote
+ * in another language than the page is marked instead (spec-dashboard
+ * §Language; #154 carried this from the server renderer into React).
+ */
+function VerbatimTag({
+  lang,
+  t,
+}: {
+  lang: string | null;
+  t: (key: string) => string;
+}) {
+  if (!lang || lang === getLang()) return null;
+  return (
+    <span className="langtag text-[10px] text-ink-3 uppercase ml-1 not-italic">
+      {lang.toUpperCase()} · {t("verbatim_tag")}
+    </span>
+  );
 }
 
 function SafetyBanner({
@@ -122,6 +144,15 @@ function RoutineCard({
               : t("chip_agent")}
           </span>
         )}
+        <span className="flex-1" />
+        {/* The Edit journey into the Routine editor — the entry point the
+            server member page always had (#100); #154 carries it over. */}
+        <Link
+          to={`/members/${data.member_id}/routine`}
+          className="edit text-[12px] font-normal text-ink-2 hover:text-ink transition-colors duration-fast"
+        >
+          {t("edit")}
+        </Link>
       </h2>
       {data.routine.length === 0 ? (
         <p className="muted text-[13px] text-ink-3">{t("no_routine")}</p>
@@ -183,20 +214,27 @@ function SessionsCard({
                   : t("n_sets").replace("{n}", String(count));
 
             // Collapse sets by (exercise, weight)
-            const collapsed: Map<string, { weight: number | null; repsList: number[]; notes: string[] }> = new Map();
+            const collapsed: Map<
+              string,
+              {
+                weight: number | null;
+                repsList: number[];
+                notes: { text: string; lang: string | null }[];
+              }
+            > = new Map();
             for (const s of session.sets) {
               const key = `${s.exercise}|${s.weight}`;
               const existing = collapsed.get(key);
               if (existing) {
                 existing.repsList.push(s.reps);
-                if (s.note && !existing.notes.includes(s.note)) {
-                  existing.notes.push(s.note);
+                if (s.note && !existing.notes.some((n) => n.text === s.note)) {
+                  existing.notes.push({ text: s.note, lang: s.note_lang });
                 }
               } else {
                 collapsed.set(key, {
                   weight: s.weight,
                   repsList: [s.reps],
-                  notes: s.note ? [s.note] : [],
+                  notes: s.note ? [{ text: s.note, lang: s.note_lang }] : [],
                 });
               }
             }
@@ -219,7 +257,8 @@ function SessionsCard({
                             key={ni}
                             className="said text-[12px] text-ink-3 italic mt-0.5 pl-2"
                           >
-                            “{note}”
+                            “{note.text}”
+                            <VerbatimTag lang={note.lang} t={t} />
                           </div>
                         ))}
                       </div>
@@ -319,7 +358,8 @@ function NotesCard({
           {notes.map((note, i) => (
             <div key={i} className="note text-[13px] mb-1.5">
               <span className="tag text-[10px] mr-1">{note.kind}</span>
-              {note.text}{" "}
+              {note.text}
+              <VerbatimTag lang={note.lang} t={t} />{" "}
               <span className="muted text-ink-3">
                 · {fmtDate(note.on)}
               </span>
@@ -333,7 +373,8 @@ function NotesCard({
               {retired.map((note, i) => (
                 <div key={i} className="note text-[13px] mt-1.5 ml-2 opacity-60">
                   <span className="tag text-[10px] mr-1">{note.kind}</span>
-                  {note.text}{" "}
+                  {note.text}
+                  <VerbatimTag lang={note.lang} t={t} />{" "}
                   <span className="muted text-ink-3">
                     · {t("retired_on").replace(
                       "{date}",
@@ -472,6 +513,8 @@ export function MemberPageContent({
         >
           ← {t("back_to_roster")}
         </Link>
+        <span className="flex-1" />
+        <LangToggle />
       </header>
 
       <main className="max-w-2xl mx-auto px-gut py-6">
@@ -494,12 +537,26 @@ export function MemberPage({ member: paneMember }: { member?: RosterMember } = {
   const page = Number(sp.get("page") ?? 1);
   const rosterView = sp.get("view") ?? "table";
 
+  // A mistyped id ("/members/abc") parses to NaN; the query never runs,
+  // so without this it would land on the generic error branch. The spec's
+  // rule is the same bare 404 for anything unreachable — mistyped included
+  // (P3, PR #206 review).
+  const idValid = Number.isInteger(id) && id > 0;
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["member", id, page],
     queryFn: () => fetchMember(id, page),
-    enabled: id > 0,
+    enabled: idValid,
     staleTime: 30_000,
   });
+
+  if (!idValid) {
+    return (
+      <div className="flex items-center justify-center min-h-[200px] text-ink-3 text-[14px]">
+        404
+      </div>
+    );
+  }
 
   if (isLoading) {
     return (
