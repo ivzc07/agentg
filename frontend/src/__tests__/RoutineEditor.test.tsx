@@ -81,15 +81,31 @@ function buildTextColorInventory(): Set<string> {
 
 const TEXT_COLOR_INVENTORY = buildTextColorInventory();
 
-/** True when `cls` is a `text-*` colour utility.  Always false for
- *  arbitrary-value classes (`text-[14px]`), sizing, alignment, or decoration
- *  utilities. */
+/** True when the content inside `text-[...]` looks like a colour (hex, rgb(),
+ *  hsl(), etc.).  Returns false for sizing values like `text-[14px]` and
+ *  ambiguous CSS variables like `text-[--custom]`. */
+function isArbitraryTextColor(cls: string): boolean {
+  // Match text-[<value>] with an optional /<alpha-modifier>
+  const m = cls.match(/^text-\[(.+?)\](?:\/\d+)?$/);
+  if (!m) return false;
+  const inner = m[1];
+  // Hex colour: #rgb, #rrggbb, #rgba, #rrggbbaa
+  if (/^#[0-9a-fA-F]{3,8}$/.test(inner)) return true;
+  // Colour functions
+  if (/^(rgb|rgba|hsl|hsla|hwb|lab|lch|oklch|oklab|color)\(/.test(inner)) return true;
+  return false;
+}
+
+/** True when `cls` is a `text-*` colour utility.  Also detects arbitrary-value
+ *  colour classes like `text-[#fff]`.  Returns false for sizing, alignment,
+ *  decoration, and other non-colour `text-*` utilities. */
 function isTextColorClass(cls: string): boolean {
-  return (
-    cls.startsWith("text-") &&
-    !cls.startsWith("text-[") &&
-    TEXT_COLOR_INVENTORY.has(cls)
-  );
+  if (!cls.startsWith("text-")) return false;
+  // Known tokens from the inventory (arbitrary-value classes never match here)
+  if (TEXT_COLOR_INVENTORY.has(cls)) return true;
+  // Arbitrary-value colour classes: text-[#fff], text-[rgb(…)], etc.
+  if (isArbitraryTextColor(cls)) return true;
+  return false;
 }
 
 /** Split a className string into individual tokens. */
@@ -674,10 +690,23 @@ describe("RoutineEditor", () => {
         expect(isTextColorClass("text-slate-950")).toBe(true);
       });
 
-      it("rejects arbitrary-value classes like text-[14px]", () => {
+      it("rejects non-colour arbitrary-value classes like text-[14px]", () => {
         expect(isTextColorClass("text-[14px]")).toBe(false);
-        expect(isTextColorClass("text-[#f00]")).toBe(false);
         expect(isTextColorClass("text-[--custom]")).toBe(false);
+      });
+
+      it("recognises arbitrary-value colour classes", () => {
+        expect(isTextColorClass("text-[#f00]")).toBe(true);
+        expect(isTextColorClass("text-[#fff]")).toBe(true);
+        expect(isTextColorClass("text-[#ffffff]")).toBe(true);
+        expect(isTextColorClass("text-[#000000]")).toBe(true);
+        expect(isTextColorClass("text-[rgb(255,0,0)]")).toBe(true);
+        expect(isTextColorClass("text-[hsl(0,100%,50%)]")).toBe(true);
+      });
+
+      it("recognises arbitrary-value colour classes with alpha modifier", () => {
+        expect(isTextColorClass("text-[#fff]/50")).toBe(true);
+        expect(isTextColorClass("text-[#ffffff]/10")).toBe(true);
       });
 
       it("rejects typography / non-colour text-* utilities", () => {
