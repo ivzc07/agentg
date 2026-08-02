@@ -25,7 +25,8 @@ def test_script_exists():
     assert SCRIPT.is_file(), "the merge gate script is missing"
 
 
-def test_gitattributes_pins_the_script_to_lf():
+@pytest.mark.parametrize("path", ["scripts/pi-review", "tools/example.sh"])
+def test_gitattributes_pins_the_script_to_lf(path):
     """Ask git itself, not the filesystem.
 
     Checking the bytes on disk would pass trivially on Linux CI (where
@@ -35,14 +36,14 @@ def test_gitattributes_pins_the_script_to_lf():
     fails this test in CI too.
     """
     result = subprocess.run(
-        ["git", "check-attr", "eol", "--", "scripts/pi-review"],
+        ["git", "check-attr", "eol", "--", path],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=True,
     )
     assert result.stdout.strip().endswith(": eol: lf"), (
-        "scripts/pi-review is no longer pinned to LF in .gitattributes; "
+        f"{path} is no longer pinned to LF in .gitattributes; "
         "Git for Windows' core.autocrlf=true will rewrite it to CRLF on "
         f"checkout and break the shebang (got: {result.stdout.strip()!r})"
     )
@@ -141,6 +142,17 @@ def test_guard_stays_silent_off_wsl(tmp_path, kernel):
 
 
 def _find_sh() -> str | None:
+    """A POSIX shell that is not WSL.
+
+    A bare `which("bash")` can resolve to C:\\Windows\\System32\\bash.exe - the
+    WSL launcher this script exists to guard against. WSL cannot open the
+    script via its Windows path, so using it here would fail these tests
+    spuriously rather than skip them.
+    """
     from shutil import which
 
-    return which("sh") or which("bash")
+    for name in ("sh", "bash"):
+        found = which(name)
+        if found and "system32" not in found.lower():
+            return found
+    return None
