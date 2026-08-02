@@ -79,6 +79,8 @@ STRINGS = {
         "snoozed_tag": "en pausa hasta el {date}",
         "lapsed_tag": "se perdió",
         "no_sessions_yet": "Aún sin sesiones",
+        "roster_error": "No se pudo cargar el roster.",
+        "roster_retry": "Reintentar",
         "trained_today": "entrenó hoy",
         "one_day_away": "1 día sin venir",
         "days_away": "{n} días sin venir",
@@ -247,6 +249,19 @@ STRINGS = {
             "¿Retirar este Preset? Los miembros conservan su copia, pero el "
             "Preset ya no se podrá editar ni aplicar."
         ),
+        "settings_load_error": "No se pudieron cargar los ajustes.",
+        "nav_dashboard": "Dashboard",
+        "presets_loading": "Cargando…",
+        "presets_error": "Algo salió mal al cargar tus presets.",
+        "presets_retry": "Reintentar",
+        # Routine editor i18n (issue #151, review 2).
+        "network_error": "Error de red — por favor, inténtalo de nuevo.",
+        "member_not_found": "Miembro no encontrado.",
+        "remove_day": "Quitar día",
+        "remove_exercise": "Quitar ejercicio",
+        "add_day": "Añadir día",
+        "add_exercise": "Añadir ejercicio",
+        "save_failed": "No se pudo guardar — intentá de nuevo.",
     },
     "en": {
         "settings": "Settings",
@@ -261,6 +276,8 @@ STRINGS = {
         "snoozed_tag": "paused until {date}",
         "lapsed_tag": "lapsed",
         "no_sessions_yet": "No sessions yet",
+        "roster_error": "Couldn't load the roster.",
+        "roster_retry": "Retry",
         "trained_today": "trained today",
         "one_day_away": "1 day away",
         "days_away": "{n} days away",
@@ -419,6 +436,19 @@ STRINGS = {
             "Retire this preset? Members keep their copies, but the preset "
             "can no longer be edited or applied."
         ),
+        "settings_load_error": "Could not load settings.",
+        "nav_dashboard": "Dashboard",
+        "presets_loading": "Loading…",
+        "presets_error": "Something went wrong loading your presets.",
+        "presets_retry": "Retry",
+        # Routine editor i18n (issue #151, review 2).
+        "network_error": "Network error — please try again.",
+        "member_not_found": "Member not found.",
+        "remove_day": "Remove day",
+        "remove_exercise": "Remove exercise",
+        "add_day": "Add day",
+        "add_exercise": "Add exercise",
+        "save_failed": "Could not save — try again.",
     },
 }
 
@@ -475,16 +505,10 @@ def away_text(has_sessions: bool, gap_days: int, lang: str) -> str:
 # bien, mal, canso, no) break the tie the other way.
 
 _ES_WORDS = frozenset(
-    "el la los las de del que un una con por para mi mis su sus se al no "
-    "quiero puedo solo antes después hacer muy más cuando porque entrenar "
-    "dolor pero también tiene estoy lo es son está me duele siento mucho "
-    "bien mal canso".split()
+    ["el", "la", "los", "las", "de", "del", "que", "un", "una", "con", "por", "para", "mi", "mis", "su", "sus", "se", "al", "no", "quiero", "puedo", "solo", "antes", "después", "hacer", "muy", "más", "cuando", "porque", "entrenar", "dolor", "pero", "también", "tiene", "estoy", "lo", "es", "son", "está", "me", "duele", "siento", "mucho", "bien", "mal", "canso"]
 )
 _EN_WORDS = frozenset(
-    "the and to of in is it i me i'm my can want only before with for on at "
-    "not hates will them train pain week but also have has am are was were "
-    "would could should this that these those from after when what who "
-    "help i'll i've i'd im".split()
+    ["the", "and", "to", "of", "in", "is", "it", "i", "me", "i'm", "my", "can", "want", "only", "before", "with", "for", "on", "at", "not", "hates", "will", "them", "train", "pain", "week", "but", "also", "have", "has", "am", "are", "was", "were", "would", "could", "should", "this", "that", "these", "those", "from", "after", "when", "what", "who", "help", "i'll", "i've", "i'd", "im"]
 )
 _ES_ACCENTS = re.compile(r"[áéíóúñ¿¡]")
 _WORDS = re.compile(r"[a-záéíóúñü]+(?:'[a-z]+)?")

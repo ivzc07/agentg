@@ -38,3 +38,7 @@ class MemberContext:
     # Exercises the Agent asked to demo this turn; the channel sends them
     # after the reply so the agent loop stays channel-agnostic (ADR 0001).
     demo_requests: list[str] = field(default_factory=list)
+    # True when delete_my_data confirmed and wiped everything; the runtime
+    # clears the SDK session again after the run to remove the turn's own
+    # residue (issue #166).
+    forgotten: bool = False

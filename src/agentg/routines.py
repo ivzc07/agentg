@@ -318,6 +318,21 @@ class RoutineStore:
                 )
             )
 
+    async def preset_ids_with_masters(self, gym_id: int) -> set[int]:
+        """Return the set of live Preset ids that have an active master Routine."""
+        async with self._sessions() as db:
+            ids = await db.scalars(
+                select(Routine.preset_id)
+                .join(RoutinePreset, Routine.preset_id == RoutinePreset.id)
+                .where(
+                    RoutinePreset.gym_id == gym_id,
+                    RoutinePreset.retired_at.is_(None),
+                    Routine.member_id.is_(None),
+                    Routine.is_active.is_(True),
+                )
+            )
+            return set(ids)
+
     async def set_default_preset(self, gym_id: int, preset_id: int | None) -> None:
         """Set or clear the Gym's one live Preset default (issue #103)."""
         async with self._sessions() as db:
