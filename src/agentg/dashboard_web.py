@@ -92,7 +92,7 @@ from agentg.dashboard_store import (
     RosterRow,
     RoutineDayView,
 )
-from agentg.linking_store import GYM_NAME_MAX_LENGTH, LinkingStore
+from agentg.linking_store import LinkingStore
 from agentg.models import Gym, Member, RoutinePreset
 from agentg.routines import (
     DuplicatePresetNameError,
@@ -577,114 +577,6 @@ def _preset_editor_view(preset: RoutinePreset, master: dict | None) -> RoutineEd
 # --- The tenant Settings screen (spec-dashboard §Settings) ---
 
 
-def _copy_button(url: str, t: dict) -> str:
-    return (
-        f'<button type="button" class="copy" data-copy="{escape(url, quote=True)}"'
-        f' data-done="{escape(t["copied"], quote=True)}"'
-        f' data-failed="{escape(t["copy_failed"], quote=True)}">'
-        f'{t["copy"]}</button>'
-    )
-
-
-def _regenerate_form(action: str, warning: str, t: dict) -> str:
-    """A Regenerate button the page script keeps disabled until the confirm
-    word is typed. The script also applies the initial disable: without JS
-    the button stays live and the POST's own word check — the load-bearing
-    one — still refuses a wrong confirm."""
-    word = t["confirm_word"]
-    return f"""<form method="post" action="{action}" data-confirm="{word}">
-<p>{warning}</p>
-<p><label>{t["confirm_prompt"].format(word=word)}
-<input type="text" name="confirm" autocomplete="off" required></label>
-<button type="submit">{t["regenerate"]}</button></p>
-</form>"""
-
-
-SETTINGS_SCRIPT = """
-document.querySelectorAll("button.copy").forEach(function (button) {
-  button.addEventListener("click", function () {
-    // navigator.clipboard needs a secure context — plain-HTTP origins leave
-    // it undefined — and writeText itself can reject (denied permission).
-    var restore = function () {
-      setTimeout(function () { button.textContent = button.dataset.idle; }, 2000);
-    };
-    button.dataset.idle = button.dataset.idle || button.textContent;
-    if (!navigator.clipboard) {
-      button.textContent = button.dataset.failed;
-      restore();
-      return;
-    }
-    navigator.clipboard.writeText(button.dataset.copy).then(
-      function () { button.textContent = button.dataset.done; restore(); },
-      function () { button.textContent = button.dataset.failed; restore(); }
-    );
-  });
-});
-document.querySelectorAll("form[data-confirm]").forEach(function (form) {
-  var input = form.querySelector("input[name=confirm]");
-  var submit = form.querySelector("button[type=submit]");
-  submit.disabled = true;
-  input.addEventListener("input", function () {
-    submit.disabled = input.value.trim().toLowerCase() !== form.dataset.confirm;
-  });
-});
-"""
-
-
-def _settings_page(
-    gym: Gym, bot_username: str, lang: str, next_path: str, error: str = "", success: str = ""
-) -> str:
-    """The whole tenant Settings screen: two invite links, two regenerations,
-    and the gym name — each a distinct card block (spec-dashboard §Settings,
-    issue #139)."""
-    t = STRINGS[lang]
-    member_url = _invite_url(bot_username, gym.invite_code)
-    coach_url = _invite_url(bot_username, gym.coach_invite_code or "")
-    # The error strings are the dashboard's own (confirm_mismatch carries
-    # markup), never user input — rendered as-is like every STRINGS value.
-    notice = success + (f'<p class="error">{error}</p>' if error else "")
-    content = f"""{_chrome(gym.name, t, next_path, lang, active="settings")}
-<div class="settings-wrap">
-<h1>{t["settings_title"]}</h1>
-{notice}
-<section class="setcard" id="invite">
-<h2>{t["invite_section"]}</h2>
-<p>{t["invite_blurb"]} <b>{escape(gym.name)}</b>.</p>
-<p><code>{escape(member_url)}</code> {_copy_button(member_url, t)}</p>
-<div class="qr">{_qr_svg(member_url)}</div>
-</section>
-<section class="setcard consequential" id="regenerate-invite">
-<h2>{t["regenerate"]}: {t["invite_section"].lower()}</h2>
-{_regenerate_form("/settings/regenerate-invite", t["invite_warning"], t)}
-</section>
-<section class="setcard" id="coach-link">
-<h2>{t["coach_section"]}</h2>
-<p>{t["coach_blurb"]}</p>
-<p><code>{escape(coach_url)}</code> {_copy_button(coach_url, t)}</p>
-</section>
-<section class="setcard consequential" id="regenerate-coach">
-<h2>{t["regenerate"]}: {t["coach_section"].lower()}</h2>
-{_regenerate_form("/settings/regenerate-coach", t["coach_warning"], t)}
-</section>
-<section class="setcard" id="gym-name">
-<h2>{t["gym_name_section"]}</h2>
-<p>{t["gym_name_help"]}</p>
-<form method="post" action="/settings/gym-name">
-<p><input type="text" name="name" value="{escape(gym.name, quote=True)}"
-maxlength="{GYM_NAME_MAX_LENGTH}" required>
-<button type="submit">{t["save"]}</button></p>
-</form>
-</section>
-<p><a class="back" href="/">{t["back_to_dashboard"]}</a></p>
-</div>"""
-    return _document(
-        f"{t['settings_title']} — {escape(gym.name)}",
-        lang,
-        content,
-        scripts=SETTINGS_SCRIPT,
-    )
-
-
 def sign_session(member_id: int, gym_id: int, secret: str, now: datetime) -> str:
     """``member:gym:expiry:signature`` — the expiry is inside the signature."""
     expires = int((now + SESSION_TTL).timestamp())
@@ -770,91 +662,6 @@ def build_app(
                 secure=secure_cookies,
                 samesite="Lax",
             )
-        raise response
-
-    async def settings(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        response = web.Response(
-            text=_settings_page(
-                gym,
-                bot_username,
-                lang,
-                _next_path_sans_done(request),
-                success=_done_notice(request.query.get("done"), STRINGS[lang]),
-            ),
-            content_type="text/html",
-        )
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
-        return response
-
-    async def _regenerate(request: web.Request, which: str) -> web.Response:
-        """Regenerate one invite code behind the typed confirm. A wrong or
-        missing confirm changes nothing — the form's JS gate is convenience;
-        this check is the load-bearing one."""
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        t = STRINGS[lang]
-        form = await request.post()
-        confirm = form.get("confirm", "")
-        if not isinstance(confirm, str) or confirm.strip().lower() != t["confirm_word"]:
-            # The error re-render points the language toggle at /settings —
-            # this POST-only path would 405 a GET.
-            response = web.Response(
-                text=_settings_page(
-                    gym,
-                    bot_username,
-                    lang,
-                    "/settings",
-                    error=t["confirm_mismatch"].format(word=t["confirm_word"]),
-                ),
-                content_type="text/html",
-            )
-            set_session(response, member.id, gym.id)  # sliding 90-day refresh
-            return response
-        if which == "invite":
-            await linking.regenerate_invite_code(gym.id)
-        else:
-            await linking.regenerate_coach_invite_code(gym.id)
-        response = web.HTTPFound("/settings?done=link_regenerated")
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
-        raise response
-
-    async def regenerate_invite(request: web.Request) -> web.Response:
-        return await _regenerate(request, "invite")
-
-    async def regenerate_coach(request: web.Request) -> web.Response:
-        return await _regenerate(request, "coach")
-
-    async def gym_name(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        t = STRINGS[lang]
-        form = await request.post()
-        name = form.get("name", "")
-        if not isinstance(name, str) or not name.strip():
-            # Same as the confirm mismatch above: the toggle must not point
-            # at this POST-only path.
-            response = web.Response(
-                text=_settings_page(
-                    gym, bot_username, lang, "/settings", error=t["gym_name_empty"]
-                ),
-                content_type="text/html",
-            )
-            set_session(response, member.id, gym.id)  # sliding 90-day refresh
-            return response
-        await linking.rename_gym(gym.id, name)
-        response = web.HTTPFound("/settings?done=saved")
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
         raise response
 
     async def login_redeem(request: web.Request) -> web.Response:
@@ -1737,10 +1544,7 @@ def build_app(
     app.router.add_get("/members/{member_id}", spa_shell)
     app.router.add_get("/presets", spa_shell)
     app.router.add_get("/presets/{preset_id}/routine", spa_shell)
-    app.router.add_get("/settings", settings)
-    app.router.add_post("/settings/regenerate-invite", regenerate_invite)
-    app.router.add_post("/settings/regenerate-coach", regenerate_coach)
-    app.router.add_post("/settings/gym-name", gym_name)
+    app.router.add_get("/settings", spa_shell)
     app.router.add_get("/lang/{lang}", set_language)
     # GET /login/{token} serves the SPA login shell (public — the React
     # interstitial validates the token via /api/login/{token} without
