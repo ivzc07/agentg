@@ -8,7 +8,7 @@ fact, not a fixed enum.
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentg.models import Exercise
@@ -19,13 +19,18 @@ def normalize_exercise_name(text: str) -> str:
 
 
 async def find_exercise(db: AsyncSession, norm: str) -> Exercise | None:
-    found = await db.scalar(select(Exercise).where(Exercise.name == norm))
-    if found is not None:
-        return found
-    for candidate in await db.scalars(select(Exercise)):  # the catalog stays small
-        if norm in [alias for alias in candidate.aliases.split(",") if alias]:
-            return candidate
-    return None
+    """Resolve an Exercise by exact name, then by comma-separated alias.
+
+    Aliases are matched with comma boundary guards so a search for 'curl'
+    never falsely hits 'hammer curls' (issue #178)."""
+    return await db.scalar(
+        select(Exercise).where(
+            or_(
+                Exercise.name == norm,
+                func.concat(',', Exercise.aliases, ',').contains(',' + norm + ',', autoescape=True),
+            )
+        )
+    )
 
 
 async def find_or_create_exercise(db: AsyncSession, name: str) -> Exercise:
