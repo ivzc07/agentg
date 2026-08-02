@@ -600,6 +600,12 @@ async def test_partial_bundle_does_not_crash_boot(tmp_path, monkeypatch):
             assert asset.status == 200
             text = await asset.text()
             assert "stub" not in text and BOUNCE_MARKER in text
+            # And a signed-in coach gets the honest 503, not a shell whose
+            # bundle files cannot load — a blank page hiding the real
+            # problem (P3, PR #206 review).
+            cookie = sign_session(member.id, gym.id, SECRET, clock())
+            shell = await client.get("/", cookies={SESSION_COOKIE: cookie})
+            assert shell.status == 503
     finally:
         await engine.dispose()
 
@@ -956,6 +962,20 @@ async def test_api_seed_not_an_http_endpoint(spa_env):
 
 
 # --- SPA fallback for React Router deep links (issue #149) ---
+
+
+async def test_unknown_api_paths_answer_json_404_not_the_shell(spa_env):
+    """A typo'd /api/* GET must 404 as JSON — the HTML catch-all would
+    mask it as a 200 during development (P3, PR #206 review)."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.get(
+        "/api/no-such-endpoint", cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 404
+    assert response.content_type == "application/json"
+    assert json.loads(await response.text()) == {"error": "not found"}
 
 
 async def test_spa_fallback_serves_shell_for_deep_links(spa_env):

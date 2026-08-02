@@ -536,6 +536,14 @@ describe("MemberPage (fetch integration)", () => {
     expect(screen.getByText("Loading…")).toBeInTheDocument();
   });
 
+  it("shows the bare 404 for a mistyped non-numeric id (P3, PR #206 review)", async () => {
+    const fetchSpy = vi.spyOn(memberApi, "fetchMember");
+    renderPageWithRouter(["/members/abc"]);
+
+    expect(await screen.findByText("404")).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("shows 404 on MemberNotFoundError", async () => {
     vi.spyOn(memberApi, "fetchMember").mockRejectedValue(
       new memberApi.MemberNotFoundError(99)

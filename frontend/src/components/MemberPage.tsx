@@ -537,12 +537,26 @@ export function MemberPage({ member: paneMember }: { member?: RosterMember } = {
   const page = Number(sp.get("page") ?? 1);
   const rosterView = sp.get("view") ?? "table";
 
+  // A mistyped id ("/members/abc") parses to NaN; the query never runs,
+  // so without this it would land on the generic error branch. The spec's
+  // rule is the same bare 404 for anything unreachable — mistyped included
+  // (P3, PR #206 review).
+  const idValid = Number.isInteger(id) && id > 0;
+
   const { data, isLoading, error } = useQuery({
     queryKey: ["member", id, page],
     queryFn: () => fetchMember(id, page),
-    enabled: id > 0,
+    enabled: idValid,
     staleTime: 30_000,
   });
+
+  if (!idValid) {
+    return (
+      <div className="flex items-center justify-center min-h-[200px] text-ink-3 text-[14px]">
+        404
+      </div>
+    );
+  }
 
   if (isLoading) {
     return (

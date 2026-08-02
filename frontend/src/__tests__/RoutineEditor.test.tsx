@@ -234,6 +234,47 @@ describe("RoutineEditor", () => {
     await waitFor(() => {
       expect(screen.getByText("Routine saved.")).toBeDefined();
     });
+    // notified: true -> the banner names the Member.
+    expect(screen.getByText("We told Luis.")).toBeInTheDocument();
+  });
+
+  it("omits the notified suffix when the API says nobody was told (P2, PR review)", async () => {
+    const user = userEvent.setup();
+    const routineData = mockRoutineResponse();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () => Promise.resolve(routineData),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            routine_id: 2,
+            routine: routineData.routine,
+            coach_authored: true,
+            routine_author: "Coach Ana",
+            routine_preset_name: null,
+            notified: false,
+          }),
+      } as Response)
+      .mockResolvedValue({
+        ok: true, status: 200,
+        json: () => Promise.resolve(routineData),
+      } as Response);
+
+    renderEditor("/members/1/routine");
+    await waitFor(() => {
+      expect(screen.getByText("Save Routine")).toBeDefined();
+    });
+
+    await user.click(screen.getByText("Save Routine"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Routine saved.")).toBeDefined();
+    });
+    expect(screen.queryByText(/We told/)).not.toBeInTheDocument();
   });
 
   it("shows stale refusal with fresh version on screen", async () => {
@@ -511,6 +552,7 @@ describe("RoutineEditor preset mode", () => {
       preset_editor_title: "Preset: {name}",
       preset_master_consequence:
         "Saving updates every Member still on this Preset.",
+      preset_master_saved: "Preset saved; every linked copy is up to date.",
     };
   });
 
@@ -577,8 +619,13 @@ describe("RoutineEditor preset mode", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save Routine" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Routine saved.")).toBeInTheDocument();
+      // The preset save has its own copy - and never the member-notified
+      // suffix naming the preset as if it were a person (P2, PR review).
+      expect(
+        screen.getByText("Preset saved; every linked copy is up to date.")
+      ).toBeInTheDocument();
     });
+    expect(screen.queryByText(/We told/)).not.toBeInTheDocument();
     const [url, init] = fetchSpy.mock.calls[1];
     expect(url).toBe("/api/presets/7/routine");
     expect(init?.method).toBe("PUT");

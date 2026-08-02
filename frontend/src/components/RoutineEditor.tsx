@@ -117,6 +117,8 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
   const [feedback, setFeedback] = useState<{
     type: "success" | "error";
     message: string;
+    /** Whether the save's Member notification actually went out. */
+    notified?: boolean;
     freshRoutine?: RoutineDay[];
   } | null>(null);
 
@@ -191,7 +193,11 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
       if ("ok" in result && result.ok) {
         setFeedback({
           type: "success",
-          message: t("routine_saved"),
+          // The preset master's save has its own copy (the linked copies
+          // were updated); the member save names the Member — but only
+          // when the notification actually went out (see the banner).
+          message: preset ? t("preset_master_saved") : t("routine_saved"),
+          notified: !preset && result.notified === true,
         });
         // Update form with fresh data from server
         reset({
@@ -332,7 +338,7 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
           >
             <Check className="w-4 h-4 flex-shrink-0" />
             <span>{feedback.message}</span>
-            {data.name && (
+            {feedback.notified && (
               <span>{t("member_notified").replace("{name}", data.name)}</span>
             )}
           </div>

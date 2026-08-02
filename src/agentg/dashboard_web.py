@@ -1270,9 +1270,14 @@ def build_app(
         return html
 
     def _read_spa_index() -> str | None:
-        """Read the Vite-built index.html; ``None`` if not built."""
+        """Read the Vite-built index.html; ``None`` if not built.
+
+        A dist/ with index.html but no assets/ is treated as not built too:
+        serving a shell whose bundle files cannot load would render a blank
+        page, where the 503 says what is actually wrong (spec-dashboard
+        §Stack; P3, PR #206 review)."""
         index_path = resolved_dist / "index.html"
-        if not index_path.exists():
+        if not index_path.exists() or not (resolved_dist / "assets").is_dir():
             return None
         return index_path.read_text(encoding="utf-8")
 
@@ -1373,6 +1378,13 @@ def build_app(
             "run `npm run build` in frontend/",
             resolved_dist / "assets",
         )
+    # Unknown /api/* paths answer a JSON 404 — they must never fall through
+    # to the HTML shell, which would mask a typo'd endpoint as a 200 during
+    # development (P3, PR #206 review).
+    async def api_not_found(request: web.Request) -> web.Response:
+        return web.json_response({"error": "not found"}, status=404)
+
+    app.router.add_get("/api/{tail:.*}", api_not_found)
     # SPA fallback, registered last so every real route above wins: any
     # unmatched GET is a React Router deep link on a cold load and gets the
     # authenticated shell (issue #149).
