@@ -1,15 +1,14 @@
 """`scripts/pi-review` must stay runnable on a fresh Windows worktree.
 
 The repo's merge gate is `scripts/pi-review`, so the script breaking is not a
-cosmetic problem - it blocks every PR. Two Windows-specific traps have bitten
-it before, and both are regressions a test can catch:
+cosmetic problem - it blocks every PR. Two Windows-specific traps have bitten it
+before: CRLF line endings breaking the shebang, and `bash` on the PATH resolving
+to WSL, which cannot read a linked worktree. These tests hold both closed.
 
-1. Git for Windows sets `core.autocrlf=true` in its SYSTEM gitconfig, so every
-   clone and `git worktree add` rewrote the script to CRLF. A CRLF shebang makes
-   the kernel search for an interpreter named `sh\r`. `.gitattributes` pins the
-   script to LF; these tests assert that pin is still in force.
-2. `bash` on the PATH can resolve to WSL, which cannot read a linked worktree's
-   Windows-path `.git` file. The script guards against that up front.
+Why each trap happens and why the fix is shaped the way it is, is documented
+once in `docs/agents/pr-merges.md` ("Windows environment traps") and in the
+`.gitattributes` comment block - deliberately not restated here, so the policy
+has one place to change rather than three.
 """
 
 import subprocess

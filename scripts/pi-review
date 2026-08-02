@@ -34,8 +34,11 @@ pi-review: running under WSL bash, which cannot read this repository.
   A linked git worktree records its metadata as a Windows path, and WSL cannot
   resolve it - git would fail with "fatal: not a git repository: /mnt/c/...".
 
-  Re-run from Git Bash instead:
+  Re-run from Git Bash instead - the bash.exe inside your Git for Windows
+  install, typically:
     "C:\\Program Files\\Git\\bin\\bash.exe" scripts/pi-review ${PR}
+  A per-user install lives under %LOCALAPPDATA%\\Programs\\Git instead; if
+  neither path exists, \`where.exe bash\` will list the candidates.
 EOF
     exit 1
 fi
