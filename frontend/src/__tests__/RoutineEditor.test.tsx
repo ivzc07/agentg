@@ -114,15 +114,28 @@ function isArbitraryTextColor(cls: string): boolean {
   return looksLikeColor(inner);
 }
 
+/** Strip a Tailwind slash-opacity modifier (e.g. text-bg/50 → text-bg,
+ *  text-red-500/25 → text-red-500) so the base utility can be classified
+ *  against the inventory.  Non-slash classes are returned unchanged. */
+function stripOpacityModifier(cls: string): string {
+  return cls.replace(/\/\d+$/, "");
+}
+
 /** True when `cls` is a `text-*` colour utility.  Also detects arbitrary-value
  *  colour classes like `text-[#fff]`.  Returns false for sizing, alignment,
- *  decoration, and other non-colour `text-*` utilities. */
+ *  decoration, and other non-colour `text-*` utilities.
+ *
+ *  Slash-opacity variants (text-bg/50, text-white/50, text-red-500/25) are
+ *  classified by stripping the modifier and checking the base class. */
 function isTextColorClass(cls: string): boolean {
   if (!cls.startsWith("text-")) return false;
+  // Strip slash-opacity modifier before classifying (P2, PR review)
+  const base = stripOpacityModifier(cls);
   // Known tokens from the inventory (arbitrary-value classes never match here)
-  if (TEXT_COLOR_INVENTORY.has(cls)) return true;
+  if (TEXT_COLOR_INVENTORY.has(base)) return true;
   // Arbitrary-value colour classes: text-[#fff], text-[rgb(…)], etc.
-  if (isArbitraryTextColor(cls)) return true;
+  // (isArbitraryTextColor already handles its own slash-opacity suffix)
+  if (isArbitraryTextColor(base)) return true;
   return false;
 }
 
@@ -757,6 +770,33 @@ describe("RoutineEditor", () => {
         expect(isTextColorClass("text-nowrap")).toBe(false);
         expect(isTextColorClass("text-opacity-50")).toBe(false);
       });
+
+      // P2, PR review: slash-opacity colour variants
+      it("recognises slash-opacity colour variants", () => {
+        // Standard keywords with opacity
+        expect(isTextColorClass("text-white/50")).toBe(true);
+        expect(isTextColorClass("text-black/10")).toBe(true);
+        expect(isTextColorClass("text-current/75")).toBe(true);
+        expect(isTextColorClass("text-transparent/0")).toBe(true);
+
+        // Project design tokens with opacity
+        expect(isTextColorClass("text-bg/50")).toBe(true);
+        expect(isTextColorClass("text-magenta/25")).toBe(true);
+        expect(isTextColorClass("text-ink/80")).toBe(true);
+        expect(isTextColorClass("text-ink-2/60")).toBe(true);
+
+        // Standard palette with opacity
+        expect(isTextColorClass("text-red-500/25")).toBe(true);
+        expect(isTextColorClass("text-slate-950/5")).toBe(true);
+      });
+
+      it("rejects non-colour text-* utilities that resemble slash-opacity", () => {
+        // text-opacity-50 is a standalone non-colour utility, not a slash variant
+        expect(isTextColorClass("text-opacity-50")).toBe(false);
+        // Arbitrary non-colour values with a slash should still be rejected
+        expect(isTextColorClass("text-[14px]/50")).toBe(false);
+        expect(isTextColorClass("text-[font-size:14px]/50")).toBe(false);
+      });
     });
 
     it("rejects modifier-only background (lookbehind guard)", () => {
@@ -780,6 +820,23 @@ describe("RoutineEditor", () => {
       expect(colorClasses).toHaveLength(2);
       expect(colorClasses).toContain("text-bg");
       expect(colorClasses).toContain("text-white");
+    });
+
+    it("rejects conflicting slash-opacity text-color tokens on the same element", () => {
+      // A className with text-bg and a slash-opacity colour variant must be
+      // flagged — the opacity-modified utility is still a colour class (P2, PR review).
+      const tokens = classTokens("text-bg text-white/50 bg-magenta");
+      const colorClasses = tokens.filter(isTextColorClass);
+      expect(colorClasses).toHaveLength(2);
+      expect(colorClasses).toContain("text-bg");
+      expect(colorClasses).toContain("text-white/50");
+
+      // Same with a project token slash-opacity variant
+      const tokens2 = classTokens("text-bg text-bg/50 bg-magenta");
+      const colorClasses2 = tokens2.filter(isTextColorClass);
+      expect(colorClasses2).toHaveLength(2);
+      expect(colorClasses2).toContain("text-bg");
+      expect(colorClasses2).toContain("text-bg/50");
     });
   });
 
