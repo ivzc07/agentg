@@ -356,6 +356,55 @@ async def test_concurrent_redemption_and_regeneration_serialise(store):
         assert linked is None
 
 
+async def test_redeem_member_code_holds_write_lock_blocking_regeneration(store):
+    """The no-op UPDATE in ``_redeem_member_code`` holds a write lock on the
+    Gym row, blocking a concurrent regeneration until the redemption commits.
+
+    This lock serialisation is what makes redemption atomic.  A plain
+    SELECT-then-INSERT would not acquire a write lock, allowing regeneration
+    to commit between the check and the INSERT — producing a stale Member
+    linked with an already-expired code.  This test would fail under such a
+    non-atomic implementation because regeneration would finish before the
+    assertion observes it still blocked."""
+    gym = await store.create_gym("Iron Temple")
+    code = gym.invite_code
+    sessions = async_sessionmaker(store.engine)
+
+    lock_held = asyncio.Event()
+    regenerating = asyncio.Event()
+    regeneration_finished = False
+
+    async def redeem():
+        async with sessions() as db:
+            await _redeem_member_code(db, gym.id, code)
+            lock_held.set()
+            # Wait for the regeneration task to reach its blocking UPDATE
+            await regenerating.wait()
+            # Tiny yield so the event loop can try to progress regenerate;
+            # it can't because the write lock still blocks the UPDATE.
+            await asyncio.sleep(0.05)
+            assert not regeneration_finished, (
+                "regeneration should be blocked on the write lock; "
+                "a plain SELECT would allow it to finish"
+            )
+            await _link_member_in_session(db, gym.id, "Sam", "telegram", "99")
+            await db.commit()
+
+    async def regenerate():
+        await lock_held.wait()
+        regenerating.set()  # signal: about to issue the blocking UPDATE
+        await store.regenerate_invite_code(gym.id)
+        nonlocal regeneration_finished
+        regeneration_finished = True
+
+    await asyncio.gather(redeem(), regenerate())
+
+    assert regeneration_finished
+    linked = await store.identity_for("telegram", "99")
+    assert linked is not None
+    assert linked.member.name == "Sam"
+
+
 # --- schema evolution for deployed databases (PR #109) ---
 
 
