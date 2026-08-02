@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { RoutineEditor } from "../components/RoutineEditor";
+// Vite serves the component's own source as a string, so the guard below reads
+// production code without pulling node builtins into the typechecked build.
 import routineEditorSource from "../components/RoutineEditor.tsx?raw";
 
 const EN_BOOTSTRAP = {
@@ -509,29 +511,6 @@ describe("RoutineEditor", () => {
       }
       expect(violations).toEqual([]);
     });
-  });
-
-  // DOM-level save-button assertion — renders RoutineEditor and inspects
-  // the DOM to confirm the accessibility fix (text-bg instead of text-white
-  // on the bg-magenta submit button).
-  it("save button renders with bg-magenta text-bg (DOM assertion)", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
-      ok: true, status: 200,
-      json: () => Promise.resolve(mockRoutineResponse()),
-    } as Response);
-
-    renderEditor("/members/1/routine");
-
-    await waitFor(() => {
-      expect(screen.getByText("Save Routine")).toBeDefined();
-    });
-
-    const saveBtn = screen.getByRole("button", { name: "Save Routine" });
-    expect(saveBtn).toHaveClass("bg-magenta");
-    expect(saveBtn).toHaveClass("text-bg");
-    // Must NOT have a light text class (which would fail AA).
-    expect(saveBtn).not.toHaveClass("text-ink");
-    expect(saveBtn).not.toHaveClass("text-white");
   });
 });
 

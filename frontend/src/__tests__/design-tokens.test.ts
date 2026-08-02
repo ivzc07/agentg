@@ -1,44 +1,25 @@
 /**
- * Design-token contrast validation — WCAG AA (≥ 4.5:1).
+ * Design-token contrast validation for #156:
+ *   ink.3 on elevation-3.DEFAULT must clear WCAG AA (≥ 4.5:1).
  *
- * Imports the live Tailwind config structurally (no source-text regex)
- * so new token keys are discovered automatically.
- *
- * Issue #156: ink-3 on elevation-3 was 4.17:1; elevation-3 now
- * darkened to #1c1d1f.
+ * Imports the live Tailwind config; no regex, no framework.
  */
 
 import { describe, it, expect } from 'vitest';
-
-// ---------------------------------------------------------------------------
-// Import the live config
-// ---------------------------------------------------------------------------
-
 import tailwindConfig from '../../tailwind.config';
 
-interface NestedColor {
-  DEFAULT?: string;
-  [key: string]: string | undefined;
-}
+// ---------------------------------------------------------------------------
+// Dig tokens from the live config — one direct access per key
+// ---------------------------------------------------------------------------
 
-interface ColorsConfig {
-  bg?: string;
-  ink?: NestedColor;
-  [key: string]: string | NestedColor | undefined;
-}
+const colors = tailwindConfig.theme?.extend?.colors as Record<string, unknown> | undefined;
+if (!colors) throw new Error('tailwind config has no theme.extend.colors');
 
-interface TailwindTheme {
-  extend?: {
-    colors?: ColorsConfig;
-  };
-}
+const ink3 = (colors.ink as Record<string, string> | undefined)?.['3'];
+if (typeof ink3 !== 'string') throw new Error('ink.3 token missing or not a string');
 
-interface TailwindConfigLike {
-  theme?: TailwindTheme;
-}
-
-const cfg = tailwindConfig as TailwindConfigLike;
-const colors: ColorsConfig = cfg.theme?.extend?.colors ?? {};
+const elevation3 = (colors['elevation-3'] as { DEFAULT?: string } | undefined)?.DEFAULT;
+if (typeof elevation3 !== 'string') throw new Error('elevation-3.DEFAULT token missing or not a string');
 
 // ---------------------------------------------------------------------------
 // WCAG 2.1 relative luminance & contrast
@@ -49,17 +30,13 @@ function linearize(c: number): number {
   return ((c + 0.055) / 1.055) ** 2.4;
 }
 
-const HEX_DIGIT_RE = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/;
+const HEX_RE = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/;
 
-function expandHex(short: string): string {
-  if (!HEX_DIGIT_RE.test(short)) {
-    throw new Error(`Invalid hex color: ${short}`);
-  }
-  if (short.length === 7 && short.startsWith('#')) return short;
-  if (short.length === 4 && short.startsWith('#')) {
-    return `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`;
-  }
-  throw new Error(`Unhandled hex format: ${short}`);
+function expandHex(hex: string): string {
+  if (!HEX_RE.test(hex)) throw new Error(`Invalid hex color: ${hex}`);
+  if (hex.length === 7) return hex;
+  // 3-char shorthand
+  return `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}`;
 }
 
 function relativeLuminance(hex: string): number {
@@ -86,50 +63,13 @@ function contrastRatio(fg: string, bg: string): number {
 
 const AA_MINIMUM = 4.5;
 
-// ---------------------------------------------------------------------------
-// Extraction helpers — structural (live config), not regex
-// ---------------------------------------------------------------------------
-
-function getInks(): Record<string, string> {
-  const ink = colors.ink;
-  if (!ink || typeof ink !== 'object') {
-    throw new Error('Could not parse ink block from tailwind config');
-  }
-  const inks: Record<string, string> = {};
-  for (const [key, value] of Object.entries(ink)) {
-    if (typeof value === 'string') {
-      inks[key === 'DEFAULT' ? 'ink' : `ink-${key}`] = value;
-    }
-  }
-  if (Object.keys(inks).length === 0) {
-    throw new Error('No ink tokens found in tailwind config');
-  }
-  return inks;
-}
-
-function getSurfaces(): Record<string, string> {
-  const surfaces: Record<string, string> = {};
-  for (const [key, value] of Object.entries(colors)) {
-    if (key.startsWith('elevation-') && typeof value === 'object' && value !== null) {
-      const entry = value as NestedColor;
-      if (typeof entry.DEFAULT === 'string') {
-        surfaces[key] = entry.DEFAULT;
-      }
-    }
-  }
-  if (typeof colors.bg === 'string') {
-    surfaces['bg'] = colors.bg;
-  }
-  return surfaces;
-}
-
 // ===========================================================================
 // Tests
 // ===========================================================================
 
-describe('design token WCAG AA contrast', () => {
+describe('ink.3 on elevation-3.DEFAULT — WCAG AA (#156)', () => {
   // -----------------------------------------------------------------------
-  // Hex validation — malformed strings must throw, not false-green via NaN
+  // NaN guard: malformed hex must throw, not silently pass
   // -----------------------------------------------------------------------
 
   it('malformed hex tokens throw instead of silently passing (NaN guard)', () => {
@@ -141,48 +81,43 @@ describe('design token WCAG AA contrast', () => {
   });
 
   // -----------------------------------------------------------------------
-  // #156 regression canary
+  // #156 regression canary — direct, no abstraction
   // -----------------------------------------------------------------------
 
-  it('ink-3 on elevation-3 clears AA (#156 regression)', () => {
-    const inks = getInks();
-    const surfaces = getSurfaces();
-
-    expect(inks['ink-3'], 'ink-3 must exist').toBeDefined();
-    expect(surfaces['elevation-3'], 'elevation-3 must exist').toBeDefined();
-
-    const cr = contrastRatio(inks['ink-3'], surfaces['elevation-3']);
+  it('ink.3 on elevation-3.DEFAULT clears AA', () => {
+    const cr = contrastRatio(ink3, elevation3);
     expect(
       cr,
-      `ink-3 on elevation-3: ${cr.toFixed(2)}:1 < ${AA_MINIMUM}:1`,
+      `ink.3 (${ink3}) on elevation-3.DEFAULT (${elevation3}): ${cr.toFixed(2)}:1 < ${AA_MINIMUM}:1`,
     ).toBeGreaterThanOrEqual(AA_MINIMUM);
   });
 
   // -----------------------------------------------------------------------
-  // Elevation scale monotonicity
+  // Elevation monotonicity — justified because changing elevation-3 could
+  // invert the scale (higher elevation must be lighter)
   // -----------------------------------------------------------------------
 
   it('elevation scale is monotonic (higher = lighter)', () => {
-    const surfaces = getSurfaces();
-    const elevations = Object.entries(surfaces)
-      .filter(([k]) => k.startsWith('elevation-'))
-      .sort(([a], [b]) => {
-        const numA = parseInt(a.split('-')[1], 10);
-        const numB = parseInt(b.split('-')[1], 10);
-        return numA - numB;
-      });
+    const entries: [string, string][] = [];
+    for (const [key, val] of Object.entries(colors)) {
+      if (key.startsWith('elevation-') && typeof val === 'object' && val !== null) {
+        const d = (val as { DEFAULT?: string }).DEFAULT;
+        if (typeof d === 'string') entries.push([key, d]);
+      }
+    }
+    entries.sort(([a], [b]) => parseInt(a.split('-')[1], 10) - parseInt(b.split('-')[1], 10));
 
-    expect(elevations.length, 'need at least 2 elevation levels').toBeGreaterThanOrEqual(2);
+    expect(entries.length, 'need at least 2 elevation levels').toBeGreaterThanOrEqual(2);
 
-    const lums = elevations.map(([name, hex]) => ({ name, lum: relativeLuminance(hex) }));
-
-    for (let i = 0; i < lums.length - 1; i++) {
-      const lo = lums[i];
-      const hi = lums[i + 1];
+    for (let i = 0; i < entries.length - 1; i++) {
+      const [loName, loHex] = entries[i];
+      const [hiName, hiHex] = entries[i + 1];
+      const loLum = relativeLuminance(loHex);
+      const hiLum = relativeLuminance(hiHex);
       expect(
-        lo.lum,
-        `Elevation scale broken: ${lo.name} (${lo.lum.toFixed(5)}) >= ${hi.name} (${hi.lum.toFixed(5)})`,
-      ).toBeLessThan(hi.lum);
+        loLum,
+        `Elevation scale broken: ${loName} (${loLum.toFixed(5)}) >= ${hiName} (${hiLum.toFixed(5)})`,
+      ).toBeLessThan(hiLum);
     }
   });
 });
