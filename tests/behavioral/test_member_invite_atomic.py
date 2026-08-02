@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agentg.models import Gym, Member
-from behavioral.harness import ConversationHarness, message
+from behavioral.harness import ConversationHarness
 
 
 async def _count(engine, model, **where) -> int:
@@ -26,13 +26,6 @@ async def _count(engine, model, **where) -> int:
         for col, val in where.items():
             q = q.where(getattr(model, col) == val)
         return int(await db.scalar(q) or 0)
-
-
-async def _gym(h: ConversationHarness) -> Gym:
-    async with async_sessionmaker(h._engine)() as db:
-        gym = await db.get(Gym, h.gym_id)
-        assert gym is not None
-        return gym
 
 
 # --- first-time redemption is atomic ---
@@ -132,7 +125,8 @@ async def test_switching_gyms_with_revoked_code_leaves_identity_unchanged(tmp_pa
 
         reply = await h.say("yes")
 
-        assert "Iron Temple" in reply  # still with the old Gym
+        # Expired-code recovery response — no gym named in the expired reply.
+        assert "Iron Temple" not in reply
         linked = await h.stores.linking.identity_for("telegram", "42")
         assert linked is not None
         assert linked.member.id == old_member_id
@@ -206,7 +200,8 @@ async def test_regeneration_first_revokes_a_pending_switch(tmp_path):
 
         reply = await h.say("yes")
 
-        assert "Iron Temple" in reply
+        # Expired-code recovery response — no gym named in the expired reply.
+        assert "Iron Temple" not in reply
         linked = await h.stores.linking.identity_for("telegram", "42")
         assert linked is not None
         assert linked.member.id == old_member_id
@@ -259,7 +254,6 @@ async def test_coach_invite_atomic_redemption_is_preserved(tmp_path):
         assert "Iron Temple" not in reply  # expired
 
         # Retry with the new code works.
-        new_gym = await _gym(h) if False else None
         # Fetch the regenerated coach code
         async with async_sessionmaker(h._engine)() as db:
             fresh_gym = await db.get(Gym, gym.id)

@@ -420,9 +420,7 @@ class Linking:
             )
         if member is None:
             del self._pending[identity]
-            return await self.phraser(
-                LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name), msg.text
-            )
+            return await self.phraser(LINK_EXPIRED_INSTRUCTION, msg.text)
         # Cleared only after the write: a store error keeps the step retryable.
         del self._pending[identity]
         template = COACH_SWITCHED_INSTRUCTION if pending.as_coach else SWITCHED_INSTRUCTION

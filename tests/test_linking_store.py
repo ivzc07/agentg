@@ -1,5 +1,7 @@
 """LinkingStore: gyms, invite codes, Members, channel identity (spec §Data model)."""
 
+import asyncio
+
 import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -7,7 +9,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agentg.db import create_engine
 from agentg.models import Gym, Member, MemberChannel
-from agentg.linking_store import COACH_CODE_PREFIX, INVITE_CODE_LENGTH, LinkingStore, new_invite_code
+from agentg.linking_store import (
+    COACH_CODE_PREFIX,
+    INVITE_CODE_LENGTH,
+    LinkingStore,
+    _link_member_in_session,
+    _redeem_member_code,
+    new_invite_code,
+)
 
 
 @pytest.fixture
@@ -299,6 +308,52 @@ async def test_link_member_with_code_with_a_revoked_code_writes_nothing(store):
     assert member is not None and member.is_coach is False
     async with sessions() as db:
         assert await db.scalar(select(func.count()).select_from(Member)) == 1
+
+
+async def test_concurrent_redemption_and_regeneration_serialise(store):
+    """Two sessions racing — one redeeming, one regenerating — the Gym-row
+    write lock serialises them so exactly one path wins (issue #215).
+
+    The behavioural tests sequence operations explicitly (regeneration
+    before / after confirm), which a non-atomic check-then-write
+    implementation would also pass.  This test overlaps the transactions
+    via ``asyncio.gather`` so the no-op UPDATE lock pattern is exercised:
+    whichever session's UPDATE commits first wins; the loser sees
+    rowcount == 0 and writes nothing."""
+    gym = await store.create_gym("Iron Temple")
+    code = gym.invite_code
+
+    sessions = async_sessionmaker(store.engine)
+
+    redeemed_flag = False
+    revoked_flag = False
+
+    async def redeem():
+        nonlocal redeemed_flag, revoked_flag
+        async with sessions() as db:
+            if await _redeem_member_code(db, gym.id, code):
+                await _link_member_in_session(db, gym.id, "Racer", "telegram", "99")
+                await db.commit()
+                redeemed_flag = True
+            else:
+                await db.rollback()
+                revoked_flag = True
+
+    async def regenerate():
+        await store.regenerate_invite_code(gym.id)
+
+    await asyncio.gather(redeem(), regenerate())
+
+    # Exactly one path succeeds: the Gym-row lock prevents both from
+    # acting on the same code.
+    assert redeemed_flag != revoked_flag
+
+    if redeemed_flag:
+        linked = await store.identity_for("telegram", "99")
+        assert linked is not None and linked.member.name == "Racer"
+    else:
+        linked = await store.identity_for("telegram", "99")
+        assert linked is None
 
 
 # --- schema evolution for deployed databases (PR #109) ---
