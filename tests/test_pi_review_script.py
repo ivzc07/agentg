@@ -11,6 +11,7 @@ once in `docs/agents/pr-merges.md` ("Windows environment traps") and in the
 has one place to change rather than three.
 """
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -178,3 +179,141 @@ def _find_sh() -> str | None:
         if found and "system32" not in found.lower():
             return found
     return None
+
+
+# --- the herdr CLI contract -------------------------------------------------
+#
+# The traps above are about the script *running*. This one is about the script
+# calling commands that exist: `pi-review` shipped for weeks invoking
+# `herdr agent prompt` (no such command) and `herdr agent wait --until` (the
+# flag is `--status`), so every in-Herdr run died on the first call while the
+# shell-hygiene tests stayed green. The contract is declared here so changing
+# the script forces a deliberate update, and is checked against the real CLI
+# whenever herdr is on PATH.
+
+# (command words, required flags) for every `"$H" ...` call in the script.
+HERDR_CONTRACT = [
+    (("agent", "get"), ()),
+    (("agent", "rename"), ()),
+    (("agent", "wait"), ("--status", "--timeout")),
+    (("pane", "split"), ("--direction", "--cwd", "--no-focus")),
+    (("pane", "run"), ()),
+]
+
+
+def _script_invocations():
+    """Every `"$H" <words...>` call in the script, as (words, flags)."""
+    calls = []
+    for line in SCRIPT.read_text(encoding="utf-8").splitlines():
+        marker = '"$H" '
+        if marker not in line:
+            continue
+        rest = line.split(marker, 1)[1]
+        words, flags = [], []
+        for token in rest.split():
+            if token.startswith("--"):
+                flags.append(token)
+            elif not words or (token.isalpha() and len(words) < 2):
+                words.append(token)
+        calls.append((tuple(words[:2]), tuple(flags)))
+    return calls
+
+
+def test_every_herdr_call_is_declared_in_the_contract():
+    """No `"$H" ...` call may use a command outside HERDR_CONTRACT.
+
+    Forces anyone reaching for a new herdr subcommand to add it here, where
+    the next test will check it actually exists.
+    """
+    declared = {words for words, _ in HERDR_CONTRACT}
+    used = {words for words, _ in _script_invocations()}
+    undeclared = used - declared
+    assert not undeclared, (
+        f"pi-review calls herdr commands that are not in HERDR_CONTRACT: "
+        f"{sorted(undeclared)}"
+    )
+
+
+def test_script_does_not_use_retired_herdr_commands():
+    """Pin the two that were wrong, by name.
+
+    `agent prompt` does not exist, and `agent wait` takes `--status`, not
+    `--until`. Both shipped and broke every in-Herdr review.
+    """
+    body = SCRIPT.read_text(encoding="utf-8")
+    assert "agent prompt" not in body, (
+        "herdr has no `agent prompt`; deliver the prompt with `pane run`, "
+        "which types the text and presses Enter"
+    )
+    assert "--until" not in body, (
+        "`herdr agent wait` takes --status <idle|working|blocked|unknown>, "
+        "not --until"
+    )
+
+
+def _herdr_binary():
+    """Find herdr the way a shell would, not the way Windows Python would.
+
+    On Windows the client commonly lives in Git Bash's ``usr/bin`` and is not
+    on the *Windows* PATH, so ``shutil.which`` alone reports it missing and the
+    live check below would silently skip on the very machines that run it.
+    """
+    found = shutil.which("herdr")
+    if found:
+        return found
+    candidate = Path("C:/Program Files/Git/usr/bin/herdr")
+    return str(candidate) if candidate.is_file() else None
+
+
+def _herdr_help(group):
+    binary = _herdr_binary()
+    if binary is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [binary, group, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (proc.stdout or "") + (proc.stderr or "")
+
+
+@pytest.mark.skipif(
+    _herdr_help("agent") is None, reason="herdr is not installed on this machine"
+)
+@pytest.mark.parametrize("words,flags", HERDR_CONTRACT)
+def test_declared_herdr_commands_exist(words, flags):
+    """Every declared command and flag must appear in the real CLI's help.
+
+    Skipped in CI (no herdr there); it bites locally and in Herdr, which is
+    exactly where the script runs.
+    """
+    group, sub = words
+    help_text = _herdr_help(group)
+    assert help_text is not None, f"could not read `herdr {group} --help`"
+    assert f"{group} {sub}" in help_text, (
+        f"`herdr {group} {sub}` is not in `herdr {group} --help` - "
+        f"the script calls a command this herdr does not have"
+    )
+    for flag in flags:
+        assert flag in help_text, (
+            f"`herdr {group} {sub}` has no {flag} in this herdr build"
+        )
+
+
+def test_installed_herdr_must_be_a_regular_file():
+    """`resolve_herdr` must not accept a directory as the herdr binary.
+
+    `-x` passes on directories, and on Windows the install path can be a
+    reparse point that MSYS reports as one (Windows itself refuses to traverse
+    it). The script then invoked it and died with "herdr: Is a directory",
+    while a working herdr sat on PATH the whole time.
+    """
+    body = SCRIPT.read_text(encoding="utf-8")
+    assert '[ -f "$installed" ] && [ -x "$installed" ]' in body, (
+        "resolve_herdr must require a regular file, not just -x, or a "
+        "directory at the install path shadows the working herdr on PATH"
+    )

@@ -56,10 +56,17 @@ When done, reply with just the number of findings posted."
 
 # Herdr client binary: PATH may hold a stale copy that cannot talk to a newer
 # server, so prefer the installed one when present.
+#
+# -x alone is not a "this is a runnable binary" test: it also passes on
+# directories. On Windows this install path can be a reparse point that MSYS
+# reports as a directory (Windows itself refuses to traverse it: "the path
+# contains an untrusted mount point"), and the script would then invoke it and
+# die with "herdr: Is a directory" - while a perfectly good herdr sat on PATH.
+# Require a regular file so anything else falls through to PATH.
 resolve_herdr() {
     if [ -n "${LOCALAPPDATA:-}" ]; then
         installed="$(cygpath "$LOCALAPPDATA" 2>/dev/null)/Programs/Herdr/bin/herdr"
-        if [ -x "$installed" ]; then
+        if [ -f "$installed" ] && [ -x "$installed" ]; then
             printf '%s' "$installed"
             return
         fi
@@ -94,6 +101,12 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
         done
         "$H" agent rename "$PANE" pi-review >/dev/null
     fi
+    # The pane backing the agent: prompts are delivered with `pane run`, which
+    # types the text and presses Enter. (`agent send` writes literal text with
+    # no Enter, so it would leave the prompt sitting unsent in pi's input box.)
+    PANE=$("$H" agent get pi-review 2>/dev/null |
+        sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -1)
+    [ -n "$PANE" ] || { echo "pi-review: cannot resolve the pi-review pane" >&2; exit 1; }
     agent_status() {
         "$H" agent get pi-review 2>/dev/null | sed -n 's/.*"agent_status":"\([a-z]*\)".*/\1/p' | head -1
     }
@@ -101,13 +114,18 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
     # instead of hanging out the full serialize timeout.
     [ "$(agent_status)" != blocked ] || { echo "pi-review: the pi-review pane is blocked awaiting input - resolve it first" >&2; exit 1; }
     # Serialize: wait for any in-flight review to finish before prompting.
-    "$H" agent wait pi-review --until idle --until done --timeout 1800000 >/dev/null
+    "$H" agent wait pi-review --status idle --timeout 1800000 >/dev/null
     BEFORE=$(comment_count)
     [ "$BEFORE" != ERR ] || { echo "pi-review: cannot read PR ${PR} comments" >&2; exit 1; }
-    # --wait blocks until the agent settles again, i.e. the review ran and
-    # every comment was posted; the count afterwards is the full delta.
-    "$H" agent prompt pi-review "$PROMPT" --wait --timeout 3000000 >/dev/null
-    # --wait also releases on blocked; that is an operator situation, not a
+    "$H" pane run "$PANE" "$PROMPT" >/dev/null
+    # Settle-based completion: let the agent pick the work up first, otherwise
+    # the idle wait below returns immediately on the still-idle agent and we
+    # count comments before the review has written any. Picking it up is fast,
+    # so a short timeout is enough, and a miss is not fatal - the comment-count
+    # delta below is the real gate.
+    "$H" agent wait pi-review --status working --timeout 60000 >/dev/null 2>&1 || true
+    "$H" agent wait pi-review --status idle --timeout 3000000 >/dev/null
+    # The wait also releases on blocked; that is an operator situation, not a
     # finished review.
     [ "$(agent_status)" != blocked ] || { echo "pi-review: pi blocked mid-review on PR ${PR} - check the pane" >&2; exit 1; }
     NOW=$(comment_count)
