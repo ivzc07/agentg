@@ -52,6 +52,7 @@ class CheckinStore:
                     select(Member, Gym.timezone, MemberChannel.channel, MemberChannel.channel_user_id)
                     .join(Gym, Member.gym_id == Gym.id)
                     .join(MemberChannel, MemberChannel.member_id == Member.id)
+                    .order_by(Member.id)
                 )
             ).all()
         return [
