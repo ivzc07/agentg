@@ -7,6 +7,95 @@ import { RoutineEditor } from "../components/RoutineEditor";
 // Vite serves the component's own source as a string, so the guard below reads
 // production code without pulling node builtins into the typechecked build.
 import routineEditorSource from "../components/RoutineEditor.tsx?raw";
+import tailwindConfig from "../../tailwind.config";
+
+// ---------------------------------------------------------------------------
+//  Text-colour utility inventory — derived from the live Tailwind config so
+//  the tests stay in sync when design tokens are added or removed.  The
+//  inventory covers project custom colours, standard Tailwind keywords, and
+//  the full default palette.  Arbitrary-value classes (text-[14px]) are never
+//  colour utilities.
+// ---------------------------------------------------------------------------
+
+/** Build a Set of known `text-*` colour-utility class names. */
+function buildTextColorInventory(): Set<string> {
+  const set = new Set<string>();
+
+  // Standard fixed Tailwind colour keywords
+  for (const kw of ["white", "black", "current", "transparent", "inherit"]) {
+    set.add(`text-${kw}`);
+  }
+
+  // Project design tokens from tailwind.config.ts theme.extend.colors
+  const colors = (tailwindConfig.theme?.extend?.colors ?? {}) as Record<
+    string,
+    unknown
+  >;
+  for (const [key, val] of Object.entries(colors)) {
+    if (typeof val === "string") {
+      set.add(`text-${key}`);
+    } else if (typeof val === "object" && val !== null) {
+      // Nested colour object: the key itself is the DEFAULT shade.
+      set.add(`text-${key}`);
+      for (const sub of Object.keys(val as Record<string, unknown>)) {
+        // DEFAULT is an alias for the key — skip the explicit form.
+        if (sub !== "DEFAULT") set.add(`text-${key}-${sub}`);
+      }
+    }
+  }
+
+  // Standard Tailwind palette: text-{name}-{shade}
+  const PALETTE_NAMES = [
+    "slate",
+    "gray",
+    "zinc",
+    "neutral",
+    "stone",
+    "red",
+    "orange",
+    "amber",
+    "yellow",
+    "lime",
+    "green",
+    "emerald",
+    "teal",
+    "cyan",
+    "sky",
+    "blue",
+    "indigo",
+    "violet",
+    "purple",
+    "fuchsia",
+    "pink",
+    "rose",
+  ];
+  const SHADES = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
+  for (const name of PALETTE_NAMES) {
+    for (const shade of SHADES) {
+      set.add(`text-${name}-${shade}`);
+    }
+  }
+
+  return set;
+}
+
+const TEXT_COLOR_INVENTORY = buildTextColorInventory();
+
+/** True when `cls` is a `text-*` colour utility.  Always false for
+ *  arbitrary-value classes (`text-[14px]`), sizing, alignment, or decoration
+ *  utilities. */
+function isTextColorClass(cls: string): boolean {
+  return (
+    cls.startsWith("text-") &&
+    !cls.startsWith("text-[") &&
+    TEXT_COLOR_INVENTORY.has(cls)
+  );
+}
+
+/** Split a className string into individual tokens. */
+function classTokens(className: string): string[] {
+  return className.split(/\s+/).filter(Boolean);
+}
 
 const EN_BOOTSTRAP = {
   editor_title: "{name}'s routine",
@@ -491,7 +580,8 @@ describe("RoutineEditor", () => {
   describe("save button contrast (issue #218)", () => {
     it("renders with text-bg on the default-state save button", async () => {
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
-        ok: true, status: 200,
+        ok: true,
+        status: 200,
         json: () => Promise.resolve(mockRoutineResponse()),
       } as Response);
 
@@ -502,11 +592,19 @@ describe("RoutineEditor", () => {
       });
 
       const btn = screen.getByRole("button", { name: "Save Routine" });
-      // Use start/space delimiters so variant-prefixed utilities (e.g.
-      // hover:bg-magenta) are not mistaken for the base class.
-      expect(btn.className).toMatch(/(?:^|\s)bg-magenta(?:\s|$)/);
-      expect(btn.className).toMatch(/(?:^|\s)text-bg(?:\s|$)/);
-      expect(btn.className).not.toMatch(/\btext-white\b/);
+
+      // --- base-background: parse exact classList tokens so variant- -----
+      //     prefixed utilities (e.g. hover:bg-magenta) are never mistaken
+      //     for the unmodified base class.
+      expect(btn.classList.contains("bg-magenta")).toBe(true);
+      expect(btn.classList.contains("text-bg")).toBe(true);
+
+      // --- foreground: exactly one effective design-token colour on the --
+      //     default-state button.  Classify every text-* token against the
+      //     inventory derived from the live Tailwind config so arbitrary-
+      //     value utilities like text-[14px] are never misclassified.
+      const colorClasses = classTokens(btn.className).filter(isTextColorClass);
+      expect(colorClasses).toEqual(["text-bg"]);
     });
 
     it("rejects conflicting text-color utilities alongside text-bg", () => {
@@ -515,16 +613,15 @@ describe("RoutineEditor", () => {
       const submitIdx = src.indexOf('type="submit"');
       expect(submitIdx).not.toBe(-1);
       const block = src.slice(submitIdx, submitIdx + 400);
-      // Match every text-* class that looks like a colour utility (not
-      // sizing like text-[14px], decoration, or alignment).  Tailwind
-      // text-colour classes include text-bg, text-white, text-ink*,
-      // text-black, text-current, text-transparent, text-inherit, and
-      // text-{colour}-{shade} (e.g. text-red-500).
-      const textColorRe =
-        /\btext-(?:bg|white|ink(?:-[23])?|black|current|transparent|inherit|[a-z]+-\d+)\b/g;
-      const found = [...block.matchAll(textColorRe)].map((m) => m[0]);
+
+      // Parse every className token that looks like text-* and classify
+      // with the same inventory built from the live Tailwind config.
+      const allTokenRe = /\b(text-\S+)\b/g;
+      const rawTokens = [...block.matchAll(allTokenRe)].map((m) => m[1]);
+      const colorClasses = rawTokens.filter(isTextColorClass);
+
       // Exactly one text-color token on the submit button.
-      expect(found).toEqual(["text-bg"]);
+      expect(colorClasses).toEqual(["text-bg"]);
     });
 
     it("rejects modifier-only background on the submit button", () => {
@@ -532,17 +629,88 @@ describe("RoutineEditor", () => {
       const submitIdx = src.indexOf('type="submit"');
       expect(submitIdx).not.toBe(-1);
       const block = src.slice(submitIdx, submitIdx + 400);
+
       // Must have a base bg- class (bg-magenta) as a standalone class.
       // The negative lookbehind excludes variant prefixes (hover:, focus:,
       // etc.) so that hover:bg-magenta without a true base bg-magenta is
       // rejected.
       expect(block).toMatch(/(?<![\w:])bg-magenta(?![\w-])/);
+
       // Double-check: a variant-only background (hover:bg-magenta with no
       // base bg-magenta) must not satisfy the check above.
       // Prove the negative: a block with only hover:bg-magenta would fail.
       expect("hover:bg-magenta text-bg").not.toMatch(
         /(?<![\w:])bg-magenta(?![\w-])/
       );
+    });
+  });
+
+  // --- Synthetic / helper tests: prove the low-level guards work --------
+  //     independently of rendering, so future edits to the component
+  //     can't silently weaken the contrast requirements.
+  describe("contrast helpers (unit)", () => {
+    describe("isTextColorClass", () => {
+      it("recognises project design-token text-colour classes", () => {
+        expect(isTextColorClass("text-bg")).toBe(true);
+        expect(isTextColorClass("text-magenta")).toBe(true);
+        expect(isTextColorClass("text-magenta-tint")).toBe(true);
+        expect(isTextColorClass("text-ink")).toBe(true);
+        expect(isTextColorClass("text-ink-2")).toBe(true);
+        expect(isTextColorClass("text-elevation-0")).toBe(true);
+        expect(isTextColorClass("text-elevation-0-stroke")).toBe(true);
+      });
+
+      it("recognises standard Tailwind colour keywords", () => {
+        expect(isTextColorClass("text-white")).toBe(true);
+        expect(isTextColorClass("text-black")).toBe(true);
+        expect(isTextColorClass("text-current")).toBe(true);
+        expect(isTextColorClass("text-transparent")).toBe(true);
+        expect(isTextColorClass("text-inherit")).toBe(true);
+      });
+
+      it("recognises standard Tailwind palette shades", () => {
+        expect(isTextColorClass("text-red-500")).toBe(true);
+        expect(isTextColorClass("text-blue-100")).toBe(true);
+        expect(isTextColorClass("text-slate-950")).toBe(true);
+      });
+
+      it("rejects arbitrary-value classes like text-[14px]", () => {
+        expect(isTextColorClass("text-[14px]")).toBe(false);
+        expect(isTextColorClass("text-[#f00]")).toBe(false);
+        expect(isTextColorClass("text-[--custom]")).toBe(false);
+      });
+
+      it("rejects typography / non-colour text-* utilities", () => {
+        expect(isTextColorClass("text-left")).toBe(false);
+        expect(isTextColorClass("text-sm")).toBe(false);
+        expect(isTextColorClass("text-lg")).toBe(false);
+        expect(isTextColorClass("text-ellipsis")).toBe(false);
+        expect(isTextColorClass("text-nowrap")).toBe(false);
+        expect(isTextColorClass("text-opacity-50")).toBe(false);
+      });
+    });
+
+    it("rejects modifier-only background (lookbehind guard)", () => {
+      // The lookbehind regex must only match an unmodified base utility.
+      const baseBgRe = /(?<![\w:])bg-magenta(?![\w-])/;
+
+      // Valid: standalone bg-magenta
+      expect("bg-magenta text-bg").toMatch(baseBgRe);
+
+      // Invalid: variant-prefixed without a base
+      expect("hover:bg-magenta text-bg").not.toMatch(baseBgRe);
+      expect("focus:bg-magenta").not.toMatch(baseBgRe);
+      expect("disabled:bg-magenta").not.toMatch(baseBgRe);
+    });
+
+    it("rejects conflicting text-color tokens on the same element", () => {
+      // A className with two text-colour tokens must be flagged.
+      const tokens = classTokens("text-bg text-white bg-magenta");
+      const colorClasses = tokens.filter(isTextColorClass);
+      // This is a positive signal: the synthetic conflict is detected.
+      expect(colorClasses).toHaveLength(2);
+      expect(colorClasses).toContain("text-bg");
+      expect(colorClasses).toContain("text-white");
     });
   });
 
