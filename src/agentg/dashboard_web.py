@@ -2125,6 +2125,141 @@ def build_app(
         set_session(response, coach_member.id, gym.id)
         return response
 
+    # --- /api/presets/{id}/routine JSON endpoints (#154) — the master
+    # editor, mirroring the member Routine editor API (#151). ---
+
+    def _serialise_master(preset: RoutinePreset, master: dict | None) -> dict:
+        view = _preset_editor_view(preset, master)
+        return {
+            "preset_id": preset.id,
+            "name": preset.name,
+            "routine": [
+                {
+                    "weekday": day.weekday,
+                    "name": day.name,
+                    "exercises": [
+                        {"exercise": name, "sets": sets, "reps": reps}
+                        for name, sets, reps in day.exercises
+                    ],
+                }
+                for day in view.routine
+            ],
+            # The master's routine_id — the stale-save stamp, exactly like
+            # the member editor's base_routine_id contract.
+            "routine_id": view.routine_id,
+            "routine_author": view.routine_author,
+        }
+
+    async def api_preset_routine_get(request: web.Request) -> web.Response:
+        """``GET /api/presets/{preset_id}/routine`` — cookie-auth via
+        ``require_coach``; returns the Preset's master routine plus the
+        exercise catalog. 404 for an unknown, retired, or foreign Preset."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not found"}, status=404)
+        preset = await store.preset_for_gym(gym.id, preset_id)
+        if preset is None:
+            return web.json_response({"error": "not found"}, status=404)
+        master = await store.preset_master(preset.id)
+        body = _serialise_master(preset, master)
+        body["catalog"] = await store.catalog_exercises()
+        response = web.json_response(body)
+        set_session(response, member.id, gym.id)
+        return response
+
+    async def api_preset_routine_put(request: web.Request) -> web.Response:
+        """``PUT /api/presets/{preset_id}/routine`` — save the Preset's
+        master routine through the same supersession machinery as the
+        server form did: 400 on validation errors, 409 with the fresh
+        master on a stale save, and Member notifications for every linked
+        copy the save forked or updated."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not found"}, status=404)
+        preset = await store.preset_for_gym(gym.id, preset_id)
+        if preset is None:
+            return web.json_response({"error": "not found"}, status=404)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+
+        base_routine_id = body.get("base_routine_id")
+        raw_workouts = body.get("workouts")
+        if not isinstance(raw_workouts, list):
+            return web.json_response({"error": t["empty_routine_error"]}, status=400)
+        try:
+            workouts = _parse_workouts_from_json(raw_workouts, lang)
+        except ValueError as error:
+            return web.json_response({"error": str(error)}, status=400)
+        if not workouts:
+            return web.json_response({"error": t["empty_routine_error"]}, status=400)
+
+        try:
+            copies = await store.save_preset_master_from_web(
+                gym.id, preset.id, coach_member.id, base_routine_id, workouts
+            )
+        except StaleRoutineError:
+            fresh = await store.preset_master(preset.id)
+            fresh_body = _serialise_master(preset, fresh)
+            return web.json_response(
+                {
+                    "error": t["stale_error"],
+                    "fresh_routine": fresh_body["routine"],
+                    "fresh_routine_id": fresh_body["routine_id"],
+                },
+                status=409,
+            )
+        except UnknownExercisesError as error:
+            message = t["unknown_exercises_error"].format(names=", ".join(error.names))
+            return web.json_response({"error": message}, status=400)
+
+        # Notify every Member whose linked copy the save forked/updated —
+        # the same contract as the form path: a notification failure never
+        # blocks the save.
+        notified = 0
+        for copy in copies:
+            try:
+                channel = await store.member_channel(copy.member_id)
+                if channel is None:
+                    logger.warning(
+                        "failed to notify member %s of the Preset edit: no channel",
+                        copy.member_id,
+                    )
+                elif notifier is not None:
+                    await notifier.send(
+                        channel[0],
+                        channel[1],
+                        routine_notice(coach_member.name, copy.workouts),
+                    )
+                    notified += 1
+            except Exception:
+                logger.exception(
+                    "failed to notify member %s of the Preset edit", copy.member_id
+                )
+
+        fresh = await store.preset_master(preset.id)
+        response_body = _serialise_master(preset, fresh)
+        response_body["ok"] = True
+        response_body["notified"] = notified
+        response = web.json_response(response_body)
+        set_session(response, coach_member.id, gym.id)
+        return response
+
     async def api_roster(request: web.Request) -> web.Response:
         """``GET /api/roster`` — cookie-auth via ``require_coach``; returns
         the roster as JSON: active rows, lapsed tail, counts, and the sort
@@ -2452,6 +2587,8 @@ def build_app(
     )
     app.router.add_get("/api/presets", api_presets_list)
     app.router.add_post("/api/presets", api_presets_create)
+    app.router.add_get("/api/presets/{preset_id}/routine", api_preset_routine_get)
+    app.router.add_put("/api/presets/{preset_id}/routine", api_preset_routine_put)
     app.router.add_post("/api/presets/{preset_id}/apply", api_presets_apply)
     app.router.add_post("/api/presets/{preset_id}/default", api_presets_default)
     app.router.add_post("/api/presets/{preset_id}/retire", api_presets_retire)

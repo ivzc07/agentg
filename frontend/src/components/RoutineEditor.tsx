@@ -7,7 +7,12 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { useT } from "../hooks/useT";
 import { getWeekdays } from "../lib/i18n";
-import { fetchRoutine, saveRoutine } from "../api/routine";
+import {
+  fetchRoutine,
+  saveRoutine,
+  fetchPresetRoutine,
+  savePresetRoutine,
+} from "../api/routine";
 import type {
   RoutineDay,
   RoutineSaveError,
@@ -97,11 +102,15 @@ function formDayToApi(
 
 // --- Component ---
 
-export function RoutineEditor() {
-  const { memberId } = useParams<{ memberId: string }>();
+export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
+  const { memberId, presetId } = useParams<{
+    memberId: string;
+    presetId: string;
+  }>();
   const t = useT();
   const queryClient = useQueryClient();
-  const id = memberId != null ? Number(memberId) : 0;
+  const rawId = preset ? presetId : memberId;
+  const id = rawId != null ? Number(rawId) : 0;
 
   const formRef = useRef<HTMLFormElement>(null);
   const scrollRef = useRef<number>(0);
@@ -117,8 +126,8 @@ export function RoutineEditor() {
     isLoading,
     error: fetchError,
   } = useQuery({
-    queryKey: ["routine", id],
-    queryFn: () => fetchRoutine(id),
+    queryKey: ["routine", preset ? "preset" : "member", id],
+    queryFn: () => (preset ? fetchPresetRoutine(id) : fetchRoutine(id)),
     enabled: id > 0,
   });
 
@@ -172,10 +181,11 @@ export function RoutineEditor() {
   // Save mutation
   const saveMutation = useMutation({
     mutationFn: (values: FormValues) => {
-      return saveRoutine(id, {
+      const body = {
         base_routine_id: values.base_routine_id,
         workouts: values.workouts.map(formDayToApi),
-      });
+      };
+      return preset ? savePresetRoutine(id, body) : saveRoutine(id, body);
     },
     onSuccess: (result) => {
       if ("ok" in result && result.ok) {
@@ -189,7 +199,9 @@ export function RoutineEditor() {
           workouts: result.routine.map(apiDayToForm),
         });
         // Invalidate the query to get fresh data next time
-        queryClient.invalidateQueries({ queryKey: ["routine", id] });
+        queryClient.invalidateQueries({
+          queryKey: ["routine", preset ? "preset" : "member", id],
+        });
       } else {
         const err = result as RoutineSaveError;
         setFeedback({
@@ -274,10 +286,10 @@ export function RoutineEditor() {
       {/* Top bar */}
       <header className="sticky top-0 z-20 flex items-center gap-2 min-h-[46px] px-gut py-1.5 bg-elevation-0 border-b border-elevation-0-stroke shadow-elevation-1">
         <Link
-          to={`/members/${id}`}
+          to={preset ? "/presets" : `/members/${id}`}
           className="text-[13px] text-ink-2 hover:text-ink motion-safe:transition-colors duration-fast"
         >
-          ← {data.name}
+          ← {preset ? t("presets") : data.name}
         </Link>
         <span className="spacer flex-1" />
         <LangToggle />
@@ -287,17 +299,25 @@ export function RoutineEditor() {
         {/* Header */}
         <div className="mb-6">
           <h1 className="text-[28px] leading-tight">
-            {t("editor_title").replace("{name}", data.name)}
+            {(preset ? t("preset_editor_title") : t("editor_title")).replace(
+              "{name}",
+              data.name
+            )}
           </h1>
           <span className="inline-block mt-1.5 text-[13px] px-2 py-0.5 rounded-full bg-elevation-1 border border-elevation-0-stroke text-ink-2">
             {ownerLabel}
           </span>
-          {!data.coach_authored && !data.routine_preset_name && data && (
+          {preset && (
+            <p className="mt-2 text-[13px] text-ink-2">
+              {t("preset_master_consequence")}
+            </p>
+          )}
+          {!preset && !data.coach_authored && !data.routine_preset_name && data && (
             <p className="mt-2 text-[13px] text-ink-2">
               {t("chip_consequence")}
             </p>
           )}
-          {data && data.routine_preset_name && (
+          {!preset && data && data.routine_preset_name && (
             <p className="mt-2 text-[13px] text-ink-2">
               {t("chip_consequence")}
             </p>

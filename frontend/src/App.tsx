@@ -117,6 +117,12 @@ export function Dashboard() {
             path="members/:memberId/routine"
             element={<RoutineEditor />}
           />
+          {/* The Preset master editor — the same editor pointed at a
+              Preset (#154), reached from the Presets screen. */}
+          <Route
+            path="presets/:presetId/routine"
+            element={<RoutineEditor preset />}
+          />
           {/* Unknown deep links: get the coach back to the roster. */}
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

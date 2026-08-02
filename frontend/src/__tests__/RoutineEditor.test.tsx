@@ -456,3 +456,171 @@ describe("RoutineEditor", () => {
     });
   });
 });
+
+// --- Preset master mode (#154): the same editor pointed at a Preset ---
+
+function renderPresetEditor(initialPath: string) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false },
+      mutations: { retry: false },
+    },
+  });
+
+  return {
+    ...render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[initialPath]}>
+          <Routes>
+            <Route
+              path="/presets/:presetId/routine"
+              element={<RoutineEditor preset />}
+            />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    ),
+    queryClient,
+  };
+}
+
+function mockPresetRoutineResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    preset_id: 7,
+    name: "Beginner",
+    routine: [
+      {
+        weekday: 0,
+        name: "Preset day",
+        exercises: [{ exercise: "squat", sets: 3, reps: "10" }],
+      },
+    ],
+    routine_id: 42,
+    routine_author: "Coach Ana",
+    catalog: ["squat", "bench press"],
+    ...overrides,
+  };
+}
+
+describe("RoutineEditor preset mode", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    (window as any).__I18N__ = {
+      ...EN_BOOTSTRAP,
+      presets: "Presets",
+      preset_editor_title: "Preset: {name}",
+      preset_master_consequence:
+        "Saving updates every Member still on this Preset.",
+    };
+  });
+
+  it("fetches the master from /api/presets/{id}/routine and titles the screen", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockPresetRoutineResponse()),
+    } as Response);
+
+    renderPresetEditor("/presets/7/routine");
+
+    await waitFor(() => {
+      expect(screen.getByText("Preset: Beginner")).toBeInTheDocument();
+    });
+    expect(fetchSpy).toHaveBeenCalledWith("/api/presets/7/routine");
+    // The consequence line: editing a master touches every linked Member.
+    expect(
+      screen.getByText("Saving updates every Member still on this Preset.")
+    ).toBeInTheDocument();
+    // The way back leads to the Presets screen, not a member page.
+    const back = screen.getByRole("link", { name: /Presets/ });
+    expect(back).toHaveAttribute("href", "/presets");
+    // The master's day is loaded into the form.
+    expect(screen.getByDisplayValue("Preset day")).toBeInTheDocument();
+  });
+
+  it("saves through PUT /api/presets/{id}/routine with the stale-check stamp", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () => Promise.resolve(mockPresetRoutineResponse()),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () =>
+          Promise.resolve({
+            ok: true,
+            preset_id: 7,
+            name: "Beginner",
+            routine: [
+              {
+                weekday: 0,
+                name: "Preset day",
+                exercises: [{ exercise: "squat", sets: 3, reps: "10" }],
+              },
+            ],
+            routine_id: 43,
+            routine_author: "Coach Ana",
+            notified: 2,
+          }),
+      } as Response)
+      .mockResolvedValue({
+        // The post-save invalidation refetches the master.
+        ok: true, status: 200,
+        json: () => Promise.resolve(mockPresetRoutineResponse({ routine_id: 43 })),
+      } as Response);
+
+    renderPresetEditor("/presets/7/routine");
+    await waitFor(() => {
+      expect(screen.getByText("Preset: Beginner")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Save Routine" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Routine saved.")).toBeInTheDocument();
+    });
+    const [url, init] = fetchSpy.mock.calls[1];
+    expect(url).toBe("/api/presets/7/routine");
+    expect(init?.method).toBe("PUT");
+    const body = JSON.parse(String(init?.body));
+    expect(body.base_routine_id).toBe(42); // the stale-check stamp
+    expect(body.workouts[0].name).toBe("Preset day");
+  });
+
+  it("shows the stale refusal with the fresh master", async () => {
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () => Promise.resolve(mockPresetRoutineResponse()),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: false, status: 409,
+        json: () =>
+          Promise.resolve({
+            error: "This routine changed while you were editing.",
+            fresh_routine: [
+              {
+                weekday: 1,
+                name: "Newer day",
+                exercises: [{ exercise: "squat", sets: 5, reps: "5" }],
+              },
+            ],
+            fresh_routine_id: 99,
+          }),
+      } as Response);
+
+    renderPresetEditor("/presets/7/routine");
+    await waitFor(() => {
+      expect(screen.getByText("Preset: Beginner")).toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "Save Routine" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("This routine changed while you were editing.")
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Newer day/)).toBeInTheDocument();
+  });
+});
