@@ -984,11 +984,10 @@ class TestScreenCoverage:
     @pytest.mark.parametrize(
         "screen,url",
         [
-            # The roster and login screens are React since the #154 cutover
-            # — tests/test_375px_playwright.py and the frontend RTL suite
-            # cover them; this sweep now guards only the screens still
+            # Everything but Settings is React since the #154 cutover —
+            # tests/test_375px_playwright.py and the frontend RTL suite
+            # cover those; this sweep now guards only the last screen still
             # rendered server-side (retiring with #154's remaining commits).
-            ("Presets", "/presets"),
             ("Settings", "/settings"),
         ],
     )
@@ -1005,7 +1004,6 @@ class TestScreenCoverage:
     async def test_375px_body_no_fixed_width_exceeds_viewport(self, sweep_env):
         """The HTML must not contain inline fixed widths exceeding 375px."""
         screens = [
-            "/presets",
             "/settings",
         ]
 

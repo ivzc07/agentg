@@ -1,11 +1,17 @@
-"""Coach dashboard Preset flows (issue #102)."""
+"""Coach dashboard Preset flows (issue #102), on the JSON API since the
+React cutover (#154).
+
+The Presets screen itself is React (PresetsPage RTL covers the chrome,
+notices, and forms); what lives here is the web-layer contract the screen
+runs on: create/apply/default/retire plus the master editor's save,
+notification, and scoping semantics — the parts a Coach's data depends on.
+"""
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
-from agentg.dashboard_web import CONSEQUENCE_LINE, STALE_ERROR
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
 from agentg.models import Member
@@ -77,85 +83,72 @@ async def add_member(env, name: str, uid: str) -> Member:
 
 
 async def create_master(env, name: str = "Beginner") -> int:
+    """A Preset with a master written through the JSON editor endpoint."""
     preset = await env.routines.create_preset(env.gym.id, name)
-    response = await env.client.post(
-        f"/presets/{preset.id}/routine",
-        data=[
-            ("base_routine_id", ""),
-            ("weekday", "0"),
-            ("workout_name", "Full body"),
-            ("exercises", "squat, 3, 8-10"),
-        ],
+    response = await env.client.put(
+        f"/api/presets/{preset.id}/routine",
+        json={
+            "base_routine_id": None,
+            "workouts": [
+                {
+                    "weekday": 0,
+                    "name": "Full body",
+                    "exercises": [{"exercise": "squat", "sets": 3, "reps": "8-10"}],
+                },
+            ],
+        },
         cookies=cookies(env),
         allow_redirects=False,
     )
-    assert response.status == 302
+    assert response.status == 200
     return preset.id
 
 
-async def test_presets_index_create_duplicate_and_editor_share_the_coach_gate(env):
+async def test_presets_screen_and_create_share_the_coach_gate(env):
+    # The screen URL never hands the shell to an anonymous visitor…
+    anonymous = await env.client.get("/presets")
+    assert 'id="root"' not in await anonymous.text()
+    # …and serves it to a signed-in coach.  (Order matters: the aiohttp
+    # test client keeps cookies, and the authed visit refreshes a session
+    # cookie into its jar.)
     response = await env.client.get("/presets", cookies=cookies(env))
     assert response.status == 200
-    assert "Crear Preset" in await response.text()
-    assert "/presets" in await response.text()
+    assert 'id="root"' in await response.text()
 
+    # Creation and the duplicate refusal live on the API.
     response = await env.client.post(
-        "/presets", data={"name": " Beginner "}, cookies=cookies(env), allow_redirects=False
+        "/api/presets", json={"name": " Beginner "}, cookies=cookies(env)
     )
-    assert response.status == 302
+    assert response.status == 201
     response = await env.client.post(
-        "/presets", data={"name": "Beginner"}, cookies=cookies(env)
+        "/api/presets", json={"name": "Beginner"}, cookies=cookies(env)
     )
     assert response.status == 400
-    assert "Ya existe un Preset" in await response.text()
+    assert (await response.json())["error"] == "duplicate_preset_name"
 
 
 async def test_preset_editor_reuses_validation_and_unknown_ids_are_404(env):
     preset_id = await create_master(env)
     response = await env.client.get(
-        f"/presets/{preset_id}/routine", cookies=cookies(env)
+        f"/api/presets/{preset_id}/routine", cookies=cookies(env)
     )
     assert response.status == 200
-    assert "Preset: Beginner" in await response.text()
-    response = await env.client.post(
-        f"/presets/{preset_id}/routine",
-        data={"base_routine_id": "999999", "weekday": "0", "workout_name": "X", "exercises": "squat"},
-        cookies=cookies(env),
-    )
-    assert response.status == 409
-    response = await env.client.get("/presets/not-an-id/routine", cookies=cookies(env))
-    assert response.status == 404
-
-
-async def test_preset_master_editor_shows_its_own_consequence_not_the_member_warning(env):
-    preset_id = await create_master(env)
-
-    response = await env.client.get(
-        f"/presets/{preset_id}/routine", cookies=cookies(env)
-    )
-
-    assert response.status == 200
-    body = await response.text()
-    assert "Guardar actualiza a todos los miembros que siguen este Preset." in body
-    assert CONSEQUENCE_LINE not in body
-
-    # The rejection re-render is the same page: a refused master save must
-    # not fall back to the Member's fork warning either.
-    refused = await env.client.post(
-        f"/presets/{preset_id}/routine",
-        data={
-            "base_routine_id": "999999",
-            "weekday": "0",
-            "workout_name": "X",
-            "exercises": "squat",
+    assert (await response.json())["name"] == "Beginner"
+    response = await env.client.put(
+        f"/api/presets/{preset_id}/routine",
+        json={
+            "base_routine_id": 999999,
+            "workouts": [
+                {"weekday": 0, "name": "X", "exercises": [{"exercise": "squat"}]},
+            ],
         },
         cookies=cookies(env),
     )
-
-    assert refused.status == 409
-    body = await refused.text()
-    assert "Guardar actualiza a todos los miembros que siguen este Preset." in body
-    assert CONSEQUENCE_LINE not in body
+    assert response.status == 409
+    response = await env.client.get(
+        "/api/presets/not-an-id/routine", cookies=cookies(env)
+    )
+    assert response.status == 404
 
 
 async def test_apply_multi_and_all_notifies_each_member_and_never_coach(env, caplog):
@@ -163,23 +156,24 @@ async def test_apply_multi_and_all_notifies_each_member_and_never_coach(env, cap
     first = await add_member(env, "Luis", "2")
     second = await add_member(env, "Mara", "3")
     response = await env.client.post(
-        f"/presets/{preset_id}/apply",
-        data=[("member_ids", str(first.id)), ("member_ids", str(second.id))],
+        f"/api/presets/{preset_id}/apply",
+        json={"member_ids": [first.id, second.id]},
         cookies=cookies(env),
         allow_redirects=False,
     )
-    assert response.status == 302
+    assert response.status == 200
+    assert (await response.json())["applied"] == 2
     assert {sent[1] for sent in env.notifier.sent} == {"2", "3"}
     assert await env.routines.active_routine(first.id)
 
     env.notifier.fail_ids.add("2")
     response = await env.client.post(
-        f"/presets/{preset_id}/apply",
-        data={"apply_all": "1"},
+        f"/api/presets/{preset_id}/apply",
+        json={"apply_all": True},
         cookies=cookies(env),
         allow_redirects=False,
     )
-    assert response.status == 302
+    assert response.status == 200
     assert "failed to notify member" in caplog.text
     assert await env.routines.active_routine(second.id)
     assert await env.routines.active_routine(env.coach.id) is None
@@ -205,36 +199,36 @@ async def test_apply_rejects_a_foreign_or_coach_member_without_writing(env):
     foreign_member = await env.linking.link_member(foreign_gym.id, "Mara", "telegram", "7")
     for member_id in (foreign_member.id, env.coach.id):
         response = await env.client.post(
-            f"/presets/{preset_id}/apply",
-            data={"member_ids": str(member_id)},
+            f"/api/presets/{preset_id}/apply",
+            json={"member_ids": [member_id]},
             cookies=cookies(env),
         )
         assert response.status == 404
         assert await env.routines.active_routine(member_id) is None
 
 
-async def test_apply_without_a_master_rerenders_presets_with_a_coach_error(env):
+async def test_apply_without_a_master_answers_a_structured_400(env):
     preset = await env.routines.create_preset(env.gym.id, "Beginner")
     member = await add_member(env, "Luis", "2")
     response = await env.client.post(
-        f"/presets/{preset.id}/apply",
-        data={"member_ids": str(member.id)},
+        f"/api/presets/{preset.id}/apply",
+        json={"member_ids": [member.id]},
         cookies=cookies(env),
     )
     assert response.status == 400
-    assert "Escribe el plan del Preset antes de aplicarlo." in await response.text()
+    assert (await response.json())["error"] == "preset_no_master"
 
 
-async def test_apply_without_selection_rerenders_presets_with_a_coach_error(env):
+async def test_apply_without_selection_answers_a_structured_400(env):
     preset_id = await create_master(env)
     response = await env.client.post(
-        f"/presets/{preset_id}/apply", data={}, cookies=cookies(env)
+        f"/api/presets/{preset_id}/apply", json={}, cookies=cookies(env)
     )
     assert response.status == 400
-    assert "Elige al menos un miembro." in await response.text()
+    assert (await response.json())["error"] == "preset_no_selection"
 
 
-async def test_stale_apply_rerenders_presets_with_the_stale_error(env, monkeypatch):
+async def test_stale_apply_answers_409(env, monkeypatch):
     preset_id = await create_master(env)
     member = await add_member(env, "Luis", "2")
 
@@ -245,12 +239,12 @@ async def test_stale_apply_rerenders_presets_with_the_stale_error(env, monkeypat
 
     monkeypatch.setattr(env.store, "apply_preset", stale)
     response = await env.client.post(
-        f"/presets/{preset_id}/apply",
-        data={"member_ids": str(member.id)},
+        f"/api/presets/{preset_id}/apply",
+        json={"member_ids": [member.id]},
         cookies=cookies(env),
     )
     assert response.status == 409
-    assert STALE_ERROR in await response.text()
+    assert (await response.json())["error"] == "stale_error"
 
 
 async def test_editing_a_preset_notifies_only_members_still_linked_to_it(env, monkeypatch, caplog):
@@ -267,40 +261,34 @@ async def test_editing_a_preset_notifies_only_members_still_linked_to_it(env, mo
         base_routine_id=forked_active["routine_id"],
     )
     env.notifier.sent.clear()
-    master = await env.routines.preset_master(preset_id)
 
-    response = await env.client.post(
-        f"/presets/{preset_id}/routine",
-        data=[
-            ("base_routine_id", str(master["routine_id"])),
-            ("weekday", "0"),
-            ("workout_name", "Refreshed"),
-            ("exercises", "squat, 3, 8"),
-        ],
-        cookies=cookies(env),
-        allow_redirects=False,
-    )
+    async def save_master(name: str) -> None:
+        master = await env.routines.preset_master(preset_id)
+        response = await env.client.put(
+            f"/api/presets/{preset_id}/routine",
+            json={
+                "base_routine_id": master["routine_id"],
+                "workouts": [
+                    {
+                        "weekday": 0,
+                        "name": name,
+                        "exercises": [{"exercise": "squat", "sets": 3, "reps": "8"}],
+                    },
+                ],
+            },
+            cookies=cookies(env),
+            allow_redirects=False,
+        )
+        assert response.status == 200
 
-    assert response.status == 302
+    await save_master("Refreshed")
     assert [sent[1] for sent in env.notifier.sent] == ["2"]
     assert "Coach Ana" in env.notifier.sent[0][2]
     assert (await env.routines.active_routine(linked.id))["workouts"][0]["name"] == "Refreshed"
     assert (await env.routines.active_routine(forked.id))["workouts"][0]["name"] == "Mara fork"
 
     env.notifier.fail_ids.add("2")
-    master = await env.routines.preset_master(preset_id)
-    response = await env.client.post(
-        f"/presets/{preset_id}/routine",
-        data=[
-            ("base_routine_id", str(master["routine_id"])),
-            ("weekday", "0"),
-            ("workout_name", "Refreshed again"),
-            ("exercises", "squat, 3, 8"),
-        ],
-        cookies=cookies(env),
-        allow_redirects=False,
-    )
-    assert response.status == 302
+    await save_master("Refreshed again")
     assert "failed to notify member" in caplog.text
 
     original_member_channel = env.store.member_channel
@@ -311,19 +299,7 @@ async def test_editing_a_preset_notifies_only_members_still_linked_to_it(env, mo
         return await original_member_channel(member_id)
 
     monkeypatch.setattr(env.store, "member_channel", no_channel)
-    master = await env.routines.preset_master(preset_id)
-    response = await env.client.post(
-        f"/presets/{preset_id}/routine",
-        data=[
-            ("base_routine_id", str(master["routine_id"])),
-            ("weekday", "0"),
-            ("workout_name", "Refreshed without channel"),
-            ("exercises", "squat, 3, 8"),
-        ],
-        cookies=cookies(env),
-        allow_redirects=False,
-    )
-    assert response.status == 302
+    await save_master("Refreshed without channel")
     assert "no channel" in caplog.text
 
 
@@ -332,28 +308,33 @@ async def test_presets_can_move_the_default_slot_and_retire_it(env):
     second = await env.routines.create_preset(env.gym.id, "Advanced")
 
     response = await env.client.post(
-        f"/presets/{first.id}/default", cookies=cookies(env), allow_redirects=False
+        f"/api/presets/{first.id}/default", json={}, cookies=cookies(env)
     )
-    assert response.status == 302
+    assert response.status == 200
     assert await env.store.default_preset_id(env.gym.id) == first.id
     response = await env.client.post(
-        f"/presets/{second.id}/default", cookies=cookies(env), allow_redirects=False
+        f"/api/presets/{second.id}/default", json={}, cookies=cookies(env)
     )
-    assert response.status == 302
+    assert response.status == 200
     assert await env.store.default_preset_id(env.gym.id) == second.id
 
+    # A second set on the same Preset clears the slot (the toggle).
     response = await env.client.post(
-        f"/presets/{second.id}/default", cookies=cookies(env), allow_redirects=False
+        f"/api/presets/{second.id}/default", json={}, cookies=cookies(env)
     )
-    assert response.status == 302
+    assert response.status == 200
     assert await env.store.default_preset_id(env.gym.id) is None
 
     response = await env.client.post(
-        f"/presets/{second.id}/retire", cookies=cookies(env), allow_redirects=False
+        f"/api/presets/{second.id}/retire", json={}, cookies=cookies(env)
     )
-    assert response.status == 302
+    assert response.status == 200
     assert await env.store.default_preset_id(env.gym.id) is None
-    assert (await env.client.get(f"/presets/{second.id}/routine", cookies=cookies(env))).status == 404
+    # A retired Preset's master editor is gone with it.
+    gone = await env.client.get(
+        f"/api/presets/{second.id}/routine", cookies=cookies(env)
+    )
+    assert gone.status == 404
 
 
 async def test_default_and_retire_reject_a_foreign_or_missing_preset(env):
@@ -361,83 +342,12 @@ async def test_default_and_retire_reject_a_foreign_or_missing_preset(env):
     foreign = await env.routines.create_preset(foreign_gym.id, "Foreign")
     for preset_id in (foreign.id, 999999):
         default = await env.client.post(
-            f"/presets/{preset_id}/default", cookies=cookies(env)
+            f"/api/presets/{preset_id}/default", json={}, cookies=cookies(env)
         )
         retire = await env.client.post(
-            f"/presets/{preset_id}/retire", cookies=cookies(env)
+            f"/api/presets/{preset_id}/retire", json={}, cookies=cookies(env)
         )
         assert default.status == 404
         assert retire.status == 404
     assert await env.store.default_preset_id(env.gym.id) is None
     assert [item.id for item in await env.routines.presets(foreign_gym.id)] == [foreign.id]
-
-
-async def test_an_htmx_master_save_returns_the_editor_in_place(env):
-    preset_id = await create_master(env)
-    master = await env.store.preset_master(preset_id)
-
-    response = await env.client.post(
-        f"/presets/{preset_id}/routine",
-        data=[
-            ("base_routine_id", str(master["routine_id"])),
-            ("weekday", "1"),
-            ("workout_name", "Full body B"),
-            ("exercises", "bench press, 3, 10"),
-        ],
-        cookies=cookies(env),
-        headers={"HX-Request": "true"},
-        allow_redirects=False,
-    )
-
-    assert response.status == 200
-    text = await response.text()
-    assert "<!DOCTYPE" not in text
-    assert text.lstrip().startswith('<div id="editor-root"')
-    assert "Preset guardado" in text
-
-
-async def test_preset_writes_redirect_with_their_done_keys(env):
-    """Issue #129: every redirect write carries its confirmation key."""
-    preset_id = await create_master(env)
-    member = await add_member(env, "Marta", "201")
-
-    created = await env.client.post(
-        "/presets", data={"name": "Cutting"}, cookies=cookies(env), allow_redirects=False
-    )
-    assert created.headers["Location"] == "/presets?done=preset_created"
-
-    applied = await env.client.post(
-        f"/presets/{preset_id}/apply",
-        data={"member_ids": str(member.id)},
-        cookies=cookies(env),
-        allow_redirects=False,
-    )
-    assert applied.headers["Location"] == "/presets?done=preset_applied"
-
-    default_set = await env.client.post(
-        f"/presets/{preset_id}/default", cookies=cookies(env), allow_redirects=False
-    )
-    assert default_set.headers["Location"] == "/presets?done=default_set"
-    cleared = await env.client.post(
-        f"/presets/{preset_id}/default", cookies=cookies(env), allow_redirects=False
-    )
-    assert cleared.headers["Location"] == "/presets?done=default_cleared"
-
-    retired = await env.client.post(
-        f"/presets/{preset_id}/retire", cookies=cookies(env), allow_redirects=False
-    )
-    assert retired.headers["Location"] == "/presets?done=preset_retired"
-
-
-async def test_the_presets_page_renders_a_known_done_notice_and_ignores_garbage(env):
-    await create_master(env)
-
-    page = await env.client.get("/presets?done=preset_applied", cookies=cookies(env))
-    text = await page.text()
-    assert "notice-ok" in text and "Preset aplicado." in text
-
-    garbage = await env.client.get(
-        "/presets?done=%3Cscript%3Ealert(1)%3C/script%3E", cookies=cookies(env)
-    )
-    text = await garbage.text()
-    assert "notice-ok" not in text and "<script>alert(1)" not in text
