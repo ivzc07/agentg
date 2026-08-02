@@ -32,8 +32,10 @@ from agentg.linking import Linking
 from agentg.linking_store import LinkedIdentity
 from agentg.context import MemberContext
 from agentg.instrument import TurnContext
+from agentg.parsing import parse_set_line
 from agentg.snapshot import member_snapshot
 from agentg.stores import Stores
+from agentg.training import LoggedSets
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from agents.result import RunResultStreaming
@@ -117,6 +119,9 @@ class AgentRuntime:
     # Stream replies by default; set False when no live model backs the Agent
     # (tests that mock Runner).  Kept deliberately per #176.
     stream_replies: bool = True
+    # Fast path (#177): log pure set shorthand without a model call.
+    # Disabled in behavioral tests that script the Agent's turn.
+    fast_path_enabled: bool = True
     # One lock per channel identity so a rapid double message can't interleave
     # turns (or linking steps). Unbounded, but one entry per person who
     # ever messaged this process — fine at this scale.
@@ -171,6 +176,79 @@ class AgentRuntime:
             dashboard_base_url=self.dashboard.base_url if self.dashboard else None,
         )
 
+    def _format_fast_confirmation(self, logged: LoggedSets, unit: str) -> str:
+        """Confirmation that mirrors the Agent's coaching tone: restates the
+        parsed numbers, celebrates beaten previous records, and flags a new
+        exercise (#177).  Defaults to Spanish per the system prompt's
+        language rule."""
+        exercise = logged.exercise
+        reps_str = "/".join(str(r) for r in logged.reps)
+        if logged.weight is not None:
+            line = f"{exercise} {logged.weight:g}{unit} {reps_str}"
+        else:
+            line = f"{exercise} {reps_str}"
+
+        previous = logged.previous
+        if previous is None:
+            return f"{line} ✅ — ¡primera vez registrando {exercise}!"
+
+        prev_weight = previous.get("weight")
+        prev_reps = previous.get("reps", [])
+
+        if prev_weight is None and not prev_reps:
+            return f"{line} ✅"
+
+        beats: list[str] = []
+        if logged.weight is not None and prev_weight is not None and logged.weight > prev_weight:
+            beats.append(f"subiste de {prev_weight:g}{unit}")
+        elif logged.weight is not None and prev_weight is not None and logged.weight < prev_weight:
+            beats.append(f"bajó de {prev_weight:g}{unit}")
+
+        total_prev = sum(prev_reps) if prev_reps else 0
+        total_now = sum(logged.reps)
+        if total_now > total_prev and prev_reps:
+            beats.append(f"{total_now} reps total supera{'n' if total_now > 1 else ''} {total_prev}")
+
+        if beats:
+            return f"{line} ✅ — {'; '.join(beats)}"
+
+        return f"{line} ✅"
+
+    async def _try_fast_log(
+        self, text: str, context: MemberContext, member_id: int,
+        session: SQLAlchemySession,
+    ) -> Reply | None:
+        """Try the fast path for pure set shorthand (#177).
+
+        Returns a ``Reply`` when the message is nothing but set shorthand,
+        the Exercise resolves in the catalog, an open Session exists, and
+        the weight is not suspect.  Returns ``None`` when anything is
+        ambiguous — the caller falls through to the Agent.
+        """
+        if not self.fast_path_enabled:
+            return None
+        parsed = parse_set_line(text)
+        if parsed is None:
+            return None
+        # The fast path only fires when the line itself names the exercise;
+        # context-dependent logging needs the Agent.
+        if parsed.exercise is None:
+            return None
+        logged = await self.stores.training.try_fast_log_sets(
+            member_id, context.gym_id, parsed
+        )
+        if logged is None:
+            return None
+        confirmation = self._format_fast_confirmation(logged, context.weight_unit)
+        # Record the user message and assistant confirmation in the session
+        # history so the Agent's next turn stays coherent (#177).
+        from agents.items import ItemHelpers
+        await session.add_items([
+            *ItemHelpers.input_to_new_input_list(text),
+            {"content": confirmation, "role": "assistant"},
+        ])
+        return Reply(confirmation)
+
     async def handle_message(self, msg: IncomingMessage) -> Reply:
         key = (msg.channel, msg.channel_user_id)
         # Await the previous turn's compaction (if any) before acquiring the
@@ -222,12 +300,24 @@ class AgentRuntime:
                 # Awaited: the tool set is scoped to the caller's role, which
                 # needs a Routine lookup (issue #174).
                 context = await self.member_context(linked)
+                member_id = linked.member.id
+                # Fast path: pure set shorthand that resolves to a catalog
+                # Exercise with an open Session and no suspect weight jump
+                # can be logged deterministically — no model call needed
+                # (#177).  Anything ambiguous falls through to the Agent.
+                fast = await self._try_fast_log(msg.text, context, member_id, session)
+                if fast is not None:
+                    # The fast path still resets the check-in rhythm — any
+                    # reply from a linked Member counts as activity (#169).
+                    asyncio.create_task(
+                        self.stores.checkins.reset_rhythm(member_id)
+                    )
+                    return fast
                 # Any reply resets the check-in rhythm and revives a lapsed
                 # Member.  Fired concurrently with the model call rather than
                 # in front of it, so the DB write overlaps the LLM round-trip
                 # and never adds to the Member's wait (issue #169).  It is
                 # settled on every exit path, including failure.
-                member_id = linked.member.id
                 reset_task = asyncio.create_task(
                     self.stores.checkins.reset_rhythm(member_id)
                 )

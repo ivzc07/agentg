@@ -23,7 +23,7 @@ from agentg.catalog import (
     resolve_exercise_names,
 )
 from agentg.models import Exercise, Gym, Member, Session, Set
-from agentg.parsing import parse_set_line
+from agentg.parsing import ParsedSetLine, parse_set_line
 from agentg.timezones import local_date
 
 # Build-time choice (#26): a Session abandoned without "done" closes itself
@@ -208,6 +208,46 @@ class TrainingStore:
             return session
 
     # --- Sets ---
+
+    async def try_fast_log_sets(
+        self, member_id: int, gym_id: int, parsed: ParsedSetLine
+    ) -> LoggedSets | None:
+        """Fast-path a pure set shorthand log without a model call (#177).
+
+        Returns ``LoggedSets`` when the sets can be logged deterministically;
+        returns ``None`` when the log should fall through to the Agent (no
+        open Session, exercise not in the catalog, suspect weight jump, or
+        no exercise name in the parsed line).
+        """
+        if parsed.exercise is None:
+            return None
+        async with self._sessions() as db:
+            # Exercise must resolve in the catalog (read-only check — the
+            # fast path never creates a new Exercise; that needs the Agent).
+            resolved = await find_exercise(db, _normalize(parsed.exercise))
+            if resolved is None:
+                await db.commit()
+                return None
+            session = await self._open_session_row(db, member_id)
+            if session is None:
+                await db.commit()  # persist any auto-close that just happened
+                return None
+            weight = await self._to_gym_unit(db, gym_id, parsed.weight, parsed.unit)
+            previous = await self._last_sets_info(
+                db, member_id, resolved.id, exclude_session_id=session.id
+            )
+            suspect = _suspect_hint(weight, previous)
+            if suspect is not None:
+                await db.commit()
+                return None
+            self._add_sets(db, session, resolved.id, weight, parsed.reps, self._clock())
+            await db.commit()
+            return LoggedSets(
+                resolved.name,
+                weight,
+                list(parsed.reps),
+                previous,
+            )
 
     async def log_sets(
         self,
