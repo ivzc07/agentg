@@ -160,6 +160,9 @@ async def dynamic_instructions(
 
 
 def build_agent(settings: Settings) -> Agent:
+    # Model-call counting is done by a global wrapper on litellm.acompletion
+    # installed at import time in agentg.instrument; it attributes each call
+    # to the active turn via a ContextVar (issue #161).
     return Agent(
         name="Agent",
         instructions=dynamic_instructions,

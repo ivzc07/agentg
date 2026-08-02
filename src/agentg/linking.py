@@ -141,9 +141,9 @@ def build_phraser(settings: Settings) -> Phraser:
     """The production phraser: one plain model call per linking reply."""
 
     async def phrase(instruction: str, member_text: str) -> str:
-        from litellm import acompletion  # deferred: import cost and test isolation
+        import litellm  # deferred: import cost and test isolation
 
-        response = await acompletion(
+        response = await litellm.acompletion(
             model=settings.model,
             api_key=settings.model_api_key,
             messages=[

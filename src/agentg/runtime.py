@@ -35,6 +35,7 @@ from agentg.messages import IncomingMessage, Reply
 from agentg.linking import Linking
 from agentg.linking_store import LinkedIdentity
 from agentg.context import MemberContext
+from agentg.instrument import TurnContext
 from agentg.stores import Stores
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,19 @@ class AgentRuntime:
     def session_for_member(self, member_id: int) -> SQLAlchemySession:
         return SQLAlchemySession(f"member:{member_id}", engine=self.engine)
 
-    def member_context(self, linked: LinkedIdentity) -> MemberContext:
+    async def member_context(self, linked: LinkedIdentity) -> MemberContext:
+        """Build the per-turn context with conversation-stable gating flags
+        precomputed (issue #174)."""
+        can_author_routine = True
+        if not linked.member.is_coach:
+            routine = await self.stores.routines.active_routine(linked.member.id)
+            # Routine-authoring tools are usable when the Member has no routine
+            # at all (intake) OR has an agent-generated one (can replace it).
+            # A coach-authored routine blocks them — the Agent never restructures
+            # those (issue #174).
+            can_author_routine = (
+                routine is None or not routine.get("coach_authored", False)
+            )
         return MemberContext(
             stores=self.stores,
             notifier=self.notifier,
@@ -83,92 +96,96 @@ class AgentRuntime:
             weight_unit=linked.gym.weight_unit,
             timezone=linked.gym.timezone,
             is_coach=linked.member.is_coach,
+            can_author_routine=can_author_routine,
             dashboard_base_url=self.dashboard.base_url if self.dashboard else None,
         )
 
     async def handle_message(self, msg: IncomingMessage) -> Reply:
         async with self._locks[(msg.channel, msg.channel_user_id)]:
-            linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
-            reply = await self.linking.handle(msg, linked)
-            if reply is not None:
-                return Reply(reply)
-            if linked is None:  # linking always replies for unlinked identities
-                raise RuntimeError("unlinked message reached the agent loop")
-            # `/dashboard` is a deterministic door, not Agent chat: it never
-            # touches the check-in rhythm, compaction, or history.
-            if self.dashboard is not None and is_dashboard_command(msg.text):
-                return await self.dashboard.handle(linked, is_group=msg.is_group)
-            # Any reply resets the check-in rhythm and revives a lapsed Member.
-            await self.stores.checkins.reset_rhythm(linked.member.id)
-            session = self.session_for_member(linked.member.id)
-            try:
-                await maybe_compact(
-                    session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
-                )
-            except Exception:
-                logger.exception("compaction failed for member %d", linked.member.id)
-            context = self.member_context(linked)
-            # Coach pings accumulated during the turn must be drained even
-            # if Runner.run raises (a later tool error, provider timeout,
-            # MaxTurnsExceeded) — the safety note was already committed and
-            # silence is not an option (P1 #5153515963).
-            result = None
-            try:
+            with TurnContext():
+                linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
+                reply = await self.linking.handle(msg, linked)
+                if reply is not None:
+                    return Reply(reply)
+                if linked is None:  # linking always replies for unlinked identities
+                    raise RuntimeError("unlinked message reached the agent loop")
+                # `/dashboard` is a deterministic door, not Agent chat: it never
+                # touches the check-in rhythm, compaction, or history.
+                if self.dashboard is not None and is_dashboard_command(msg.text):
+                    return await self.dashboard.handle(linked, is_group=msg.is_group)
+                # Any reply resets the check-in rhythm and revives a lapsed Member.
+                await self.stores.checkins.reset_rhythm(linked.member.id)
+                session = self.session_for_member(linked.member.id)
                 try:
-                    result = await Runner.run(
-                        self.agent,
-                        msg.text,
-                        session=session,
-                        context=context,
+                    await maybe_compact(
+                        session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
                     )
-                finally:
-                    # Issue #166: delete_my_data clears the session during the
-                    # turn, but the runner persists this turn's items afterwards --
-                    # the tool call and goodbye survive the wipe.  Clear again so
-                    # nothing remains.  Run in finally so a mid-turn error (API,
-                    # MaxTurnsExceeded) doesn't skip the clear after the domain
-                    # wipe has already committed.
-                    if context.forgotten:
-                        await session.clear_session()
-                text = str(result.final_output)
-                sender = self.demo_sender
-                has_demos = sender is not None and context.demo_requests
-                has_pings = bool(context.coach_pings)
-                if not has_demos and not has_pings:
-                    return Reply(text)
-                demo_requests = list(context.demo_requests) if sender is not None else []
-                coach_pings = list(context.coach_pings)
-                gym_id = context.gym_id
-                channel, user_id = msg.channel, msg.channel_user_id
+                except Exception:
+                    logger.exception("compaction failed for member %d", linked.member.id)
+                # Awaited: the tool set is scoped to the caller's role, which
+                # needs a Routine lookup (issue #174).
+                context = await self.member_context(linked)
+                # Coach pings accumulated during the turn must be drained even
+                # if Runner.run raises (a later tool error, provider timeout,
+                # MaxTurnsExceeded) -- the safety note was already committed
+                # and silence is not an option (issue #172).
+                result = None
+                try:
+                    try:
+                        result = await Runner.run(
+                            self.agent,
+                            msg.text,
+                            session=session,
+                            context=context,
+                        )
+                    finally:
+                        # Issue #166: delete_my_data clears the session during
+                        # the turn, but the runner persists this turn's items
+                        # afterwards -- the tool call and goodbye survive the
+                        # wipe.  Clear again so nothing remains.  In a finally
+                        # so a mid-turn error doesn't skip the clear after the
+                        # domain wipe has already committed.
+                        if context.forgotten:
+                            await session.clear_session()
+                    text = str(result.final_output)
+                    sender = self.demo_sender
+                    has_demos = sender is not None and context.demo_requests
+                    has_pings = bool(context.coach_pings)
+                    if not has_demos and not has_pings:
+                        return Reply(text)
+                    demo_requests = list(context.demo_requests) if sender is not None else []
+                    coach_pings = list(context.coach_pings)
+                    gym_id = context.gym_id
+                    channel, user_id = msg.channel, msg.channel_user_id
 
-                async def after_send() -> None:
-                    async def _send_demo(exercise: str) -> None:
-                        try:
-                            # Narrow sender for mypy (P2 #5153516992).
-                            assert sender is not None
-                            await serve_demo(
-                                self.stores.demos, sender, exercise, gym_id, channel, user_id
-                            )
-                        except Exception:
-                            logger.exception("failed to serve demo %r to %s", exercise, user_id)
+                    async def after_send() -> None:
+                        async def _send_demo(exercise) -> None:
+                            try:
+                                # Narrow sender for mypy (P2 #5153516992).
+                                assert sender is not None
+                                await serve_demo(
+                                    self.stores.demos, sender, exercise, gym_id, channel, user_id
+                                )
+                            except Exception:
+                                logger.exception("failed to serve demo %r to %s", exercise, user_id)
 
-                    async def _run_ping(ping):
-                        try:
-                            await ping()
-                        except Exception:
-                            logger.exception("deferred coach ping failed")
+                        async def _run_ping(ping):
+                            try:
+                                await ping()
+                            except Exception:
+                                logger.exception("deferred coach ping failed")
 
-                    tasks = [_send_demo(ex) for ex in demo_requests] + [
-                        _run_ping(p) for p in coach_pings
-                    ]
-                    if tasks:
-                        await asyncio.gather(*tasks, return_exceptions=True)
+                        tasks = [_send_demo(ex) for ex in demo_requests] + [
+                            _run_ping(p) for p in coach_pings
+                        ]
+                        if tasks:
+                            await asyncio.gather(*tasks, return_exceptions=True)
 
-                return Reply(text, after_send=after_send)
-            except BaseException:
-                # Runner failed after the safety tool already ran — drain
-                # the accumulated pings so no Coach notification is lost.
-                if context.coach_pings:
-                    pings = list(context.coach_pings)
-                    asyncio.create_task(_drain_coach_pings(pings))
-                raise
+                    return Reply(text, after_send=after_send)
+                except BaseException:
+                    # Runner failed after the safety tool already ran -- drain
+                    # the accumulated pings so no Coach notification is lost.
+                    if context.coach_pings:
+                        pings = list(context.coach_pings)
+                        asyncio.create_task(_drain_coach_pings(pings))
+                    raise
