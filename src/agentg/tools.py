@@ -455,6 +455,10 @@ async def delete_my_data(ctx: RunContextWrapper[MemberContext], confirm: bool) -
     if not confirm:
         return {"deleted": False, "need_confirmation": True}
     await c.stores.forget.forget_member(c.member_id)
+    # Mark the context so the runtime clears the SDK session again after the
+    # run — the runner persists this turn's items after the tool returns,
+    # which would leave the tool call and goodbye as residue (issue #166).
+    object.__setattr__(ctx.context, "forgotten", True)
     return {"deleted": True}
 
 
