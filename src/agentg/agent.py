@@ -4,7 +4,6 @@ from agents import Agent, ModelSettings, RunContextWrapper
 from agents.extensions.models.litellm_model import LitellmModel
 
 from agentg.config import Settings
-from agentg.snapshot import member_snapshot
 from agentg.context import MemberContext
 from agentg.tools import build_tools
 
@@ -98,9 +97,9 @@ a goal, a constraint — call remember_note. Never interrogate for facts; if \
 it wasn't volunteered, it isn't a note.
 - When they say a note no longer holds ("the shoulder's fine now"), call \
 retire_note with that note's id from your snapshot.
-- Your snapshot below is the ground truth for identity, gap, last Session, \
-today's Workout, and active notes. When chat memory and the snapshot \
-disagree, the snapshot wins.
+- Your snapshot (injected at the end of this conversation) is the ground \
+truth for identity, gap, last Session, today's Workout, and active notes. \
+When chat memory and the snapshot disagree, the snapshot wins.
 
 Routine intake and generation (when the Member has no routine yet):
 - Gather exactly four things conversationally, warmly, one or two at a time: \
@@ -157,11 +156,15 @@ If a tool returns an error, say what's missing conversationally and ask.\
 async def dynamic_instructions(
     wrapper: RunContextWrapper[MemberContext], agent: Agent | None
 ) -> str:
-    """The protocol plus this turn's member snapshot (docs/design/memory.md)."""
-    return INSTRUCTIONS + "\n\n" + await member_snapshot(wrapper.context)
+    """The static protocol; the snapshot is now injected via
+    call_model_input_filter so the prompt prefix is cacheable (#175)."""
+    return INSTRUCTIONS
 
 
 def build_agent(settings: Settings) -> Agent:
+    # Model-call counting is done by a global wrapper on litellm.acompletion
+    # installed at import time in agentg.instrument; it attributes each call
+    # to the active turn via a ContextVar (issue #161).
     return Agent(
         name="Agent",
         instructions=dynamic_instructions,
@@ -170,6 +173,14 @@ def build_agent(settings: Settings) -> Agent:
         # tool-calling completion; we never run that proxy, so skip the import
         # rather than ship its dependencies. The SDK forwards extra_args to
         # litellm.acompletion. See tests/test_model_backend.py.
-        model_settings=ModelSettings(extra_args={"_skip_mcp_handler": True}),
+        model_settings=ModelSettings(
+            extra_args={
+                "_skip_mcp_handler": True,
+                "timeout": 30,  # interactive — per-attempt; ~2×30s + backoff worst case under lock
+                "num_retries": 1,  # at least one retry for transient 5xx
+            },
+            max_tokens=2000,  # cap runaway generations
+            temperature=0.7,  # creative but grounded coaching
+        ),
         tools=build_tools(),
     )

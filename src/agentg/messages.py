@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
 
@@ -12,22 +12,33 @@ class Reply(str):
 
     A ``str`` subclass so every existing caller keeps treating a reply as
     plain text; the channel adapter awaits ``after_send`` once the text is out.
+
+    When ``stream`` is set the channel delivers chunks progressively: the
+    first yield is sent as a new message, later yields edit that message.
+    Each yield is the full accumulated text so far, growing monotonically.
     """
 
-    after_send: Callable[[], Awaitable[None]] | None
+    # Takes an optional ``deliver_media`` keyword: the channel passes False
+    # when a streamed delivery errored, suppressing demo animations while the
+    # safety pings, rhythm reset and compaction signal still run.
+    after_send: Callable[..., Awaitable[None]] | None
     # Suppress the channel's link preview (magic links: a preview fetch could
     # spend a one-time token before the human taps it).
     disable_preview: bool
+    # When set, the channel streams chunks as they arrive (issue #176).
+    stream: AsyncIterator[str] | None
 
     def __new__(
         cls,
         text: str,
-        after_send: Callable[[], Awaitable[None]] | None = None,
+        after_send: Callable[..., Awaitable[None]] | None = None,
         disable_preview: bool = False,
+        stream: AsyncIterator[str] | None = None,
     ) -> "Reply":
         obj = super().__new__(cls, text)
         obj.after_send = after_send
         obj.disable_preview = disable_preview
+        obj.stream = stream
         return obj
 
 

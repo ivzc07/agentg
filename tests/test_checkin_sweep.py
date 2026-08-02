@@ -207,3 +207,54 @@ async def test_a_snoozed_member_is_quiet_then_wakes_when_the_snooze_passes(env):
     assert count == 1
     state, until = await env.checkins.get_state(member.id)
     assert state == "on" and until is None  # snooze cleared
+
+
+# --- resilience: one bad Member does not abort the sweep (#168) ---
+
+
+class FailingTrainingStore:
+    """Wraps a TrainingStore so newest_session_date raises for one Member."""
+
+    def __init__(self, delegate, fail_member_id):
+        self._delegate = delegate
+        self._fail_member_id = fail_member_id
+
+    async def newest_session_date(self, member_id):
+        if member_id == self._fail_member_id:
+            raise RuntimeError("simulated DB failure")
+        return await self._delegate.newest_session_date(member_id)
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+
+async def test_one_bad_member_does_not_abort_the_sweep(env, caplog):
+    """A failure while processing one Member is logged and the sweep
+    continues with the next (#168)."""
+    # member A will fail — same TZ as B so both are eligible at 09:00 local
+    _, member_a = await make_member(env, tz="UTC", channel_user_id="a")
+    _, member_b = await make_member(env, tz="UTC", channel_user_id="b")
+
+    bad_training = FailingTrainingStore(env.training, member_a.id)
+
+    notifier = FakeNotifier()
+    import logging
+
+    with caplog.at_level(logging.ERROR):
+        count = await run_sweep(
+            datetime(2026, 7, 16, 9, 0, tzinfo=UTC),
+            env.checkins,
+            bad_training,
+            env.routines,
+            notifier,
+        )
+
+    # B is still processed after A failed.
+    assert count == 1
+    sent_ids = {s[1] for s in notifier.sent}
+    assert "b" in sent_ids
+    assert "a" not in sent_ids
+
+    # A's identifier appears in the error log.
+    logged = "\n".join(caplog.messages)
+    assert str(member_a.id) in logged

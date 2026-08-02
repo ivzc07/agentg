@@ -6,11 +6,13 @@ one process may poll a given bot token at a time (single replica).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ChatAction
 from aiogram.types import FSInputFile, LinkPreviewOptions, Message
 
 from agentg.demo_media import SentAnimation
@@ -61,6 +63,130 @@ def split_reply(text: str, limit: int = MAX_MESSAGE_LENGTH) -> list[str]:
     return chunks
 
 
+# Module-level so tests can shorten the refresh interval without waiting
+# for a full production cycle (Telegram expires the action after ~5 s).
+_TYPING_REFRESH_INTERVAL: float = 4.5
+
+
+async def _keep_typing(bot: Bot, chat_id: int) -> None:
+    """Send the typing action repeatedly so Telegram never expires it.
+
+    Telegram's typing indicator lasts ~5 seconds; this coroutine refreshes it
+    every ``_TYPING_REFRESH_INTERVAL`` seconds until cancelled.  The caller
+    must cancel the task (and await the cancellation) to stop the indicator.
+    """
+    while True:
+        await asyncio.sleep(_TYPING_REFRESH_INTERVAL)
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+        except Exception:
+            logger.debug("typing refresh failed", exc_info=True)
+
+
+async def _deliver_streamed(
+    message: Message,
+    reply: Reply,
+    typing_task: asyncio.Task[None],
+    sender_id: int,
+) -> None:
+    """Stream reply chunks: first yield → new message, later yields → edits.
+
+    Cancels the typing indicator after the first chunk lands so the Member
+    sees the reply start right away.  Demo animations land after the stream
+    is exhausted, preserving the existing ordering guarantee.
+
+    Long replies (exceeding ``MAX_MESSAGE_LENGTH``) are split across
+    multiple messages using ``split_reply`` so no text is silently dropped
+    and every message edit changes the visible text (avoiding Telegram's
+    "message is not modified" error and the duplicate-message burst it
+    caused).
+    """
+    assert reply.stream is not None
+    sent_messages: dict[int, Message] = {}  # chunk index → sent message
+    last_sent_by_index: dict[int, str] = {}  # chunk index → last text sent
+    last_yielded: str = ""
+    stream_errored = False
+    try:
+        async for chunk in reply.stream:
+            stripped = chunk.strip().replace("**", "")
+            if not stripped or stripped == last_yielded:
+                continue
+            last_yielded = stripped
+            chunks = split_reply(stripped)
+            first_ever = len(sent_messages) == 0
+            for i, part in enumerate(chunks):
+                if part == last_sent_by_index.get(i):
+                    continue
+                last_sent_by_index[i] = part
+                existing = sent_messages.get(i)
+                if existing is None:
+                    # New chunk — send as a fresh message.
+                    if first_ever and i == 0:
+                        typing_task.cancel()
+                        try:
+                            await typing_task
+                        except asyncio.CancelledError:
+                            pass
+                    if i == 0 and reply.disable_preview:
+                        sent = await message.answer(
+                            part,
+                            link_preview_options=LinkPreviewOptions(is_disabled=True),
+                        )
+                    else:
+                        sent = await message.answer(part)
+                    sent_messages[i] = sent
+                else:
+                    # Existing chunk grew — edit it in place.
+                    try:
+                        await existing.edit_text(part)
+                    except Exception:
+                        logger.debug(
+                            "edit_text failed, sending as new message", exc_info=True
+                        )
+                        sent = await message.answer(part)
+                        sent_messages[i] = sent
+    except Exception:
+        stream_errored = True
+        logger.exception("streaming delivery failed for sender %s", sender_id)
+        if not sent_messages:
+            sent_messages[-1] = await message.answer(ERROR_REPLY)
+    finally:
+        # Close the stream deterministically so _hold_lock releases the
+        # per-identity lock immediately — a delivery error (e.g. message.answer
+        # raising) would otherwise leave the async generator suspended at its
+        # yield until GC (#176).
+        try:
+            await reply.stream.aclose()
+        except Exception:
+            logger.debug("aclose on stream raised", exc_info=True)
+        # Ensure typing is always cancelled.
+        if not typing_task.done():
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+
+    # after_send carries the deferred rhythm reset (#169), the Coach safety
+    # pings (#172) and the compaction signal (#173) as well as demo media, so
+    # it must run even when the stream errored -- a failed delivery must never
+    # cost a Coach their safety ping.  Only the media is suppressed, which is
+    # all #176 wanted: no animation beneath an error message.  It sits in a
+    # finally so that a fallback send raising cannot drop it either (#172).
+    try:
+        # If nothing was delivered (empty stream, all-whitespace, or error
+        # before any chunk), send the fallback so the Member isn't left in
+        # silence.
+        if not sent_messages:
+            await message.answer(EMPTY_REPLY_FALLBACK)
+    finally:
+        if reply.after_send is not None:
+            try:
+                await reply.after_send(deliver_media=not stream_errored)
+            except Exception:
+                logger.exception("post-reply delivery failed for sender %s", sender_id)
+
+
 def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[None]]:
     async def on_text(message: Message) -> None:
         if message.from_user is None or message.text is None:
@@ -73,25 +199,61 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
             link_code=parse_start_payload(message.text),
             is_group=message.chat.type != "private",
         )
+        # Send the first typing action synchronously so it lands before the
+        # Agent starts work, then keep refreshing in the background (Telegram
+        # expires the action after ~5 s).  The initial send is failure-tolerant
+        # — a transient failure must never gate the reply.
         try:
-            reply = await reply_fn(incoming)
+            await message.bot.send_chat_action(
+                chat_id=message.chat.id, action=ChatAction.TYPING
+            )
         except Exception:
-            logger.exception("agent loop failed for sender %s", message.from_user.id)
-            await message.answer(ERROR_REPLY)
-            return
-        for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
-            if reply.disable_preview:  # keep the call shape unchanged otherwise
-                await message.answer(
-                    chunk, link_preview_options=LinkPreviewOptions(is_disabled=True)
-                )
-            else:
-                await message.answer(chunk)
-        # Follow-up media (demo animations) lands beneath the reply text.
-        if reply.after_send is not None:
+            logger.warning("first typing send failed", exc_info=True)
+        typing_task = asyncio.create_task(_keep_typing(message.bot, message.chat.id))
+        try:
             try:
-                await reply.after_send()
+                reply = await reply_fn(incoming)
             except Exception:
-                logger.exception("post-reply delivery failed for sender %s", message.from_user.id)
+                logger.exception("agent loop failed for sender %s", message.from_user.id)
+                await message.answer(ERROR_REPLY)
+                return
+            if reply.stream is not None:
+                # Streaming path (#176): send the first chunk as a new message,
+                # then edit it with progressively longer text at sentence
+                # boundaries.  Sentence-granularity respects Telegram's rate
+                # limits -- no per-token edits.
+                await _deliver_streamed(
+                    message, reply, typing_task, message.from_user.id
+                )
+                # typing_task already cancelled inside _deliver_streamed
+                return
+            # Non-streaming path: split long replies and send in order.
+            # after_send always runs in a finally so a Telegram 403 / 429 /
+            # network error on the reply text does not silently drop the
+            # deferred coach pings, rhythm reset or demos (issue #172).
+            try:
+                for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
+                    if reply.disable_preview:  # keep the call shape unchanged otherwise
+                        await message.answer(
+                            chunk, link_preview_options=LinkPreviewOptions(is_disabled=True)
+                        )
+                    else:
+                        await message.answer(chunk)
+            finally:
+                # Follow-up media (demo animations) lands beneath the reply text.
+                if reply.after_send is not None:
+                    try:
+                        await reply.after_send()
+                    except Exception:
+                        logger.exception("post-reply delivery failed for sender %s", message.from_user.id)
+        finally:
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("typing task teardown raised", exc_info=True)
 
     return on_text
 

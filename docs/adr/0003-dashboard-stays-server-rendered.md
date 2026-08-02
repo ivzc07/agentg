@@ -1,6 +1,6 @@
 # ADR 0003: Dashboard stays server-rendered - React rejected, htmx capped, f-strings blessed
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR 0004](0004-dashboard-react-spa.md) (2026-08-01) — the dashboard moves to a React SPA + JSON API after three in-stack design attempts fell short of the visual bar.
 - **Date:** 2026-07-31
 - **Decision drivers:** Owner explored a Node + React rebuild for a "premium" dashboard (shadcn/Svelte before it).
   A design interview (2026-07-31) resolved what premium concretely means and whether it justifies overturning the stack decision in [#84](https://github.com/ivzc07/agentg/issues/84) / spec-dashboard §Stack.

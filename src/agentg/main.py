@@ -3,8 +3,10 @@
 import asyncio
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 
 from agents import set_tracing_disabled
+from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from agentg.agent import build_agent
@@ -26,6 +28,35 @@ from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 
 logger = logging.getLogger(__name__)
+
+
+def build_dashboard_app(
+    stores: Stores,
+    settings: Settings,
+    *,
+    bot_username: str,
+    notifier: TelegramNotifier,
+):
+    """The single place where Settings become the dashboard app.
+
+    Kept apart from :func:`run` so the settings-to-app wiring (notably the SPA
+    flag) is reachable from a test without standing up a bot and a poller.
+    """
+    spa_dist = None
+    if settings.dashboard_spa_dist:
+        spa_dist = Path(settings.dashboard_spa_dist)
+
+    return build_app(
+        stores.dashboard,
+        stores.linking,
+        session_secret=settings.dashboard_session_secret
+        or settings.telegram_bot_token,
+        bot_username=bot_username,
+        secure_cookies=settings.dashboard_base_url.startswith("https://"),
+        notifier=notifier,
+        spa_enabled=settings.dashboard_spa_enabled,
+        spa_dist=spa_dist,
+    )
 
 
 async def run() -> None:
@@ -57,13 +88,10 @@ async def run() -> None:
     # invite links the Settings screen shows.
     bot_username = (await bot.get_me()).username or ""
     web_runner = await start_server(
-        build_app(
-            stores.dashboard,
-            stores.linking,
-            session_secret=settings.dashboard_session_secret
-            or settings.telegram_bot_token,
+        build_dashboard_app(
+            stores,
+            settings,
             bot_username=bot_username,
-            secure_cookies=settings.dashboard_base_url.startswith("https://"),
             notifier=notifier,
         ),
         host="0.0.0.0",
@@ -89,6 +117,19 @@ async def run() -> None:
 
     try:
         await run_polling(bot, runtime.handle_message)
+    finally:
+        await _shutdown(scheduler, bot, web_runner)
+
+
+async def _shutdown(
+    scheduler: AsyncIOScheduler,
+    bot,  # aiogram Bot — not annotated to keep channel isolation (ADR 0001)
+    web_runner: web.AppRunner,
+) -> None:
+    """Cleanly stop scheduler, bot HTTP session, and web server."""
+    scheduler.shutdown(wait=False)
+    try:
+        await bot.session.close()
     finally:
         await web_runner.cleanup()
 

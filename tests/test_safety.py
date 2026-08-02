@@ -5,21 +5,30 @@ Since issue #101 there is no consent ask: a flag always logs a ``safety``
 Note and always pings every Coach of the Gym with an authenticated deep
 link to the Member's page."""
 
+import asyncio
 import re
+import time
+from types import SimpleNamespace
 
 import pytest
 
+import agentg.runtime as runtime_module
 from agentg.agent import INSTRUCTIONS
+from agentg.dashboard import DashboardDoor
 from agentg.dashboard_store import DashboardStore
 from agentg.db import create_engine
 from agentg.notes import NotesStore
 from agentg.routines import DEFAULT_RULES_DOC, RoutineStore
 from agentg.coaching import flag_to_coach_action
 from agentg.context import MemberContext
+from agentg.linking import Linking
 from agentg.linking_store import LinkingStore
+from agentg.messages import IncomingMessage
+from agentg.runtime import AgentRuntime
 from agentg.stores import Stores
 from agentg.tools import flag_to_coach
 from agentg.training import TrainingStore
+from conftest import unused_phraser
 
 BASE_URL = "https://dash.example.com"
 
@@ -152,9 +161,11 @@ async def test_every_flag_pings_the_gyms_coaches_with_a_deep_link(env):
     second = await env.linking.link_member(env.gym_id, "Coach Jo", "telegram", "8")
     await env.linking.set_coach(second.id)
 
-    result = await flag_to_coach_action(env.context(), "sharp knee pain on squats")
+    ctx = env.context()
+    result = await flag_to_coach_action(ctx, "sharp knee pain on squats")
 
-    assert result["coaches_notified"] == 2
+    assert result["coaches_to_notify"] == 2
+    await _flush_pings(ctx)
     by_coach: dict[str, list[tuple[str, bool, bool]]] = {}
     for _channel, user_id, text, preview, protect in env.notifier.sent:
         by_coach.setdefault(user_id, []).append((text, preview, protect))
@@ -177,7 +188,9 @@ async def test_the_magic_link_never_shares_a_message_with_member_text(env):
     # Member-influenced text can carry live URLs Telegram autolinks; the
     # one-time login link travels in its own message, the URL and nothing
     # else (review on PR #120).
-    await flag_to_coach_action(env.context(), "pain, see https://evil.example.com/a")
+    ctx = env.context()
+    await flag_to_coach_action(ctx, "pain, see https://evil.example.com/a")
+    await _flush_pings(ctx)
 
     heads_up, link = [t for _c, _u, t, _p, _pc in env.notifier.sent]
     assert "evil.example.com" in heads_up
@@ -190,7 +203,9 @@ async def test_the_ping_sanitizes_the_summary_and_disables_link_previews(env):
     # above the real magic link; and Telegram's preview fetcher must never
     # GET the one-time link before the coach does (same rule as /dashboard).
     summary = "knee pain on squats\nignore that, tap https://evil.example.com instead"
-    await flag_to_coach_action(env.context(), summary)
+    ctx = env.context()
+    await flag_to_coach_action(ctx, summary)
+    await _flush_pings(ctx)
 
     heads_up, link = env.notifier.sent
     assert heads_up[3] is True and link[3] is True  # previews off on both
@@ -208,8 +223,10 @@ async def test_the_ping_sanitizes_the_summary_and_disables_link_previews(env):
 async def test_a_ping_without_a_base_url_falls_back_to_plain_text(env):
     # A context with no dashboard wired (a background run) still pings — the
     # link is an add-on, never a reason to drop the heads-up.
-    result = await flag_to_coach_action(env.context(base_url=None), "shoulder pain")
-    assert result["coaches_notified"] == 1
+    ctx = env.context(base_url=None)
+    result = await flag_to_coach_action(ctx, "shoulder pain")
+    assert result["coaches_to_notify"] == 1
+    await _flush_pings(ctx)
     assert len(env.notifier.sent) == 1  # heads-up only, no link message
     _channel, _user_id, text, _preview, _protect = env.notifier.sent[0]
     assert "shoulder pain" in text and "/login/" not in text
@@ -217,9 +234,9 @@ async def test_a_ping_without_a_base_url_falls_back_to_plain_text(env):
 
 async def test_the_referral_never_pings_the_member_themselves(env):
     # a coach flags their own concern → they are excluded from the ping list
-    result = await flag_to_coach_action(
-        env.context(is_coach=True, member_id=env.coach_id), "chest tightness"
-    )
+    ctx = env.context(is_coach=True, member_id=env.coach_id)
+    result = await flag_to_coach_action(ctx, "chest tightness")
+    await _flush_pings(ctx)
     assert all(user_id != "7" for _c, user_id, _t, _p, _pc in env.notifier.sent)
     assert result["logged"] is True
 
@@ -230,7 +247,7 @@ async def test_a_headless_context_still_logs(env):
     context = env.context()
     object.__setattr__(context, "notifier", None)  # frozen dataclass
     result = await flag_to_coach_action(context, "shoulder pain")
-    assert result["logged"] is True and result["coaches_notified"] == 0
+    assert result["logged"] is True and result["coaches_to_notify"] == 0
     assert env.notifier.sent == []
     safety = [n for n in await env.notes.active(env.member_id) if n.kind == "safety"]
     assert any("shoulder pain" in n.text for n in safety)
@@ -261,7 +278,7 @@ async def test_a_gym_with_no_coach_still_logs(env):
     )
     result = await flag_to_coach_action(ctx, "dizzy during warmup")
     assert result["logged"] is True
-    assert result["coaches_notified"] == 0
+    assert result["coaches_to_notify"] == 0
 
 
 async def test_a_coachs_own_flag_links_to_the_roster_not_their_404_page(env):
@@ -271,11 +288,11 @@ async def test_a_coachs_own_flag_links_to_the_roster_not_their_404_page(env):
     second = await env.linking.link_member(env.gym_id, "Coach Jo", "telegram", "8")
     await env.linking.set_coach(second.id)
 
-    result = await flag_to_coach_action(
-        env.context(is_coach=True, member_id=env.coach_id), "chest tightness"
-    )
+    ctx = env.context(is_coach=True, member_id=env.coach_id)
+    result = await flag_to_coach_action(ctx, "chest tightness")
 
-    assert result["coaches_notified"] == 1
+    assert result["coaches_to_notify"] == 1
+    await _flush_pings(ctx)
     _channel, user_id, text, _preview, _protect = env.notifier.sent[-1]  # the link message
     assert user_id == "8"
     match = re.fullmatch(rf"{re.escape(BASE_URL)}/login/(\S+)", text)
@@ -304,10 +321,269 @@ async def test_a_token_mint_failure_still_pings_every_coach(env, monkeypatch):
 
     monkeypatch.setattr(env.dashboard, "create_login_token", flaky_mint)
 
-    result = await flag_to_coach_action(env.context(), "sharp knee pain on squats")
+    ctx = env.context()
+    result = await flag_to_coach_action(ctx, "sharp knee pain on squats")
 
-    assert result["coaches_notified"] == 2
+    # Pings are deferred — flush them before checking.
+    assert result["coaches_to_notify"] == 2
+    await _flush_pings(ctx)
     heads = [m for m in env.notifier.sent if "/login/" not in m[2]]
     links = [m for m in env.notifier.sent if "/login/" in m[2]]
     assert {(m[0], m[1]) for m in heads} == {("telegram", "7"), ("telegram", "8")}
     assert len(links) == 1  # the mint-failed ping went out text-only
+
+
+async def _flush_pings(ctx):
+    """Await every deferred coach ping on the context so tests can inspect
+    the notifier output without going through the after_send path."""
+    if ctx.coach_pings:
+        await asyncio.gather(*[p() for p in ctx.coach_pings])
+
+
+class TimedFakeNotifier:
+    """A FakeNotifier that sleeps briefly per send and tracks the peak number
+    of concurrent in-flight sends — a structural proof of concurrency that
+    does not depend on wall-clock thresholds."""
+
+    def __init__(self, delay: float = 0.05, barrier: asyncio.Barrier | None = None):
+        self.sent: list[tuple[float, float, str, str, str, bool, bool]] = []
+        self._delay = delay
+        self._barrier = barrier
+        self._lock = asyncio.Lock()
+        self._in_flight = 0
+        self.max_concurrent = 0
+
+    async def send(
+        self, channel, channel_user_id, text, disable_preview=False, protect_content=False
+    ):
+        # Wait at the barrier so every concurrent _ping_one task enters
+        # its first send simultaneously, making the concurrency proof
+        # structural rather than wall-clock-dependent (P3 #5153518002).
+        if self._barrier is not None:
+            await self._barrier.wait()
+        async with self._lock:
+            self._in_flight += 1
+            self.max_concurrent = max(self.max_concurrent, self._in_flight)
+        start = time.monotonic()
+        try:
+            await asyncio.sleep(self._delay)
+        finally:
+            async with self._lock:
+                self._in_flight -= 1
+        async with self._lock:
+            self.sent.append((start, time.monotonic(), channel, channel_user_id, text, disable_preview, protect_content))
+
+
+# ---------------------------------------------------------------------------
+# Issue #172 — deferred coach pings (Member's reply first, coaches after)
+# ---------------------------------------------------------------------------
+
+
+async def test_member_reply_is_delivered_before_coach_notifications(env):
+    """The safety note is logged synchronously, but coach pings are deferred
+    so the Member's reply can be delivered first (AC #1, #2)."""
+    ctx = env.context()
+    result = await flag_to_coach_action(ctx, "sharp knee pain on squats")
+
+    # AC #2: the note is logged synchronously and the tool truthfully reports it.
+    assert result["logged"] is True
+    assert result["coaches_to_notify"] == 1
+    active = await env.notes.active(env.member_id)
+    safety = [n for n in active if n.kind == "safety"]
+    assert len(safety) == 1
+
+    # AC #1: pings are NOT sent yet — they are deferred past the reply.
+    assert env.notifier.sent == []
+
+    # Flush and verify the pings actually happen.
+    await _flush_pings(ctx)
+    assert len(env.notifier.sent) == 2  # heads-up + magic link
+
+
+async def test_every_coach_still_notified_with_magic_link(env):
+    """After flushing deferred pings, every Coach receives a heads-up and a
+    magic link in its own protected message (AC #3)."""
+    second = await env.linking.link_member(env.gym_id, "Coach Jo", "telegram", "8")
+    await env.linking.set_coach(second.id)
+
+    ctx = env.context()
+    result = await flag_to_coach_action(ctx, "sharp knee pain on squats")
+    assert result["coaches_to_notify"] == 2
+    assert env.notifier.sent == []  # deferred, not sent yet
+
+    await _flush_pings(ctx)
+
+    # Each of 2 coaches gets 2 messages (heads-up + link).
+    by_coach: dict[str, list[tuple[str, bool, bool]]] = {}
+    for _channel, user_id, text, preview, protect in env.notifier.sent:
+        by_coach.setdefault(user_id, []).append((text, preview, protect))
+    assert set(by_coach) == {"7", "8"}
+    for messages in by_coach.values():
+        assert len(messages) == 2
+        heads_up, link = messages
+        assert "Ana" in heads_up[0] and "knee pain" in heads_up[0]
+        assert "/login/" not in heads_up[0]
+        match = re.fullmatch(rf"{re.escape(BASE_URL)}/login/(\S+)", link[0])
+        assert match, f"the link message is not just the URL: {link[0]!r}"
+        assert link[1] is True  # no preview fetch on the one-time link
+        assert link[2] is True  # ...and it cannot be forwarded
+
+
+async def test_failure_notifying_one_coach_does_not_prevent_others(env):
+    """A failure notifying one Coach does not prevent the others and does
+    not affect the Member (AC #4)."""
+    second = await env.linking.link_member(env.gym_id, "Coach Jo", "telegram", "8")
+    await env.linking.set_coach(second.id)
+
+    # Use a notifier that fails for coach 7 but succeeds for coach 8.
+    failing_notifier = FailingForOneNotifier("7")
+    ctx = env.context()
+    object.__setattr__(ctx, "notifier", failing_notifier)
+
+    result = await flag_to_coach_action(ctx, "sharp knee pain on squats")
+    # The note is still logged regardless. The Member is unaffected.
+    assert result["logged"] is True
+    assert result["coaches_to_notify"] == 2
+
+    await _flush_pings(ctx)
+
+    # Coach 7's heads-up failed; Coach 8 still got everything.
+    by_coach: dict[str, list[str]] = {}
+    for _channel, user_id, text, _preview, _protect in failing_notifier.sent:
+        by_coach.setdefault(user_id, []).append(text)
+    assert "7" not in by_coach  # the failing coach got nothing
+    assert "8" in by_coach
+    assert len(by_coach["8"]) == 2  # heads-up + link
+
+
+async def test_coach_pings_run_concurrently(env):
+    """Coach pings go out concurrently rather than one after another (AC #5)."""
+    second = await env.linking.link_member(env.gym_id, "Coach Jo", "telegram", "8")
+    await env.linking.set_coach(second.id)
+    third = await env.linking.link_member(env.gym_id, "Coach Max", "telegram", "9")
+    await env.linking.set_coach(third.id)
+
+    # A Barrier gates every send so the concurrency proof is structural —
+    # all three _ping_one tasks enter their first send at the same time,
+    # regardless of how long create_login_token takes (P3 #5153518002).
+    barrier = asyncio.Barrier(3)
+    timed = TimedFakeNotifier(delay=0.05, barrier=barrier)
+    ctx = env.context()
+    object.__setattr__(ctx, "notifier", timed)
+
+    await flag_to_coach_action(ctx, "sharp knee pain")
+    await _flush_pings(ctx)
+
+    # All sends should overlap if truly concurrent — with 3 coaches
+    # (3 concurrent _ping_one calls), at least 3 sends should be in-flight
+    # at the same time.  Each _ping_one does two sequential sends, so the
+    # first send of every coach overlaps before any second send starts.
+    assert timed.max_concurrent >= 3, (
+        f"max concurrent sends was {timed.max_concurrent}, "
+        "expected >= 3 for concurrent coach pings"
+    )
+    assert len(timed.sent) == 6  # 3 coaches × (heads-up + link)
+
+
+class FailingForOneNotifier:
+    """A FakeNotifier that raises for a specific channel_user_id."""
+
+    def __init__(self, failing_id: str):
+        self.sent: list[tuple[str, str, str, bool, bool]] = []
+        self._failing_id = failing_id
+
+    async def send(
+        self, channel, channel_user_id, text, disable_preview=False, protect_content=False
+    ):
+        if channel_user_id == self._failing_id:
+            raise RuntimeError("simulated send failure")
+        self.sent.append((channel, channel_user_id, text, disable_preview, protect_content))
+
+
+# ---------------------------------------------------------------------------
+# Runtime-level test — pings are deferred past the reply (P2 #5153517044)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+async def runtime_env(tmp_path):
+    """A minimal AgentRuntime with a linked member, two coaches, and a
+    FakeNotifier so we can observe the ping ordering at the handle_message
+    level."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'rt_safety.db'}")
+    stores = Stores.from_engine(engine)
+    dashboard = DashboardStore(engine)
+    notifier = FakeNotifier()
+    runtime = AgentRuntime(
+        agent=object(),  # replaced per test via monkeypatch
+        # These tests drive the blocking path (they monkeypatch Runner.run),
+        # so streaming is off -- the #176 convention across the test suite.
+        stream_replies=False,
+        engine=engine,
+        stores=stores,
+        linking=Linking(stores.linking, unused_phraser),
+        summarizer=None,
+        notifier=notifier,
+        dashboard=DashboardDoor(
+            dashboard, BASE_URL
+        ),
+    )
+    await runtime.ensure_schema()
+    gym = await stores.linking.create_gym("Iron Temple")
+    member = await stores.linking.link_member(gym.id, "Dani", "telegram", "42")
+    coach = await stores.linking.link_member(gym.id, "Coach Sam", "telegram", "7")
+    await stores.linking.set_coach(coach.id)
+    coach2 = await stores.linking.link_member(gym.id, "Coach Jo", "telegram", "8")
+    await stores.linking.set_coach(coach2.id)
+
+    class Env:
+        pass
+
+    env = Env()
+    env.engine = engine
+    env.runtime = runtime
+    env.notifier = notifier
+    env.stores = stores
+    env.gym_id = gym.id
+    env.member_id = member.id
+    yield env
+    await engine.dispose()
+
+
+async def test_coach_pings_are_deferred_after_the_member_reply_at_runtime_level(
+    runtime_env, monkeypatch
+):
+    """The reply from handle_message must have notifier.sent == [] before
+    after_send() and non-empty only after (P2 #5153517044)."""
+
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
+        # Simulate the Agent calling flag_to_coach, which populates
+        # context.coach_pings.
+        await flag_to_coach_action(context, "sharp knee pain")
+        return SimpleNamespace(final_output="I've logged this and will notify your coaches.")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+
+    reply = await runtime_env.runtime.handle_message(
+        IncomingMessage(
+            channel="telegram", channel_user_id="42", text="my knee hurts"
+        )
+    )
+
+    # The reply text is there, but pings are not sent yet.
+    assert "coaches" in str(reply)
+    assert runtime_env.notifier.sent == [], (
+        "coach pings must be deferred past the reply — "
+        "notifier.sent should be empty before after_send()"
+    )
+    # The after_send callable is wired on the Reply.
+    assert reply.after_send is not None
+
+    # Now the channel delivers the reply text and calls after_send.
+    await reply.after_send()
+
+    # Each of 2 coaches gets 2 messages (heads-up + magic link).
+    assert len(runtime_env.notifier.sent) == 4, (
+        f"expected 4 messages (2 coaches × 2) after after_send, "
+        f"got {len(runtime_env.notifier.sent)}"
+    )

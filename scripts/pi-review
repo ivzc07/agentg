@@ -11,6 +11,38 @@
 set -eu
 
 PR="${1:?usage: scripts/pi-review <pr-number>}"
+
+# On Windows, `bash` on the PATH can resolve to WSL (C:\Windows\System32\bash.exe)
+# ahead of Git Bash - notably from a PowerShell pane. That breaks this script in a
+# way whose error message points nowhere near the cause: a linked worktree's .git
+# is a FILE containing a Windows path (`gitdir: C:/Users/...`), which WSL's git
+# cannot follow, so every git/gh call dies with `fatal: not a git repository:
+# /mnt/c/...`. Detect it up front and say what to do instead.
+#
+# The probe must not fire under Git Bash, which reports MINGW64_NT/MSYS_NT in
+# /proc/version; only WSL reports a Linux kernel carrying "microsoft"/"WSL".
+# PI_REVIEW_PROC_VERSION is a test seam, not a knob for callers: it lets the
+# probe be exercised against known kernel strings (MINGW64_NT vs WSL2) on any
+# platform, so the "must stay silent under Git Bash" case is a real test rather
+# than something only reproducible on a Windows box.
+_proc_version="${PI_REVIEW_PROC_VERSION:-/proc/version}"
+if [ -n "${WSL_DISTRO_NAME:-}" ] ||
+    { [ -r "$_proc_version" ] && grep -qiE 'microsoft|wsl' "$_proc_version" 2>/dev/null; }; then
+    cat >&2 <<EOF
+pi-review: running under WSL bash, which cannot read this repository.
+
+  A linked git worktree records its metadata as a Windows path, and WSL cannot
+  resolve it - git would fail with "fatal: not a git repository: /mnt/c/...".
+
+  Re-run from Git Bash instead - the bash.exe inside your Git for Windows
+  install, typically:
+    "C:\\Program Files\\Git\\bin\\bash.exe" scripts/pi-review ${PR}
+  A per-user install lives under %LOCALAPPDATA%\\Programs\\Git instead; if
+  neither path exists, \`where.exe bash\` will list the candidates.
+EOF
+    exit 1
+fi
+
 REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 
 PROMPT="Run the code-review workflow on GitHub PR ${PR} of repo ${REPO}. \
@@ -19,15 +51,22 @@ Prioritize correctness bugs, broken imports, security problems, and test-coverag
 Then act like the Greptile review bot: for each verified finding, post one comment on PR ${PR} via 'gh pr comment' with a severity prefix [P1] (bug or correctness issue, must fix), [P2] (should fix), or [P3] (optional), naming the file and line. \
 Only post findings the workflow verified as real; do not pad. Post at most 3 [P3] comments - keep only the most valuable ones. \
 If there are no real findings, post a single comment saying the automated review found no issues. \
-Sign every comment with '- pi code-review'. \
+Sign every comment with '- pi code-review' on a line of its own. \
 When done, reply with just the number of findings posted."
 
 # Herdr client binary: PATH may hold a stale copy that cannot talk to a newer
 # server, so prefer the installed one when present.
+#
+# -x alone is not a "this is a runnable binary" test: it also passes on
+# directories. On Windows this install path can be a reparse point that MSYS
+# reports as a directory (Windows itself refuses to traverse it: "the path
+# contains an untrusted mount point"), and the script would then invoke it and
+# die with "herdr: Is a directory" - while a perfectly good herdr sat on PATH.
+# Require a regular file so anything else falls through to PATH.
 resolve_herdr() {
     if [ -n "${LOCALAPPDATA:-}" ]; then
         installed="$(cygpath "$LOCALAPPDATA" 2>/dev/null)/Programs/Herdr/bin/herdr"
-        if [ -x "$installed" ]; then
+        if [ -f "$installed" ] && [ -x "$installed" ]; then
             printf '%s' "$installed"
             return
         fi
@@ -39,8 +78,14 @@ resolve_herdr() {
 # emits one count per page, so sum the lines. Prints ERR on API failure so
 # callers never mistake an outage for zero comments.
 comment_count() {
-    a=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '[.[] | select(.body | test("pi code-review"))] | length' 2>/dev/null) || { echo ERR; return; }
-    b=$(gh api --paginate "repos/${REPO}/pulls/${PR}/comments" --jq '[.[] | select(.body | test("pi code-review"))] | length' 2>/dev/null) || { echo ERR; return; }
+    # Match the signature on a line of its own, not anywhere in the body: the
+    # count gates success, and a human reply *quoting* a finding would other-
+    # wise inflate it. Filtering by author cannot help here - pi posts through
+    # gh as the repo owner, the same login a human reply carries.
+    a=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '[.[] | select(.body | test("
+- pi code-review"))] | length' 2>/dev/null) || { echo ERR; return; }
+    b=$(gh api --paginate "repos/${REPO}/pulls/${PR}/comments" --jq '[.[] | select(.body | test("
+- pi code-review"))] | length' 2>/dev/null) || { echo ERR; return; }
     printf '%s\n%s\n' "$a" "$b" | awk '{s += $1} END {print s + 0}'
 }
 
@@ -62,6 +107,12 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
         done
         "$H" agent rename "$PANE" pi-review >/dev/null
     fi
+    # The pane backing the agent: prompts are delivered with `pane run`, which
+    # types the text and presses Enter. (`agent send` writes literal text with
+    # no Enter, so it would leave the prompt sitting unsent in pi's input box.)
+    PANE=$("$H" agent get pi-review 2>/dev/null |
+        sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -1)
+    [ -n "$PANE" ] || { echo "pi-review: cannot resolve the pi-review pane" >&2; exit 1; }
     agent_status() {
         "$H" agent get pi-review 2>/dev/null | sed -n 's/.*"agent_status":"\([a-z]*\)".*/\1/p' | head -1
     }
@@ -69,13 +120,61 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
     # instead of hanging out the full serialize timeout.
     [ "$(agent_status)" != blocked ] || { echo "pi-review: the pi-review pane is blocked awaiting input - resolve it first" >&2; exit 1; }
     # Serialize: wait for any in-flight review to finish before prompting.
-    "$H" agent wait pi-review --until idle --until done --timeout 1800000 >/dev/null
+    "$H" agent wait pi-review --status idle --timeout 1800000 >/dev/null
     BEFORE=$(comment_count)
     [ "$BEFORE" != ERR ] || { echo "pi-review: cannot read PR ${PR} comments" >&2; exit 1; }
-    # --wait blocks until the agent settles again, i.e. the review ran and
-    # every comment was posted; the count afterwards is the full delta.
-    "$H" agent prompt pi-review "$PROMPT" --wait --timeout 3000000 >/dev/null
-    # --wait also releases on blocked; that is an operator situation, not a
+    "$H" pane run "$PANE" "$PROMPT" >/dev/null
+    # Settle-based completion. An idle wait against a still-idle agent returns
+    # in ~0.09s, so `working` must be observed before `idle` can be read as
+    # "the review finished" - otherwise comments get counted before any were
+    # written. Pickup is normally fast, but a slow one (rate limit, delivery
+    # lag) must not be mistaken for a finished review, so keep looking until it
+    # picks up or the comments land, rather than assuming a single short wait
+    # is enough. A budget miss is reported as what it is: never picked up.
+    picked_up=0
+    i=0
+    while [ $i -lt 20 ]; do
+        if "$H" agent wait pi-review --status working --timeout 30000 >/dev/null 2>&1; then
+            picked_up=1
+            break
+        fi
+        # It can also finish entirely inside one poll window; comments are the
+        # real signal, so treat a delta as pickup too.
+        seen=$(comment_count)
+        if [ "$seen" != ERR ] && [ "$seen" -gt "$BEFORE" ]; then
+            picked_up=1
+            break
+        fi
+        i=$((i + 1))
+    done
+    # The prompt was already typed and submitted, so on this path it is still
+    # pending in the pane. Leaving it there is not safe: a later re-run finds
+    # the agent idle, snapshots BEFORE without the stray, submits a second
+    # prompt, and then attributes the stray's comments to itself - a silent
+    # overcount plus a duplicate review. So clear it rather than warn about it.
+    # Escape alone is not enough, and believing it was would send the operator
+    # into a garbled re-run. In pi's TUI, Escape aborts a queued/streaming run
+    # but puts the queued text back *into the editor*; with an idle pi holding
+    # a non-empty input box it does nothing at all. A later `pane run` would
+    # then append the next prompt to the leftover text and submit the
+    # concatenation. So: Escape to stop a queued run, then ctrl+u to empty the
+    # box (both verified against a live pi pane).
+    #
+    # ctrl+u is deleteToLineStart, not "clear the editor": it empties the
+    # single-line prompt this path leaves behind, but multi-line residue (two
+    # or more queued messages, which restoreQueuedMessagesToEditor joins with
+    # blank lines) would keep its earlier lines. That is why the message below
+    # asks the operator to confirm an empty input box rather than trusting the
+    # drain outright.
+    [ "$picked_up" = 1 ] || {
+        "$H" pane send-keys "$PANE" Escape >/dev/null 2>&1 || true
+        "$H" pane send-keys "$PANE" ctrl+u >/dev/null 2>&1 || true
+        echo "pi-review: pi never picked up the review for PR ${PR}" >&2
+        echo "pi-review: tried to clear the pending prompt in pane ${PANE} (Escape + ctrl+u); check the pane is idle with an empty input box before re-running" >&2
+        exit 1
+    }
+    "$H" agent wait pi-review --status idle --timeout 3000000 >/dev/null
+    # The wait also releases on blocked; that is an operator situation, not a
     # finished review.
     [ "$(agent_status)" != blocked ] || { echo "pi-review: pi blocked mid-review on PR ${PR} - check the pane" >&2; exit 1; }
     NOW=$(comment_count)

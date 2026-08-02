@@ -47,6 +47,7 @@ async def env(tmp_path):
         secure_cookies=False,
         clock=clock,
         notifier=notifier,
+        spa_enabled=True,
     )
     async with TestClient(TestServer(app)) as client:
         class Env:
@@ -189,11 +190,14 @@ async def test_member_chip_prefers_preset_name_over_coach_authored(env):
     preset_id = await create_master(env)
     member = await add_member(env, "Luis", "2")
     await env.routines.apply_preset(preset_id, env.gym.id, env.coach.id, [member.id])
-    response = await env.client.get(f"/members/{member.id}/routine", cookies=cookies(env))
+    response = await env.client.get(
+        f"/api/members/{member.id}/routine", cookies=cookies(env)
+    )
     assert response.status == 200
-    body = await response.text()
-    assert "Preset: Beginner" in body
-    assert "Escrita por un coach" not in body
+    body = await response.json()
+    assert body["routine_preset_name"] == "Beginner"
+    assert body["coach_authored"] is True
+    assert body["routine_author"] == "Coach Ana"
 
 
 async def test_apply_rejects_a_foreign_or_coach_member_without_writing(env):

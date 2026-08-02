@@ -141,15 +141,19 @@ def build_phraser(settings: Settings) -> Phraser:
     """The production phraser: one plain model call per linking reply."""
 
     async def phrase(instruction: str, member_text: str) -> str:
-        from litellm import acompletion  # deferred: import cost and test isolation
+        import litellm  # deferred: import cost and test isolation
 
-        response = await acompletion(
+        response = await litellm.acompletion(
             model=settings.model,
             api_key=settings.model_api_key,
             messages=[
                 {"role": "system", "content": _PHRASER_PROMPT},
                 {"role": "user", "content": f'They just said: "{member_text}"\n\n{instruction}'},
             ],
+            timeout=15,  # interactive but short — linking replies are one sentence
+            num_retries=1,
+            max_tokens=200,  # linking replies are brief
+            temperature=0.7,  # warm and natural
         )
         return (response.choices[0].message.content or "").strip()
 
@@ -244,12 +248,26 @@ class Linking:
 
         # A typed Invite or coach code links too; a near-miss code is told
         # so; any other unlinked text dead-ends.
-        resolved = await self._gym_for_code(msg.text)
+        # Short-circuit: a message that can't possibly be a code (wrong shape,
+        # wrong alphabet, no digit) skips both DB lookups entirely (#169).
+        resolved = await self._resolve_typed_code(msg.text)
         if resolved is not None:
             gym, as_coach = resolved
             return await self._start_link(identity, msg, linked, gym, as_coach)
         if linked is None:
             return await self._reply_unlinked_unknown(msg, msg.text)
+        return None
+
+    async def _resolve_typed_code(self, text: str) -> tuple[Gym, bool] | None:
+        """If ``text`` looks like an Invite code *and* matches a Gym,
+        return ``(gym, as_coach)``; otherwise ``None``.
+
+        The shape gate runs first so ordinary messages skip both DB lookups
+        entirely (#169). ``_handle_code`` bypasses this gate on purpose:
+        deep-link taps are always codes.
+        """
+        if _looks_like_invite_code(text):
+            return await self._gym_for_code(text)
         return None
 
     async def _gym_for_code(self, text: str) -> tuple[Gym, bool] | None:
@@ -341,8 +359,8 @@ class Linking:
         self, identity: _Identity, msg: IncomingMessage, pending: _AwaitingName
     ) -> str:
         # A pasted Invite or coach code mid-flow restarts linking, not a
-        # name change.
-        resolved = await self._gym_for_code(msg.text)
+        # name change. Short-circuit: skip DB lookups when it can't be a code (#169).
+        resolved = await self._resolve_typed_code(msg.text)
         if resolved is not None:
             typed_gym, as_coach = resolved
             del self._pending[identity]
