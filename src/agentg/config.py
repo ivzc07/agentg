@@ -47,7 +47,12 @@ class Settings:
         missing = [name for name in REQUIRED_VARS if not env.get(name)]
         if missing:
             raise ConfigError(f"missing required environment variables: {', '.join(missing)}")
-        port = int(env.get("DASHBOARD_PORT") or DEFAULT_DASHBOARD_PORT)
+        try:
+            port = int(env.get("DASHBOARD_PORT") or DEFAULT_DASHBOARD_PORT)
+        except ValueError:
+            raise ConfigError(
+                f"DASHBOARD_PORT must be a number, got {env.get('DASHBOARD_PORT')!r}"
+            )
         return cls(
             telegram_bot_token=env["TELEGRAM_BOT_TOKEN"],
             model=env.get("MODEL") or DEFAULT_MODEL,

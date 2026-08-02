@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.dashboard import DashboardDoor, is_dashboard_command
-from agentg.demo_media import DemoSender, serve_demo
+from agentg.demo_media import DemoSender, _send_resolved_demo
 
 
 async def _drain_coach_pings(pings):
@@ -153,21 +153,23 @@ class AgentRuntime:
                     has_pings = bool(context.coach_pings)
                     if not has_demos and not has_pings:
                         return Reply(text)
-                    demo_requests = list(context.demo_requests) if sender is not None else []
+                    # Already-resolved DemoRefs -- no second Catalog lookup (#179).
+                    demo_refs = list(context.demo_requests) if sender is not None else []
                     coach_pings = list(context.coach_pings)
-                    gym_id = context.gym_id
                     channel, user_id = msg.channel, msg.channel_user_id
 
                     async def after_send() -> None:
-                        async def _send_demo(exercise) -> None:
+                        async def _send_demo(ref) -> None:
                             try:
                                 # Narrow sender for mypy (P2 #5153516992).
                                 assert sender is not None
-                                await serve_demo(
-                                    self.stores.demos, sender, exercise, gym_id, channel, user_id
+                                await _send_resolved_demo(
+                                    self.stores.demos, sender, ref, channel, user_id
                                 )
                             except Exception:
-                                logger.exception("failed to serve demo %r to %s", exercise, user_id)
+                                logger.exception(
+                                    "failed to serve demo %r to %s", ref.exercise_name, user_id
+                                )
 
                         async def _run_ping(ping):
                             try:
@@ -175,7 +177,7 @@ class AgentRuntime:
                             except Exception:
                                 logger.exception("deferred coach ping failed")
 
-                        tasks = [_send_demo(ex) for ex in demo_requests] + [
+                        tasks = [_send_demo(ref) for ref in demo_refs] + [
                             _run_ping(p) for p in coach_pings
                         ]
                         if tasks:

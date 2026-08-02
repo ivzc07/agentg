@@ -310,6 +310,8 @@ class TrainingStore:
                             exercise_id=template.exercise_id,
                             weight=weight if weight is not None else template.weight,
                             reps=rep,
+                            rpe=template.rpe,
+                            note=template.note,
                             created_at=batch_time,  # stays correctable as one batch
                         )
                     )

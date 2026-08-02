@@ -140,7 +140,7 @@ async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]
             text = f"Heads-up from your member {c.member_name}: {note.text}"
             link = None
             try:
-                if c.dashboard_base_url is not None and c.stores.dashboard is not None:
+                if c.dashboard_base_url is not None:
                     token = await c.stores.dashboard.create_login_token(
                         coach_id, c.gym_id, next_path=next_path
                     )

@@ -6,7 +6,7 @@ import pytest
 
 from agentg.db import create_engine
 from agentg.demo_ingest import DemoManifestEntry, ingest_demo_manifest, load_manifest
-from agentg.demo_media import SentAnimation, serve_demo
+from agentg.demo_media import SentAnimation, _send_resolved_demo, serve_demo
 from agentg.demos import DemoStore
 from agentg.linking_store import LinkingStore
 from agentg.training import TrainingStore
@@ -190,3 +190,15 @@ def test_load_manifest_reads_name_slug_json(tmp_path):
     path.write_text(json.dumps([{"name": "Deadlift", "slug": "deadlift.mp4"}]), encoding="utf-8")
     entries = load_manifest(path)
     assert entries == [DemoManifestEntry("Deadlift", "deadlift.mp4")]
+
+
+async def test_a_pre_resolved_demo_is_sent_without_a_second_resolution(env):
+    await env.demos.set_default_demo("bench press", "bench-press.mp4")
+    ref = await env.demos.resolve("bench press", env.gym_id)
+    assert ref is not None
+
+    sender = FakeSender()
+    result = await _send_resolved_demo(env.demos, sender, ref, *env.member_channel)
+
+    assert result == "sent"
+    assert len(sender.uploads) == 1
