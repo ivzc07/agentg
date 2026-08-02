@@ -240,6 +240,67 @@ async def test_link_member_as_coach_with_a_revoked_code_writes_nothing(store):
         assert await db.scalar(select(func.count()).select_from(Member)) == 1
 
 
+# --- atomic member-code redemption: a revoked code cannot link (issue #215) ---
+
+
+async def test_link_member_with_code_creates_a_member_with_an_active_code(store):
+    gym = await store.create_gym("Iron Temple")
+
+    member = await store.link_member_with_code(
+        gym.id, "Ana", "telegram", "42", gym.invite_code
+    )
+
+    assert member is not None and member.is_coach is False
+    linked = await store.identity_for("telegram", "42")
+    assert linked is not None
+    assert linked.gym.id == gym.id and linked.member.name == "Ana"
+
+
+async def test_link_member_with_code_repaints_the_channel_identity(store):
+    """A gym switch re-points the channel pointer atomically — the same
+    identity arriving with a different Gym's code."""
+    old_gym = await store.create_gym("Iron Temple")
+    new_gym = await store.create_gym("Steel Yard")
+    old_member = await store.link_member(old_gym.id, "Ana", "telegram", "42")
+
+    new_member = await store.link_member_with_code(
+        new_gym.id, "Ana", "telegram", "42", new_gym.invite_code
+    )
+
+    assert new_member is not None and new_member.id != old_member.id
+    linked = await store.identity_for("telegram", "42")
+    assert linked is not None
+    assert linked.gym.id == new_gym.id
+    # The old Member row is left untouched.
+    sessions = async_sessionmaker(store.engine)
+    async with sessions() as db:
+        old_row = await db.get(Member, old_member.id)
+        assert old_row is not None and old_row.gym_id == old_gym.id
+
+
+async def test_link_member_with_code_with_a_revoked_code_writes_nothing(store):
+    gym = await store.create_gym("Iron Temple")
+    stale_code = gym.invite_code
+    await store.regenerate_invite_code(gym.id)
+
+    # No partial state: no Member row, no channel pointer, nothing to retry into.
+    assert await store.link_member_with_code(gym.id, "Ana", "telegram", "42", stale_code) is None
+    sessions = async_sessionmaker(store.engine)
+    async with sessions() as db:
+        assert await db.scalar(select(func.count()).select_from(Member)) == 0
+        assert await db.scalar(select(func.count()).select_from(MemberChannel)) == 0
+
+    # A retry with the current code links exactly one Member.
+    sessions = async_sessionmaker(store.engine)
+    async with sessions() as db:
+        gym_row = await db.get(Gym, gym.id)
+        current_code = gym_row.invite_code
+    member = await store.link_member_with_code(gym.id, "Ana", "telegram", "42", current_code)
+    assert member is not None and member.is_coach is False
+    async with sessions() as db:
+        assert await db.scalar(select(func.count()).select_from(Member)) == 1
+
+
 # --- schema evolution for deployed databases (PR #109) ---
 
 
