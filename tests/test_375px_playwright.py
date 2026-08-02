@@ -65,6 +65,7 @@ from pathlib import Path  # noqa: E402
 import pytest_asyncio  # noqa: E402
 
 from aiohttp.test_utils import TestServer  # noqa: E402
+from playwright.async_api import Error as PlaywrightError  # noqa: E402
 from playwright.async_api import async_playwright  # noqa: E402
 
 from agentg.dashboard_store import DashboardStore  # noqa: E402
@@ -235,7 +236,21 @@ async def rendered(live_dashboard) -> list[Rendered]:
     results: list[Rendered] = []
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch()
+        try:
+            browser = await pw.chromium.launch()
+        except PlaywrightError as exc:
+            # The package can be installed while the browser binaries are not -
+            # `pip install ".[browser]"` without the `playwright install
+            # chromium` half. importorskip cannot see that, and without this the
+            # module ERRORs instead of skipping, which is the opposite of the
+            # graceful degradation this file promises.
+            if "playwright install" not in str(
+                exc
+            ) and "Executable doesn't exist" not in str(exc):
+                raise
+            pytest.skip(
+                f"playwright browsers not installed: run `uv run playwright install chromium` ({exc.__class__.__name__})"
+            )
         try:
             for screen in _screens(env):
                 context = await browser.new_context(
