@@ -26,6 +26,7 @@ from agentg.messages import IncomingMessage, Reply
 from agentg.linking import Linking
 from agentg.linking_store import LinkedIdentity
 from agentg.context import MemberContext
+from agentg.instrument import TurnContext
 from agentg.stores import Stores
 
 logger = logging.getLogger(__name__)
@@ -92,61 +93,62 @@ class AgentRuntime:
 
     async def handle_message(self, msg: IncomingMessage) -> Reply:
         async with self._locks[(msg.channel, msg.channel_user_id)]:
-            linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
-            reply = await self.linking.handle(msg, linked)
-            if reply is not None:
-                return Reply(reply)
-            if linked is None:  # linking always replies for unlinked identities
-                raise RuntimeError("unlinked message reached the agent loop")
-            # `/dashboard` is a deterministic door, not Agent chat: it never
-            # touches the check-in rhythm, compaction, or history.
-            if self.dashboard is not None and is_dashboard_command(msg.text):
-                return await self.dashboard.handle(linked, is_group=msg.is_group)
-            # Any reply resets the check-in rhythm and revives a lapsed Member.
-            await self.stores.checkins.reset_rhythm(linked.member.id)
-            session = self.session_for_member(linked.member.id)
-            try:
-                await maybe_compact(
-                    session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
-                )
-            except Exception:
-                logger.exception("compaction failed for member %d", linked.member.id)
-            # Awaited: the tool set is scoped to the caller's role, which needs
-            # a Routine lookup (issue #174).
-            context = await self.member_context(linked)
-            try:
-                result = await Runner.run(
-                    self.agent,
-                    msg.text,
-                    session=session,
-                    context=context,
-                )
-            finally:
-                # Issue #166: delete_my_data clears the session during the
-                # turn, but the runner persists this turn's items afterwards --
-                # the tool call and goodbye survive the wipe.  Clear again so
-                # nothing remains.  Run in finally so a mid-turn error (API,
-                # MaxTurnsExceeded) doesn't skip the clear after the domain
-                # wipe has already committed.
-                if context.forgotten:
-                    await session.clear_session()
-            text = str(result.final_output)
-            sender = self.demo_sender
-            if sender is None or not context.demo_requests:
-                return Reply(text)
-            # Defer the demo sends so the channel delivers the reply text first,
-            # then the animations land beneath it.
-            requests = list(context.demo_requests)
-            gym_id = context.gym_id
-            channel, user_id = msg.channel, msg.channel_user_id
+            with TurnContext():
+                linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
+                reply = await self.linking.handle(msg, linked)
+                if reply is not None:
+                    return Reply(reply)
+                if linked is None:  # linking always replies for unlinked identities
+                    raise RuntimeError("unlinked message reached the agent loop")
+                # `/dashboard` is a deterministic door, not Agent chat: it never
+                # touches the check-in rhythm, compaction, or history.
+                if self.dashboard is not None and is_dashboard_command(msg.text):
+                    return await self.dashboard.handle(linked, is_group=msg.is_group)
+                # Any reply resets the check-in rhythm and revives a lapsed Member.
+                await self.stores.checkins.reset_rhythm(linked.member.id)
+                session = self.session_for_member(linked.member.id)
+                try:
+                    await maybe_compact(
+                        session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
+                    )
+                except Exception:
+                    logger.exception("compaction failed for member %d", linked.member.id)
+                # Awaited: the tool set is scoped to the caller's role, which
+                # needs a Routine lookup (issue #174).
+                context = await self.member_context(linked)
+                try:
+                    result = await Runner.run(
+                        self.agent,
+                        msg.text,
+                        session=session,
+                        context=context,
+                    )
+                finally:
+                    # Issue #166: delete_my_data clears the session during the
+                    # turn, but the runner persists this turn's items afterwards --
+                    # the tool call and goodbye survive the wipe.  Clear again so
+                    # nothing remains.  Run in finally so a mid-turn error (API,
+                    # MaxTurnsExceeded) doesn't skip the clear after the domain
+                    # wipe has already committed.
+                    if context.forgotten:
+                        await session.clear_session()
+                text = str(result.final_output)
+                sender = self.demo_sender
+                if sender is None or not context.demo_requests:
+                    return Reply(text)
+                # Defer the demo sends so the channel delivers the reply text first,
+                # then the animations land beneath it.
+                requests = list(context.demo_requests)
+                gym_id = context.gym_id
+                channel, user_id = msg.channel, msg.channel_user_id
 
-            async def after_send() -> None:
-                for exercise in requests:
-                    try:
-                        await serve_demo(
-                            self.stores.demos, sender, exercise, gym_id, channel, user_id
-                        )
-                    except Exception:
-                        logger.exception("failed to serve demo %r to %s", exercise, user_id)
+                async def after_send() -> None:
+                    for exercise in requests:
+                        try:
+                            await serve_demo(
+                                self.stores.demos, sender, exercise, gym_id, channel, user_id
+                            )
+                        except Exception:
+                            logger.exception("failed to serve demo %r to %s", exercise, user_id)
 
-            return Reply(text, after_send=after_send)
+                return Reply(text, after_send=after_send)
