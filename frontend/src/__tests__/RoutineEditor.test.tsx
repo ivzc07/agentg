@@ -527,11 +527,11 @@ describe("RoutineEditor", () => {
     });
 
     const saveBtn = screen.getByRole("button", { name: "Save Routine" });
-    expect(saveBtn.className).toMatch(/\bbg-magenta\b/);
-    expect(saveBtn.className).toMatch(/\btext-bg\b/);
+    expect(saveBtn).toHaveClass("bg-magenta");
+    expect(saveBtn).toHaveClass("text-bg");
     // Must NOT have a light text class (which would fail AA).
-    expect(saveBtn.className).not.toMatch(/\btext-ink\b/);
-    expect(saveBtn.className).not.toMatch(/\btext-white\b/);
+    expect(saveBtn).not.toHaveClass("text-ink");
+    expect(saveBtn).not.toHaveClass("text-white");
   });
 });
 
