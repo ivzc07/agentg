@@ -845,6 +845,66 @@ class TestStoreConcurrency:
 
         await engine.dispose()
 
+    async def test_concurrent_log_sets_new_exercise_no_dropped_work(self, tmp_path):
+        """Concurrent log_sets calls for the same unknown Exercise both
+        succeed — the catalog INSERT race is handled gracefully and no
+        valid Sets are dropped (issue #213)."""
+        from agentg.models import Exercise as ExerciseModel
+        from agentg.models import Set as SetModel
+
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'race5.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        clock = FakeClock()
+        training = TrainingStore(engine, clock=clock)
+        # Do NOT seed — the tested exercise ("cable fly") is unknown.
+        gym = await linking.create_gym("Iron Temple")
+        member = await linking.link_member(gym.id, "Ana", "telegram", "1")
+
+        # Open a Session so the race only exercises the catalog path.
+        await training.open_session(member.id, gym.id)
+
+        barrier = asyncio.Barrier(2)
+
+        async def log(line):
+            await barrier.wait()
+            return await training.log_sets(member.id, gym.id, line)
+
+        r1, r2 = await asyncio.gather(
+            log("cable fly 20 10,10,10"),
+            log("cable fly 20 10,10,10"),
+        )
+        assert r1.exercise == "cable fly"
+        assert r2.exercise == "cable fly"
+        assert r1.reps == [10, 10, 10]
+        assert r2.reps == [10, 10, 10]
+
+        # All 6 Sets in one Session — none dropped.
+        async with training._sessions() as db:
+            session = await db.scalar(
+                select(SessionModel).where(
+                    SessionModel.member_id == member.id,
+                    SessionModel.closed_at.is_(None),
+                )
+            )
+            assert session is not None
+            set_rows = (
+                await db.execute(
+                    select(SetModel).where(SetModel.session_id == session.id)
+                )
+            ).scalars().all()
+            assert len(set_rows) == 6  # 3+3, all in one session
+
+            # Exactly one Exercise was created.
+            ex_count = await db.scalar(
+                select(func.count()).where(ExerciseModel.name == "cable fly")
+            )
+            assert ex_count == 1
+
+        await engine.dispose()
+
 
 class TestSessionLifecycleUnderConstraint:
     """Normal lifecycle operations work with the unique constraint in place."""
