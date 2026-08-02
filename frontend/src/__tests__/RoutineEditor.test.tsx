@@ -502,27 +502,27 @@ describe("RoutineEditor", () => {
       });
 
       const btn = screen.getByRole("button", { name: "Save Routine" });
-      expect(btn.className).toMatch(/\bbg-magenta\b/);
-      expect(btn.className).toMatch(/\btext-bg\b/);
+      // Use start/space delimiters so variant-prefixed utilities (e.g.
+      // hover:bg-magenta) are not mistaken for the base class.
+      expect(btn.className).toMatch(/(?:^|\s)bg-magenta(?:\s|$)/);
+      expect(btn.className).toMatch(/(?:^|\s)text-bg(?:\s|$)/);
       expect(btn.className).not.toMatch(/\btext-white\b/);
     });
 
     it("rejects conflicting text-color utilities alongside text-bg", () => {
       const src = routineEditorSource;
-      // Find the submit button's className and assert no two different
-      // text-color tokens appear together (e.g. text-ink-2 + text-bg).
-      const textColorClasses = [
-        "text-bg",
-        "text-white",
-        "text-ink",
-        "text-ink-2",
-        "text-ink-3",
-      ];
       // Locate the submit button block by its type="submit" attr.
       const submitIdx = src.indexOf('type="submit"');
       expect(submitIdx).not.toBe(-1);
       const block = src.slice(submitIdx, submitIdx + 400);
-      const found = textColorClasses.filter((cls) => block.includes(cls));
+      // Match every text-* class that looks like a colour utility (not
+      // sizing like text-[14px], decoration, or alignment).  Tailwind
+      // text-colour classes include text-bg, text-white, text-ink*,
+      // text-black, text-current, text-transparent, text-inherit, and
+      // text-{colour}-{shade} (e.g. text-red-500).
+      const textColorRe =
+        /\btext-(?:bg|white|ink(?:-[23])?|black|current|transparent|inherit|[a-z]+-\d+)\b/g;
+      const found = [...block.matchAll(textColorRe)].map((m) => m[0]);
       // Exactly one text-color token on the submit button.
       expect(found).toEqual(["text-bg"]);
     });
@@ -532,13 +532,17 @@ describe("RoutineEditor", () => {
       const submitIdx = src.indexOf('type="submit"');
       expect(submitIdx).not.toBe(-1);
       const block = src.slice(submitIdx, submitIdx + 400);
-      // Must have a base bg- class (bg-magenta) present.
-      expect(block).toMatch(/\bbg-magenta\b/);
-      // Must NOT have a modifier-only bg (hover:bg-magenta without un-prefixed bg-magenta).
-      // We already proved bg-magenta is present, so check that hover:bg-magenta
-      // does not appear as the sole background utility.
-      // At minimum bg-magenta must be a base (non-prefixed) class.
-      expect(block).toMatch(/(?<!\w)bg-magenta(?![\w-])/);
+      // Must have a base bg- class (bg-magenta) as a standalone class.
+      // The negative lookbehind excludes variant prefixes (hover:, focus:,
+      // etc.) so that hover:bg-magenta without a true base bg-magenta is
+      // rejected.
+      expect(block).toMatch(/(?<![\w:])bg-magenta(?![\w-])/);
+      // Double-check: a variant-only background (hover:bg-magenta with no
+      // base bg-magenta) must not satisfy the check above.
+      // Prove the negative: a block with only hover:bg-magenta would fail.
+      expect("hover:bg-magenta text-bg").not.toMatch(
+        /(?<![\w:])bg-magenta(?![\w-])/
+      );
     });
   });
 
