@@ -60,4 +60,4 @@ class IncomingMessage:
     text: str
     display_name: str = ""
     link_code: str | None = None
-    is_private: bool = True
+    is_private: bool = False

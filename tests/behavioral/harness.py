@@ -228,6 +228,7 @@ class ConversationHarness:
                 text=text,
                 display_name=display_name if display_name is not None else self.display_name,
                 link_code=link_code,
+                is_private=True,
             )
         )
         # Run the post-send hook the way a real channel does (see

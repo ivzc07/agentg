@@ -97,7 +97,7 @@ async def test_the_magic_link_reply_suppresses_the_link_preview(tmp_path):
     async with ConversationHarness.create(tmp_path, dashboard_base_url=BASE_URL) as h:
         await h.linked_member(is_coach=True)
         reply = await h.runtime.handle_message(
-            IncomingMessage(channel="telegram", channel_user_id="42", text="/dashboard")
+            IncomingMessage(channel="telegram", channel_user_id="42", text="/dashboard", is_private=True)
         )
         assert f"{BASE_URL}/login/" in reply
         assert reply.disable_preview is True  # Telegram must not pre-fetch it

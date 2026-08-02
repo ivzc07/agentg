@@ -193,12 +193,14 @@ async def _deliver_streamed(
 
 def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[None]]:
     async def on_text(message: Message) -> None:
-        if message.from_user is None or message.text is None:
-            return
         # Reject shared chats at the highest channel boundary — no typing,
         # no identity resolution, no model call, no store access (#211).
+        # Checked before from_user so anonymous-admin / sender-chat messages
+        # (which have no from_user) still receive the rejection.
         if message.chat.type != "private":
             await message.answer(GROUP_REJECTION_REPLY)
+            return
+        if message.from_user is None or message.text is None:
             return
         incoming = IncomingMessage(
             channel=CHANNEL,

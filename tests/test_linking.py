@@ -55,6 +55,7 @@ def incoming(text="hi", *, user_id="42", display_name="Ana García", link_code=N
         text=text,
         display_name=display_name,
         link_code=link_code,
+        is_private=True,
     )
 
 

@@ -40,7 +40,8 @@ def make_runtime(url) -> AgentRuntime:
 
 def incoming(text, user_id):
     return IncomingMessage(
-        channel="telegram", channel_user_id=user_id, text=text, display_name="Ana"
+        channel="telegram", channel_user_id=user_id, text=text, display_name="Ana",
+        is_private=True,
     )
 
 

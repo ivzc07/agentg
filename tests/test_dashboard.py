@@ -220,7 +220,7 @@ async def test_runtime_routes_the_command_to_the_door_not_the_agent(stores, engi
     await make_coach(stores.linking)
 
     reply = await runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="/dashboard")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="/dashboard", is_private=True)
     )
 
     assert isinstance(reply, Reply)

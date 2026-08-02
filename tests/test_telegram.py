@@ -85,7 +85,8 @@ async def test_group_messages_are_rejected_before_agent_work():
     # The rejection reply must be sent exactly once.
     message.answer.assert_awaited_once()
     rejection_text = message.answer.await_args[0][0]
-    assert "privado" in rejection_text or "directo" in rejection_text
+    from agentg.channels.telegram import GROUP_REJECTION_REPLY
+    assert rejection_text == GROUP_REJECTION_REPLY
 
 
 async def test_group_messages_get_no_typing_indicator():
@@ -131,6 +132,22 @@ async def test_handler_ignores_messages_without_a_sender():
     reply_fn = AsyncMock()
     await make_message_handler(reply_fn)(FakeMessage(user_id=None))
     reply_fn.assert_not_awaited()
+
+
+async def test_anonymous_admin_group_message_gets_rejection():
+    """Messages with no from_user (e.g. anonymous admin / sender-chat)
+    in non-private chats must still receive the rejection reply (#211)."""
+    reply_fn = AsyncMock()
+    message = FakeMessage(user_id=None, chat_type="supergroup", text="admin broadcast")
+    await make_message_handler(reply_fn)(message)
+
+    # Agent must never run.
+    reply_fn.assert_not_awaited()
+    # Rejection must be sent.
+    message.answer.assert_awaited_once()
+    rejection_text = message.answer.await_args[0][0]
+    from agentg.channels.telegram import GROUP_REJECTION_REPLY
+    assert rejection_text == GROUP_REJECTION_REPLY
 
 
 async def test_handler_answers_even_when_the_agent_loop_fails():
