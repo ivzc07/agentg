@@ -81,19 +81,37 @@ function buildTextColorInventory(): Set<string> {
 
 const TEXT_COLOR_INVENTORY = buildTextColorInventory();
 
+/** True when `value` looks like a colour: hex, CSS colour function, or a
+ *  CSS variable that resolves to a colour. */
+function looksLikeColor(value: string): boolean {
+  // Hex colour: #rgb, #rrggbb, #rgba, #rrggbbaa
+  if (/^#[0-9a-fA-F]{3,8}$/.test(value)) return true;
+  // Colour functions
+  if (/^(rgb|rgba|hsl|hsla|hwb|lab|lch|oklch|oklab|color)\(/.test(value)) return true;
+  // CSS variable — likely a colour variable (e.g. var(--foreground))
+  if (/^var\(--/.test(value)) return true;
+  return false;
+}
+
 /** True when the content inside `text-[...]` looks like a colour (hex, rgb(),
- *  hsl(), etc.).  Returns false for sizing values like `text-[14px]` and
- *  ambiguous CSS variables like `text-[--custom]`. */
+ *  hsl(), etc.).  Also recognises typed arbitrary values such as
+ *  `text-[color:#fff]` and `text-[color:var(--foreground)]`.  Returns false
+ *  for sizing values like `text-[14px]`, non-colour typed values like
+ *  `text-[font-size:14px]`, and ambiguous bare CSS variables like
+ *  `text-[--custom]`. */
 function isArbitraryTextColor(cls: string): boolean {
-  // Match text-[<value>] with an optional /<alpha-modifier>
+  // Match text-[<value>] or text-[<type>:<value>] with an optional /<alpha-modifier>
   const m = cls.match(/^text-\[(.+?)\](?:\/\d+)?$/);
   if (!m) return false;
   const inner = m[1];
-  // Hex colour: #rgb, #rrggbb, #rgba, #rrggbbaa
-  if (/^#[0-9a-fA-F]{3,8}$/.test(inner)) return true;
-  // Colour functions
-  if (/^(rgb|rgba|hsl|hsla|hwb|lab|lch|oklch|oklab|color)\(/.test(inner)) return true;
-  return false;
+
+  // Typed arbitrary value: text-[color:#fff], text-[color:var(--foreground)], etc.
+  // Only match when the type is "color"; reject text-[font-size:14px], etc.
+  const typed = inner.match(/^color:(.+)$/);
+  if (typed) return looksLikeColor(typed[1]);
+
+  // Bare arbitrary value: text-[#fff], text-[rgb(…)], etc.
+  return looksLikeColor(inner);
 }
 
 /** True when `cls` is a `text-*` colour utility.  Also detects arbitrary-value
@@ -693,6 +711,28 @@ describe("RoutineEditor", () => {
       it("rejects non-colour arbitrary-value classes like text-[14px]", () => {
         expect(isTextColorClass("text-[14px]")).toBe(false);
         expect(isTextColorClass("text-[--custom]")).toBe(false);
+        // Typed arbitrary values with a non-colour type
+        expect(isTextColorClass("text-[font-size:14px]")).toBe(false);
+        expect(isTextColorClass("text-[line-height:1.5]")).toBe(false);
+      });
+
+      it("recognises typed arbitrary-value colour classes", () => {
+        // Typed color: literal
+        expect(isTextColorClass("text-[color:#fff]")).toBe(true);
+        expect(isTextColorClass("text-[color:#f00]")).toBe(true);
+        expect(isTextColorClass("text-[color:#ffffff]")).toBe(true);
+        // Typed color: CSS variable
+        expect(isTextColorClass("text-[color:var(--foreground)]")).toBe(true);
+        expect(isTextColorClass("text-[color:var(--color-red-500)]")).toBe(true);
+        // Typed color: CSS function
+        expect(isTextColorClass("text-[color:rgb(255,0,0)]")).toBe(true);
+        expect(isTextColorClass("text-[color:hsl(0,100%,50%)]")).toBe(true);
+        expect(isTextColorClass("text-[color:oklch(0.5_0.2_180)]")).toBe(true);
+      });
+
+      it("recognises typed arbitrary-value colour classes with alpha modifier", () => {
+        expect(isTextColorClass("text-[color:#fff]/50")).toBe(true);
+        expect(isTextColorClass("text-[color:var(--foreground)]/75")).toBe(true);
       });
 
       it("recognises arbitrary-value colour classes", () => {
