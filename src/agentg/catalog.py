@@ -18,6 +18,33 @@ def normalize_exercise_name(text: str) -> str:
     return " ".join(text.strip().lower().split())
 
 
+async def resolve_exercise_names(
+    db: AsyncSession, names: list[str]
+) -> dict[str, int]:
+    """Resolve a batch of exercise names (or aliases) to ids.
+
+    Returns a dict mapping each input name to its resolved Exercise id.
+    Unknown exercises are silently omitted — the caller decides how to
+    handle them.
+    """
+    normalized = [(name, normalize_exercise_name(name)) for name in names]
+    all_exercises = await db.scalars(select(Exercise))
+    all_exercises = list(all_exercises)
+
+    result: dict[str, int] = {}
+    for original, norm in normalized:
+        for row in all_exercises:
+            if row.name == norm:
+                result[original] = row.id
+                break
+        else:
+            for row in all_exercises:
+                if norm in [a for a in row.aliases.split(",") if a]:
+                    result[original] = row.id
+                    break
+    return result
+
+
 async def find_exercise(db: AsyncSession, norm: str) -> Exercise | None:
     """Resolve an Exercise by exact name, then by comma-separated alias.
 
