@@ -131,6 +131,6 @@ Sent mornings only, capped per week, never on consecutive days.
 _Avoid_: Ping, alert, notification
 
 **Snapshot**:
-The compact per-turn digest of a Member's facts - identity, Gap, last Session, today's Workout, active Notes - injected into the Agent's instructions.
+The compact per-turn digest of a Member's facts - identity, Gap, last Session, today's Workout, active Notes - injected as a developer message at the end of the model input (not stored in session history) so the static system prompt prefix is cacheable (#175).
 When chat memory and the Snapshot disagree, the Snapshot wins.
 _Avoid_: Profile, context

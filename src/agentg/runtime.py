@@ -14,8 +14,9 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from agents import Agent, Runner
+from agents import Agent, RunConfig, Runner
 from agents.extensions.memory import SQLAlchemySession
+from agents.run_config import CallModelData, ModelInputData
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from agentg.checkin_sweep import Notifier
@@ -36,9 +37,43 @@ from agentg.linking import Linking
 from agentg.linking_store import LinkedIdentity
 from agentg.context import MemberContext
 from agentg.instrument import TurnContext
+from agentg.snapshot import member_snapshot
 from agentg.stores import Stores
 
 logger = logging.getLogger(__name__)
+
+
+async def _inject_snapshot(data: CallModelData[MemberContext]) -> ModelInputData:
+    """call_model_input_filter: append the per-turn member snapshot as a
+    developer message at the end of the input so the static system prompt
+    stays identical across turns and the prompt prefix is cacheable (#175).
+
+    The snapshot is injected here, not stored in the session history, so
+    stale snapshots can never accumulate.
+    """
+    ctx = data.context
+    if ctx is None:
+        return data.model_data
+    snapshot = await member_snapshot(ctx)
+    # The "developer" role works with the default openai/gpt-4o-mini (the
+    # SDK's chatcmpl converter supports it).  Via LiteLLM, some providers
+    # (e.g. Anthropic) hoist developer/system messages into the top-level
+    # system param — which would silently move the snapshot back to the
+    # front and defeat the caching goal of #175.  If MODEL is set to a
+    # provider that does not support developer-role messages as trailing
+    # input items, this mechanism needs a per-provider adaptation.
+    snapshot_item: dict = {
+        "role": "developer",
+        "content": snapshot,
+        "type": "message",
+    }
+    return ModelInputData(
+        input=list(data.model_data.input) + [snapshot_item],
+        instructions=data.model_data.instructions,
+    )
+
+
+_SNAPSHOT_RUN_CONFIG = RunConfig(call_model_input_filter=_inject_snapshot)
 
 
 @dataclass
@@ -151,6 +186,7 @@ class AgentRuntime:
                             msg.text,
                             session=session,
                             context=context,
+                            run_config=_SNAPSHOT_RUN_CONFIG,
                         )
                     finally:
                         # Issue #166: delete_my_data clears the session during

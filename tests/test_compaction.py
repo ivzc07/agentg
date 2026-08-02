@@ -212,7 +212,7 @@ async def test_handle_message_compacts_before_running_the_agent(env, monkeypatch
 
     history_sizes = []
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         history_sizes.append(len(await session.get_items()))
         return SimpleNamespace(final_output="ok")
 
@@ -268,7 +268,7 @@ async def test_failing_summarizer_in_handle_message_does_not_block_reply(env, mo
     import agentg.runtime as runtime_module
     from types import SimpleNamespace
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         return SimpleNamespace(final_output="ok")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)

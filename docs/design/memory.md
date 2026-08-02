@@ -12,7 +12,7 @@ Memory is three layers, each with one job:
 2. **Conversation history (SDK Sessions)** — what was said: the Agents SDK's `SQLAlchemySession`, one session per member, stored in the same Postgres.
 3. **Member notes (our table)** — what the agent learned: injuries, preferences, goals, tone. Written by a tool when the member volunteers something durable; small enough to load whole.
 
-Each chat turn gets a compact **member snapshot** (identity, today's workout, days since last session, open notes) injected into the agent's instructions; everything bigger sits behind a tool. Gap awareness is never stored — it is derived from the newest Session by one indexed query.
+Each chat turn gets a compact **member snapshot** (identity, today's workout, days since last session, open notes) injected at the tail of the model input via `call_model_input_filter` so the static system prompt stays cacheable; everything bigger sits behind a tool. Gap awareness is never stored — it is derived from the newest Session by one indexed query.
 
 ## 1. Structured records — domain tables
 
@@ -30,7 +30,7 @@ session_id = f"member:{member_id}"
 
 Keyed by **member, not by channel chat id** — moving Telegram → WhatsApp keeps the whole history; the channel adapter only maps its own chat id to a member.
 
-**Growth policy** (the SDK stores raw items and has no built-in summarizer, so this is ours): before each run, estimate the session's tokens with a chars/4 heuristic (no tokenizer dependency). History may occupy up to `HISTORY_TOKEN_BUDGET` (12 000) estimated tokens; compact when the estimate exceeds ~70% of that budget (`COMPACT_AT_TOKENS` = 8 400), so we fire well before the attention cliff rather than waiting on item count. Item count is not the primary signal — many small turns stay put; a few huge ones trigger. Always keep the newest `KEEP_RECENT` (20) items raw so the live exchange is never folded away. Compaction asks the model for a short summary of the oldest turns, writes anything durable to member notes first, then replaces the old items with one summary item at the **start** of history (`Session.get_items`/`clear_session`/`add_items`). Notes stay in the per-turn snapshot at the **end** of the system prompt (attention-favored edge of the U-curve), not mid-context. History is a working buffer, not an archive; nothing of record lives only in it (facts are in tables, durables in notes).
+**Growth policy** (the SDK stores raw items and has no built-in summarizer, so this is ours): before each run, estimate the session's tokens with a chars/4 heuristic (no tokenizer dependency). History may occupy up to `HISTORY_TOKEN_BUDGET` (12 000) estimated tokens; compact when the estimate exceeds ~70% of that budget (`COMPACT_AT_TOKENS` = 8 400), so we fire well before the attention cliff rather than waiting on item count. Item count is not the primary signal — many small turns stay put; a few huge ones trigger. Always keep the newest `KEEP_RECENT` (20) items raw so the live exchange is never folded away. Compaction asks the model for a short summary of the oldest turns, writes anything durable to member notes first, then replaces the old items with one summary item at the **start** of history (`Session.get_items`/`clear_session`/`add_items`). Notes ride at the tail of the per-turn snapshot message (attention-favored edge of the U-curve), not mid-context. History is a working buffer, not an archive; nothing of record lives only in it (facts are in tables, durables in notes).
 
 ## 3. Member notes — long-term agent memory
 
@@ -42,7 +42,7 @@ One table, `member_notes`: `id, gym_id, member_id, kind, text, created_at, retir
 
 ## 4. Recall — the per-turn snapshot
 
-Before each run, the bot builds a **member snapshot** and injects it via the agent's dynamic instructions (system prompt), so every turn starts oriented without loading everything:
+Before each run, the bot builds a **member snapshot** and injects it via `call_model_input_filter` at the tail of the model input (the attention-favored U-curve edge), keeping the static system prompt cacheable across turns:
 
 - who: name, gym, member id
 - plan: today's workout from the active Routine (name + exercise list)

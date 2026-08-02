@@ -80,7 +80,7 @@ def test_log_sets_payload_omits_suspect_when_the_jump_is_plausible():
 async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch):
     seen = {}
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         seen["context"] = context
         return SimpleNamespace(final_output="ok")
 

@@ -246,7 +246,7 @@ class TestIntegration:
             await stores.linking.link_member(gym.id, "Ana", "telegram", "42")
 
             # A fake Runner.run that returns a simple reply.
-            async def fake_run(agent, text, *, session, context=None):
+            async def fake_run(agent, text, *, session, context=None, run_config=None):
                 return SimpleNamespace(final_output="hey Ana, logged that")
 
             import agentg.runtime as rt_mod

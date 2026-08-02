@@ -75,7 +75,7 @@ async def test_turns_in_one_conversation_never_interleave(runtime, monkeypatch):
     running: set[str] = set()
     overlapped = []
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         if session.session_id in running:
             overlapped.append(text)
         running.add(session.session_id)
@@ -104,7 +104,7 @@ async def test_reset_rhythm_is_deferred_past_the_reply(runtime, monkeypatch):
     """reset_rhythm must not block the LLM call — it fires after_send."""
     events: list[str] = []
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         events.append("llm")
         return SimpleNamespace(final_output="ok")
 
@@ -138,7 +138,7 @@ async def test_reset_rhythm_is_deferred_past_the_reply(runtime, monkeypatch):
 
 async def test_deferred_reset_rhythm_still_revives_lapsed_members(runtime, monkeypatch):
     """A lapsed Member is revived after the reply, not before."""
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         return SimpleNamespace(final_output="welcome back!")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
@@ -168,7 +168,7 @@ async def test_reset_rhythm_still_runs_on_llm_failure(runtime, monkeypatch):
     Before this PR, the rhythm reset only ran inside after_send, which the
     channel adapter never calls when the reply_fn raises — a lapsed Member
     whose model call failed would stay lapsed, feeding the give-up rule."""
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         raise RuntimeError("model unavailable")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
@@ -194,7 +194,7 @@ async def test_reset_rhythm_still_runs_on_llm_failure(runtime, monkeypatch):
 async def test_plain_linked_message_issues_few_queries(runtime, monkeypatch):
     """A plain message from a linked Member issues a bounded number of DB
     queries — the turn-level query count that issue #169 asks for."""
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         return SimpleNamespace(final_output="ok")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)

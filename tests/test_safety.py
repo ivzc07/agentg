@@ -553,7 +553,7 @@ async def test_coach_pings_are_deferred_after_the_member_reply_at_runtime_level(
     """The reply from handle_message must have notifier.sent == [] before
     after_send() and non-empty only after (P2 #5153517044)."""
 
-    async def fake_run(agent, text, *, session, context=None):
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
         # Simulate the Agent calling flag_to_coach, which populates
         # context.coach_pings.
         await flag_to_coach_action(context, "sharp knee pain")
