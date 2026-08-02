@@ -6,6 +6,7 @@ tail. Page level: the shared bare 404 — a departed, forgotten, or mistyped
 id all land on the same dead end — and the roster's click-through.
 """
 
+import json
 from datetime import timedelta
 
 import pytest
@@ -244,14 +245,16 @@ async def test_the_member_page_bounces_anonymous_and_demoted_coaches(env):
     assert BOUNCE_MARKER in await response.text()
 
 
-async def test_roster_rows_link_to_the_member_page(env):
+async def test_roster_rows_carry_the_member_id_the_links_are_built_from(env):
     member = await env.add_member("Beto")
 
     cookie = sign_session(env.coach.id, env.gym.id, SECRET, env.clock())
-    response = await env.client.get("/", cookies={SESSION_COOKIE: cookie})
-    text = await response.text()
+    response = await env.client.get("/api/roster", cookies={SESSION_COOKIE: cookie})
+    data = json.loads(await response.text())
 
-    assert f'href="/members/{member.id}?view=table"' in text
+    # The React rows link to /members/{member_id} from this field (the
+    # frontend RosterTable RTL test asserts the href itself).
+    assert [r["member_id"] for r in data["active"]] == [member.id]
 
 
 async def test_the_gap_wording_matches_the_roster(env):
@@ -260,13 +263,17 @@ async def test_the_gap_wording_matches_the_roster(env):
 
     _, member_text = await env.page(member.id)
     cookie = sign_session(env.coach.id, env.gym.id, SECRET, env.clock())
-    roster_text = await (
-        await env.client.get("/", cookies={SESSION_COOKIE: cookie})
-    ).text()
+    roster = json.loads(
+        await (
+            await env.client.get("/api/roster", cookies={SESSION_COOKIE: cookie})
+        ).text()
+    )
 
     assert "entrenó hoy" in member_text
-    assert "entrenó hoy" in roster_text
-    assert "0 días sin venir" not in roster_text
+    # The roster row carries the same facts the React row words from:
+    # trained today = gap 0 with sessions (never "0 días sin venir").
+    row = next(r for r in roster["active"] if r["member_id"] == member.id)
+    assert row["gap_days"] == 0 and row["has_sessions"] is True
 
 
 async def test_a_sets_only_prescription_renders_its_set_count(env):

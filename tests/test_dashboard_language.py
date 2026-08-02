@@ -30,7 +30,7 @@ SECRET = "test-secret"
 
 
 @pytest.fixture
-async def env(tmp_path):
+async def env(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'domain.db'}")
     clock = FakeClock()
     linking = LinkingStore(engine)
@@ -39,6 +39,17 @@ async def env(tmp_path):
     gym = await linking.create_gym("Iron Temple")
     coach = await linking.link_member(gym.id, "Coach Ana", "telegram", "1")
     await linking.set_coach(coach.id, True)
+    # A stub bundle so the SPA shell serves without depending on the real
+    # frontend/dist build state.
+    stub_dist = tmp_path / "dist"
+    stub_dist.mkdir()
+    (stub_dist / "index.html").write_text(
+        '<!DOCTYPE html><html><head><title>SPA</title></head>'
+        '<body><div id="root"></div></body></html>',
+        encoding="utf-8",
+    )
+    (stub_dist / "assets").mkdir()
+    monkeypatch.setattr("agentg.dashboard_web._FRONTEND_DIST", stub_dist)
     app = build_app(
         store,
         linking,
@@ -112,18 +123,19 @@ class Env:
 async def test_first_visit_defaults_from_accept_language(env):
     text = await env.page("/", headers={"Accept-Language": "en-US,en;q=0.9"})
 
-    assert '<html lang="en">' in text
-    assert "Members (0)" in text
+    # The SPA shell's injected bootstrap carries the English strings (and
+    # marks itself en) — the React chrome renders from exactly this payload.
+    assert '"_lang": "en"' in text
     assert "Search by name" in text
-    assert ">Table<" in text and ">Cards<" in text and ">Split<" in text
+    assert "Buscar por nombre" not in text
 
 
 async def test_spanish_and_unrelated_headers_fall_back_to_spanish(env):
     for header in ({"Accept-Language": "es-MX,es;q=0.9"}, {"Accept-Language": "fr-FR"}, {}):
         text = await env.page("/", headers=header)
-        assert '<html lang="es">' in text
-        assert "Miembros (0)" in text
-        assert ">Tabla<" in text and ">Tarjetas<" in text and ">Dividida<" in text
+        assert '"_lang": "es"' in text
+        assert "Buscar por nombre" in text
+        assert "Search by name" not in text
 
 
 # --- the toggle: a long-lived cookie that wins over the header ---
@@ -140,7 +152,7 @@ async def test_the_toggle_sets_a_long_lived_cookie_and_redirects_back(env):
 
     # …and it wins over a Spanish Accept-Language on later visits.
     text = await env.page("/", headers={"Accept-Language": "es"}, **{LANG_COOKIE: "en"})
-    assert '<html lang="en">' in text
+    assert '"_lang": "en"' in text
 
 
 async def test_an_unknown_language_sets_no_cookie_and_goes_home(env):
@@ -190,17 +202,6 @@ async def test_the_settings_screen_translates(env):
 
     assert "Settings" in en and "Invite link" in en and "Regenerate" in en
     assert "Ajustes" in es and "Enlace de invitación" in es
-
-
-async def test_cards_and_split_translate_too(env):
-    await env.add_member("Luis")
-
-    en_cards = await env.page("/?view=cards", headers={"Accept-Language": "en"})
-    en_split = await env.page("/?view=split", headers={"Accept-Language": "en"})
-
-    assert "On track" in en_cards and "last 4 weeks" in en_cards
-    assert '<span class="wd" aria-hidden="true">Mo</span>' in en_cards
-    assert "Pick a member" in en_split
 
 
 # --- what never translates ---
@@ -306,18 +307,18 @@ def test_spanish_and_ties_detect_as_spanish():
     assert detect_language("10k 2026") == "es"
 
 
-async def test_the_language_toggle_sits_in_the_chrome_of_every_screen(env):
-    member = await env.add_member("Luis")
-
-    for path in ("/", "/?view=cards", "/?view=split", f"/members/{member.id}", "/settings"):
-        text = await env.page(path)
-        assert 'href="/lang/en?' in text and 'href="/lang/es?' in text
-
-
-async def test_the_live_count_format_follows_the_page_language(env):
-    """Issue #127: the match-count template localizes with the page."""
+async def test_the_shell_bootstrap_carries_the_toggle_language(env):
+    """The React chrome renders the EN/ES toggle from the injected ``_lang``
+    (frontend LangToggle RTL tests cover the links themselves); the server's
+    job is to stamp the active language into every shell it serves."""
     en = await env.page("/", headers={"Accept-Language": "en"})
-    assert 'data-fmt="{shown} of {total}"' in en
+    assert '"_lang": "en"' in en
 
     es = await env.page("/")
-    assert 'data-fmt="{shown} de {total}"' in es
+    assert '"_lang": "es"' in es
+
+    # The cookie the /lang/{lang} toggle route sets wins over the header.
+    toggled = await env.page(
+        "/", headers={"Accept-Language": "es"}, **{LANG_COOKIE: "en"}
+    )
+    assert '"_lang": "en"' in toggled

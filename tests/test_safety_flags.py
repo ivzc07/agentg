@@ -104,12 +104,17 @@ async def test_a_30_day_old_flag_drops_off_the_roster(env):
     assert flagged == {"Fresh": True, "Stale": False}
 
 
-async def test_the_page_renders_the_marker_on_flagged_rows(env):
+async def test_the_api_serves_the_marker_on_flagged_rows(env):
     member = await env.add_member("Ana")
     await _flag(env, member)
 
-    html = await env.page()
-    assert "tag-flag" in html
+    import json
+
+    data = json.loads(await env.page("/api/roster"))
+    row = next(r for r in data["active"] if r["member_id"] == member.id)
+    # The React roster renders its flag tag from exactly this field
+    # (frontend RosterTable RTL covers the tag itself).
+    assert row["has_safety_flag"] is True
 
 
 # --- the Member page banner and the tick-off ---

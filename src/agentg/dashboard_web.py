@@ -85,7 +85,6 @@ from agentg.dashboard_i18n import (
     STRINGS,
     WEEKDAY_INITIALS,
     WEEKDAYS,
-    away_text,
     detect_language,
     fmt_date,
     fmt_number,
@@ -93,9 +92,7 @@ from agentg.dashboard_i18n import (
     verbatim,
 )
 from agentg.dashboard_store import (
-    GRID_WEEKS,
     DashboardStore,
-    DayCell,
     MemberPage,
     NoteView,
     RosterRow,
@@ -133,8 +130,6 @@ BOUNCE_BODY = (
     "Los enlaces al dashboard caducan y solo se pueden usar una vez. "
     "Envía <b>/dashboard</b> a tu bot en Telegram para recibir uno nuevo."
 )
-INTERSTITIAL_TITLE = "Abriendo tu dashboard…"
-INTERSTITIAL_BUTTON = "Entrar al dashboard"
 
 # Spanish aliases of the editor's STRINGS keys, for chat-side use (the
 # member notice follows the chat rule, not the dashboard's language) and
@@ -255,16 +250,6 @@ def _page(title: str, body: str, extra: str = "", lang: str = "es") -> str:
 
 def _bounce_page() -> str:
     return _page(BOUNCE_TITLE, BOUNCE_BODY)
-
-
-def _interstitial_page(token: str) -> str:
-    """A self-submitting POST form: one tap (or zero, with JS) for the human,
-    a harmless GET for any link-preview fetcher."""
-    form = f"""<form method="post" action="/login/{token}" id="go">
-<button type="submit" class="btn-primary big">{INTERSTITIAL_BUTTON}</button>
-</form>
-<script>document.getElementById("go").submit();</script>"""
-    return _page(INTERSTITIAL_TITLE, "", form)
 
 
 def _invite_url(bot_username: str, code: str) -> str:
@@ -555,127 +540,6 @@ def _roster_document(
     )
 
 
-def _table_page(
-    gym_name: str, rows: list[RosterRow], lapsed: list[RosterRow], lang: str, next_path: str
-) -> str:
-    t = STRINGS[lang]
-    if not rows and not lapsed:
-        body = f'<div class="roster-body">{_empty_roster(t)}</div>'
-    else:
-        items = "".join(_roster_row(row, "table", lang) for row in rows)
-        body = f"""{_countbar(t, count=len(rows))}
-<div class="roster-body">
-<ul id="roster">{items}</ul>
-{_no_matches(t)}
-{_lapsed_section(lapsed, "table", lang)}
-</div>"""
-    return _roster_document(gym_name, "table", lang, next_path, len(rows), body, split=False)
-
-
-def _member_card(row: RosterRow, cells: list[DayCell], lang: str) -> str:
-    """One Cards card: the shared markers and Gap text, plus the 4-week
-    Mon–Sun day grid — one square per day, dashed for future days, judged
-    per date against the Routine active on it. Hit squares fill magenta;
-    missed squares are hollow coral rings, so the two never read by hue
-    alone."""
-    t = STRINGS[lang]
-    initials = "".join(
-        f'<span class="wd" aria-hidden="true">{w}</span>' for w in WEEKDAY_INITIALS[lang]
-    )
-    # Missed days carry their date for screen readers — the one fact a
-    # Coach acts on ("you missed Monday"); hits and future days stay
-    # decorative so the count sentence isn't buried under 28 dates.
-    squares = "".join(
-        f'<i class="miss" title="{fmt_date(cell.on, lang)}">'
-        f'<span class="sr">{t["sr_missed"].format(date=fmt_date(cell.on, lang))}</span></i>'
-        if cell.state == "miss"
-        else f'<i class="{cell.state}" title="{fmt_date(cell.on, lang)}" aria-hidden="true"></i>'
-        for cell in cells
-    )
-    tags = ""
-    if row.is_new:
-        tags += f' <span class="tag tag-new">{t["new_tag"]}</span>'
-    if row.snoozed_until is not None:
-        until = fmt_date(row.snoozed_until, lang)
-        tags += f' <span class="tag">{t["snoozed_tag"].format(date=until)}</span>'
-    if row.has_safety_flag:
-        # A marker on the card, never a re-sort (spec-dashboard §Safety flags).
-        tags += f' <span class="tag tag-flag">{t["flag_tag"]}</span>'
-    severity = _severity_text(row, lang)
-    return f"""<div class="mcard" data-name="{escape(row.name)}">
-<div class="top-row"><a class="name" href="{_member_href(row.member_id, "cards")}">{escape(row.name)}</a>
-<span class="away">{away_text(row.has_sessions, row.gap_days, lang)}</span></div>
-{f'<div class="meta">{severity}</div>' if severity else ""}
-<div class="daygrid">{initials}{squares}</div>
-<div class="sparklab">{t["grid_label"].format(n=GRID_WEEKS)}</div>
-{f"<div>{tags}</div>" if tags else ""}
-</div>"""
-
-
-def _legend(t: dict) -> str:
-    """What the day-grid squares mean, said once per Cards page."""
-    return f"""<div class="legend">
-<span><i class="l-hit"></i>{t["legend_hit"]}</span>
-<span><i class="l-miss"></i>{t["legend_miss"]}</span>
-</div>"""
-
-
-def _cards_page(
-    gym_name: str,
-    rows: list[RosterRow],
-    lapsed: list[RosterRow],
-    grids: dict[int, list[DayCell]],
-    lang: str,
-    next_path: str,
-) -> str:
-    """The urgency bands — a reading of the same schedule-aware severity the
-    Table colours with, never a new field: red needs you now, amber is
-    slipping, the rest are on track. A Member with no Routine yet sits in a
-    quiet fourth group instead of masquerading as on-track (the spec's
-    grey-new rule). The three severity bands always render — an empty hot
-    band saying 0 is good news, not a missing feature. The Gap sort holds
-    inside each band."""
-    t = STRINGS[lang]
-    if not rows and not lapsed:
-        body = f'<div class="roster-body">{_empty_roster(t)}</div>'
-        return _roster_document(gym_name, "cards", lang, next_path, 0, body, split=False)
-    bands: list[tuple[str, str, list[RosterRow]]] = [
-        ("hot", t["band_hot"], []),
-        ("warm", t["band_warm"], []),
-        ("cool", t["band_cool"], []),
-        ("new", t["band_new"], []),
-    ]
-    for row in rows:
-        if row.severity == "red":
-            band = "hot"
-        elif row.severity == "amber":
-            band = "warm"
-        elif row.is_new:
-            band = "new"
-        else:
-            band = "cool"
-        next(b for b in bands if b[0] == band)[2].append(row)
-    # Icon chips for each band so they read as marked sections.
-    band_icons = {"hot": "●", "warm": "◐", "cool": "○", "new": "✦"}
-    sections = ""
-    for band_id, title, members in bands:
-        if band_id == "new" and not members:
-            continue  # a transient group, not a permanent fixture
-        cards = "".join(_member_card(row, grids.get(row.member_id, []), lang) for row in members)
-        icon = band_icons.get(band_id, "")
-        sections += f"""<section class="band band-{band_id}" id="band-{band_id}">
-<h2><span class="chip-icon" aria-hidden="true">{icon}</span>{title} <span class="count">{len(members)}</span></h2>
-{f'<div class="grid">{cards}</div>' if members else ""}
-</section>"""
-    body = f"""<div class="roster-body">
-{sections}
-{_legend(t)}
-{_no_matches(t)}
-{_lapsed_section(lapsed, "cards", lang)}
-</div>"""
-    return _roster_document(gym_name, "cards", lang, next_path, len(rows), body, split=False)
-
-
 def _split_page(
     gym_name: str,
     rows: list[RosterRow],
@@ -706,13 +570,6 @@ def _split_page(
 <div class="pane">{pane}</div>
 </div>"""
     return _roster_document(gym_name, "split", lang, next_path, len(rows), body, split=True)
-
-
-def _split_placeholder(lang: str) -> str:
-    return (
-        f'<div class="pane-empty"><div class="emptystate">'
-        f'<h2>{STRINGS[lang]["pick_a_member"]}</h2></div></div>'
-    )
 
 
 # --- The Member page (issue #99, spec-dashboard §The Member page) ---
@@ -1588,8 +1445,6 @@ def verify_session(value: str, secret: str, now: datetime) -> tuple[int, int] | 
 
 # The directory where the Vite-built React bundle lives.
 _FRONTEND_DIST = Path(__file__).parent.parent.parent / "frontend" / "dist"
-# The hidden route the SPA shell mounts at (ADR 0004 §Migration 5b).
-SPA_MOUNT = "/dashboard"
 
 
 def build_app(
@@ -1601,7 +1456,6 @@ def build_app(
     secure_cookies: bool = True,
     clock: Clock = _utcnow,
     notifier: Notifier | None = None,
-    spa_enabled: bool = False,
     spa_dist: Path | None = None,
 ) -> web.Application:
     def set_session(response: web.StreamResponse, member_id: int, gym_id: int) -> None:
@@ -1633,26 +1487,6 @@ def build_app(
     def _view_of(request: web.Request) -> str:
         view = request.query.get("view", "table")
         return view if view in VIEWS else "table"
-
-    async def home(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        lang = _lang_of(request)
-        view = _view_of(request)
-        next_path = request.rel_url.path_qs
-        rows, lapsed = await store.roster(gym.id)
-        if view == "cards":
-            grids = await store.attendance(gym.id, [row.member_id for row in rows])
-            text = _cards_page(gym.name, rows, lapsed, grids, lang, next_path)
-        elif view == "split":
-            text = _split_page(gym.name, rows, lapsed, _split_placeholder(lang), lang, next_path)
-        else:
-            text = _table_page(gym.name, rows, lapsed, lang, next_path)
-        response = web.Response(text=text, content_type="text/html")
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
-        return response
 
     async def member_page(request: web.Request) -> web.Response:
         coach = await require_coach(request)
@@ -2315,12 +2149,6 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         raise response
 
-    async def login_form(request: web.Request) -> web.Response:
-        token = request.match_info["token"]
-        if await store.peek_login_token(token) is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        return web.Response(text=_interstitial_page(token), content_type="text/html")
-
     async def login_redeem(request: web.Request) -> web.Response:
         token = await store.redeem_login_token(request.match_info["token"])
         if token is None:
@@ -2964,6 +2792,10 @@ def build_app(
         ``_decimal_mark`` keys the frontend's ``i18n.ts`` reads through
         ``getMonths`` / ``getWeekdayInitials`` / ``getDecimalMark``."""
         i18n_payload: dict = dict(t)
+        # The active language rides along so the React chrome can mark the
+        # EN/ES toggle and build /lang/{lang} links (#154 — the toggle
+        # crossed from the server chrome to the SPA in the cutover).
+        i18n_payload["_lang"] = lang
         i18n_payload["_months"] = list(MONTHS[lang])
         i18n_payload["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
         i18n_payload["_weekdays"] = list(WEEKDAYS[lang])
@@ -2997,8 +2829,8 @@ def build_app(
 
     async def spa_login_shell(request: web.Request) -> web.Response:
         """Serve the SPA shell **without** auth for the login/interstitial
-        screen (issue #153).  The React app at ``/dashboard/login/:token``
-        detects the route and renders the interstitial — no session required.
+        screen (issue #153).  The React app at ``/login/:token`` detects the
+        route and renders the interstitial — no session required.
 
         The i18n bootstrap uses the language cookie if set, else the
         no-signal default (Spanish) — the same rule as the door pages."""
@@ -3021,8 +2853,7 @@ def build_app(
 
     async def spa_shell(request: web.Request) -> web.Response:
         """Serve the Vite-built React bundle shell with ``window.__I18N__``
-        bootstrap injected (ADR 0004 §i18n 7a). Only reachable when the
-        ``spa_enabled`` flag is on."""
+        bootstrap injected (ADR 0004 §i18n 7a)."""
         coach = await require_coach(request)
         if coach is None:
             return web.Response(text=_bounce_page(), content_type="text/html")
@@ -3043,21 +2874,10 @@ def build_app(
         set_session(response, member.id, gym.id)  # sliding 90-day refresh
         return response
 
-    async def spa_catchall(request: web.Request) -> web.Response:
-        """SPA fallback: serve the shell for any unmatched ``/dashboard/*`` path
-        so React Router deep links resolve on a cold load (issue #149).
-
-        Real bundle files are served by the ``/dashboard/assets/`` static mount
-        registered ahead of this route; everything else is a client-side route,
-        and the shell it gets is the authenticated one.
-        """
-        return await spa_shell(request)
-
     app = web.Application()
-    app.router.add_get("/", home)
-    # /api/session is registered unconditionally — the JSON session-info
-    # endpoint is tiny and useful for any non-SPA consumer (CLI scripts,
-    # health-check probes) so there is no value in gating it behind the flag.
+    # The roster — like every dashboard screen since the #154 cutover — is
+    # the React SPA shell; the data lives behind /api/*.
+    app.router.add_get("/", spa_shell)
     app.router.add_get("/api/session", api_session)
     app.router.add_get("/members/{member_id}", member_page)
     app.router.add_get("/presets", presets_page)
@@ -3073,67 +2893,50 @@ def build_app(
     app.router.add_post("/settings/regenerate-coach", regenerate_coach)
     app.router.add_post("/settings/gym-name", gym_name)
     app.router.add_get("/lang/{lang}", set_language)
-    app.router.add_get("/login/{token}", login_form)
+    # GET /login/{token} serves the SPA login shell (public — the React
+    # interstitial validates the token via /api/login/{token} without
+    # spending it); the POST redemption stays server-side so the signed
+    # session cookie is set exactly as before (#154 preserves the
+    # login-token flow the bot depends on).
+    app.router.add_get("/login/{token}", spa_login_shell)
     app.router.add_post("/login/{token}", login_redeem)
     app.router.add_static("/static/", STATIC_DIR)
-    # The server-HTML Routine editor is production today — registered
-    # unconditionally like member_page and the /presets routes (#151, #154).
     app.router.add_get("/members/{member_id}/routine", routine_editor)
     app.router.add_post("/members/{member_id}/routine", routine_save)
-    if spa_enabled:
-        # /api/login/{token} peek is SPA-only — serves the interstitial's
-        # token validation without spending the token.  Flag-gated so the
-        # flag-off rollback contract holds.
-        app.router.add_get("/api/login/{token}", api_login_peek)
-        # /api/roster is the SPA's JSON endpoint — it has no server-HTML
-        # consumer, so flag-gating it keeps the prod surface minimal.
-        app.router.add_get("/api/roster", api_roster)
-        # /api/settings and its write routes (issue #153) — flag-gated like
-        # /api/roster so the flag-off rollback holds.
-        app.router.add_get("/api/settings", api_settings)
-        app.router.add_post("/api/settings/regenerate-invite", api_settings_regenerate_invite)
-        app.router.add_post("/api/settings/regenerate-coach", api_settings_regenerate_coach)
-        app.router.add_post("/api/settings/gym-name", api_settings_gym_name)
-        # JSON endpoints for the SPA — flag-gated so the flag-off rollback
-        # holds (ADR 0004 §Migration 5b).
-        # /api/members/{id}/routine is the JSON Routine editor endpoint
-        # (issue #151).
-        app.router.add_get("/api/members/{member_id}/routine", api_member_routine_get)
-        app.router.add_put("/api/members/{member_id}/routine", api_member_routine_put)
-        # /api/members/{id} and tick-off are the SPA's member-page JSON
-        # endpoints (issue #150).
-        app.router.add_get("/api/members/{member_id}", api_member)
-        app.router.add_post(
-            "/api/members/{member_id}/flags/{note_id}/tick-off", api_tick_off_flag
+    # The JSON API is the dashboard's only data surface after the React
+    # cutover (#154) — registered unconditionally.
+    app.router.add_get("/api/login/{token}", api_login_peek)
+    app.router.add_get("/api/roster", api_roster)
+    app.router.add_get("/api/settings", api_settings)
+    app.router.add_post("/api/settings/regenerate-invite", api_settings_regenerate_invite)
+    app.router.add_post("/api/settings/regenerate-coach", api_settings_regenerate_coach)
+    app.router.add_post("/api/settings/gym-name", api_settings_gym_name)
+    app.router.add_get("/api/members/{member_id}/routine", api_member_routine_get)
+    app.router.add_put("/api/members/{member_id}/routine", api_member_routine_put)
+    app.router.add_get("/api/members/{member_id}", api_member)
+    app.router.add_post(
+        "/api/members/{member_id}/flags/{note_id}/tick-off", api_tick_off_flag
+    )
+    app.router.add_get("/api/presets", api_presets_list)
+    app.router.add_post("/api/presets", api_presets_create)
+    app.router.add_post("/api/presets/{preset_id}/apply", api_presets_apply)
+    app.router.add_post("/api/presets/{preset_id}/default", api_presets_default)
+    app.router.add_post("/api/presets/{preset_id}/retire", api_presets_retire)
+    # The Vite bundle's asset files.  Guarded so a missing/partial bundle
+    # degrades to a 503 shell instead of killing the bot at boot
+    # (add_static raises on a missing directory).
+    if (resolved_dist / "assets").is_dir():
+        app.router.add_static("/assets/", resolved_dist / "assets")
+    else:
+        logger.warning(
+            "SPA bundle missing at %s — dashboard screens will answer 503; "
+            "run `npm run build` in frontend/",
+            resolved_dist / "assets",
         )
-        # /api/presets JSON endpoints (issue #152).
-        app.router.add_get("/api/presets", api_presets_list)
-        app.router.add_post("/api/presets", api_presets_create)
-        app.router.add_post("/api/presets/{preset_id}/apply", api_presets_apply)
-        app.router.add_post("/api/presets/{preset_id}/default", api_presets_default)
-        app.router.add_post("/api/presets/{preset_id}/retire", api_presets_retire)
-        if not (resolved_dist / "assets").is_dir():
-            logger.warning(
-                "SPA enabled but %s missing — not serving /dashboard; "
-                "run `npm run build` in frontend/",
-                resolved_dist / "assets",
-            )
-        else:
-            # Public (no-auth) SPA shell for the login/interstitial screen
-            # (issue #153).  Registered first so the authenticated catch-all
-            # only covers routes that need a session.
-            app.router.add_get(
-                f"{SPA_MOUNT}/login/{{token}}", spa_login_shell
-            )
-            app.router.add_get(SPA_MOUNT, spa_shell)
-            app.router.add_get(f"{SPA_MOUNT}/", spa_shell)
-            # Assets first: the catch-all below would otherwise swallow them.
-            app.router.add_static(
-                f"{SPA_MOUNT}/assets/", resolved_dist / "assets"
-            )
-            # Every other /dashboard/* path is a React Router deep link, so it
-            # gets the authenticated shell (issue #149).
-            app.router.add_get(f"{SPA_MOUNT}/{{tail:.*}}", spa_catchall)
+    # SPA fallback, registered last so every real route above wins: any
+    # unmatched GET is a React Router deep link on a cold load and gets the
+    # authenticated shell (issue #149).
+    app.router.add_get("/{tail:.*}", spa_shell)
     return app
 
 

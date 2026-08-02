@@ -10,7 +10,7 @@ async function peekToken(token: string): Promise<boolean> {
 }
 
 /**
- * Interstitial / bounce screen for the ``/dashboard/login/:token`` route
+ * Interstitial / bounce screen for the ``/login/:token`` route
  * (issue #153).
  *
  * Reachable **without** a session — the server serves the SPA shell

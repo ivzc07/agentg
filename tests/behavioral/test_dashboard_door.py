@@ -31,7 +31,18 @@ def link_token(reply: str) -> str:
     return reply.split(prefix, 1)[1].split()[0]
 
 
-def web_client(h: ConversationHarness, clock: FakeClock) -> TestClient:
+def web_client(h: ConversationHarness, clock: FakeClock, tmp_path) -> TestClient:
+    # A stub bundle so the SPA shell serves deterministically, without
+    # depending on the real frontend/dist build state.
+    stub_dist = tmp_path / "stub-dist"
+    if not stub_dist.exists():
+        stub_dist.mkdir()
+        (stub_dist / "index.html").write_text(
+            '<!DOCTYPE html><html><head><title>SPA</title></head>'
+            '<body><div id="root"></div></body></html>',
+            encoding="utf-8",
+        )
+        (stub_dist / "assets").mkdir()
     app = build_app(
         h.stores.dashboard,
         h.stores.linking,
@@ -39,6 +50,7 @@ def web_client(h: ConversationHarness, clock: FakeClock) -> TestClient:
         bot_username="testbot",
         secure_cookies=False,
         clock=clock,
+        spa_dist=stub_dist,
     )
     return TestClient(TestServer(app))
 
@@ -53,11 +65,12 @@ async def test_coachs_dashboard_link_signs_them_in_for_revisits(tmp_path):
         reply = await h.say("/dashboard")
         token = link_token(reply)
 
-        async with web_client(h, clock) as client:
-            # The interstitial never spends the token: a link-preview fetch
-            # (GET) can't burn the one-time link before the human taps it.
+        async with web_client(h, clock, tmp_path) as client:
+            # The SPA login shell never spends the token: a link-preview
+            # fetch (GET) can't burn the one-time link before the human
+            # taps it — the React interstitial validates via the peek API.
             page = await (await client.get(f"/login/{token}")).text()
-            assert 'method="post"' in page
+            assert 'id="root"' in page
             assert await h.stores.dashboard.peek_login_token(token) is not None
 
             # The real redemption is the POST: redirect home, session cookie.
@@ -66,10 +79,13 @@ async def test_coachs_dashboard_link_signs_them_in_for_revisits(tmp_path):
             assert response.headers["Location"] == "/"
             assert SESSION_COOKIE in response.cookies
 
-            # The cookie opens the gym's shell and survives revisits.
+            # The cookie opens the gym's shell and survives revisits — the
+            # gym itself comes from the JSON API the shell renders from.
             for _ in range(2):
                 text = await (await client.get("/")).text()
-                assert "Iron Temple" in text
+                assert 'id="root"' in text and "window.__I18N__" in text
+                session = await (await client.get("/api/session")).json()
+                assert session["gym"] == "Iron Temple"
 
         # End-state: exactly one token row, spent, bound to this coach + gym.
         [row] = await h.login_tokens()
@@ -95,17 +111,19 @@ async def test_a_magic_link_redeems_exactly_once(tmp_path):
         await h.linked_member(is_coach=True)
         token = link_token(await h.say("/dashboard"))
 
-        async with web_client(h, clock) as client:
+        async with web_client(h, clock, tmp_path) as client:
             first = await client.post(f"/login/{token}", allow_redirects=False)
             assert first.status == 302
 
-            # A second redemption — or its interstitial — bounces, and no
-            # fresh session cookie is issued.
+            # A second redemption bounces, and no fresh session cookie is
+            # issued; the peek API reports the token dead so the React
+            # interstitial shows the bounce too.
             second = await client.post(f"/login/{token}", allow_redirects=False)
             assert second.status == 200
             assert BOUNCE_MARKER in await second.text()
             assert SESSION_COOKIE not in second.cookies
-            assert BOUNCE_MARKER in await (await client.get(f"/login/{token}")).text()
+            peek = await (await client.get(f"/api/login/{token}")).json()
+            assert peek["valid"] is False
 
 
 async def test_an_expired_bookmark_bounces_instead_of_erroring(tmp_path):
@@ -118,11 +136,14 @@ async def test_an_expired_bookmark_bounces_instead_of_erroring(tmp_path):
 
         clock.advance(TOKEN_TTL + timedelta(seconds=1))  # link dies in chat
 
-        async with web_client(h, clock) as client:
-            assert BOUNCE_MARKER in await (await client.get(f"/login/{token}")).text()
+        async with web_client(h, clock, tmp_path) as client:
+            peek = await (await client.get(f"/api/login/{token}")).json()
+            assert peek["valid"] is False
             assert BOUNCE_MARKER in await (await client.post(f"/login/{token}")).text()
-            # And no session ever materialized from it.
-            assert "Iron Temple" not in await (await client.get("/")).text()
+            # And no session ever materialized from it: the anonymous visit
+            # still bounces instead of opening the shell.
+            home = await (await client.get("/")).text()
+            assert BOUNCE_MARKER in home and 'id="root"' not in home
 
         [row] = await h.login_tokens()
         assert row.used_at is None  # expired, never spent
@@ -162,7 +183,7 @@ async def test_the_http_door_enforces_the_session(tmp_path):
         tmp_path, dashboard_base_url=BASE_URL, dashboard_clock=clock
     ) as h:
         await h.linked_member(is_coach=True)
-        async with web_client(h, clock) as client:
+        async with web_client(h, clock, tmp_path) as client:
             # Anonymous and forged-cookie visits both bounce.
             assert BOUNCE_MARKER in await (await client.get("/")).text()
             forged = sign_session(h.member_id, h.gym_id, "wrong-secret", clock())
@@ -172,11 +193,13 @@ async def test_the_http_door_enforces_the_session(tmp_path):
             # A real sign-in opens the shell…
             token = link_token(await h.say("/dashboard"))
             await client.post(f"/login/{token}")
-            assert "Iron Temple" in await (await client.get("/")).text()
+            assert 'id="root"' in await (await client.get("/")).text()
+            session = await (await client.get("/api/session")).json()
+            assert session["gym"] == "Iron Temple"
 
             # …but demotion is checked per request, not per session: the
             # live cookie stops working on the very next click.
             await h.stores.linking.set_coach(h.member_id, False)
             text = await (await client.get("/")).text()
             assert BOUNCE_MARKER in text
-            assert "Iron Temple" not in text
+            assert 'id="root"' not in text

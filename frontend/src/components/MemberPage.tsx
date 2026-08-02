@@ -1,3 +1,4 @@
+import { LangToggle } from "./LangToggle";
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useT } from "../hooks/useT";
@@ -472,6 +473,8 @@ export function MemberPageContent({
         >
           ← {t("back_to_roster")}
         </Link>
+        <span className="flex-1" />
+        <LangToggle />
       </header>
 
       <main className="max-w-2xl mx-auto px-gut py-6">

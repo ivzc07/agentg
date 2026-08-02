@@ -27,7 +27,7 @@ const queryClient = new QueryClient({
 function LoginRoutes() {
   return (
     <MotionConfig reducedMotion="user">
-      <BrowserRouter basename="/dashboard">
+      <BrowserRouter>
         <Routes>
           <Route path="login/:token" element={<LoginPage />} />
           {/* Any unmatched login path shows a fallback bounce */}
@@ -47,7 +47,7 @@ export function Dashboard() {
   // Check if we're on a login route — those don't need a session.
   const isLoginRoute =
     typeof window !== "undefined" &&
-    window.location.pathname.startsWith("/dashboard/login");
+    window.location.pathname.startsWith("/login");
 
   if (isLoginRoute) {
     return <LoginRoutes />;
@@ -93,7 +93,7 @@ export function Dashboard() {
 
   return (
     <MotionConfig reducedMotion="user">
-      <BrowserRouter basename="/dashboard">
+      <BrowserRouter>
         <Routes>
           {/* The roster in table, cards, or split view.  Split keeps the
               rail and renders the member inline, not via a deep link. */}

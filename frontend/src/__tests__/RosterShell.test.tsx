@@ -327,6 +327,17 @@ describe("RosterShell", () => {
     expect(link).toHaveAttribute("href", "/presets");
   });
 
+  it("renders the Settings nav as a link to /settings (#154 — the roster is the only home screen now)", async () => {
+    renderShell(makeResponse());
+
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument();
+    });
+
+    const link = screen.getByRole("link", { name: "Settings" });
+    expect(link).toHaveAttribute("href", "/settings");
+  });
+
   it("shows a distinct error message when the roster fetch fails", async () => {
     renderShell(null, ["/"], true);
 

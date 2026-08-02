@@ -39,8 +39,9 @@ def build_dashboard_app(
 ):
     """The single place where Settings become the dashboard app.
 
-    Kept apart from :func:`run` so the settings-to-app wiring (notably the SPA
-    flag) is reachable from a test without standing up a bot and a poller.
+    Kept apart from :func:`run` so the settings-to-app wiring (notably the
+    SPA bundle location) is reachable from a test without standing up a bot
+    and a poller.
     """
     spa_dist = None
     if settings.dashboard_spa_dist:
@@ -54,7 +55,6 @@ def build_dashboard_app(
         bot_username=bot_username,
         secure_cookies=settings.dashboard_base_url.startswith("https://"),
         notifier=notifier,
-        spa_enabled=settings.dashboard_spa_enabled,
         spa_dist=spa_dist,
     )
 

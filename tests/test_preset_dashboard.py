@@ -47,7 +47,6 @@ async def env(tmp_path):
         secure_cookies=False,
         clock=clock,
         notifier=notifier,
-        spa_enabled=True,
     )
     async with TestClient(TestServer(app)) as client:
         class Env:

@@ -1,3 +1,4 @@
+import { LangToggle } from "./LangToggle";
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
@@ -122,8 +123,10 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
         {/* Presets & Settings quick links */}
         <nav className="quick flex gap-2 text-[13px] text-ink-2" aria-label={t("nav_sections")}>
           <Link to="/presets" className="transition-colors hover:text-ink">{t("presets")}</Link>
-          <span>{t("settings")}</span>
+          <Link to="/settings" className="transition-colors hover:text-ink">{t("settings")}</Link>
         </nav>
+
+        <LangToggle />
       </header>
 
       {/* Search bar */}

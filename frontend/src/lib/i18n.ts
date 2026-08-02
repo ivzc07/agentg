@@ -34,6 +34,13 @@ export function getWeekdayInitials(): string[] {
   return ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 }
 
+/** The active language ("en" | "es"); Spanish is the no-signal default. */
+export function getLang(): string {
+  const raw = getI18N()["_lang"];
+  if (raw === "en" || raw === "es") return raw;
+  return "es";
+}
+
 /** The decimal mark for the active language (e.g. "." for en, "," for es). */
 export function getDecimalMark(): string {
   const raw = getI18N()["_decimal_mark"];

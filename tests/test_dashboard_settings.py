@@ -93,11 +93,6 @@ async def test_a_coach_sees_both_links_and_exactly_one_qr(env):
     assert 'name="weight_unit"' not in page
 
 
-async def test_the_shell_links_to_settings(env):
-    page = await (await env.client.get("/")).text()
-    assert 'href="/settings"' in page
-
-
 async def test_regenerating_the_member_link_requires_the_typed_confirm(env):
     old_code = env.gym.invite_code
 
@@ -163,8 +158,9 @@ async def test_renaming_the_gym_takes_effect_where_members_see_it(env):
     assert 'value="Templo de Hierro"' in page
     assert "Iron Temple" not in page
 
-    shell = await (await env.client.get("/")).text()
-    assert "Templo de Hierro" in shell
+    # The React shell reads the gym name off /api/session — renamed there too.
+    session = await (await env.client.get("/api/session")).json()
+    assert session["gym"] == "Templo de Hierro"
 
 
 async def test_an_empty_gym_name_is_refused(env):

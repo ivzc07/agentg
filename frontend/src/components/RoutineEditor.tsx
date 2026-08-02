@@ -1,3 +1,4 @@
+import { LangToggle } from "./LangToggle";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -279,6 +280,7 @@ export function RoutineEditor() {
           ← {data.name}
         </Link>
         <span className="spacer flex-1" />
+        <LangToggle />
       </header>
 
       <main className="max-w-2xl mx-auto px-gut py-8">

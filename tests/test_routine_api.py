@@ -2,7 +2,7 @@
 
 GET /api/members/{id}/routine — returns routine data + catalog.
 PUT /api/members/{id}/routine — saves a coach-authored Routine through JSON.
-Flag-gated behind spa_enabled; both endpoints reuse require_coach auth.
+Both endpoints reuse require_coach auth.
 """
 
 import pytest
@@ -46,7 +46,6 @@ async def env(tmp_path):
     gym = await linking.create_gym("Iron Temple")
     coach = await linking.link_member(gym.id, "Coach Ana", "telegram", "1")
     await linking.set_coach(coach.id, True)
-    # spa_enabled=True so the JSON API routes are registered.
     app = build_app(
         store,
         linking,
@@ -55,7 +54,6 @@ async def env(tmp_path):
         secure_cookies=False,
         clock=clock,
         notifier=notifier,
-        spa_enabled=True,
     )
     async with TestClient(TestServer(app)) as client:
         yield Env(clock, engine, linking, store, notifier, client, gym, coach)
@@ -107,34 +105,6 @@ class Env:
                 self.coach.id, self.gym.id, SECRET, self.clock()
             )
         }
-
-
-# --- /api/members/{id}/routine flag-off (404) ---
-
-
-async def test_api_routine_flag_off_answers_404(tmp_path):
-    """When spa_enabled is False the JSON endpoint does not exist."""
-    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'db.db'}")
-    clock = FakeClock()
-    linking = LinkingStore(engine)
-    store = DashboardStore(engine, clock=clock)
-    await linking.ensure_schema()
-    gym = await linking.create_gym("Iron Temple")
-    coach = await linking.link_member(gym.id, "Coach Ana", "telegram", "1")
-    await linking.set_coach(coach.id, True)
-    app = build_app(
-        store, linking, session_secret=SECRET, bot_username="testbot",
-        secure_cookies=False, clock=clock, spa_enabled=False,
-    )
-    async with TestClient(TestServer(app)) as client:
-        cookies = {
-            SESSION_COOKIE: sign_session(coach.id, gym.id, SECRET, clock())
-        }
-        response = await client.get("/api/members/1/routine", cookies=cookies)
-        assert response.status == 404
-        response = await client.put("/api/members/1/routine", json={}, cookies=cookies)
-        assert response.status == 404
-    await engine.dispose()
 
 
 # --- GET /api/members/{id}/routine ---
