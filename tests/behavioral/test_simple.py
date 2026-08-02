@@ -142,3 +142,70 @@ async def test_open_alone_creates_a_visit_with_no_sets(tmp_path):
         opened = await h.stores.training.open_session(h.member_id, h.gym_id)
         assert opened.reopened is True
         assert await h.stores.training.current_session_sets(h.member_id) == []
+
+
+# ---------------------------------------------------------------------------
+# Fast-path set logging (#177)
+# ---------------------------------------------------------------------------
+
+
+async def test_pure_shorthand_with_open_session_takes_fast_path(tmp_path):
+    """Pure set shorthand with an open session logs without a model call."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        h.runtime.fast_path_enabled = True
+        await h.stores.training.open_session(h.member_id, h.gym_id)
+        reply = await h.say("bench 60 8,8,8")
+        assert "bench press" in reply.lower()
+        assert "60" in reply
+        assert "8/8/8" in reply
+        assert "primera vez" in reply  # no previous data → celebration
+        by_ex = await h.current_sets_by_exercise()
+        assert "bench press" in by_ex
+        assert [s["reps"] for s in by_ex["bench press"]] == [8, 8, 8]
+
+
+async def test_pure_shorthand_without_open_session_falls_through_to_agent(tmp_path):
+    """No open session → the Agent handles it (opens session + logs)."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        h.runtime.fast_path_enabled = True
+        reply = await h.say(
+            "bench 60 8,8,8",
+            steps=[
+                tool("open_session"),
+                tool("log_sets", line="bench 60 8,8,8"),
+                message("Bench logged."),
+            ],
+        )
+        assert "Bench logged." in reply
+
+
+async def test_shorthand_with_prose_falls_through_to_agent(tmp_path):
+    """Extra text in the message → the Agent handles it."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        h.runtime.fast_path_enabled = True
+        await h.stores.training.open_session(h.member_id, h.gym_id)
+        reply = await h.say(
+            "bench 60 8,8,8 felt heavy today",
+            steps=[
+                tool("log_sets", line="bench 60 8,8,8", note="felt heavy today"),
+                message("Bench logged."),
+            ],
+        )
+        assert "Bench logged." in reply
+
+
+async def test_bodyweight_shorthand_takes_fast_path(tmp_path):
+    """Bodyweight exercise with open session also takes the fast path."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        h.runtime.fast_path_enabled = True
+        await h.stores.training.open_session(h.member_id, h.gym_id)
+        reply = await h.say("dips 10,10,9")
+        assert "dips" in reply.lower()
+        assert "10/10/9" in reply
+        by_ex = await h.current_sets_by_exercise()
+        assert "dips" in by_ex
+        assert [s["reps"] for s in by_ex["dips"]] == [10, 10, 9]
