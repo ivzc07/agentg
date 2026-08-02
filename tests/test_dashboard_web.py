@@ -967,6 +967,36 @@ async def test_api_seed_not_an_http_endpoint(spa_env):
 # --- SPA fallback for React Router deep links (issue #149) ---
 
 
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/members/{id}"),
+        ("GET", "/api/members/{id}/routine"),
+        ("PUT", "/api/members/{id}/routine"),
+        ("POST", "/api/members/{id}/flags/{id}/tick-off"),
+        ("POST", "/api/presets/{id}/apply"),
+        ("POST", "/api/presets/{id}/default"),
+        ("POST", "/api/presets/{id}/retire"),
+        ("GET", "/api/presets/{id}/routine"),
+        ("PUT", "/api/presets/{id}/routine"),
+    ],
+)
+async def test_every_route_id_rejects_values_outside_the_database_range(
+    spa_env, method, path
+):
+    """Python integers are unbounded; database primary keys are not. Every
+    route rejects oversized IDs before a driver can raise OverflowError."""
+    huge = "1" + "0" * 100
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    response = await spa_env.client.request(
+        method, path.format(id=huge), cookies={SESSION_COOKIE: cookie}
+    )
+
+    assert response.status == 404
+    assert response.content_type == "application/json"
+
+
 async def test_unknown_api_paths_answer_json_404_not_the_shell(spa_env):
     """A typo'd /api/* GET must 404 as JSON — the HTML catch-all would
     mask it as a 200 during development (P3, PR #206 review)."""

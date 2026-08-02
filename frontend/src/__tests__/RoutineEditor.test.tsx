@@ -408,6 +408,22 @@ describe("RoutineEditor", () => {
     expect(screen.getByText("deadlift")).toBeDefined();
   });
 
+  it("fills the first empty exercise from the catalog through form state", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockRoutineResponse()),
+    } as Response);
+
+    renderEditor("/members/1/routine");
+    const exerciseInputs = await screen.findAllByPlaceholderText("squat");
+    await user.clear(exerciseInputs[0]);
+    await user.click(screen.getByText("Exercise catalog"));
+    await user.click(screen.getByRole("button", { name: "deadlift" }));
+
+    expect(exerciseInputs[0]).toHaveValue("deadlift");
+  });
+
   // i18n: Spanish weekday names (issue #151, review 2).
   it("renders Spanish weekday names from window.__I18N__._weekdays", async () => {
     (window as any).__I18N__ = {

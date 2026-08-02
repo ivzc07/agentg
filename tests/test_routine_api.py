@@ -460,6 +460,32 @@ async def test_put_refuses_bad_sets(env):
     assert "entre 1 y 99" in body["error"]
 
 
+async def test_put_accepts_an_integer_equivalent_json_number_for_sets(env):
+    """JSON Schema integers include 3.0 even though Python decodes it as a
+    float; normalize it at the contract boundary."""
+    member = await env.add_member("Luis")
+    await env.training.ensure_seeded()
+
+    response = await env.client.put(
+        f"/api/members/{member.id}/routine",
+        json={
+            "base_routine_id": None,
+            "workouts": [
+                {
+                    "weekday": 0,
+                    "name": "X",
+                    "exercises": [{"exercise": "squat", "sets": 3.0, "reps": "8"}],
+                },
+            ],
+        },
+        cookies=env.cookies(),
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["routine"][0]["exercises"][0]["sets"] == 3
+
+
 async def test_put_refuses_overlong_workout_name(env):
     member = await env.add_member("Luis")
 

@@ -208,6 +208,20 @@ async def test_apply_rejects_a_foreign_or_coach_member_without_writing(env):
         assert await env.routines.active_routine(member_id) is None
 
 
+async def test_apply_rejects_member_ids_outside_the_database_range(env):
+    preset_id = await create_master(env)
+    huge = 10**100
+
+    response = await env.client.post(
+        f"/api/presets/{preset_id}/apply",
+        json={"member_ids": [huge]},
+        cookies=cookies(env),
+    )
+
+    assert response.status == 404
+    assert (await response.json())["error"] == "not_found"
+
+
 async def test_apply_without_a_master_answers_a_structured_400(env):
     preset = await env.routines.create_preset(env.gym.id, "Beginner")
     member = await add_member(env, "Luis", "2")

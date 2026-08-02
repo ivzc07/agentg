@@ -140,6 +140,7 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
     handleSubmit,
     watch,
     reset,
+    setFocus,
     setValue,
     formState: { errors },
   } = useForm<FormValues>({
@@ -514,33 +515,33 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
               </summary>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {data.catalog.map((name) => (
-                  <span
+                  <button
+                    type="button"
                     key={name}
                     className="inline-block text-[13px] px-2 py-0.5 rounded-full bg-elevation-1 border border-elevation-0-stroke text-ink-2 cursor-pointer hover:text-ink hover:border-ink-3 motion-safe:transition-colors duration-fast"
                     onClick={() => {
-                      // Find first empty exercise in the form and fill it
-                      const allExercises = document.querySelectorAll<HTMLInputElement>(
-                        'input[name*=".exercise"]'
-                      );
-                      for (const input of allExercises) {
-                        if (!input.value.trim()) {
-                          const nativeInputValueSetter =
-                            Object.getOwnPropertyDescriptor(
-                              window.HTMLInputElement.prototype,
-                              "value"
-                            )?.set;
-                          nativeInputValueSetter?.call(input, name);
-                          input.dispatchEvent(
-                            new Event("input", { bubbles: true })
-                          );
-                          input.focus();
-                          break;
+                      // Fill through React Hook Form rather than reaching into
+                      // its generated DOM names. That keeps the form state,
+                      // validation, and focus in one model.
+                      for (let dayIndex = 0; dayIndex < workouts.length; dayIndex += 1) {
+                        const exercises = workouts[dayIndex]?.exercises ?? [];
+                        for (let exIndex = 0; exIndex < exercises.length; exIndex += 1) {
+                          if (!exercises[exIndex].exercise.trim()) {
+                            const path =
+                              `workouts.${dayIndex}.exercises.${exIndex}.exercise` as const;
+                            setValue(path, name, {
+                              shouldDirty: true,
+                              shouldValidate: true,
+                            });
+                            setFocus(path);
+                            return;
+                          }
                         }
                       }
                     }}
                   >
                     {name}
-                  </span>
+                  </button>
                 ))}
               </div>
             </details>

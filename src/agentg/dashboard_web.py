@@ -273,6 +273,26 @@ class RoutineEditorView:
 # deterministic and chat-side, so it follows the chat rule (Spanish like
 # the nudges), never the dashboard's per-browser language.
 ROUTINE_NOTICE = "Tu coach {coach} actualizó tu Rutina 📋\n{plan}"
+_DB_ID_LIMIT = 2**63
+
+
+def _parse_db_id(raw: object) -> int:
+    """Parse one positive SQLite/Postgres-compatible primary-key value.
+
+    Keeping the bound at the web boundary prevents Python's arbitrary-size
+    integers from reaching drivers that only accept signed 64-bit values.
+    """
+    if isinstance(raw, bool):
+        raise ValueError("invalid database id")
+    if isinstance(raw, float) and not raw.is_integer():
+        raise ValueError("invalid database id")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError("invalid database id") from error
+    if not 0 < value < _DB_ID_LIMIT:
+        raise ValueError("invalid database id")
+    return value
 
 
 def _parse_workouts_from_json(raw_workouts: list, lang: str) -> list[WorkoutSpec]:
@@ -305,7 +325,13 @@ def _parse_workouts_from_json(raw_workouts: list, lang: str) -> list[WorkoutSpec
                 raise ValueError(t["empty_workout_error"])
             sets = ex.get("sets")
             if sets is not None:
-                if not isinstance(sets, int):
+                # JSON Schema's integer type includes mathematically integral
+                # numbers such as 3.0. Python's decoder preserves that token
+                # as float, so normalize it before applying the integer range.
+                if isinstance(sets, float) and sets.is_integer():
+                    sets = int(sets)
+                # bool is an int subclass but is not a meaningful set count.
+                if not isinstance(sets, int) or isinstance(sets, bool):
                     raise ValueError(t["bad_sets_error"])
                 if not SETS_MIN <= sets <= SETS_MAX:
                     raise ValueError(t["sets_range_error"])
@@ -606,7 +632,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         _, gym = coach
         try:
-            member_id = int(request.match_info["member_id"])
+            member_id = _parse_db_id(request.match_info["member_id"])
         except ValueError:
             return web.json_response({"error": "not found"}, status=404)
         view = await store.member_page(gym.id, member_id)
@@ -650,7 +676,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         coach_member, gym = coach
         try:
-            member_id = int(request.match_info["member_id"])
+            member_id = _parse_db_id(request.match_info["member_id"])
         except ValueError:
             return web.json_response({"error": "not found"}, status=404)
         target = await store.roster_member(gym.id, member_id)
@@ -816,7 +842,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         coach_member, gym = coach
         try:
-            preset_id = int(request.match_info["preset_id"])
+            preset_id = _parse_db_id(request.match_info["preset_id"])
         except ValueError:
             return web.json_response({"error": "not_found"}, status=404)
         if await store.preset_for_gym(gym.id, preset_id) is None:
@@ -830,8 +856,8 @@ def build_app(
         if not isinstance(raw_ids, list):
             return web.json_response({"error": "preset_no_selection"}, status=400)
         try:
-            member_ids = [int(v) for v in raw_ids]
-        except (ValueError, TypeError):
+            member_ids = [_parse_db_id(v) for v in raw_ids]
+        except ValueError:
             return web.json_response({"error": "not_found"}, status=404)
         if apply_all:
             member_ids = [m.id for m in await store.preset_members(gym.id)]
@@ -870,7 +896,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         coach_member, gym = coach
         try:
-            preset_id = int(request.match_info["preset_id"])
+            preset_id = _parse_db_id(request.match_info["preset_id"])
         except ValueError:
             return web.json_response({"error": "not_found"}, status=404)
         if await store.preset_for_gym(gym.id, preset_id) is None:
@@ -895,7 +921,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         coach_member, gym = coach
         try:
-            preset_id = int(request.match_info["preset_id"])
+            preset_id = _parse_db_id(request.match_info["preset_id"])
         except ValueError:
             return web.json_response({"error": "not_found"}, status=404)
         try:
@@ -940,7 +966,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         member, gym = coach
         try:
-            preset_id = int(request.match_info["preset_id"])
+            preset_id = _parse_db_id(request.match_info["preset_id"])
         except ValueError:
             return web.json_response({"error": "not found"}, status=404)
         preset = await store.preset_for_gym(gym.id, preset_id)
@@ -964,7 +990,7 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         coach_member, gym = coach
         try:
-            preset_id = int(request.match_info["preset_id"])
+            preset_id = _parse_db_id(request.match_info["preset_id"])
         except ValueError:
             return web.json_response({"error": "not found"}, status=404)
         preset = await store.preset_for_gym(gym.id, preset_id)
@@ -1188,10 +1214,8 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         _, gym = coach
         try:
-            member_id = int(request.match_info["member_id"])
-            if not 0 < member_id < 2**63:
-                return web.json_response({"error": "not found"}, status=404)
-        except (ValueError, OverflowError):
+            member_id = _parse_db_id(request.match_info["member_id"])
+        except ValueError:
             return web.json_response({"error": "not found"}, status=404)
         try:
             page = int(request.query.get("page", "1"))
@@ -1216,11 +1240,9 @@ def build_app(
             return web.json_response({"error": "unauthorized"}, status=401)
         member, gym = coach
         try:
-            member_id = int(request.match_info["member_id"])
-            note_id = int(request.match_info["note_id"])
-            if not (0 < member_id < 2**63 and 0 < note_id < 2**63):
-                return web.json_response({"error": "not found"}, status=404)
-        except (ValueError, OverflowError):
+            member_id = _parse_db_id(request.match_info["member_id"])
+            note_id = _parse_db_id(request.match_info["note_id"])
+        except ValueError:
             return web.json_response({"error": "not found"}, status=404)
         note = await store.acknowledge_flag(gym.id, member_id, note_id, member.id)
         if note is None:
