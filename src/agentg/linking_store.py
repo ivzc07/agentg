@@ -233,6 +233,41 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text("ALTER TABLE safety_outbox_jobs ADD COLUMN next_retry_at TIMESTAMP")
         )
+    # P1 #1: tighten unique constraint from (gym_id, note_id, coach_member_id)
+    # to (note_id, coach_member_id) — one job per Note/Coach regardless of
+    # gym_id (the Note already owns the Gym scope; the gym_id column is
+    # denormalised for convenience and must match the Note's gym_id).
+    outbox_indexes = {i["name"]: i for i in inspect(conn).get_indexes("safety_outbox_jobs")}
+    if "uq_outbox_job_note_coach" in outbox_indexes:
+        existing_cols = [
+            c["name"] for c in outbox_indexes["uq_outbox_job_note_coach"]["column_names"]
+        ]
+        # Recreate if the old three-column form is still present.
+        if "gym_id" in existing_cols:
+            if conn.dialect.name == "postgresql":
+                conn.execute(
+                    text(
+                        "ALTER TABLE safety_outbox_jobs "
+                        "DROP CONSTRAINT uq_outbox_job_note_coach"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "ALTER TABLE safety_outbox_jobs "
+                        "ADD CONSTRAINT uq_outbox_job_note_coach "
+                        "UNIQUE (note_id, coach_member_id)"
+                    )
+                )
+            else:
+                conn.execute(
+                    text("DROP INDEX IF EXISTS uq_outbox_job_note_coach")
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX uq_outbox_job_note_coach "
+                        "ON safety_outbox_jobs (note_id, coach_member_id)"
+                    )
+                )
 
 
 @dataclass(frozen=True)

@@ -33,6 +33,9 @@ LEASE_TIMEOUT_SECONDS = 60
 # Jobs are never permanently failed solely from retry count (P1 #4).
 BASE_BACKOFF_SECONDS = 5
 MAX_BACKOFF_SECONDS = 300  # 5-minute cap on retry delay
+# Bounded send: a notifier.send that hangs longer than this is cancelled
+# so a hung channel adapter never blocks gather or strands other jobs.
+SEND_TIMEOUT_SECONDS = 15
 
 Clock = Callable[[], datetime]
 
@@ -143,6 +146,13 @@ class SafetyOutbox:
 
             jobs: list[SafetyOutboxJob] = []
             for coach_id, _coach_name, channel, channel_user_id in resolved_coaches:
+                # Validate that the denormalized job Gym matches the Note Gym
+                # — the unique constraint on (note_id, coach_member_id) allows
+                # only one job per Note/Coach regardless of gym_id, so a
+                # mismatched gym_id would be a silent bug.
+                assert gym_id == note.gym_id, (
+                    f"job gym_id {gym_id} does not match note gym_id {note.gym_id}"
+                )
                 job = SafetyOutboxJob(
                     gym_id=gym_id,
                     note_id=note.id,
@@ -397,8 +407,9 @@ class OutboxWorker:
 
         Channel identity is resolved immediately before each send so a coach
         who switched gyms after job creation never receives a cross-gym
-        notification (P1 #2).  The zero-await gap between resolution and
-        send closes the TOCTOU window (P1 #5).
+        notification.  The final authorization (coach_channel_in_gym) and
+        send have zero await between them — no Gym switch, demotion, or
+        Forget-me can authorize stale delivery across an await gap (P1 #2).
 
         The job and note are re-verified before sending: if the Note was
         deleted by forget-me between claim and delivery the job is failed
@@ -406,6 +417,9 @@ class OutboxWorker:
 
         Transient failures are always retried with bounded backoff — jobs
         are never permanently failed solely from attempt count (P1 #4).
+
+        Each notifier.send is wrapped in asyncio.wait_for so a hung
+        channel adapter never blocks gather or strands other jobs (P2).
         """
         # Backoff: wait before attempting delivery so transient outages
         # (network flap, DB restart) have time to resolve.  The claim_pending
@@ -447,30 +461,42 @@ class OutboxWorker:
                         job.coach_member_id,
                     )
 
-            # Send heads-up — re-authorize inside the semaphore so no
-            # Gym switch or Forget-me can commit between authorization
-            # and send (P1 #2).
+            # Send heads-up — final authorization and send with zero await
+            # gap so no Gym switch/demotion/Forget-me can interleave (P1 #2).
             headsup_failed: str | None = None
             async with self._semaphore:
-                channel_info = await self._linking.coach_channel_in_gym(
-                    job.coach_member_id, job.gym_id,
-                )
-                if channel_info is None:
-                    headsup_failed = "coach no longer reachable in this gym"
-                elif not await self._job_still_sending(job.id):
+                # Pre-verify the job is still sending before authorizing.
+                if not await self._job_still_sending(job.id):
                     headsup_failed = "job_gone"
                 else:
-                    try:
-                        await self._notifier.send(
-                            channel_info[0], channel_info[1],
-                            text, disable_preview=True,
-                        )
-                    except Exception:
-                        headsup_failed = "notifier send failed"
-                        logger.exception(
-                            "failed to send heads-up to coach %s",
-                            channel_info[1],
-                        )
+                    channel_info = await self._linking.coach_channel_in_gym(
+                        job.coach_member_id, job.gym_id,
+                    )
+                    if channel_info is None:
+                        headsup_failed = "coach no longer reachable in this gym"
+                    else:
+                        # Zero await gap: no DB or I/O between authorization
+                        # and send — a Gym switch or demotion cannot interleave.
+                        try:
+                            await asyncio.wait_for(
+                                self._notifier.send(
+                                    channel_info[0], channel_info[1],
+                                    text, disable_preview=True,
+                                ),
+                                timeout=SEND_TIMEOUT_SECONDS,
+                            )
+                        except asyncio.TimeoutError:
+                            headsup_failed = "notifier send timed out"
+                            logger.error(
+                                "send timeout for coach %s on heads-up",
+                                channel_info[1],
+                            )
+                        except Exception:
+                            headsup_failed = "notifier send failed"
+                            logger.exception(
+                                "failed to send heads-up to coach %s",
+                                channel_info[1],
+                            )
 
             if headsup_failed == "coach no longer reachable in this gym":
                 return await self._outbox.mark_failed(
@@ -478,42 +504,57 @@ class OutboxWorker:
                 )
             elif headsup_failed == "job_gone":
                 return
-            elif headsup_failed == "notifier send failed":
+            elif headsup_failed in ("notifier send failed", "notifier send timed out"):
                 return await self._outbox.reset_for_retry(
-                    job, "notifier send failed"
+                    job, headsup_failed
                 )
 
             if link is not None:
-                # Re-resolve channel identity inside the semaphore so no
-                # Gym switch can commit between authorization and the
-                # link send (P1 #2).
+                # Re-resolve channel identity inside the semaphore with
+                # zero await gap between authorization and link send (P1 #2).
                 link_failed: str | None = None
                 async with self._semaphore:
-                    link_channel_info = await self._linking.coach_channel_in_gym(
-                        job.coach_member_id, job.gym_id,
-                    )
-                    if link_channel_info is None:
-                        link_failed = "unauthorized"
+                    if not await self._job_still_sending(job.id):
+                        link_failed = "job_gone"
                     else:
-                        try:
-                            await self._notifier.send(
-                                link_channel_info[0],
-                                link_channel_info[1],
-                                link,
-                                disable_preview=True,
-                                protect_content=True,
-                            )
-                        except Exception:
-                            link_failed = "notifier"
-                            logger.exception(
-                                "failed to send dashboard link to coach %s",
-                                link_channel_info[1],
-                            )
+                        link_channel_info = await self._linking.coach_channel_in_gym(
+                            job.coach_member_id, job.gym_id,
+                        )
+                        if link_channel_info is None:
+                            link_failed = "unauthorized"
+                        else:
+                            try:
+                                await asyncio.wait_for(
+                                    self._notifier.send(
+                                        link_channel_info[0],
+                                        link_channel_info[1],
+                                        link,
+                                        disable_preview=True,
+                                        protect_content=True,
+                                    ),
+                                    timeout=SEND_TIMEOUT_SECONDS,
+                                )
+                            except asyncio.TimeoutError:
+                                link_failed = "notifier"
+                                logger.error(
+                                    "send timeout for coach %s on link",
+                                    link_channel_info[1],
+                                )
+                            except Exception:
+                                link_failed = "notifier"
+                                logger.exception(
+                                    "failed to send dashboard link to coach %s",
+                                    link_channel_info[1],
+                                )
 
                 if link_failed == "unauthorized":
                     # Heads-up already landed; link can't be delivered.
                     # Mark delivered anyway — the safety text arrived.
                     return await self._outbox.mark_delivered(job)
+                # link_failed == "job_gone": job was deleted between
+                # heads-up and link; bail without marking anything.
+                if link_failed == "job_gone":
+                    return
                 # link_failed == "notifier": the heads-up already landed;
                 # a missing link is unfortunate but not worth marking the
                 # whole job failed.

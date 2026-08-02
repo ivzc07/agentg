@@ -339,7 +339,7 @@ class SafetyOutboxJob(Base):
     __tablename__ = "safety_outbox_jobs"
     __table_args__ = (
         UniqueConstraint(
-            "gym_id", "note_id", "coach_member_id",
+            "note_id", "coach_member_id",
             name="uq_outbox_job_note_coach",
         ),
         Index("ix_outbox_jobs_pending", "status", "created_at"),

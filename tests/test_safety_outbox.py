@@ -1879,3 +1879,532 @@ async def test_semaphore_reauth_blocks_gym_switched_coach(env, monkeypatch):
         ).first()
     assert row.status == "failed"
     assert "no longer reachable" in (row.failure_reason or "")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Round 4 — P1 #1: one job per Note/Coach regardless of gym_id
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def test_unique_per_note_coach_not_scoped_by_gym(env):
+    """The unique constraint on (note_id, coach_member_id) — without gym_id
+    — prevents a second job for the same Note+Coach regardless of gym_id
+    value. A Note belongs to exactly one Gym, so gym_id is denormalised
+    and must not participate in the uniqueness scope (P1 #1)."""
+    note, _jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Attempting a second job for the same note+coach (even with a
+    # different or same gym_id) must fail on the uniqueness constraint.
+    with pytest.raises(Exception):  # IntegrityError
+        from agentg.models import SafetyOutboxJob
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+        async with async_sessionmaker(env.engine)() as db:
+            db.add(
+                SafetyOutboxJob(
+                    gym_id=env.gym_id,
+                    note_id=note.id,
+                    coach_member_id=env.coach1_id,
+                    channel="telegram",
+                    channel_user_id="7",
+                    member_id=env.member_id,
+                    member_name=env.member_name,
+                    member_is_coach=False,
+                    status="pending",
+                    created_at=datetime.now(UTC),
+                )
+            )
+            await db.commit()
+
+
+async def test_unique_per_note_coach_across_notes(env):
+    """The same Coach can have jobs for different Notes — uniqueness is
+    per (note_id, coach_member_id), not per coach (P1 #1)."""
+    note1, jobs1 = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="first flag",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+    # Second flag — same coach, different Note.
+    note2, jobs2 = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="second flag",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+    assert note1.id != note2.id
+    assert len(jobs1) == 1 and len(jobs2) == 1
+    assert jobs1[0].note_id == note1.id
+    assert jobs2[0].note_id == note2.id
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Round 4 — P1 #2: TOCTOU — final authorization then send, zero await gap
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def test_toctou_demotion_between_job_check_and_send_blocked(env, monkeypatch):
+    """When the worker pre-verifies _job_still_sending and then resolves
+    the channel inside the semaphore, a demotion that lands between the
+    pre-check and the channel resolution is caught — the zero-await gap
+    between channel resolution and send prevents stale authorization.
+
+    Uses an asyncio.Event barrier to force the race: the pre-check
+    passes, the coach is demoted, and the channel resolution returns
+    None (P1 #2)."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    # Barrier: let the pre-check pass, then demote before channel resolution.
+    pre_check_passed = asyncio.Event()
+    demotion_done = asyncio.Event()
+
+    worker = _make_worker(env)
+
+    real_job_still_sending = worker._job_still_sending
+    call_count = [0]
+
+    async def instrumented_job_still_sending(job_id):
+        call_count[0] += 1
+        if call_count[0] == 2:  # inside semaphore
+            pre_check_passed.set()
+            await demotion_done.wait()
+        return await real_job_still_sending(job_id)
+
+    monkeypatch.setattr(worker, "_job_still_sending", instrumented_job_still_sending)
+
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+
+    await pre_check_passed.wait()
+
+    # Demote the coach while the worker is about to resolve the channel.
+    await env.linking.set_coach(env.coach1_id, is_coach=False)
+    demotion_done.set()
+
+    await deliver_task
+
+    # No messages sent — channel resolution returned None.
+    assert env.notifier.sent == []
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, failure_reason FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.status == "failed"
+    assert "no longer reachable" in (row.failure_reason or "")
+
+
+async def test_toctou_gym_switch_between_job_check_and_send_blocked(env, monkeypatch):
+    """When a coach switches gyms between the pre-check and the channel
+    resolution, the re-resolution catches it and fails the job — no
+    cross-gym delivery (P1 #2)."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    pre_check_passed = asyncio.Event()
+    switch_done = asyncio.Event()
+
+    worker = _make_worker(env)
+
+    real_job_still_sending = worker._job_still_sending
+    call_count = [0]
+
+    async def instrumented_job_still_sending(job_id):
+        call_count[0] += 1
+        if call_count[0] == 2:  # inside semaphore
+            pre_check_passed.set()
+            await switch_done.wait()
+        return await real_job_still_sending(job_id)
+
+    monkeypatch.setattr(worker, "_job_still_sending", instrumented_job_still_sending)
+
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+
+    await pre_check_passed.wait()
+
+    # Switch gyms while the worker is about to resolve the channel.
+    new_gym = await env.linking.create_gym("New Gym")
+    await env.linking.link_member(new_gym.id, "Coach Sam", "telegram", "7")
+    switch_done.set()
+
+    await deliver_task
+
+    assert env.notifier.sent == []
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, failure_reason FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.status == "failed"
+    assert "no longer reachable" in (row.failure_reason or "")
+
+
+async def test_toctou_forget_me_between_precheck_and_send_blocked(env, monkeypatch):
+    """When forget-me deletes the Note between the pre-check and the
+    channel resolution, the re-authorization still catches it because
+    _job_still_sending runs inside the semaphore before channel
+    resolution (P1 #2).
+
+    Uses a barrier: the pre-check passes, forget-me deletes the Note
+    (cascade-deleting the job), then the semaphore's _job_still_sending
+    returns False and the worker bails out."""
+    note, _jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    pre_check_passed = asyncio.Event()
+    forget_done = asyncio.Event()
+
+    worker = _make_worker(env)
+
+    real_job_still_sending = worker._job_still_sending
+    call_count = [0]
+
+    async def instrumented_job_still_sending(job_id):
+        call_count[0] += 1
+        if call_count[0] == 1:  # first call (outside semaphore): passes
+            result = await real_job_still_sending(job_id)
+            pre_check_passed.set()
+            await forget_done.wait()
+            return result
+        # Second call (inside semaphore): runs after forget-me
+        return await real_job_still_sending(job_id)
+
+    monkeypatch.setattr(worker, "_job_still_sending", instrumented_job_still_sending)
+
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+
+    await pre_check_passed.wait()
+
+    # Forget-me: delete the Note (cascade-deletes the job).
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text("DELETE FROM member_notes WHERE id = :id"), {"id": note.id}
+        )
+    forget_done.set()
+
+    await deliver_task
+
+    # No messages sent — _job_still_sending returned False inside semaphore.
+    assert env.notifier.sent == []
+
+
+async def test_toctou_zero_await_between_auth_and_send(env, monkeypatch):
+    """Verify there is no await between channel resolution and
+    notifier.send — a Gym switch that fires between them cannot land
+    because there is no yield point (P1 #2).
+
+    Instruments coach_channel_in_gym to record when it returns; then
+    instruments notifier.send to verify no other await happened between."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    worker = _make_worker(env)
+
+    # Track the sequence of async operations inside the semaphore.
+    events: list[str] = []
+
+    real_coach_channel = env.linking.coach_channel_in_gym
+
+    async def instrumented_coach_channel(member_id, gym_id):
+        events.append("channel_resolved")
+        return await real_coach_channel(member_id, gym_id)
+
+    env.linking.coach_channel_in_gym = instrumented_coach_channel
+
+    real_send = env.notifier.send
+
+    async def instrumented_send(channel, channel_user_id, text,
+                                disable_preview=False, protect_content=False):
+        events.append("send_started")
+        await real_send(channel, channel_user_id, text,
+                         disable_preview=disable_preview,
+                         protect_content=protect_content)
+        events.append("send_completed")
+
+    monkeypatch.setattr(env.notifier, "send", instrumented_send)
+
+    await worker._deliver_one(claimed[0])
+
+    # The sequence must be: channel_resolved → send_started → send_completed
+    # with no intervening events (proving zero await gap).
+    headsup_events = [e for e in events if "channel" in e or "send" in e]
+    # For the heads-up: first channel_resolved, then send_started.
+    idx_ch = events.index("channel_resolved")
+    idx_ss = events.index("send_started")
+    assert idx_ss == idx_ch + 1, (
+        f"expected send_started immediately after channel_resolved, got {events}"
+    )
+
+    # Verify delivery completed.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"
+
+    env.linking.coach_channel_in_gym = real_coach_channel
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Round 4 — P2: bounded send timeout prevents hung notifier stranding
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class HangingNotifier:
+    """A notifier whose send hangs forever — simulating a network partition
+    or a misbehaving channel adapter."""
+
+    def __init__(self):
+        self.sent: list[tuple[str, str, str, bool, bool]] = []
+        self._hang = True
+
+    async def send(self, channel, channel_user_id, text,
+                   disable_preview=False, protect_content=False):
+        if self._hang:
+            # Hang forever — simulating a stuck TCP connection.
+            await asyncio.Event().wait()
+        self.sent.append(
+            (channel, channel_user_id, text, disable_preview, protect_content),
+        )
+
+
+async def test_send_timeout_retries_not_permanently_fails(env, monkeypatch):
+    """When a notifier.send hangs longer than SEND_TIMEOUT_SECONDS,
+    the job is retried (reset to pending) — not permanently failed.
+    Other jobs in the same drain batch are not stranded (P2)."""
+    import agentg.safety_outbox as outbox_module
+
+    # Patch SEND_TIMEOUT_SECONDS to a short value for the test.
+    monkeypatch.setattr(outbox_module, "SEND_TIMEOUT_SECONDS", 0.1)
+
+    hanging = HangingNotifier()
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=hanging,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+    await worker.drain_once(limit=50)
+
+    # The job must be retried (pending), not permanently failed.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count, last_error, failure_reason "
+                    "FROM safety_outbox_jobs WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.status == "pending", (
+        f"expected pending (retry), got {row.status}"
+    )
+    assert row.retry_count == 1
+    assert "timed out" in (row.last_error or "")
+    assert row.failure_reason is None  # not permanent
+
+
+async def test_hung_notifier_does_not_strand_other_jobs(env, monkeypatch):
+    """When one notifier.send hangs, other jobs in the same drain_once
+    batch complete normally — the gather continues because each
+    _deliver_one has its own timeout (P2)."""
+    import agentg.safety_outbox as outbox_module
+
+    monkeypatch.setattr(outbox_module, "SEND_TIMEOUT_SECONDS", 0.1)
+
+    # Notifier that hangs ONLY for coach 7.
+    class SelectiveHangingNotifier:
+        def __init__(self, real_notifier):
+            self.sent: list[tuple[str, str, str, bool, bool]] = []
+            self._real = real_notifier
+            self._hang_id = "7"
+
+        async def send(self, channel, channel_user_id, text,
+                       disable_preview=False, protect_content=False):
+            if channel_user_id == self._hang_id:
+                await asyncio.Event().wait()  # hang forever
+            result = await self._real.send(
+                channel, channel_user_id, text,
+                disable_preview=disable_preview,
+                protect_content=protect_content,
+            )
+            self.sent.append(
+                (channel, channel_user_id, text, disable_preview, protect_content),
+            )
+            return result
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+
+    # Don't manually claim — let drain_once claim them so it can deliver.
+    selective = SelectiveHangingNotifier(env.notifier)
+
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=selective,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+    await worker.drain_once(limit=50)
+
+    # Coach 7's job (hanging) should be retried.
+    async with env.engine.connect() as conn:
+        row7 = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row7.status == "pending"  # retried
+    assert row7.retry_count == 1
+
+    # Coach 8's job should be delivered.
+    async with env.engine.connect() as conn:
+        row8 = (
+            await conn.execute(
+                text(
+                    "SELECT status FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach2_id},
+            )
+        ).first()
+    assert row8.status == "delivered"
+
+
+async def test_send_timeout_retry_eventually_succeeds(env, monkeypatch):
+    """After a send timeout, advancing the clock and retrying with a
+    working notifier delivers successfully (P2)."""
+    import agentg.safety_outbox as outbox_module
+
+    monkeypatch.setattr(outbox_module, "SEND_TIMEOUT_SECONDS", 0.1)
+
+    hanging = HangingNotifier()
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=hanging,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+    await worker.drain_once(limit=50)
+
+    # Job is back to pending.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT retry_count FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.retry_count == 1
+
+    # Advance clock past next_retry_at.
+    future = datetime.now(UTC) + timedelta(days=1)
+    env.outbox._clock = lambda: future
+
+    # Retry with a working notifier.
+    hanging._hang = False
+    await worker.drain_once(limit=50)
+
+    # Now it should be delivered.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status, last_error FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"
+    assert row.last_error is None  # cleared on success
