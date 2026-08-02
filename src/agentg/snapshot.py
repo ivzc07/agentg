@@ -7,13 +7,12 @@ anything bulkier stays behind a tool.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+from agentg.context import MemberContext
 
 MAX_SNAPSHOT_NOTES = 15
 MAX_NOTE_DISPLAY = 120
-
-if TYPE_CHECKING:
-    from agentg.context import MemberContext
 
 
 def _headline(exercises: list[dict[str, Any]], unit: str) -> str:
@@ -29,7 +28,9 @@ def _headline(exercises: list[dict[str, Any]], unit: str) -> str:
 
 async def member_snapshot(context: MemberContext) -> str:
     days, last = await context.stores.training.latest_session_info(context.member_id)
-    routine = await context.stores.routines.active_routine(context.member_id)
+    routine = await context.turn_cache.get_or_load_routine(
+        context.stores.routines, context.member_id
+    )
     todays_workout = context.stores.routines.pick_todays_workout(routine, context.timezone)
     notes = await context.stores.notes.active(context.member_id)
 

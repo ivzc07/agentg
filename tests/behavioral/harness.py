@@ -232,4 +232,6 @@ class ConversationHarness:
                 is_group=is_group,
             )
         )
+        if reply.after_send is not None:
+            await reply.after_send()
         return str(reply)
