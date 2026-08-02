@@ -92,6 +92,7 @@ class LoggedSets:
     reps: list[int]
     previous: dict[str, Any] | None  # that exercise's previous-session numbers
     suspect: str | None = None  # hint when the weight jumps implausibly vs history
+    copied_sets: list[dict[str, Any]] | None = None  # per-set detail from copy_last_sets
 
 
 @dataclass(frozen=True)
@@ -249,19 +250,40 @@ class TrainingStore:
         async with self._sessions() as db:
             resolved = await self._match_or_create(db, exercise)
             session = await self._require_open_session(db, member_id, gym_id)
-            previous = await self._last_sets_info(
+            detail = await self._last_sets_detail(
                 db, member_id, resolved.id, exclude_session_id=session.id
             )
-            if previous is None:
+            if detail is None:
                 raise ValueError(
                     f"no earlier sets of {resolved.name} to copy — check the exercise "
                     "name, or ask the Member for the weight and reps to log fresh"
                 )
-            self._add_sets(
-                db, session, resolved.id, previous["weight"], previous["reps"], self._clock()
+            now = self._clock()
+            for s in detail:
+                db.add(
+                    Set(
+                        gym_id=session.gym_id,
+                        session_id=session.id,
+                        exercise_id=resolved.id,
+                        weight=s["weight"],
+                        reps=s["reps"],
+                        rpe=s.get("rpe"),
+                        note=s.get("note"),
+                        created_at=now,
+                    )
+                )
+            previous = await self._last_sets_info(
+                db, member_id, resolved.id, exclude_session_id=session.id
             )
+            weights = [s["weight"] for s in detail if s["weight"] is not None]
             await db.commit()
-            return LoggedSets(resolved.name, previous["weight"], list(previous["reps"]), previous)
+            return LoggedSets(
+                resolved.name,
+                max(weights) if weights else None,
+                [s["reps"] for s in detail],
+                previous,
+                copied_sets=detail,
+            )
 
     async def edit_logged_sets(
         self,
@@ -606,6 +628,41 @@ class TrainingStore:
             "weight": max(weights) if weights else None,
             "reps": [row.reps for row in rows],
         }
+
+    async def _last_sets_detail(
+        self, db: AsyncSession, member_id: int, exercise_id: int, exclude_session_id: int | None
+    ) -> list[dict[str, Any]] | None:
+        """The previous Session's sets in order, each with its own weight,
+        reps, RPE, and note — the exact-copy data for ``copy_last_sets``.
+        Returns ``None`` when there is no prior session with this exercise."""
+        query = (
+            select(Session.id)
+            .join(Set, Set.session_id == Session.id)
+            .where(Session.member_id == member_id, Set.exercise_id == exercise_id)
+            .order_by(Session.started_at.desc())
+            .limit(1)
+        )
+        if exclude_session_id is not None:
+            query = query.where(Session.id != exclude_session_id)
+        session_id = await db.scalar(query)
+        if session_id is None:
+            return None
+        rows = list(
+            await db.scalars(
+                select(Set)
+                .where(Set.session_id == session_id, Set.exercise_id == exercise_id)
+                .order_by(Set.id)
+            )
+        )
+        return [
+            {
+                "weight": row.weight,
+                "reps": row.reps,
+                "rpe": row.rpe,
+                "note": row.note,
+            }
+            for row in rows
+        ]
 
     async def _to_gym_unit(
         self, db: AsyncSession, gym_id: int, weight: float | None, unit: str | None

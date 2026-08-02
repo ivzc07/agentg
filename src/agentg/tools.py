@@ -66,6 +66,8 @@ def _logged(payload: LoggedSets, unit: str) -> dict[str, Any]:
     }
     if payload.suspect is not None:
         result["suspect"] = payload.suspect
+    if payload.copied_sets is not None:
+        result["copied_sets"] = payload.copied_sets
     return result
 
 
