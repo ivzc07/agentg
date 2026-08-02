@@ -13,7 +13,6 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from agentg.checkin_store import CheckinStore
-from agentg.dashboard_i18n import fmt_date
 from agentg.dashboard_store import DashboardStore
 from agentg.dashboard_web import SESSION_COOKIE, build_app, sign_session
 from agentg.db import create_engine
