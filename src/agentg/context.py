@@ -36,3 +36,7 @@ class MemberContext:
     demo_requests: list[str] = field(default_factory=list)
     # Coach safety-flag pings deferred past the Member's reply (issue #172).
     coach_pings: list[Callable[[], Awaitable[None]]] = field(default_factory=list)
+    # True when delete_my_data confirmed and wiped everything; the runtime
+    # clears the SDK session again after the run to remove the turn's own
+    # residue (issue #166).
+    forgotten: bool = False

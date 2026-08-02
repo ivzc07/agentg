@@ -101,9 +101,12 @@ class AgentRuntime:
             # Any reply resets the check-in rhythm and revives a lapsed Member.
             await self.stores.checkins.reset_rhythm(linked.member.id)
             session = self.session_for_member(linked.member.id)
-            await maybe_compact(
-                session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
-            )
+            try:
+                await maybe_compact(
+                    session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
+                )
+            except Exception:
+                logger.exception("compaction failed for member %d", linked.member.id)
             context = self.member_context(linked)
             # Coach pings accumulated during the turn must be drained even
             # if Runner.run raises (a later tool error, provider timeout,
@@ -111,12 +114,22 @@ class AgentRuntime:
             # silence is not an option (P1 #5153515963).
             result = None
             try:
-                result = await Runner.run(
-                    self.agent,
-                    msg.text,
-                    session=session,
-                    context=context,
-                )
+                try:
+                    result = await Runner.run(
+                        self.agent,
+                        msg.text,
+                        session=session,
+                        context=context,
+                    )
+                finally:
+                    # Issue #166: delete_my_data clears the session during the
+                    # turn, but the runner persists this turn's items afterwards --
+                    # the tool call and goodbye survive the wipe.  Clear again so
+                    # nothing remains.  Run in finally so a mid-turn error (API,
+                    # MaxTurnsExceeded) doesn't skip the clear after the domain
+                    # wipe has already committed.
+                    if context.forgotten:
+                        await session.clear_session()
                 text = str(result.final_output)
                 sender = self.demo_sender
                 has_demos = sender is not None and context.demo_requests
