@@ -113,19 +113,24 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
                 logger.exception("agent loop failed for sender %s", message.from_user.id)
                 await message.answer(ERROR_REPLY)
                 return
-            for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
-                if reply.disable_preview:  # keep the call shape unchanged otherwise
-                    await message.answer(
-                        chunk, link_preview_options=LinkPreviewOptions(is_disabled=True)
-                    )
-                else:
-                    await message.answer(chunk)
-            # Follow-up media (demo animations) lands beneath the reply text.
-            if reply.after_send is not None:
-                try:
-                    await reply.after_send()
-                except Exception:
-                    logger.exception("post-reply delivery failed for sender %s", message.from_user.id)
+            # Deliver the reply text; follow-up actions always run in a finally
+            # so a Telegram 403 / 429 / network error on the reply text does not
+            # silently drop deferred coach pings or demo animations (issue #172).
+            try:
+                for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
+                    if reply.disable_preview:  # keep the call shape unchanged otherwise
+                        await message.answer(
+                            chunk, link_preview_options=LinkPreviewOptions(is_disabled=True)
+                        )
+                    else:
+                        await message.answer(chunk)
+            finally:
+                # Follow-up media (demo animations) lands beneath the reply text.
+                if reply.after_send is not None:
+                    try:
+                        await reply.after_send()
+                    except Exception:
+                        logger.exception("post-reply delivery failed for sender %s", message.from_user.id)
         finally:
             typing_task.cancel()
             try:
