@@ -22,8 +22,25 @@ these tests run and bite.
 
 To run them:
 
-    uv pip install playwright && uv run playwright install chromium
+    uv pip install ".[browser]" && uv run playwright install chromium
     uv run pytest tests/test_375px_playwright.py
+
+Install through the `browser` extra, not a bare `pip install playwright`: the
+extra carries the `>=1.40` pin, and bypassing it is how the two drift apart.
+
+## Two deviations from the issue text, recorded rather than glossed
+
+Step 2 says the test "signs in". It injects a pre-signed session cookie instead
+of redeeming a login token. Login tokens are single-use, and the interstitial
+submits itself, so redeeming one to reach the roster would both consume the
+token the login screen needs and make every other screen depend on that
+redirect landing. The cookie is the same credential the redemption would
+issue, so the screens under test are identical - only the route in differs.
+
+Step 3 says primary actions must be "within the viewport bounds". The check is
+horizontal-only. A strict vertical check would fail every page taller than
+812px, which is most of them, and scrolling down is normal on a phone while
+scrolling sideways is the defect this module exists to catch.
 
 Screenshots land in `docs/design/375px/` next to the sweep doc, per the issue.
 They are regenerated on every run and are git-ignored: committing them would put
@@ -39,7 +56,7 @@ import pytest
 pytest.importorskip(
     "playwright",
     reason="needs playwright + browser binaries: "
-    "uv pip install playwright && uv run playwright install chromium",
+    'uv pip install ".[browser]" && uv run playwright install chromium',
 )
 
 from dataclasses import dataclass, field  # noqa: E402
@@ -271,6 +288,9 @@ async def rendered(live_dashboard) -> list[Rendered]:
                       for (const el of document.querySelectorAll(selector)) {
                         const r = el.getBoundingClientRect();
                         if (r.width === 0 && r.height === 0) continue;  // hidden
+                        // Horizontal only, deliberately - see the module
+                        // docstring: pages are routinely taller than the
+                        // viewport and scrolling down is not a defect.
                         if (r.left < 0 || r.right > window.innerWidth) {
                           out.push(`${el.tagName.toLowerCase()}.${el.className || '(no class)'}`
                                    + ` [${Math.round(r.left)}..${Math.round(r.right)}]`);
