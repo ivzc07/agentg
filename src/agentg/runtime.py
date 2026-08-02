@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from collections import defaultdict
 from collections.abc import AsyncIterator
@@ -117,6 +118,8 @@ class AgentRuntime:
     # Stream replies by default; set False when no live model backs the Agent
     # (tests that mock Runner).  Kept deliberately per #176.
     stream_replies: bool = True
+    # How long a forget-me confirmation phrase stays valid (issue #212).
+    forget_me_confirmation_seconds: int = 300
     # One lock per channel identity so a rapid double message can't interleave
     # turns (or linking steps). Unbounded, but one entry per person who
     # ever messaged this process — fine at this scale.
@@ -218,6 +221,11 @@ class AgentRuntime:
                 # touches the check-in rhythm, compaction, or history.
                 if self.dashboard is not None and is_dashboard_command(msg.text):
                     return await self.dashboard.handle(linked, is_group=msg.is_group)
+                # Pre-model forget-me check (issue #212): handles both
+                # initiating the two-turn flow and confirming deletion.
+                forget_reply = await self._handle_forget_me(msg, linked)
+                if forget_reply is not None:
+                    return forget_reply
                 session = self.session_for_member(linked.member.id)
                 # Awaited: the tool set is scoped to the caller's role, which
                 # needs a Routine lookup (issue #174).
@@ -279,22 +287,13 @@ class AgentRuntime:
         await_reset,
     ) -> Reply:
         """Non-streaming path kept deliberately for tests (#176)."""
-        try:
-            result = await Runner.run(
-                self.agent,
-                msg.text,
-                session=session,
-                context=context,
-                run_config=_SNAPSHOT_RUN_CONFIG,
-            )
-        finally:
-            # Issue #166: delete_my_data clears the session during the turn,
-            # but the runner persists this turn's items afterwards -- the tool
-            # call and goodbye survive the wipe.  Clear again so nothing
-            # remains.  In a finally so a mid-turn error doesn't skip the clear
-            # after the domain wipe has already committed.
-            if context.forgotten:
-                await session.clear_session()
+        result = await Runner.run(
+            self.agent,
+            msg.text,
+            session=session,
+            context=context,
+            run_config=_SNAPSHOT_RUN_CONFIG,
+        )
         text = str(result.final_output)
         return Reply(
             text,
@@ -322,10 +321,9 @@ class AgentRuntime:
             run_config=_SNAPSHOT_RUN_CONFIG,
         )
         stream = _stream_text(result)
-        # Innermost first: wipe on forget (#166), release the lock (#176), then
-        # close the turn's instrument last so its duration and counts cover the
-        # whole generation, not just setup (#161).
-        stream = _clear_if_forgotten(stream, context, session)
+        # Innermost first: release the lock (#176), then close the turn's
+        # instrument last so its duration and counts cover the whole
+        # generation, not just setup (#161).
         if _lock is not None:
             stream = _hold_lock(stream, _lock)
         if _turn is not None:
@@ -424,6 +422,67 @@ class AgentRuntime:
 
         return after_send
 
+    # -- Pre-model forget-me (issue #212) ---------------------------------
+
+    async def _handle_forget_me(
+        self, msg: IncomingMessage, linked: LinkedIdentity
+    ) -> Reply | None:
+        """Handle the two-turn forget-me flow before the model ever runs.
+
+        Returns a Reply when the message was fully handled (request or
+        confirmation), or None to let normal processing continue.
+        """
+        # Group messages never trigger or confirm forget-me.
+        if msg.is_group:
+            return None
+
+        from agentg.forget import is_forget_me_request, normalize_confirmation
+
+        now = datetime.now(timezone.utc)
+        pending = await self.stores.forget.get_pending_request(
+            linked.member.id
+        )
+
+        if pending is not None:
+            # Expired — cancel silently and fall through.
+            if pending.expires_at < now:
+                await self.stores.forget.cancel_forget_me(linked.member.id)
+            else:
+                normalized = normalize_confirmation(msg.text)
+                if normalized == pending.confirmation_phrase:
+                    # Exact match — execute the wipe.
+                    await self.stores.forget.forget_member(linked.member.id)
+                    return Reply(
+                        "Your data has been permanently deleted. Goodbye!"
+                    )
+                # Wrong phrase — cancel the pending request.  A new
+                # forget-me trigger below will create a fresh one.
+                await self.stores.forget.cancel_forget_me(linked.member.id)
+
+        # Check if this message looks like a new forget-me request
+        # (handles both "no pending" and "wrong phrase, re-asking").
+        if is_forget_me_request(msg.text):
+            phrase = await self.stores.forget.request_forget_me(
+                linked.member.id,
+                linked.gym.id,
+                now,
+                self.forget_me_confirmation_seconds,
+            )
+            minutes = max(1, self.forget_me_confirmation_seconds // 60)
+            warning = (
+                f"\u26a0\ufe0f This will permanently erase ALL your data \u2014 "
+                f"every session, routine, note, and all chat history. "
+                f"This cannot be undone.\n\n"
+                f"To confirm, reply with this exact phrase:\n\n"
+                f"{phrase}\n\n"
+                f"Any other reply will cancel the request. "
+                f"This confirmation expires in {minutes} minute"
+                f"{'s' if minutes != 1 else ''}."
+            )
+            return Reply(warning)
+
+        return None
+
 
 
 def _is_sentence_boundary(text: str, last_sent: str) -> bool:
@@ -450,36 +509,6 @@ def _is_sentence_boundary(text: str, last_sent: str) -> bool:
             continue  # first chunk too short; keep scanning
         return True
     return False
-
-
-async def _clear_if_forgotten(
-    inner: AsyncIterator[str], context: MemberContext, session: SQLAlchemySession,
-) -> AsyncIterator[str]:
-    """Yield every chunk from ``inner``, then wipe the session if the turn
-    forgot the Member.
-
-    The streaming path is the production default, so issue #166 has to hold
-    here too: ``delete_my_data`` clears the session mid-turn, but the runner
-    persists this turn's items afterwards.  The clear runs in a ``finally``
-    so a stream that errors part-way still leaves no residue behind a
-    committed domain wipe."""
-    # Known limitation (#161): the wipe below runs during stream teardown, in
-    # the channel's task, which never entered ``with turn:``.  The SQL counter
-    # reads the contextvar, so these statements are not attributed to the turn
-    # -- a small undercount on forget-me turns only.  Duration and model-call
-    # count are unaffected: the run-loop task inherits the contextvar because
-    # ``run_streamed`` creates it inside the with-block.
-    try:
-        async for chunk in inner:
-            yield chunk
-    finally:
-        # Propagate the close inward before wiping (see _finish_turn), in a
-        # try/finally so a failure down the chain cannot skip the wipe (#166).
-        try:
-            await inner.aclose()
-        finally:
-            if context.forgotten:
-                await session.clear_session()
 
 
 async def _finish_turn(

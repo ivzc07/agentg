@@ -166,6 +166,26 @@ class DemoFileId(Base):
     file_unique_id: Mapped[str | None] = mapped_column(String(64), default=None)
 
 
+class ForgetMeRequest(Base):
+    """A pending two-turn Forget-me confirmation (issue #212).
+
+    One Member can hold at most one pending request; a new request replaces
+    any old one.  The confirmation phrase is checked from normalized raw
+    text before the model runs — the model never sees or acts on it.
+    """
+
+    __tablename__ = "forget_me_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    member_id: Mapped[int] = mapped_column(
+        ForeignKey("members.id"), unique=True, index=True
+    )
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    confirmation_phrase: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime())
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
 class DashboardLoginToken(Base):
     """A one-time magic link the bot hands a Coach for `/dashboard`.
 

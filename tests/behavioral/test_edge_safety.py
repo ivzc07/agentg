@@ -19,6 +19,15 @@ async def _count(engine, model, **where) -> int:
         return int(await db.scalar(q) or 0)
 
 
+def _extract_confirmation_phrase(reply: str) -> str | None:
+    """Pull the DELETE-ME-XXXXXX phrase out of a forget-me warning reply."""
+    for line in reply.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("DELETE-ME-"):
+            return stripped
+    return None
+
+
 async def test_pain_report_flags_the_coach_with_a_deep_link(tmp_path):
     async with ConversationHarness.create(
         tmp_path, dashboard_base_url="https://dash.test"
@@ -58,6 +67,7 @@ async def test_pain_report_flags_the_coach_with_a_deep_link(tmp_path):
 
 
 async def test_forget_me_wipes_every_member_row(tmp_path):
+    """Two-turn forget-me: request, then confirm with exact phrase (issue #212)."""
     async with ConversationHarness.create(tmp_path) as h:
         await h.linked_member()
         await h.seed_closed_session("bench 60 8,8,8")
@@ -77,52 +87,129 @@ async def test_forget_me_wipes_every_member_row(tmp_path):
         )
         member_id = h.member_id
 
-        await h.say(
-            "forget me",
-            steps=[message("This permanently erases everything — sure?")],
-        )
-        reply = await h.say(
-            "yes, delete everything",
-            steps=[
-                tool("delete_my_data", confirm=True),
-                message("Goodbye — you're wiped."),
-            ],
-        )
-        # Issue #166 acceptance criterion: goodbye reaches the Member.
-        assert "Goodbye" in reply
+        # Turn 1: request forget-me (pre-model — no model steps needed).
+        request_reply = await h.say("forget me")
+        assert "permanently erase" in request_reply.lower()
+        # The reply must include a confirmation phrase like DELETE-ME-XXXXXX.
+        phrase = _extract_confirmation_phrase(request_reply)
+        assert phrase is not None, f"no confirmation phrase in reply: {request_reply!r}"
+        # Data must still be intact after request.
+        assert await _count(h._engine, Member, id=member_id) == 1
 
+        # Turn 2: confirm with the exact phrase (pre-model — no model steps).
+        confirm_reply = await h.say(phrase)
+        assert "deleted" in confirm_reply.lower()
+
+        # Everything must be gone.
         assert await _count(h._engine, Member, id=member_id) == 0
         assert await _count(h._engine, MemberChannel, member_id=member_id) == 0
         assert await _count(h._engine, Session, member_id=member_id) == 0
         assert await _count(h._engine, MemberNote, member_id=member_id) == 0
         assert await _count(h._engine, Routine, member_id=member_id) == 0
         assert await h.stores.linking.identity_for("telegram", "42") is None
-        # Issue #166: the SDK session must be residue-free — no tool call or
-        # goodbye lingering after the wipe.
+        # The SDK session must be residue-free.
         session = h.runtime.session_for_member(member_id)
         assert await session.get_items() == []
 
 
-async def test_forget_me_declined_leaves_data_intact(tmp_path):
+async def test_forget_me_wrong_phrase_cancels_and_leaves_data(tmp_path):
+    """A wrong phrase cancels the request without deleting (issue #212)."""
     async with ConversationHarness.create(tmp_path) as h:
         await h.linked_member()
         await h.seed_closed_session("bench 60 8,8,8")
         member_id = h.member_id
 
-        await h.say(
-            "forget me",
-            steps=[message("This wipes everything — sure?")],
-        )
+        # Request forget-me.
+        request_reply = await h.say("delete my account")
+        assert "permanently erase" in request_reply.lower()
+        assert await _count(h._engine, Member, id=member_id) == 1
+
+        # Send a wrong phrase — the model runs normally.
         await h.say(
             "no wait keep my data",
-            steps=[
-                tool("delete_my_data", confirm=False),
-                message("Nothing deleted."),
-            ],
+            steps=[message("Nothing deleted — your data is safe.")],
         )
 
         assert await _count(h._engine, Member, id=member_id) == 1
         assert await h.stores.training.last_sets(member_id, "bench press") is not None
+
+
+async def test_forget_me_group_message_ignored(tmp_path):
+    """Group messages must not trigger or confirm forget-me (issue #212)."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        await h.seed_closed_session("bench 60 8,8,8")
+        member_id = h.member_id
+
+        # "forget me" in a group must pass through to the model.
+        await h.say(
+            "forget me",
+            is_group=True,
+            steps=[message("I can help with your training — what's on today?")],
+        )
+        # No pending request was created.
+        pending = await h.stores.forget.get_pending_request(member_id)
+        assert pending is None
+        assert await _count(h._engine, Member, id=member_id) == 1
+
+
+async def test_forget_me_retry_after_cancel(tmp_path):
+    """After a cancelled request, asking again issues a fresh phrase (issue #212)."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        await h.seed_closed_session("bench 60 8,8,8")
+        member_id = h.member_id
+
+        # First request.
+        reply1 = await h.say("forget me")
+        phrase1 = _extract_confirmation_phrase(reply1)
+        assert phrase1 is not None
+
+        # Cancel by sending something else.
+        await h.say(
+            "actually never mind",
+            steps=[message("No problem — your data is safe.")],
+        )
+        assert await _count(h._engine, Member, id=member_id) == 1
+
+        # Second request issues a different phrase.
+        reply2 = await h.say("forget me")
+        phrase2 = _extract_confirmation_phrase(reply2)
+        assert phrase2 is not None
+        assert phrase1 != phrase2, "each request must get a fresh phrase"
+
+        # Confirm with the second phrase.
+        await h.say(phrase2)
+        assert await _count(h._engine, Member, id=member_id) == 0
+
+
+async def test_forget_me_phrase_from_old_request_does_not_delete(tmp_path):
+    """After a request is cancelled, its old phrase must not delete (issue #212)."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        await h.seed_closed_session("bench 60 8,8,8")
+        member_id = h.member_id
+
+        reply1 = await h.say("forget me")
+        phrase1 = _extract_confirmation_phrase(reply1)
+        assert phrase1 is not None
+
+        # Cancel by requesting again (which replaces the old request).
+        reply2 = await h.say("forget me")
+        phrase2 = _extract_confirmation_phrase(reply2)
+        assert phrase2 is not None
+
+        # Sending the old phrase must not delete.
+        await h.say(
+            phrase1,
+            steps=[message("Hey! What can I help you with today?")],
+        )
+        assert await _count(h._engine, Member, id=member_id) == 1
+
+        # The pending request should have been cancelled when the old phrase
+        # didn't match.
+        pending = await h.stores.forget.get_pending_request(member_id)
+        assert pending is None
 
 
 async def test_gym_switch_creates_fresh_member_and_keeps_old(tmp_path):

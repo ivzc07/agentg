@@ -479,27 +479,6 @@ async def flag_to_coach(
     return await flag_to_coach_action(ctx.context, summary)
 
 
-@function_tool
-async def delete_my_data(ctx: RunContextWrapper[MemberContext], confirm: bool) -> dict[str, Any]:
-    """Forget-me: permanently erase EVERYTHING about the Member — profile,
-    Sessions, Sets, Routines, notes, and chat history — across every store.
-
-    Irreversible, no grace period. Ask for confirmation once first ("this wipes
-    everything permanently and can't be undone — are you sure?"); call with
-    confirm=True only on a clear yes. On confirm=False, nothing is deleted.
-    Only the Member can do this; never mention it to their coach.
-    """
-    c = ctx.context
-    if not confirm:
-        return {"deleted": False, "need_confirmation": True}
-    await c.stores.forget.forget_member(c.member_id)
-    # Mark the context so the runtime clears the SDK session again after the
-    # run — the runner persists this turn's items after the tool returns,
-    # which would leave the tool call and goodbye as residue (issue #166).
-    object.__setattr__(ctx.context, "forgotten", True)
-    return {"deleted": True}
-
-
 def build_tools() -> list[Tool]:
     return [
         open_session,
@@ -522,5 +501,4 @@ def build_tools() -> list[Tool]:
         resume_checkins,
         show_demo,
         flag_to_coach,
-        delete_my_data,
     ]

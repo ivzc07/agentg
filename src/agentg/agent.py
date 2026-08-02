@@ -143,12 +143,12 @@ it (YYYY-MM-DD); confirm the date warmly.
 - "start checking in again" → call resume_checkins.
 
 Privacy (plain chat):
-- "forget me" / "delete my data" / "delete my account" → confirm exactly once \
-that this permanently erases everything about them and can't be undone; on a \
-clear yes call delete_my_data with confirm=True and say a short, warm \
-goodbye; on no, reassure and do nothing. Never bring this up with their coach.
 - "export my data" / "send me my data" → politely say that's not available \
 yet, no promises on timing.
+- Forget-me ("forget me", "delete my data", etc.) is handled before you see
+  the message — you will never receive a forget-me request.  If a Member
+  asks about it, say only that the system handles data deletion requests and
+  they should type "forget me" to start.
 If a tool returns an error, say what's missing conversationally and ask.\
 """
 

@@ -205,3 +205,137 @@ async def test_messaging_after_forget_dead_ends_in_linking(env):
     linked = await env.linking.identity_for("telegram", "42")
     reply = await linking.handle(msg, linked)
     assert reply == DEAD_END_INSTRUCTION
+
+
+# --- Two-turn confirmation (issue #212) -----------------------------------
+
+from datetime import UTC, datetime
+
+from agentg.forget import is_forget_me_request, normalize_confirmation
+from agentg.models import ForgetMeRequest
+
+
+async def _pending_count(env, member_id: int) -> int:
+    async with async_sessionmaker(env.engine)() as db:
+        from sqlalchemy import func
+
+        return await db.scalar(
+            select(func.count())
+            .select_from(ForgetMeRequest)
+            .where(ForgetMeRequest.member_id == member_id)
+        ) or 0
+
+
+async def test_request_forget_me_persists_no_delete(env):
+    """Requesting forget-me creates a pending row but does not delete."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+
+    assert phrase.startswith("DELETE-ME-")
+    assert len(phrase) == len("DELETE-ME-") + 6  # 3 bytes hex = 6 chars
+    # Data still intact.
+    assert await count(env, Member, id=member.id) == 1
+    assert await count(env, Session, member_id=member.id) == 1
+    # Pending request row exists.
+    assert await _pending_count(env, member.id) == 1
+
+
+async def test_confirm_phrase_deletes_and_clears_request(env):
+    """The exact phrase triggers deletion; the pending row is gone too."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+
+    # Confirm with the exact phrase.
+    await env.forget.forget_member(member.id)
+
+    assert await count(env, Member, id=member.id) == 0
+    assert await _pending_count(env, member.id) == 0
+
+
+async def test_second_request_replaces_first(env):
+    """A second request atomically replaces the first."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+    phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+
+    assert phrase1 != phrase2, "each request must produce a fresh random phrase"
+    assert await _pending_count(env, member.id) == 1, "only one pending request"
+    # The stored phrase is the second one.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending.confirmation_phrase == phrase2
+
+
+async def test_cancel_forget_me_removes_request(env):
+    """Cancelling removes the pending row without deleting Member data."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+    await env.forget.cancel_forget_me(member.id)
+
+    assert await _pending_count(env, member.id) == 0
+    assert await count(env, Member, id=member.id) == 1
+
+
+async def test_get_pending_request_returns_none_when_empty(env):
+    """No pending request returns None."""
+    member = await populate(env)
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is None
+
+
+async def test_expired_request_still_stored(env):
+    """The store does not auto-expire — the runtime checks expiry."""
+    member = await populate(env)
+    past = datetime(2020, 1, 1, tzinfo=UTC)
+
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, past, 1)
+    # The row is there even though it's long expired.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.expires_at < datetime.now(UTC)
+
+
+# -- Helper function tests --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("forget me", True),
+        ("Forget Me", True),
+        ("I want to delete my data", True),
+        ("delete my account please", True),
+        ("erase me", True),
+        ("erase my data permanently", True),
+        ("delete my info now", True),
+        ("how do I forget me?", True),
+        ("  FORGET  ME  ", True),
+        ("hello", False),
+        ("what's my routine?", False),
+        ("delete my workout", False),  # no trigger substring
+        ("", False),
+    ],
+)
+def test_is_forget_me_request(text, expected):
+    assert is_forget_me_request(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("DELETE-ME-ABC123", "DELETE-ME-ABC123"),
+        ("delete-me-abc123", "DELETE-ME-ABC123"),
+        ("  Delete-Me-Abc123  ", "DELETE-ME-ABC123"),
+        ("DELETE  ME  ABC123", "DELETE ME ABC123"),
+        ("some other text", "SOME OTHER TEXT"),
+        ("", ""),
+    ],
+)
+def test_normalize_confirmation(text, expected):
+    assert normalize_confirmation(text) == expected

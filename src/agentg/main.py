@@ -80,6 +80,7 @@ async def run() -> None:
         demo_sender=demo_sender,
         notifier=notifier,
         dashboard=DashboardDoor(stores.dashboard, settings.dashboard_base_url),
+        forget_me_confirmation_seconds=settings.forget_me_confirmation_seconds,
     )
     await runtime.ensure_schema()
 

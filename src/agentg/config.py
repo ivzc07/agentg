@@ -10,6 +10,7 @@ DEFAULT_MODEL = "openai/gpt-4o-mini"
 DEFAULT_DATABASE_URL = "postgresql+asyncpg://agentg:agentg@localhost:5432/agentg"
 DEFAULT_DEMO_MEDIA_ROOT = "/data/demos"  # where the canonical demo MP4s live
 DEFAULT_DASHBOARD_PORT = 8080
+DEFAULT_FORGET_ME_CONFIRMATION_SECONDS = 300  # 5 minutes
 
 REQUIRED_VARS = ("TELEGRAM_BOT_TOKEN", "MODEL_API_KEY")
 
@@ -36,6 +37,8 @@ class Settings:
     # to the repo-relative path ``frontend/dist/``. Set this in container
     # deploys where the package is installed into site-packages.
     dashboard_spa_dist: str = ""
+    # How long a forget-me confirmation phrase stays valid (issue #212).
+    forget_me_confirmation_seconds: int = DEFAULT_FORGET_ME_CONFIRMATION_SECONDS
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -62,7 +65,21 @@ class Settings:
             dashboard_port=port,
             dashboard_session_secret=env.get("DASHBOARD_SESSION_SECRET") or None,
             dashboard_spa_dist=env.get("DASHBOARD_SPA_DIST") or "",
+            forget_me_confirmation_seconds=_int_env(
+                env, "FORGET_ME_CONFIRMATION_SECONDS", DEFAULT_FORGET_ME_CONFIRMATION_SECONDS
+            ),
         )
+
+
+def _int_env(env: Mapping[str, str], key: str, default: int) -> int:
+    """Parse an optional integer env var, falling back to *default*."""
+    raw = env.get(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ConfigError(f"{key} must be a number, got {raw!r}")
 
 
 def _as_asyncpg_url(url: str) -> str:

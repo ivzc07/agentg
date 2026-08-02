@@ -73,7 +73,3 @@ class MemberContext:
     # Per-turn cache so the active Routine is loaded once and reused
     # across the snapshot, session opener, and weight suggestions (#162).
     turn_cache: TurnCache = field(default_factory=TurnCache)
-    # True when delete_my_data confirmed and wiped everything; the runtime
-    # clears the SDK session again after the run to remove the turn's own
-    # residue (issue #166).
-    forgotten: bool = False
