@@ -82,6 +82,7 @@ async def run() -> None:
         dashboard=DashboardDoor(stores.dashboard, settings.dashboard_base_url),
     )
     await runtime.ensure_schema()
+    await runtime.start_background_tasks()
 
     # The dashboard's HTTP server shares this event loop with the long
     # poller (spec-dashboard §Stack). The bot username builds the t.me
@@ -118,6 +119,7 @@ async def run() -> None:
     try:
         await run_polling(bot, runtime.handle_message)
     finally:
+        await runtime.shutdown()
         await _shutdown(scheduler, bot, web_runner)
 
 

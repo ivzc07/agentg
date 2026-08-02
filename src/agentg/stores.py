@@ -19,6 +19,7 @@ from agentg.forget import ForgetStore
 from agentg.notes import NotesStore
 from agentg.routines import RoutineStore
 from agentg.linking_store import LinkingStore
+from agentg.safety_outbox import SafetyOutbox
 from agentg.training import Clock, TrainingStore
 
 
@@ -32,6 +33,7 @@ class Stores:
     demos: DemoStore
     forget: ForgetStore
     dashboard: DashboardStore
+    safety_outbox: SafetyOutbox
 
     @classmethod
     def from_engine(cls, engine: AsyncEngine, clock: Clock | None = None) -> "Stores":
@@ -47,6 +49,7 @@ class Stores:
                 demos=DemoStore(engine),
                 forget=ForgetStore(engine),
                 dashboard=DashboardStore(engine, clock=clock),
+                safety_outbox=SafetyOutbox(engine, clock=clock),
             )
         return cls(
             linking=LinkingStore(engine),
@@ -57,4 +60,5 @@ class Stores:
             demos=DemoStore(engine),
             forget=ForgetStore(engine),
             dashboard=DashboardStore(engine),
+            safety_outbox=SafetyOutbox(engine),
         )

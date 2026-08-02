@@ -32,6 +32,7 @@ from agentg.linking import Linking
 from agentg.linking_store import LinkedIdentity
 from agentg.context import MemberContext
 from agentg.instrument import TurnContext
+from agentg.safety_outbox import OutboxWorker
 from agentg.snapshot import member_snapshot
 from agentg.stores import Stores
 
@@ -133,6 +134,9 @@ class AgentRuntime:
     # wedge that Member, so the wait is bounded and the entry is consumed on
     # read — ordering is a nicety, liveness is not negotiable.
     _compaction_done: dict[tuple[str, str], asyncio.Event] = field(default_factory=dict)
+    # Durable safety-outbox worker — started after ensure_schema, stopped on
+    # shutdown.  None when no dashboard is wired (tests, headless runs).
+    _outbox_worker: OutboxWorker | None = None
 
     async def ensure_schema(self) -> None:
         """Create the domain and SDK session tables once at startup."""
@@ -140,6 +144,36 @@ class AgentRuntime:
         await self.stores.training.ensure_seeded()
         session = SQLAlchemySession("startup:schema", engine=self.engine, create_tables=True)
         await session.get_items(limit=1)  # table creation happens on first use
+
+    async def start_background_tasks(self) -> None:
+        """Start the outbox worker after ensure_schema has created its table.
+
+        Idempotent: safe to call when no notifier or dashboard is wired
+        (tests, headless runs).
+        """
+        if self._outbox_worker is not None:
+            return  # already started
+        if self.notifier is None or self.dashboard is None:
+            return  # nothing to wire
+        worker = OutboxWorker(
+            outbox=self.stores.safety_outbox,
+            notifier=self.notifier,
+            dashboard_store=self.stores.dashboard,
+            dashboard_base_url=self.dashboard.base_url,
+        )
+        await worker.start()
+        self._outbox_worker = worker
+
+    async def shutdown(self) -> None:
+        """Stop background tasks.  Safe to call when none were started."""
+        if self._outbox_worker is not None:
+            # Final drain before stopping the poll loop.
+            try:
+                await self._outbox_worker.drain_once()
+            except Exception:
+                logger.exception("final outbox drain failed")
+            await self._outbox_worker.stop()
+            self._outbox_worker = None
 
     def session_for_member(self, member_id: int) -> SQLAlchemySession:
         return SQLAlchemySession(f"member:{member_id}", engine=self.engine)

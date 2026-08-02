@@ -9,7 +9,6 @@ recover conversationally instead of crashing the turn.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -103,88 +102,41 @@ async def write_routine_action(
 
 
 async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]:
-    """Log a safety concern and ping every Coach of the Gym — every time.
+    """Log a safety concern and durably queue one notification per Coach.
 
     The flag is a Note of the ``safety`` kind with the bare summary (no
     prefix hack), so the roster can filter on the kind. There is no consent
-    ask (issue #101): the Note is always written and the Coaches are always
-    pinged, with an authenticated deep link that lands signed-in on the
-    Member's page — the same magic-link mechanism ``/dashboard`` uses.
+    ask (issue #101): the Note is always written and every Coach is always
+    queued for notification.  The outbox worker sends the pings without
+    delaying the Member's reply (issue #172).
 
-    The safety note is recorded synchronously so the tool truthfully reports
-    it was logged. Coach pings are deferred past the Member's reply so the
-    Member is never waiting on them (issue #172)."""
-    note = await c.stores.notes.remember_safety(c.member_id, c.gym_id, summary)
+    The safety Note and its outbox jobs commit atomically (issue #216): an
+    incomplete outbox rolls back the safety operation so a committed Note
+    can never lose every Coach notification on delivery failure or process
+    exit.
+    """
+    # A headless context (no notifier, no outbox wired) still logs — the
+    # concern is recorded rather than lost.
     if c.notifier is None:
+        note = await c.stores.notes.remember_safety(c.member_id, c.gym_id, summary)
         return {"logged": True, "coaches_to_notify": 0}
-    coaches = await c.stores.linking.coaches_for_gym(c.gym_id, exclude_member_id=c.member_id)
+
+    coaches = await c.stores.linking.coaches_for_gym(
+        c.gym_id, exclude_member_id=c.member_id
+    )
     if not coaches:
+        note = await c.stores.notes.remember_safety(c.member_id, c.gym_id, summary)
         return {"logged": True, "coaches_to_notify": 0}
-    # The Member page excludes coach-flagged Members, so a flag about a coach
-    # deep-links to the roster — their /members/<id> would be a signed-in 404.
-    next_path = "/" if c.is_coach else f"/members/{c.member_id}"
 
-    # Bind notifier to a local after the None guard so mypy can prove it
-    # is not None inside the nested closures (P2 #5153516992).
-    notifier = c.notifier
-
-    # Bound the fan-out so a Gym with many Coaches does not flood the
-    # channel with unthrottled concurrent sends (P3 #5153518045).
-    _ping_semaphore = asyncio.Semaphore(10)
-
-    async def _ping_coaches() -> None:
-        async def _ping_one(coach_id: int, _name: str, channel: str, channel_user_id: str) -> None:
-            # The stored text, not the raw summary: whitespace-collapsed like every
-            # Note, so a member-influenced summary can't smuggle a phishing URL
-            # onto its own line above the real magic link.
-            text = f"Heads-up from your member {c.member_name}: {note.text}"
-            link = None
-            try:
-                if c.dashboard_base_url is not None:
-                    token = await c.stores.dashboard.create_login_token(
-                        coach_id, c.gym_id, next_path=next_path
-                    )
-                    link = f"{c.dashboard_base_url}/login/{token}"
-            except Exception:
-                # Mint failed for this coach: fall back to a text-only ping (the
-                # no-base_url path) rather than dropping them.
-                logger.exception(
-                    "failed to mint a dashboard link for coach %s", channel_user_id
-                )
-            try:
-                # No link preview on either message: Telegram's fetcher would GET
-                # the one-time link before the coach does (and the token would
-                # land in its logs).
-                async with _ping_semaphore:
-                    await notifier.send(channel, channel_user_id, text, disable_preview=True)
-            except Exception:
-                logger.exception("failed to ping coach %s", channel_user_id)
-                return
-            if link is not None:
-                try:
-                    # The link travels alone: member-influenced text (which can carry
-                    # live URLs Telegram autolinks) never shares a message with the
-                    # one-time token, and protect_content keeps it unforwardable.
-                    async with _ping_semaphore:
-                        await notifier.send(
-                            channel,
-                            channel_user_id,
-                            link,
-                            disable_preview=True,
-                            protect_content=True,
-                        )
-                except Exception:
-                    logger.exception(
-                        "failed to send the dashboard link to coach %s", channel_user_id
-                    )
-
-        results = await asyncio.gather(
-            *[_ping_one(*coach) for coach in coaches], return_exceptions=True
-        )
-        # Surface any unhandled exception from _ping_one (P3 #5153517944).
-        for result in results:
-            if isinstance(result, BaseException):
-                logger.error("unhandled error during coach ping: %s", result)
-
-    c.coach_pings.append(_ping_coaches)
+    note, jobs = await c.stores.safety_outbox.create_note_and_jobs(
+        member_id=c.member_id,
+        gym_id=c.gym_id,
+        text=summary,
+        member_name=c.member_name,
+        member_is_coach=c.is_coach,
+        coaches=coaches,
+    )
+    logger.info(
+        "safety note #%d queued %d outbox jobs", note.id, len(jobs),
+    )
     return {"logged": True, "coaches_to_notify": len(coaches)}

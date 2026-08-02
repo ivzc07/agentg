@@ -13,6 +13,7 @@ from agentg.dashboard_store import DashboardStore
 from agentg.demos import DemoStore
 from agentg.forget import ForgetStore
 from agentg.routines import DEFAULT_RULES_DOC, ExerciseSpec, RoutineStore, WorkoutSpec
+from agentg.safety_outbox import SafetyOutbox
 from agentg.snapshot import member_snapshot
 from agentg.linking_store import LinkingStore
 from agentg.context import MemberContext
@@ -46,6 +47,7 @@ async def env(tmp_path):
             demos=DemoStore(engine),
             forget=ForgetStore(engine),
             dashboard=DashboardStore(engine),
+            safety_outbox=SafetyOutbox(engine),
         ),
         member_id=member.id,
         gym_id=gym.id,
@@ -173,6 +175,7 @@ async def test_active_routine_is_loaded_exactly_once_per_turn(env):
             demos=env.context.stores.demos,
             forget=env.context.stores.forget,
             dashboard=env.context.stores.dashboard,
+            safety_outbox=env.context.stores.safety_outbox,
         ),
         member_id=env.member_id,
         gym_id=env.gym_id,
@@ -213,6 +216,7 @@ async def test_no_routine_loads_exactly_once_per_turn(env):
             demos=env.context.stores.demos,
             forget=env.context.stores.forget,
             dashboard=env.context.stores.dashboard,
+            safety_outbox=env.context.stores.safety_outbox,
         ),
         member_id=env.member_id,
         gym_id=env.gym_id,
@@ -253,6 +257,7 @@ async def test_the_cache_lives_exactly_one_turn(env):
             demos=env.context.stores.demos,
             forget=env.context.stores.forget,
             dashboard=env.context.stores.dashboard,
+            safety_outbox=env.context.stores.safety_outbox,
         ),
         member_id=env.member_id,
         gym_id=env.gym_id,
