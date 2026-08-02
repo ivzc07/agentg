@@ -187,6 +187,29 @@ async def test_regeneration_first_revokes_a_pending_first_time_link(tmp_path):
         assert await h.stores.linking.identity_for("telegram", "99") is None
 
 
+async def test_redemption_first_switch_completes_before_regeneration_takes_effect(tmp_path):
+    """Redemption commits first for a Gym switch — the identity moves to the
+    new Gym before regeneration takes effect."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member(name="Dani", gym_name="Iron Temple")
+        old_member_id = h.member_id
+        new_gym = await h.create_gym("Steel Yard")
+
+        await h.say("/start x", link_code=new_gym.invite_code)
+
+        # Redemption first, then regeneration — the switch completes.
+        await h.say("yes")
+        await h.stores.linking.regenerate_invite_code(new_gym.id)
+
+        linked = await h.stores.linking.identity_for("telegram", "42")
+        assert linked is not None
+        assert linked.gym.id == new_gym.id
+        assert linked.member.id != old_member_id
+        assert linked.member.name == "Dani"
+        # Old Member row untouched by the atomic switch.
+        assert await _count(h._engine, Member, id=old_member_id) == 1
+
+
 async def test_regeneration_first_revokes_a_pending_switch(tmp_path):
     """Regeneration on the target Gym commits before the switch confirm —
     identity stays at the old Gym."""

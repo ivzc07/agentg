@@ -162,8 +162,8 @@ async def test_regenerated_coach_code_invalidates_a_pending_switch(tmp_path):
 
         reply = await h.say("yes")
 
-        # Expired-code recovery response — no gym named in the expired reply.
-        assert "Iron Temple" not in reply
+        # Coach switch recovery: reassured they're still at their old Gym.
+        assert "Iron Temple" in reply
         linked = await h.stores.linking.identity_for("telegram", "42")
         assert linked is not None
         assert linked.member.id == old_member_id and linked.member.is_coach is False
