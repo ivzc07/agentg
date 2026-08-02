@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from agentg.db import create_engine
-from agentg.models import Member, MemberChannel
+from agentg.models import Gym, Member, MemberChannel
 from agentg.linking_store import COACH_CODE_PREFIX, INVITE_CODE_LENGTH, LinkingStore, new_invite_code
 
 
@@ -470,6 +470,36 @@ async def test_ensure_schema_rebuilds_legacy_routines_for_memberless_masters(tmp
         )
         await db.flush()
     await store.ensure_schema()
+    await engine.dispose()
+
+
+async def test_ensure_schema_heals_digitless_invite_codes(tmp_path):
+    """Gyms provisioned before the digit guarantee (c0a43fb) can hold
+    digitless invite codes; the near-miss gate would dead-end them when
+    typed. ensure_schema backfills them at startup (#169)."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'heal.db'}")
+    store = LinkingStore(engine)
+    await store.ensure_schema()
+    gym = await store.create_gym("Iron Temple")
+    # Simulate a legacy code: all letters, no digit.
+    async with store._sessions() as db:
+        gym = await db.get(Gym, gym.id)
+        gym.invite_code = "abcdefgh"
+        await db.commit()
+    await engine.dispose()
+
+    # Re-open: ensure_schema heals the digitless code.
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'heal.db'}")
+    store = LinkingStore(engine)
+    await store.ensure_schema()
+
+    # The old digitless code no longer matches.
+    assert await store.gym_by_invite_code("abcdefgh") is None
+    # The gym now carries a digit-carrying code.
+    async with store._sessions() as db:
+        gym = (await db.scalars(select(Gym))).first()
+        assert gym is not None
+        assert any(ch.isdigit() for ch in gym.invite_code)
     await engine.dispose()
 
 

@@ -246,14 +246,24 @@ class Linking:
         # so; any other unlinked text dead-ends.
         # Short-circuit: a message that can't possibly be a code (wrong shape,
         # wrong alphabet, no digit) skips both DB lookups entirely (#169).
-        resolved = None
-        if _looks_like_invite_code(msg.text):
-            resolved = await self._gym_for_code(msg.text)
+        resolved = await self._resolve_typed_code(msg.text)
         if resolved is not None:
             gym, as_coach = resolved
             return await self._start_link(identity, msg, linked, gym, as_coach)
         if linked is None:
             return await self._reply_unlinked_unknown(msg, msg.text)
+        return None
+
+    async def _resolve_typed_code(self, text: str) -> tuple[Gym, bool] | None:
+        """If ``text`` looks like an Invite code *and* matches a Gym,
+        return ``(gym, as_coach)``; otherwise ``None``.
+
+        The shape gate runs first so ordinary messages skip both DB lookups
+        entirely (#169). ``_handle_code`` bypasses this gate on purpose:
+        deep-link taps are always codes.
+        """
+        if _looks_like_invite_code(text):
+            return await self._gym_for_code(text)
         return None
 
     async def _gym_for_code(self, text: str) -> tuple[Gym, bool] | None:
@@ -346,9 +356,7 @@ class Linking:
     ) -> str:
         # A pasted Invite or coach code mid-flow restarts linking, not a
         # name change. Short-circuit: skip DB lookups when it can't be a code (#169).
-        resolved = None
-        if _looks_like_invite_code(msg.text):
-            resolved = await self._gym_for_code(msg.text)
+        resolved = await self._resolve_typed_code(msg.text)
         if resolved is not None:
             typed_gym, as_coach = resolved
             del self._pending[identity]

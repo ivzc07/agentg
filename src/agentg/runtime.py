@@ -94,29 +94,43 @@ class AgentRuntime:
                 session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
             )
             context = self.member_context(linked)
-            result = await Runner.run(
-                self.agent,
-                msg.text,
-                session=session,
-                context=context,
-            )
-            text = str(result.final_output)
             # The check-in rhythm reset is deferred past the reply so it never
-            # blocks the LLM call; it still revives lapsed Members (#169).
-            sender = self.demo_sender
+            # blocks the LLM call; it still revives lapsed Members — even on
+            # LLM failure (#169). Fired concurrently with the model call so
+            # the DB write overlaps the LLM round-trip.
             member_id = linked.member.id
-            requests = list(context.demo_requests) if sender is not None else []
+            sender = self.demo_sender
             gym_id = context.gym_id
             channel, user_id = msg.channel, msg.channel_user_id
+            reset_task = asyncio.create_task(
+                self.stores.checkins.reset_rhythm(member_id)
+            )
+            try:
+                result = await Runner.run(
+                    self.agent,
+                    msg.text,
+                    session=session,
+                    context=context,
+                )
+            except Exception:
+                # On LLM failure, still ensure the reset completes so lapsed
+                # Members are revived.
+                try:
+                    await reset_task
+                except Exception:
+                    logger.exception("reset_rhythm failed for %d", member_id)
+                raise
+            text = str(result.final_output)
+            requests = list(context.demo_requests) if sender is not None else []
 
             # after_send is a best-effort hook: the channel adapter fires it
             # after the reply is delivered, so if the send itself fails this
-            # never runs and the rhythm reset + demos are silently skipped.
+            # never runs and demos are silently skipped.
             async def after_send() -> None:
                 # reset_rhythm is isolated from demo sends so a failure in
                 # one doesn't block the other.
                 try:
-                    await self.stores.checkins.reset_rhythm(member_id)
+                    await reset_task
                 except Exception:
                     logger.exception("reset_rhythm failed for %d", member_id)
                 for exercise in requests:

@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event
 
 import agentg.runtime as runtime_module
 from agentg.db import create_engine
@@ -157,3 +158,56 @@ async def test_deferred_reset_rhythm_still_revives_lapsed_members(runtime, monke
 
     state_after, _ = await runtime.stores.checkins.get_state(1)
     assert state_after == "on"
+
+
+async def test_reset_rhythm_still_runs_on_llm_failure(runtime, monkeypatch):
+    """A lapsed Member is revived even when the LLM call fails (#169).
+
+    Before this PR, the rhythm reset only ran inside after_send, which the
+    channel adapter never calls when the reply_fn raises — a lapsed Member
+    whose model call failed would stay lapsed, feeding the give-up rule."""
+    async def fake_run(agent, text, *, session, context=None):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    await runtime.stores.checkins.lapse(1)
+
+    state_before, _ = await runtime.stores.checkins.get_state(1)
+    assert state_before == "lapsed"
+
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        await runtime.handle_message(incoming("I'm here", "42"))
+
+    # The rhythm reset ran on the error path: the Member is revived.
+    state_after, _ = await runtime.stores.checkins.get_state(1)
+    assert state_after == "on"
+
+
+# --- AC: the measured query count for a plain message drops (#169) ---
+
+
+async def test_plain_linked_message_issues_few_queries(runtime, monkeypatch):
+    """A plain message from a linked Member issues a bounded number of DB
+    queries — the turn-level query count that issue #169 asks for."""
+    async def fake_run(agent, text, *, session, context=None):
+        return SimpleNamespace(final_output="ok")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    counts: list[int] = []
+
+    @event.listens_for(runtime.engine.sync_engine, "before_cursor_execute")
+    def count_query(conn, cursor, statement, parameters, context, executemany):
+        counts.append(1)
+
+    await runtime.handle_message(incoming("I'm here today", "42"))
+
+    # The exact count depends on compaction internals, but it must be
+    # bounded — a plain message should never trigger dozens of queries.
+    assert len(counts) < 30, f"expected <30 queries for a plain message, got {len(counts)}"

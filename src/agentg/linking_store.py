@@ -268,11 +268,15 @@ class LinkingStore:
         # Gyms provisioned before the coach link get their code at startup;
         # fresh schemas have no NULL codes, so this is a no-op there.
         async with self._sessions() as db:
-            legacy = (
-                await db.scalars(select(Gym).where(Gym.coach_invite_code.is_(None)))
-            ).all()
-            for gym in legacy:
-                gym.coach_invite_code = new_coach_invite_code()
+            gyms = (await db.scalars(select(Gym))).all()
+            for gym in gyms:
+                if gym.coach_invite_code is None:
+                    gym.coach_invite_code = new_coach_invite_code()
+                # Gyms provisioned before the digit guarantee (c0a43fb) can
+                # hold digitless invite codes; the near-miss gate would
+                # dead-end them when typed (#169). Heal them at startup.
+                if not any(ch.isdigit() for ch in gym.invite_code):
+                    gym.invite_code = new_invite_code()
             await db.commit()
 
     async def create_gym(
