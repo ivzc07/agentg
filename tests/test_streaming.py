@@ -941,3 +941,72 @@ async def test_aclose_releases_the_lock_synchronously(tmp_path):
             "aclose() must release the per-identity lock before it returns, "
             "not leave it to async-generator finalization"
         )
+
+
+async def test_lock_is_released_even_if_the_forget_wipe_raises(tmp_path):
+    """A failure while closing the inner chain must not cost the lock.
+
+    ``_hold_lock`` closes its inner chain before releasing, and that chain
+    runs ``clear_session()`` for a forgotten Member (#166), which can raise.
+    ``handle_message`` acquires the lock with no timeout, so a lost release
+    wedges that Member permanently -- the release therefore sits in a
+    ``finally`` around the inner ``aclose()``.
+
+    Revert-proof: drop the try/finally in ``_hold_lock`` and the lock is
+    still held after the raising close.
+    """
+    import agentg.runtime as runtime_module
+
+    lock = asyncio.Lock()
+    await lock.acquire()
+
+    async def exploding_inner():
+        try:
+            yield "chunk"
+        finally:
+            raise RuntimeError("clear_session blew up")
+
+    stream = runtime_module._hold_lock(exploding_inner(), lock)
+    assert await stream.__anext__() == "chunk"
+    with pytest.raises(RuntimeError):
+        await stream.aclose()
+
+    assert not lock.locked(), (
+        "the per-identity lock must be released even when the inner close raises"
+    )
+
+
+async def test_coach_pings_survive_a_failing_fallback_send():
+    """A raising fallback send must not drop the deferred safety pings.
+
+    ``after_send`` carries the Coach safety pings (#172); it runs in a
+    ``finally`` so that ``message.answer(EMPTY_REPLY_FALLBACK)`` raising
+    cannot skip it.
+
+    Revert-proof: move ``after_send`` back outside the ``finally`` and this
+    fails -- the exception propagates before the hook runs.
+    """
+    after_send_calls = []
+
+    async def empty_stream():
+        return
+        yield  # pragma: no cover - never reached, makes this a generator
+
+    async def after_send(*, deliver_media=True):
+        after_send_calls.append(deliver_media)
+
+    reply = Reply("", stream=empty_stream(), after_send=after_send)
+
+    async def reply_fn(msg):
+        return reply
+
+    message = FakeStreamMessage()
+    # Nothing streamed, so the fallback send fires -- and raises.
+    message.answer.side_effect = RuntimeError("network failure")
+
+    with pytest.raises(RuntimeError):
+        await make_message_handler(reply_fn)(message)
+
+    assert after_send_calls, (
+        "the Coach safety pings must still run when the fallback send fails"
+    )

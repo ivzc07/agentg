@@ -167,21 +167,24 @@ async def _deliver_streamed(
             except asyncio.CancelledError:
                 pass
 
-    # If nothing was delivered (empty stream, all-whitespace, or error before
-    # any chunk), send the fallback so the Member isn't left in silence.
-    if not sent_messages:
-        await message.answer(EMPTY_REPLY_FALLBACK)
-
     # after_send carries the deferred rhythm reset (#169), the Coach safety
     # pings (#172) and the compaction signal (#173) as well as demo media, so
     # it must run even when the stream errored -- a failed delivery must never
     # cost a Coach their safety ping.  Only the media is suppressed, which is
-    # all #176 wanted: no animation beneath an error message.
-    if reply.after_send is not None:
-        try:
-            await reply.after_send(deliver_media=not stream_errored)
-        except Exception:
-            logger.exception("post-reply delivery failed for sender %s", sender_id)
+    # all #176 wanted: no animation beneath an error message.  It sits in a
+    # finally so that a fallback send raising cannot drop it either (#172).
+    try:
+        # If nothing was delivered (empty stream, all-whitespace, or error
+        # before any chunk), send the fallback so the Member isn't left in
+        # silence.
+        if not sent_messages:
+            await message.answer(EMPTY_REPLY_FALLBACK)
+    finally:
+        if reply.after_send is not None:
+            try:
+                await reply.after_send(deliver_media=not stream_errored)
+            except Exception:
+                logger.exception("post-reply delivery failed for sender %s", sender_id)
 
 
 def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[None]]:

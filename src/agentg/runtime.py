@@ -467,10 +467,13 @@ async def _clear_if_forgotten(
         async for chunk in inner:
             yield chunk
     finally:
-        # Propagate the close inward before wiping (see _finish_turn).
-        await inner.aclose()
-        if context.forgotten:
-            await session.clear_session()
+        # Propagate the close inward before wiping (see _finish_turn), in a
+        # try/finally so a failure down the chain cannot skip the wipe (#166).
+        try:
+            await inner.aclose()
+        finally:
+            if context.forgotten:
+                await session.clear_session()
 
 
 async def _finish_turn(
@@ -484,16 +487,27 @@ async def _finish_turn(
     instead, in a ``finally`` so an aborted stream is still accounted for
     (issue #161 + #176).
     """
+    aborted = False
     try:
         async for chunk in inner:
             yield chunk
+    except BaseException:
+        # Errored or abandoned mid-generation: not a completed turn, so it is
+        # not logged -- #161 measures completed turns only, and a half-turn
+        # would pollute the latency baseline.
+        aborted = True
+        raise
     finally:
         # ``async for ... yield`` does NOT propagate aclose() to the delegated
         # generator, so close it explicitly: the channel's aclose() on the
         # outermost wrapper must still drive the #166 wipe and the lock release
-        # deterministically, not leave them to async-gen GC.
-        await inner.aclose()
-        turn.finish()
+        # deterministically, not leave them to async-gen GC.  In a try/finally
+        # so a failure down the chain cannot swallow the log.
+        try:
+            await inner.aclose()
+        finally:
+            if not aborted:
+                turn.finish()
 
 
 async def _hold_lock(
@@ -515,10 +529,16 @@ async def _hold_lock(
             async for chunk in inner:
                 yield chunk
         finally:
-            # Propagate the close inward before releasing (see _finish_turn).
-            await inner.aclose()
-            lock.release()
-            released = True
+            # Propagate the close inward before releasing (see _finish_turn),
+            # but never at the cost of the release itself: clear_session() down
+            # the chain can raise, and a lost release wedges this Member
+            # forever (handle_message acquires with no timeout).
+            try:
+                await inner.aclose()
+            finally:
+                if not released:
+                    lock.release()
+                    released = True
     except GeneratorExit:
         if not released:
             lock.release()
