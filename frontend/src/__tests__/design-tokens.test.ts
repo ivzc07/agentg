@@ -64,7 +64,13 @@ function linearize(c: number): number {
   return ((c + 0.055) / 1.055) ** 2.4;
 }
 
+/** Hex digits used to reject malformed colour strings before parsing. */
+const HEX_DIGIT_RE = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/;
+
 function expandHex(short: string): string {
+  if (!HEX_DIGIT_RE.test(short)) {
+    throw new Error(`Invalid hex color: ${short}`);
+  }
   if (short.length === 7 && short.startsWith('#')) return short;
   if (short.length === 4 && short.startsWith('#')) {
     return `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`;
@@ -74,9 +80,15 @@ function expandHex(short: string): string {
 
 function relativeLuminance(hex: string): number {
   const expanded = expandHex(hex);
-  const r = parseInt(expanded.slice(1, 3), 16) / 255;
-  const g = parseInt(expanded.slice(3, 5), 16) / 255;
-  const b = parseInt(expanded.slice(5, 7), 16) / 255;
+  const rRaw = parseInt(expanded.slice(1, 3), 16);
+  const gRaw = parseInt(expanded.slice(3, 5), 16);
+  const bRaw = parseInt(expanded.slice(5, 7), 16);
+  if (isNaN(rRaw) || isNaN(gRaw) || isNaN(bRaw)) {
+    throw new Error(`Invalid hex color: ${hex} (parsed NaN)`);
+  }
+  const r = rRaw / 255;
+  const g = gRaw / 255;
+  const b = bRaw / 255;
   return 0.2126 * linearize(r) + 0.7152 * linearize(g) + 0.0722 * linearize(b);
 }
 
@@ -89,7 +101,9 @@ export function contrastRatio(fg: string, bg: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// Extraction helpers — operate on the imported colours object, not regex
+// Extraction helpers — operate on the imported colours object, not regex.
+// Every helper accepts an optional ColorsConfig so synthetic / decoy
+// tests can exercise the same extraction logic that production tests run.
 // ---------------------------------------------------------------------------
 
 const AA_MINIMUM = 4.5;
@@ -97,9 +111,9 @@ const AA_MINIMUM = 4.5;
 /** All semantic colour family names that carry both DEFAULT + tint. */
 const SEMANTIC_NAMES = ['magenta', 'cyan', 'coral', 'amber', 'purple', 'success'] as const;
 
-/** Discover every ink token from ``colors.ink`` (fail-closed). */
-function getInks(): Record<string, string> {
-  const ink = colors.ink;
+/** Discover every ink token from ``src.ink`` (fail-closed). */
+function getInks(src: ColorsConfig = colors): Record<string, string> {
+  const ink = src.ink;
   if (!ink || typeof ink !== 'object') {
     throw new Error('Could not parse ink block from tailwind config');
   }
@@ -122,10 +136,10 @@ function getInks(): Record<string, string> {
 }
 
 /** Discover every elevation surface + ``bg`` from the colours object. */
-function getSurfaces(): Record<string, string> {
+function getSurfaces(src: ColorsConfig = colors): Record<string, string> {
   const surfaces: Record<string, string> = {};
 
-  for (const [key, value] of Object.entries(colors)) {
+  for (const [key, value] of Object.entries(src)) {
     if (key.startsWith('elevation-') && typeof value === 'object' && value !== null) {
       const entry = value as NestedColor;
       if (typeof entry.DEFAULT === 'string') {
@@ -134,18 +148,20 @@ function getSurfaces(): Record<string, string> {
     }
   }
 
-  if (typeof colors.bg === 'string') {
-    surfaces['bg'] = colors.bg;
+  if (typeof src.bg === 'string') {
+    surfaces['bg'] = src.bg;
   }
 
   return surfaces;
 }
 
 /** Semantic foreground-on-tint pairs for each colour family. */
-function getSemanticTintPairs(): Record<string, { fg: string; bg: string }> {
+function getSemanticTintPairs(
+  src: ColorsConfig = colors,
+): Record<string, { fg: string; bg: string }> {
   const pairs: Record<string, { fg: string; bg: string }> = {};
   for (const name of SEMANTIC_NAMES) {
-    const entry = colors[name];
+    const entry = src[name];
     if (typeof entry === 'object' && entry !== null) {
       const e = entry as NestedColor;
       if (typeof e.DEFAULT === 'string' && typeof e.tint === 'string') {
@@ -160,13 +176,18 @@ function getSemanticTintPairs(): Record<string, { fg: string; bg: string }> {
  *
  * Accent colours are mid-luminance by design and are only paired with
  * dark text (``text-bg`` / ``text-black``) in the UI — never with white
- * ``text-ink``, which would fail AA. */
-function getSemanticAccentBgPairs(): Record<string, { fg: string; bg: string }> {
+ * ``text-ink``, which would fail AA.
+ *
+ * The RoutineEditor.test.tsx component-level test guards this invariant
+ * across live component sources so it cannot silently regress. */
+function getSemanticAccentBgPairs(
+  src: ColorsConfig = colors,
+): Record<string, { fg: string; bg: string }> {
   const pairs: Record<string, { fg: string; bg: string }> = {};
-  const bg = colors.bg;
+  const bg = src.bg;
 
   for (const name of SEMANTIC_NAMES) {
-    const entry = colors[name];
+    const entry = src[name];
     if (typeof entry === 'object' && entry !== null) {
       const e = entry as NestedColor;
       if (typeof e.DEFAULT === 'string' && typeof bg === 'string') {
@@ -182,6 +203,18 @@ function getSemanticAccentBgPairs(): Record<string, { fg: string; bg: string }> 
 // ===========================================================================
 
 describe('design token WCAG AA contrast', () => {
+  // -----------------------------------------------------------------------
+  // Hex validation — malformed strings must throw, not false-green via NaN
+  // -----------------------------------------------------------------------
+
+  it('malformed hex tokens throw instead of silently passing (NaN guard)', () => {
+    expect(() => relativeLuminance('#zzzzzz')).toThrow(/Invalid hex/);
+    expect(() => relativeLuminance('#GGGGGG')).toThrow(/Invalid hex/);
+    expect(() => relativeLuminance('#xyz')).toThrow(/Invalid hex/);
+    expect(() => contrastRatio('#000000', '#zzzzzz')).toThrow(/Invalid hex/);
+    expect(() => contrastRatio('#zzzzzz', '#000000')).toThrow(/Invalid hex/);
+  });
+
   // -----------------------------------------------------------------------
   // Ink × surface matrix (dynamically discovered)
   // -----------------------------------------------------------------------
@@ -231,7 +264,11 @@ describe('design token WCAG AA contrast', () => {
     const surfaces = getSurfaces();
     const elevations = Object.entries(surfaces)
       .filter(([k]) => k.startsWith('elevation-'))
-      .sort(([a], [b]) => a.localeCompare(b));
+      .sort(([a], [b]) => {
+        const numA = parseInt(a.split('-')[1], 10);
+        const numB = parseInt(b.split('-')[1], 10);
+        return numA - numB;
+      });
 
     expect(elevations.length).toBeGreaterThanOrEqual(2);
 
@@ -248,11 +285,12 @@ describe('design token WCAG AA contrast', () => {
   });
 
   // -----------------------------------------------------------------------
-  // Dynamic discovery: new keys are automatically included
+  // Dynamic discovery: new keys are automatically included.
+  // Synthetic tests call the shared helpers (getInks / getSurfaces) so
+  // helper regressions are caught here instead of by duplicate logic.
   // -----------------------------------------------------------------------
 
   it('new ink token is discovered and a bad contrast pair fails', () => {
-    // Simulate a config with an extra ink token that fails contrast.
     const synthetic: ColorsConfig = {
       ink: {
         DEFAULT: '#fff',
@@ -265,18 +303,9 @@ describe('design token WCAG AA contrast', () => {
       'elevation-1': { DEFAULT: '#131313' },
     };
 
-    const inks: Record<string, string> = {};
-    const ink = synthetic.ink!;
-    for (const [key, value] of Object.entries(ink)) {
-      if (typeof value === 'string') {
-        inks[key === 'DEFAULT' ? 'ink' : `ink-${key}`] = value;
-      }
-    }
-
-    // ink-4 must be discovered
+    const inks = getInks(synthetic);
     expect(inks['ink-4']).toBe('#111111');
 
-    // ink-4 on elevation-0 (#111 on #000) should fail AA
     const elev0 = synthetic['elevation-0'] as NestedColor;
     const cr = contrastRatio(inks['ink-4'], elev0.DEFAULT!);
     expect(cr).toBeLessThan(AA_MINIMUM);
@@ -291,15 +320,7 @@ describe('design token WCAG AA contrast', () => {
       'elevation-4': { DEFAULT: '#2a2a2e' },
     };
 
-    const surfaces: Record<string, string> = {};
-    for (const [key, value] of Object.entries(synthetic)) {
-      if (key.startsWith('elevation-') && typeof value === 'object' && value !== null) {
-        const entry = value as NestedColor;
-        if (typeof entry.DEFAULT === 'string') surfaces[key] = entry.DEFAULT;
-      }
-    }
-    if (typeof synthetic.bg === 'string') surfaces['bg'] = synthetic.bg;
-
+    const surfaces = getSurfaces(synthetic);
     expect(surfaces['elevation-4']).toBe('#2a2a2e');
     expect(Object.keys(surfaces).length).toBe(4); // 3 elevations + bg
   });
@@ -361,27 +382,14 @@ describe('design token WCAG AA contrast', () => {
   // -----------------------------------------------------------------------
 
   it('a retiredPalette does not contaminate extraction', () => {
-    // Simulate a config where bg lives only under retiredPalette — structural
-    // extraction from colors.* must not pick it up.
     const synthetic: ColorsConfig = {
       ink: { DEFAULT: '#fff', '2': '#9a9a9a', '3': '#85858a' },
       bg: undefined, // not present in active colors
       'elevation-0': { DEFAULT: '#000' },
       'elevation-1': { DEFAULT: '#131313' },
-      // retiredPalette is outside theme.extend.colors in reality, but even
-      // if it leaks into colors, the extraction only looks at the top-level
-      // keys bg + elevation-* — it won't recurse into arbitrary objects.
     };
 
-    const surfaces: Record<string, string> = {};
-    for (const [key, value] of Object.entries(synthetic)) {
-      if (key.startsWith('elevation-') && typeof value === 'object' && value !== null) {
-        const entry = value as NestedColor;
-        if (typeof entry.DEFAULT === 'string') surfaces[key] = entry.DEFAULT;
-      }
-    }
-    if (typeof synthetic.bg === 'string') surfaces['bg'] = synthetic.bg;
-
+    const surfaces = getSurfaces(synthetic);
     // bg must NOT be picked up since it's undefined
     expect(surfaces['bg']).toBeUndefined();
   });

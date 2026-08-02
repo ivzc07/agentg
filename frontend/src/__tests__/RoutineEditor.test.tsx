@@ -687,3 +687,50 @@ describe("RoutineEditor preset mode", () => {
     expect(screen.getByText(/Newer day/)).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Accent-bg dark-text invariant: accent backgrounds (mid-luminance) must
+// only be paired with dark text (text-bg / text-black) — never with
+// text-white or text-ink, which would fail WCAG AA.
+// ---------------------------------------------------------------------------
+
+describe("accent-background dark-text invariant", () => {
+  const ACCENT_BG_CLASSES = [
+    "bg-magenta",
+    "bg-cyan",
+    "bg-coral",
+    "bg-amber",
+    "bg-purple",
+    "bg-success",
+  ];
+
+  const DARK_TEXT_CLASSES = ["text-bg", "text-black"];
+  const LIGHT_TEXT_CLASSES = ["text-white", "text-ink"];
+
+  // Scan the live component source for className strings.
+  const CLASSNAME_RE = /className=(?:"([^"]*)"|\{`([^`]*)`\})/g;
+  let match: RegExpExecArray | null;
+  const classStrings: string[] = [];
+  while ((match = CLASSNAME_RE.exec(routineEditorSource)) !== null) {
+    classStrings.push(match[1] ?? match[2] ?? "");
+  }
+
+  it("every accent bg-* class is paired with a dark text class (not text-white / text-ink)", () => {
+    const violations: string[] = [];
+    for (const cs of classStrings) {
+      for (const accentCls of ACCENT_BG_CLASSES) {
+        if (!cs.includes(accentCls)) continue;
+
+        const hasDark = DARK_TEXT_CLASSES.some((c) => cs.includes(c));
+        const hasLight = LIGHT_TEXT_CLASSES.some((c) => cs.includes(c));
+
+        if (!hasDark || hasLight) {
+          violations.push(
+            `${accentCls} used without dark-text guard: "${cs.trim()}"`,
+          );
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
