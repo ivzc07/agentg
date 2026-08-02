@@ -136,6 +136,27 @@ async def test_handler_ignores_messages_without_a_sender():
     reply_fn.assert_not_awaited()
 
 
+async def test_channel_post_message_gets_rejection():
+    """Channel posts (chat type 'channel') arrive as channel_post updates,
+    not message updates. The handler must reject them with the same
+    non-private rejection (#211)."""
+    async def reply_fn(msg):
+        return Reply("should not reach agent")
+
+    # A channel post still carries a Message object; the chat.type is 'channel'.
+    message = FakeMessage(
+        user_id=123, text="post to channel", chat_type="channel",
+    )
+    await make_message_handler(reply_fn)(message)
+
+    message.answer.assert_awaited_once()
+    rejection_text = message.answer.await_args[0][0]
+    assert rejection_text == (
+        "👋 ¡Hola! Solo puedo entrenarte por chat directo, no en grupos. "
+        "Envíame un mensaje privado y empezamos."
+    )
+
+
 async def test_anonymous_admin_group_message_gets_rejection():
     """Messages with no from_user (e.g. anonymous admin / sender-chat)
     in non-private chats must still receive the rejection reply (#211)."""
@@ -257,9 +278,16 @@ def test_split_counts_utf16_units_the_way_telegram_does():
     assert "".join(chunks) == text
 
 
-def test_dispatcher_registers_one_message_handler():
+def test_dispatcher_registers_handler_on_message_and_channel_post():
+    """The handler must be registered on both dispatcher.message (private/group)
+    and dispatcher.channel_post so that channel posts reach the non-private
+    rejection (#211)."""
     dispatcher = create_dispatcher(AsyncMock())
     assert len(dispatcher.message.handlers) == 1
+    assert len(dispatcher.channel_post.handlers) == 1, (
+        "channel_post handler is missing — channel posts would silently "
+        "bypass the non-private rejection"
+    )
 
 
 # ── typing indicator ────────────────────────────────────────────────────

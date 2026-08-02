@@ -271,7 +271,11 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
 
 def create_dispatcher(reply_fn: ReplyFn) -> Dispatcher:
     dispatcher = Dispatcher()
-    dispatcher.message.register(make_message_handler(reply_fn), F.text)
+    handler = make_message_handler(reply_fn)
+    # Private/group messages arrive as message updates; channel posts
+    # (where the bot is an admin) arrive as channel_post updates (#211).
+    dispatcher.message.register(handler, F.text)
+    dispatcher.channel_post.register(handler, F.text)
     return dispatcher
 
 
