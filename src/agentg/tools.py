@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from agents import RunContextWrapper, Tool, function_tool
+from agents import AgentBase, RunContextWrapper, Tool, function_tool
 from pydantic import BaseModel, Field
 
 from agentg.advice import suggest_for_today
@@ -22,6 +22,22 @@ from agentg.coaching import (
 from agentg.context import MemberContext
 from agentg.routines import ExerciseSpec, WorkoutSpec
 from agentg.training import LoggedSets
+
+
+def _coach_only(ctx: RunContextWrapper[MemberContext], _agent: AgentBase) -> bool:
+    """Coach-only tools are enabled only when the Member is flagged as a Coach."""
+    return ctx.context.is_coach
+
+
+def _routine_authoring_enabled(
+    ctx: RunContextWrapper[MemberContext], _agent: AgentBase
+) -> bool:
+    """Routine-authoring tools are enabled when the Member is a Coach, has no
+    Routine, or has an agent-generated Routine they can ask to restructure
+    (issue #174). The ``can_author_routine`` flag is precomputed when
+    ``MemberContext`` is built so this check is a cheap field read."""
+    c = ctx.context
+    return c.is_coach or c.can_author_routine
 
 
 class ExerciseInput(BaseModel):
@@ -222,14 +238,14 @@ async def get_rules_doc(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]
     return {"rules_doc": await c.stores.routines.effective_rules_doc(c.gym_id)}
 
 
-@function_tool
+@function_tool(is_enabled=_routine_authoring_enabled)
 async def list_exercises(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     """The Exercise catalog to draw a Routine from. Prescribe only these names."""
     c = ctx.context
     return {"exercises": await c.stores.training.catalog_names()}
 
 
-@function_tool
+@function_tool(is_enabled=_routine_authoring_enabled)
 async def save_routine(
     ctx: RunContextWrapper[MemberContext], workouts: list[WorkoutInput]
 ) -> dict[str, Any]:
@@ -326,7 +342,7 @@ async def suggest_weights(ctx: RunContextWrapper[MemberContext]) -> dict[str, An
 # The gate and the behavior live in coaching.py; these wrappers only adapt.
 
 
-@function_tool
+@function_tool(is_enabled=_coach_only)
 async def update_rules_doc(ctx: RunContextWrapper[MemberContext], new_doc: str) -> dict[str, Any]:
     """(Coach only) Replace the gym's rules doc with new plain text.
 
@@ -339,7 +355,7 @@ async def update_rules_doc(ctx: RunContextWrapper[MemberContext], new_doc: str) 
     return await update_rules_doc_action(ctx.context, new_doc)
 
 
-@function_tool
+@function_tool(is_enabled=_coach_only)
 async def write_routine(
     ctx: RunContextWrapper[MemberContext],
     member_name: str,
@@ -422,7 +438,7 @@ async def show_demo(ctx: RunContextWrapper[MemberContext], exercise: str) -> dic
     ref = await c.stores.demos.resolve(exercise, c.gym_id)
     if ref is None:
         return {"available": False, "exercise": exercise}
-    c.demo_requests.append(ref.exercise_name)
+    c.demo_requests.append(ref)
     return {"available": True, "exercise": ref.exercise_name}
 
 
@@ -455,6 +471,10 @@ async def delete_my_data(ctx: RunContextWrapper[MemberContext], confirm: bool) -
     if not confirm:
         return {"deleted": False, "need_confirmation": True}
     await c.stores.forget.forget_member(c.member_id)
+    # Mark the context so the runtime clears the SDK session again after the
+    # run — the runner persists this turn's items after the tool returns,
+    # which would leave the tool call and goodbye as residue (issue #166).
+    object.__setattr__(ctx.context, "forgotten", True)
     return {"deleted": True}
 
 

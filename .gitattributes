@@ -1,0 +1,19 @@
+# Line-ending policy.
+#
+# Git for Windows ships `core.autocrlf=true` in its SYSTEM gitconfig, so on a
+# Windows machine every clone and every `git worktree add` rewrites text files
+# to CRLF on checkout. For shell scripts that is fatal, not cosmetic: a CRLF
+# shebang makes the kernel look for an interpreter literally named `sh\r`, and
+# any non-MSYS shell (WSL bash, dash, busybox) then fails with an error that
+# points nowhere near the real cause. Git Bash happens to tolerate it, which is
+# what makes this bug so slippery - it reproduces only under some shells.
+#
+# Pinning `eol=lf` keeps these files LF in the working tree regardless of the
+# user's core.autocrlf, so `scripts/pi-review` is executable straight out of a
+# fresh worktree with no manual CRLF-stripping step.
+# Listed per file rather than as `scripts/*`, deliberately. A directory-wide
+# glob would force `text` onto any binary later dropped in there (corrupting it
+# on checkout), and it would still miss a script in a subdirectory, since `*`
+# does not cross `/`. New extensionless scripts must be added here explicitly.
+*.sh                text eol=lf
+scripts/pi-review   text eol=lf

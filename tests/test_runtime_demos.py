@@ -7,6 +7,7 @@ import pytest
 import agentg.runtime as runtime_module
 from agentg.db import create_engine
 from agentg.demo_media import SentAnimation
+from agentg.demos import DemoRef
 from agentg.messages import IncomingMessage
 from agentg.linking import Linking
 from agentg.runtime import AgentRuntime
@@ -58,9 +59,12 @@ async def env(tmp_path):
 
 
 async def test_a_queued_demo_is_sent_after_the_reply(env, monkeypatch):
+    ref = await env.demos.resolve("goblet squat", 1)  # gym 1 = Iron Temple
+    assert ref is not None
+
     async def fake_run(agent, text, *, session, context=None, run_config=None):
-        # the show_demo tool would append the resolved exercise name
-        context.demo_requests.append("goblet squat")
+        # the show_demo tool would append the resolved DemoRef
+        context.demo_requests.append(ref)
         return SimpleNamespace(final_output="on its way — knees out, chest tall!")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)

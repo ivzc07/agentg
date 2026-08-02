@@ -16,7 +16,7 @@ Supporting flows: Presets (shared routines), tenant Settings (invite links + gym
 
 ### Stack and constraints
 
-- Server-rendered HTML built with Python f-strings inside `src/agentg/dashboard_web.py` (1951 lines) on aiohttp; no template engine in practice, no build step, no SPA, three tiny vanilla JS snippets (search filter, copy buttons, typed-confirm gate).
+- Server-rendered HTML built with Python f-strings inside `src/agentg/dashboard_web.py` (1951 lines) on aiohttp; no template engine in practice, no build step, no SPA, three tiny vanilla JS snippets (search filter, copy buttons, typed-confirm gate). (Describes the state this plan was written against, and still what ships while `DASHBOARD_SPA_ENABLED` is off; [ADR 0004](../adr/0004-dashboard-react-spa.md) has since lifted the no-build-step/no-SPA constraint.)
 - Styling is three inline `<style>` constants (`ROSTER_STYLE`, `MEMBER_STYLE`, `EDITOR_STYLE`) plus a bare `_page()` shell and three stray inline styles.
 - i18n: per-browser EN/ES via `dashboard_i18n.py` strings; Exercise names, Workout names, and Members' verbatim words never translate.
 - No design tokens, no CSS custom properties, no dark mode, no media queries, no focus styles, no transitions.
@@ -286,7 +286,7 @@ Linear's row anatomy and grouped sections with counts (roster rows, bands, lapse
 ### Left undone, knowingly
 
 - Routine day-cards carry no per-exercise "last logged" lines (plan §3): needs per-Member exercise history in `member_page`, out of the store's scope this pass.
-- Sessions stay flat rows, not `details` collapses - revisit with the htmx interaction cluster (ADR 0003).
+- Sessions stay flat rows, not `details` collapses - originally deferred to the htmx interaction cluster (ADR 0003). That cluster is retired by [ADR 0004](../adr/0004-dashboard-react-spa.md); revisit during the React cutover ([#154](https://github.com/ivzc07/agentg/issues/154)) instead.
 - The zero-match search state is a fixed sentence, not "0 de N", and the header count never updates live - same cluster.
 - No per-day remove affordance in the editor (pain 13) - the clear-the-block gesture stands for now.
 

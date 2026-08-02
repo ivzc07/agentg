@@ -199,6 +199,20 @@ def _add_missing_columns(conn: Connection) -> None:
     token_columns = {c["name"] for c in inspect(conn).get_columns("dashboard_login_tokens")}
     if "next_path" not in token_columns:
         conn.execute(text(ADD_NEXT_PATH_DDL))
+    # FK indexes for Gym-scoped reads (issue #178): Coach lookup, roster,
+    # and the check-in sweep join on these columns.
+    members_indexes = {i["name"] for i in inspect(conn).get_indexes("members")}
+    if "ix_members_gym_id" not in members_indexes:
+        conn.execute(text("CREATE INDEX ix_members_gym_id ON members (gym_id)"))
+    channels_indexes = {i["name"] for i in inspect(conn).get_indexes("member_channels")}
+    if "ix_member_channels_member_id" not in channels_indexes:
+        conn.execute(
+            text("CREATE INDEX ix_member_channels_member_id ON member_channels (member_id)")
+        )
+    if "ix_member_channels_gym_id" not in channels_indexes:
+        conn.execute(
+            text("CREATE INDEX ix_member_channels_gym_id ON member_channels (gym_id)")
+        )
 
 
 @dataclass(frozen=True)
@@ -268,11 +282,15 @@ class LinkingStore:
         # Gyms provisioned before the coach link get their code at startup;
         # fresh schemas have no NULL codes, so this is a no-op there.
         async with self._sessions() as db:
-            legacy = (
-                await db.scalars(select(Gym).where(Gym.coach_invite_code.is_(None)))
-            ).all()
-            for gym in legacy:
-                gym.coach_invite_code = new_coach_invite_code()
+            gyms = (await db.scalars(select(Gym))).all()
+            for gym in gyms:
+                if gym.coach_invite_code is None:
+                    gym.coach_invite_code = new_coach_invite_code()
+                # Gyms provisioned before the digit guarantee (c0a43fb) can
+                # hold digitless invite codes; the near-miss gate would
+                # dead-end them when typed (#169). Heal them at startup.
+                if not any(ch.isdigit() for ch in gym.invite_code):
+                    gym.invite_code = new_invite_code()
             await db.commit()
 
     async def create_gym(

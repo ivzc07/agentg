@@ -305,6 +305,11 @@ class DashboardStore:
         # the Agent's tools use, so the two never diverge.
         self._routines = RoutineStore(engine, clock)
 
+    def session(self):
+        """A public session factory for seeding / scripting — the same
+        sessionmaker the store itself uses internally."""
+        return self._sessions()
+
     async def create_login_token(
         self, member_id: int, gym_id: int, next_path: str | None = None
     ) -> str:
@@ -771,6 +776,9 @@ class DashboardStore:
 
     async def presets(self, gym_id: int) -> list[RoutinePreset]:
         return await self._routines.presets(gym_id)
+
+    async def preset_ids_with_masters(self, gym_id: int) -> set[int]:
+        return await self._routines.preset_ids_with_masters(gym_id)
 
     async def create_preset(self, gym_id: int, name: str) -> RoutinePreset:
         return await self._routines.create_preset(gym_id, name)

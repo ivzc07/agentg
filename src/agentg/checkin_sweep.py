@@ -9,10 +9,10 @@ Telegram adapter supplies the notifier (ADR 0001).
 from __future__ import annotations
 
 import logging
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Protocol
 
-from agentg.checkin import CheckinData, decide_checkin
+from agentg.checkin import CheckinData, _previous_pinned_day, decide_checkin
 from agentg.checkin_store import CheckinStore, SweepRow
 from agentg.routines import RoutineStore
 from agentg.timezones import gym_zone
@@ -32,21 +32,14 @@ class Notifier(Protocol):
     ) -> None: ...
 
 
-def _previous_pinned_weekday(today: date, pinned: frozenset[int]) -> int | None:
-    for back in range(1, 8):
-        weekday = date.fromordinal(today.toordinal() - back).weekday()
-        if weekday in pinned:
-            return weekday
-    return None
-
-
 async def _build_data(
     row: SweepRow, now_local: datetime, training: TrainingStore, routines: RoutineStore
 ) -> CheckinData:
     names = await routines.weekday_workout_names(row.member_id)
     pinned = frozenset(names)
     today = now_local.date()
-    missed_weekday = _previous_pinned_weekday(today, pinned) if pinned else None
+    prev = _previous_pinned_day(today, pinned)
+    missed_weekday = prev.weekday() if prev is not None else None
     return CheckinData(
         state=row.state,
         snoozed_until=row.snoozed_until,
@@ -79,28 +72,31 @@ async def run_sweep(
     """Run one pass. Returns how many proactive messages were sent."""
     sent = 0
     for row in await checkin_store.sweep_rows():
-        now_local = _gym_now(row, now_utc)
-        today = now_local.date()
-
-        # Clear an expired snooze so state reflects reality going forward.
-        if row.state == "snoozed" and row.snoozed_until is not None and row.snoozed_until <= today:
-            await checkin_store.wake_from_snooze(row.member_id)
-
-        data = await _build_data(row, now_local, training, routines)
-        decision = decide_checkin(now_local, data)
-        if decision.action == "none" or decision.message is None:
-            continue
         try:
-            await notifier.send(row.channel, row.channel_user_id, decision.message)
+            now_local = _gym_now(row, now_utc)
+            today = now_local.date()
+
+            # Clear an expired snooze so state reflects reality going forward.
+            if row.state == "snoozed" and row.snoozed_until is not None and row.snoozed_until <= today:
+                await checkin_store.wake_from_snooze(row.member_id)
+
+            data = await _build_data(row, now_local, training, routines)
+            decision = decide_checkin(now_local, data)
+            if decision.action == "none" or decision.message is None:
+                continue
+            try:
+                await notifier.send(row.channel, row.channel_user_id, decision.message)
+            except Exception:
+                logger.exception("failed to send check-in to member %s", row.member_id)
+                continue
+            sent += 1
+            # Best-effort: a crash between the send and the record could re-nudge
+            # next day. The frequency cap bounds the blast radius (never worse than
+            # one extra nudge), so no idempotency key is warranted at this scale.
+            if decision.action == "winddown":
+                await checkin_store.lapse(row.member_id)
+            else:
+                await checkin_store.record_nudge(row.member_id, today)
         except Exception:
-            logger.exception("failed to send check-in to member %s", row.member_id)
-            continue
-        sent += 1
-        # Best-effort: a crash between the send and the record could re-nudge
-        # next day. The frequency cap bounds the blast radius (never worse than
-        # one extra nudge), so no idempotency key is warranted at this scale.
-        if decision.action == "winddown":
-            await checkin_store.lapse(row.member_id)
-        else:
-            await checkin_store.record_nudge(row.member_id, today)
+            logger.exception("failed to process check-in for member %s", row.member_id)
     return sent

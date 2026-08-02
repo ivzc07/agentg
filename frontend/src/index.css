@@ -1,0 +1,112 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Base layer: apply design tokens from the existing dashboard.css (#133) */
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  html {
+    background: theme("colors.bg");
+  }
+
+  body {
+    margin: 0;
+    background: theme("colors.bg");
+    color: theme("colors.ink.DEFAULT");
+    font: 15px/1.45 ui-sans-serif, system-ui, -apple-system, "Helvetica Neue",
+      sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  h1,
+  h2,
+  h3 {
+    margin: 0;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  :focus-visible {
+    outline: 2px solid theme("colors.ink.DEFAULT");
+    outline-offset: 2px;
+  }
+
+  button {
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    background: theme("colors.elevation-2.DEFAULT");
+    color: theme("colors.ink.DEFAULT");
+    border: 1px solid theme("colors.elevation-2.stroke");
+    min-height: 44px;
+    padding: 8px 16px;
+    transition: background 120ms ease-out, border-color 120ms ease-out;
+  }
+
+  button:hover {
+    border-color: theme("colors.ink.2");
+  }
+
+  button:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+}
+
+/* Component layer: reusable patterns matching the server-rendered dashboard */
+@layer components {
+  .btn-primary {
+    background: theme("colors.ink.DEFAULT");
+    color: #000;
+    border-color: theme("colors.ink.DEFAULT");
+  }
+
+  .btn-primary:hover {
+    background: #e6e6e6;
+    border-color: #e6e6e6;
+  }
+
+  .tag {
+    display: inline-block;
+    font-family: theme("fontFamily.mono");
+    text-transform: uppercase;
+    font-weight: 400;
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    padding: 3px 7px;
+    white-space: nowrap;
+    border: 1px solid theme("colors.elevation-2.stroke");
+    color: theme("colors.ink.2");
+  }
+
+  .eyebrow {
+    font-family: theme("fontFamily.mono");
+    text-transform: uppercase;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    color: theme("colors.ink.2");
+    display: block;
+  }
+
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+}
