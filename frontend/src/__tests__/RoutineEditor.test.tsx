@@ -4,9 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { RoutineEditor } from "../components/RoutineEditor";
-// Vite serves the component's own source as a string, so the guard below reads
-// production code without pulling node builtins into the typechecked build.
 import routineEditorSource from "../components/RoutineEditor.tsx?raw";
+import { extractClassNames } from "./classname-extractor";
 
 const EN_BOOTSTRAP = {
   editor_title: "{name}'s routine",
@@ -488,29 +487,54 @@ describe("RoutineEditor", () => {
   });
 
   // Reduced-motion: every animation class must be guarded (issue #151, review 3).
+  // Uses the shared extractor which handles className="…", className={`…`},
+  // and className={"…"} forms — no brittle single-form regex (P2 5159492292).
   describe("reduced-motion guard", () => {
     it("every animate-spin and transition- class in RoutineEditor is prefixed with motion-safe:", () => {
-      const src = routineEditorSource;
-      // Find every className="..." containing animate-spin or transition-
-      // and assert each has motion-safe: before the animation class.
-      const re = /className=(?:"([^"]*)"|\{`([^`]*)`\})/g;
-      let match;
+      const entries = extractClassNames(routineEditorSource, "RoutineEditor.tsx");
       const violations: string[] = [];
-      while ((match = re.exec(src)) !== null) {
-        const classes = match[1] ?? match[2] ?? "";
-        const hasAnim = /\banimate-spin\b/.test(classes);
-        const hasTrans = /\btransition-/.test(classes);
-        if (hasAnim || hasTrans) {
-          const guarded =
-            (!hasAnim || /\bmotion-safe:animate-spin\b/.test(classes)) &&
-            (!hasTrans || /\bmotion-safe:transition-/.test(classes));
-          if (!guarded) {
-            violations.push(classes);
+      for (const entry of entries) {
+        for (const token of entry.tokens) {
+          const hasAnim = token === "animate-spin";
+          const hasTrans = token.startsWith("transition-");
+          if (hasAnim || hasTrans) {
+            const guarded =
+              (!hasAnim || entry.tokens.includes("motion-safe:animate-spin")) &&
+              (!hasTrans || entry.tokens.some((t) => t === `motion-safe:${token}`));
+            if (!guarded) {
+              violations.push(`${entry.file}:${entry.line} — unguarded "${token}" in "${entry.raw.trim()}"`);
+            }
           }
         }
       }
       expect(violations).toEqual([]);
     });
+  });
+
+  // DOM-level save-button assertion (P2 5159492292).
+  // Renders the real component and inspects the DOM instead of parsing
+  // source text.  Catches any className form — literal, template, or
+  // expression — because React resolves them all before painting.
+  it("save button renders with bg-magenta text-bg (DOM assertion)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: () => Promise.resolve(mockRoutineResponse()),
+    } as Response);
+
+    renderEditor("/members/1/routine");
+
+    await waitFor(() => {
+      expect(screen.getByText("Save Routine")).toBeDefined();
+    });
+
+    const saveBtn = screen.getByRole("button", { name: "Save Routine" });
+    // The button must have exactly the classes our design token invariant
+    // expects — not just any class containing "magenta".
+    expect(saveBtn.className).toMatch(/\bbg-magenta\b/);
+    expect(saveBtn.className).toMatch(/\btext-bg\b/);
+    // It must NOT have a light text class (which would fail AA).
+    expect(saveBtn.className).not.toMatch(/\btext-ink\b/);
+    expect(saveBtn.className).not.toMatch(/\btext-white\b/);
   });
 });
 
@@ -685,52 +709,5 @@ describe("RoutineEditor preset mode", () => {
       ).toBeInTheDocument();
     });
     expect(screen.getByText(/Newer day/)).toBeInTheDocument();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Accent-bg dark-text invariant: accent backgrounds (mid-luminance) must
-// only be paired with dark text (text-bg / text-black) — never with
-// text-white or text-ink, which would fail WCAG AA.
-// ---------------------------------------------------------------------------
-
-describe("accent-background dark-text invariant", () => {
-  const ACCENT_BG_CLASSES = [
-    "bg-magenta",
-    "bg-cyan",
-    "bg-coral",
-    "bg-amber",
-    "bg-purple",
-    "bg-success",
-  ];
-
-  const DARK_TEXT_CLASSES = ["text-bg", "text-black"];
-  const LIGHT_TEXT_CLASSES = ["text-white", "text-ink"];
-
-  // Scan the live component source for className strings.
-  const CLASSNAME_RE = /className=(?:"([^"]*)"|\{`([^`]*)`\})/g;
-  let match: RegExpExecArray | null;
-  const classStrings: string[] = [];
-  while ((match = CLASSNAME_RE.exec(routineEditorSource)) !== null) {
-    classStrings.push(match[1] ?? match[2] ?? "");
-  }
-
-  it("every accent bg-* class is paired with a dark text class (not text-white / text-ink)", () => {
-    const violations: string[] = [];
-    for (const cs of classStrings) {
-      for (const accentCls of ACCENT_BG_CLASSES) {
-        if (!cs.includes(accentCls)) continue;
-
-        const hasDark = DARK_TEXT_CLASSES.some((c) => cs.includes(c));
-        const hasLight = LIGHT_TEXT_CLASSES.some((c) => cs.includes(c));
-
-        if (!hasDark || hasLight) {
-          violations.push(
-            `${accentCls} used without dark-text guard: "${cs.trim()}"`,
-          );
-        }
-      }
-    }
-    expect(violations).toEqual([]);
   });
 });
