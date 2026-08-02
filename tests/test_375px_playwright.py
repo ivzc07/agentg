@@ -94,10 +94,13 @@ MISSING_BROWSER = (
 class Screen:
     """One dashboard screen to render.
 
-    ``marker`` is a selector unique to this screen. Asserting it is present is
-    what stops a screen from silently passing while showing something else - the
-    login interstitial auto-submits itself, so without this the suite happily
-    screenshotted the roster and reported the login screen as clean.
+    ``marker`` is a selector this screen renders and its siblings do not.
+    Asserting it is present is what stops a screen from silently passing while
+    showing something else - the login interstitial auto-submits itself, so
+    without this the suite happily screenshotted the roster and reported the
+    login screen as clean. Markers must discriminate against the screens most
+    likely to be served by mistake, which for the roster views means each other:
+    a selector from the shared chrome would pass on all three.
 
     ``javascript`` is off only for that interstitial, whose inline script posts
     the form immediately; with JS disabled the static page it renders for a
@@ -219,7 +222,10 @@ def _screens(env) -> list[Screen]:
     """Every screen the issue lists, with the selector that proves we're on it."""
     member = env["members"][0].id
     return [
-        Screen("table", "/?view=table", "#search"),
+        # `ul#roster`, not `#search`: the search box lives in the chrome shared
+        # by all three roster views, so it would not have caught table silently
+        # rendering as cards.
+        Screen("table", "/?view=table", "ul#roster"),
         Screen("cards", "/?view=cards", ".grid"),
         # Both Split variants: the roster-level one renders _split_placeholder
         # in the right pane, a different layout from the member-open variant.
