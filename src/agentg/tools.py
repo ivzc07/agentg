@@ -188,15 +188,16 @@ async def edit_logged_sets(
 async def get_last_sets(ctx: RunContextWrapper[MemberContext], exercise: str) -> dict[str, Any]:
     """Read an exercise's numbers from the previous Session (never from memory)."""
     c = ctx.context
-    info = await c.stores.training.last_sets(c.member_id, exercise)
-    if info is None:
-        return {
-            "error": (
-                f"no logged sets of {exercise} yet — ask the Member for the weight "
-                "and reps, or try a different exercise name"
-            )
-        }
-    return {**info, "weight_unit": c.weight_unit}
+    async with c._session_lock:
+        info = await c.stores.training.last_sets(c.member_id, exercise)
+        if info is None:
+            return {
+                "error": (
+                    f"no logged sets of {exercise} yet — ask the Member for the weight "
+                    "and reps, or try a different exercise name"
+                )
+            }
+        return {**info, "weight_unit": c.weight_unit}
 
 
 @function_tool
