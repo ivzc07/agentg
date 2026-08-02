@@ -114,29 +114,22 @@ async def flag_to_coach_action(c: MemberContext, summary: str) -> dict[str, Any]
     incomplete outbox rolls back the safety operation so a committed Note
     can never lose every Coach notification on delivery failure or process
     exit.
+
+    Eligible Coaches are queried **inside** the same transaction as the
+    Note write so eligibility is atomic with commit (P1 #3).  The durable
+    outbox does not depend on whether a notifier is currently wired — jobs
+    are always created and the worker picks them up when it starts (P1 #2).
     """
-    # A headless context (no notifier, no outbox wired) still logs — the
-    # concern is recorded rather than lost.
-    if c.notifier is None:
-        note = await c.stores.notes.remember_safety(c.member_id, c.gym_id, summary)
-        return {"logged": True, "coaches_to_notify": 0}
-
-    coaches = await c.stores.linking.coaches_for_gym(
-        c.gym_id, exclude_member_id=c.member_id
-    )
-    if not coaches:
-        note = await c.stores.notes.remember_safety(c.member_id, c.gym_id, summary)
-        return {"logged": True, "coaches_to_notify": 0}
-
     note, jobs = await c.stores.safety_outbox.create_note_and_jobs(
         member_id=c.member_id,
         gym_id=c.gym_id,
         text=summary,
         member_name=c.member_name,
         member_is_coach=c.is_coach,
-        coaches=coaches,
+        linking_store=c.stores.linking,
+        exclude_member_id=c.member_id,
     )
     logger.info(
         "safety note #%d queued %d outbox jobs", note.id, len(jobs),
     )
-    return {"logged": True, "coaches_to_notify": len(coaches)}
+    return {"logged": True, "coaches_to_notify": len(jobs)}

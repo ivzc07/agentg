@@ -229,6 +229,10 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text("ALTER TABLE safety_outbox_jobs ADD COLUMN last_error VARCHAR(400)")
         )
+    if "next_retry_at" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN next_retry_at TIMESTAMP")
+        )
 
 
 @dataclass(frozen=True)

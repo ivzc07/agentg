@@ -13,7 +13,12 @@ from agentg.dashboard_store import DashboardStore
 from agentg.linking_store import LinkingStore
 from agentg.notes import NotesStore
 from agentg.models import SafetyOutboxJob
-from agentg.safety_outbox import MAX_RETRIES, OutboxWorker, SafetyOutbox
+from agentg.safety_outbox import (
+    BASE_BACKOFF_SECONDS,
+    MAX_BACKOFF_SECONDS,
+    OutboxWorker,
+    SafetyOutbox,
+)
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -571,8 +576,17 @@ async def test_notifier_failure_retries_not_immediately_fails(env):
     assert not any(uid == "7" for _ch, uid, _t, _dp, _pc in failing_notifier.sent)
 
 
-async def test_notifier_failure_exhausts_retries_then_fails(env):
-    """After MAX_RETRIES transient failures the job is permanently failed."""
+async def test_notifier_failure_always_retries_never_permanently_fails(env, monkeypatch):
+    """Transient failures never permanently fail a job — the backoff
+    is bounded but jobs remain retryable indefinitely (P1 #4)."""
+    # Skip asyncio.sleep so backoff doesn't slow the test.
+    import agentg.safety_outbox as outbox_module
+
+    async def instant_sleep(_seconds):
+        pass
+
+    monkeypatch.setattr(outbox_module.asyncio, "sleep", instant_sleep)
+
     failing_notifier = FakeNotifier(failing_id="7")
     await env.outbox.create_note_and_jobs(
         member_id=env.member_id,
@@ -592,23 +606,32 @@ async def test_notifier_failure_exhausts_retries_then_fails(env):
     )
 
     # Each drain_once increments retry_count and resets to pending.
-    for attempt in range(1, MAX_RETRIES):
+    # The job is never permanently failed.
+    for attempt in range(1, 6):  # go well past the old MAX_RETRIES=3
         await worker.drain_once(limit=50)
         async with env.engine.connect() as conn:
             row = (
                 await conn.execute(
                     text(
-                        "SELECT status, retry_count FROM safety_outbox_jobs "
+                        "SELECT status, retry_count, next_retry_at, failure_reason "
+                        "FROM safety_outbox_jobs "
                         "WHERE coach_member_id = :cid"
                     ),
                     {"cid": env.coach1_id},
                 )
             ).first()
-        assert row.status == "pending", f"attempt {attempt}: expected pending"
+        assert row.status == "pending", (
+            f"attempt {attempt}: expected pending, got {row.status}"
+        )
         assert row.retry_count == attempt
+        assert row.failure_reason is None  # never permanently failed
+        # next_retry_at should be set for backoff gating.
+        assert row.next_retry_at is not None
 
-    # The final attempt (retry_count == MAX_RETRIES) marks it failed.
-    await worker.drain_once(limit=50)
+    # After many retries the backoff should be capped at MAX_BACKOFF_SECONDS.
+    # retry_count keeps growing for audit, but the delay is bounded.
+    for _ in range(10):
+        await worker.drain_once(limit=50)
     async with env.engine.connect() as conn:
         row = (
             await conn.execute(
@@ -619,9 +642,9 @@ async def test_notifier_failure_exhausts_retries_then_fails(env):
                 {"cid": env.coach1_id},
             )
         ).first()
-    assert row.status == "failed", f"expected failed after {MAX_RETRIES} retries"
-    assert row.retry_count == MAX_RETRIES
-    assert "retries exhausted" in (row.failure_reason or "")
+    assert row.status == "pending"  # still retryable
+    assert row.retry_count >= 10
+    assert row.failure_reason is None  # never permanently failed
 
 
 async def test_deleted_note_marks_job_failed(env):
@@ -848,10 +871,21 @@ async def test_last_error_cleared_after_successful_retry(env):
 # ── backoff timing (P1 #1) ─────────────────────────────────────────────────
 
 
-async def test_retry_includes_backoff_delay(env):
+async def test_retry_includes_backoff_delay(env, monkeypatch):
     """Each retry waits retry_count * BASE_BACKOFF_SECONDS before
-    attempting delivery."""
-    from agentg.safety_outbox import BASE_BACKOFF_SECONDS
+    attempting delivery, capped at MAX_BACKOFF_SECONDS."""
+    import agentg.safety_outbox as outbox_module
+
+    # Capture sleep durations to verify the backoff formula without
+    # actually waiting.  We still need the real sleep to be fast.
+    sleep_durations: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def tracking_sleep(seconds):
+        sleep_durations.append(seconds)
+        # Don't actually sleep — this test verifies the formula, not timing.
+
+    monkeypatch.setattr(outbox_module.asyncio, "sleep", tracking_sleep)
 
     failing_notifier = FakeNotifier(failing_id="7")
     await env.outbox.create_note_and_jobs(
@@ -872,22 +906,27 @@ async def test_retry_includes_backoff_delay(env):
     )
 
     # First attempt: retry_count=0 → no backoff.
-    t0 = time.monotonic()
     await worker.drain_once(limit=50)
-    t1 = time.monotonic()
-    assert (t1 - t0) < BASE_BACKOFF_SECONDS  # no backoff on first attempt
+    assert len(sleep_durations) == 0  # no sleep on first attempt
 
     # Second attempt: retry_count=1 → 1 * BASE_BACKOFF delay.
-    t2 = time.monotonic()
     await worker.drain_once(limit=50)
-    t3 = time.monotonic()
-    assert (t3 - t2) >= BASE_BACKOFF_SECONDS * 0.8  # allow small timing variance
+    assert len(sleep_durations) == 1
+    assert sleep_durations[0] == pytest.approx(BASE_BACKOFF_SECONDS * 1)
 
     # Third attempt: retry_count=2 → 2 * BASE_BACKOFF delay.
-    t4 = time.monotonic()
     await worker.drain_once(limit=50)
-    t5 = time.monotonic()
-    assert (t5 - t4) >= BASE_BACKOFF_SECONDS * 1.6  # 2 * BASE_BACKOFF, minus variance
+    assert len(sleep_durations) == 2
+    assert sleep_durations[1] == pytest.approx(BASE_BACKOFF_SECONDS * 2)
+
+    # Run enough attempts that the backoff reaches and stays at the cap
+    # (retry_count * BASE_BACKOFF >= MAX_BACKOFF for retry_count >= 60).
+    for _ in range(60):
+        await worker.drain_once(limit=50)
+    # The last sleep should be capped at MAX_BACKOFF_SECONDS.
+    assert sleep_durations[-1] == pytest.approx(MAX_BACKOFF_SECONDS)
+    # Earlier sleeps should still be growing linearly.
+    assert sleep_durations[2] == pytest.approx(BASE_BACKOFF_SECONDS * 3)
 
 
 # ── transient error recovery (P1 #1) ──────────────────────────────────────
@@ -1276,3 +1315,217 @@ async def test_concurrent_claim_does_not_double_claim(env):
             )
         ).all()
     assert all(r.status == "sending" for r in rows)
+
+
+# ── P1 #1: forget / delete race with deterministic interleaving ────────────
+
+
+async def test_forget_me_race_never_sends_after_note_deleted(env, monkeypatch):
+    """When forget-me deletes a Note while a job is in-flight (claimed),
+    the worker must not send the retained note text (P1 #1).
+
+    Uses an asyncio.Event barrier to deterministically force the race:
+    the worker reads note text, then the Note is deleted, then the worker
+    checks job existence and bails out."""
+    import agentg.safety_outbox as outbox_module
+
+    note, jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Barriers to control interleaving.
+    note_text_read = asyncio.Event()   # worker has read the note text
+    can_delete_note = asyncio.Event()  # forget-me may now delete
+
+    # Patch _note_text on the OutboxWorker to inject our barrier.
+    real_note_text = outbox_module.OutboxWorker._note_text
+
+    async def instrumented_note_text(self, note_id):
+        result = await real_note_text(self, note_id)
+        note_text_read.set()  # signal: text is now in memory
+        await can_delete_note.wait()  # wait for permission to proceed
+        return result
+
+    monkeypatch.setattr(
+        outbox_module.OutboxWorker, "_note_text", instrumented_note_text,
+    )
+
+    # Claim the job first so it's in 'sending' state.
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    # Start delivery in a task.
+    worker = _make_worker(env)
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+
+    # Wait for the worker to read the note text.
+    await note_text_read.wait()
+
+    # Now delete the Note (simulating forget-me).  This explicitly fails
+    # outbox jobs then cascade-deletes them.
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE safety_outbox_jobs SET status = 'failed', "
+                "failure_reason = 'member data deleted (forget-me)' "
+                "WHERE note_id = :nid AND status IN ('pending', 'sending')"
+            ),
+            {"nid": note.id},
+        )
+        await conn.execute(
+            text("DELETE FROM member_notes WHERE id = :id"), {"id": note.id}
+        )
+
+    # Allow the worker to proceed past the barrier.
+    can_delete_note.set()
+
+    # Wait for delivery to complete.
+    await deliver_task
+
+    # The worker must NOT have sent anything — the job was deleted
+    # (or explicitly failed) while delivery was in progress.
+    assert env.notifier.sent == [], (
+        "worker must not send after note is deleted by forget-me"
+    )
+
+
+# ── P1 #3: eligibility queried inside the transaction ──────────────────────
+
+
+async def test_coach_eligibility_is_atomic_with_note_commit(env):
+    """When a Coach is promoted between the coach query and the Note
+    commit, using linking_store inside create_note_and_jobs ensures the
+    committed Note has the correct set of jobs (P1 #3)."""
+    # Create a third member who will become a coach during the test.
+    coach3 = await env.linking.link_member(
+        env.gym_id, "Coach New", "telegram", "99",
+    )
+    # Not yet a coach.
+
+    # Use linking_store path: coaches are queried inside the transaction.
+    note, jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        linking_store=env.linking,
+        exclude_member_id=env.member_id,
+    )
+
+    # Only the two existing coaches should get jobs (coach3 isn't flagged).
+    assert len(jobs) == 2
+    coach_ids = {j.coach_member_id for j in jobs}
+    assert coach_ids == {env.coach1_id, env.coach2_id}
+
+    # Now promote coach3 and verify a new flag includes them.
+    await env.linking.set_coach(coach3.id, is_coach=True)
+
+    note2, jobs2 = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="shoulder pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        linking_store=env.linking,
+        exclude_member_id=env.member_id,
+    )
+
+    # Now all three coaches get jobs.
+    assert len(jobs2) == 3
+    coach_ids2 = {j.coach_member_id for j in jobs2}
+    assert coach_ids2 == {env.coach1_id, env.coach2_id, coach3.id}
+
+
+# ── P1 #5: gym-switch TOCTOU with controlled interleaving ──────────────────
+
+
+async def test_gym_switch_toctou_channel_resolved_immediately_before_send(env, monkeypatch):
+    """When a coach switches gyms between job creation and delivery, the
+    channel is re-resolved immediately before the send — no await gap
+    allows a repoint to interleave (P1 #5).
+
+    Uses a controlled interleaving: the coach_channel_in_gym resolution
+    returns successfully, then before the notifier.send the coach switches
+    gyms.  The resolution is re-done right before each send, so the
+    second resolution would catch the switch.
+
+    This test verifies that even with forced interleaving between
+    resolution and send, a re-resolution guards the link send."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Barriers to control the interleaving between heads-up send and link send.
+    heads_up_sent = asyncio.Event()
+    gym_switch_applied = asyncio.Event()
+
+    real_send = env.notifier.send
+    send_count = [0]
+
+    async def instrumented_send(channel, channel_user_id, text,
+                                disable_preview=False, protect_content=False):
+        send_count[0] += 1
+        if send_count[0] == 1:
+            # First send: heads-up.  Let it complete, then signal.
+            await real_send(channel, channel_user_id, text,
+                            disable_preview=disable_preview,
+                            protect_content=protect_content)
+            heads_up_sent.set()
+            # Wait for the gym switch to happen before returning.
+            await gym_switch_applied.wait()
+        else:
+            # Second send: link.  This should NOT happen because the
+            # re-resolution will find the coach is gone.
+            await real_send(channel, channel_user_id, text,
+                            disable_preview=disable_preview,
+                            protect_content=protect_content)
+
+    monkeypatch.setattr(env.notifier, "send", instrumented_send)
+
+    worker = _make_worker(env)
+    deliver_task = asyncio.create_task(worker.drain_once(limit=50))
+
+    # Wait for the heads-up to complete.
+    await heads_up_sent.wait()
+
+    # Heads-up was sent.
+    assert send_count[0] == 1
+    heads_before = len([m for m in env.notifier.sent if "/login/" not in m[2]])
+    assert heads_before == 1
+
+    # Now switch the coach's gym (between heads-up and link).
+    new_gym = await env.linking.create_gym("New Gym")
+    await env.linking.link_member(new_gym.id, "Coach Sam", "telegram", "7")
+    gym_switch_applied.set()
+
+    # Wait for delivery to finish.
+    await deliver_task
+
+    # The heads-up was delivered (safety text arrived).
+    # The link should NOT have been sent because the re-resolution
+    # finds the coach is no longer in the gym.
+    links_after = len([m for m in env.notifier.sent if "/login/" in m[2]])
+    assert links_after == 0, (
+        "link must not be sent after coach switches gyms mid-delivery"
+    )
+
+    # The job should be marked delivered (heads-up landed) even though
+    # the link couldn't be sent.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"

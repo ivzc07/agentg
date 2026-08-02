@@ -365,6 +365,9 @@ class SafetyOutboxJob(Base):
     member_is_coach: Mapped[bool] = mapped_column(default=False)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     retry_count: Mapped[int] = mapped_column(default=0)
+    # Earliest time this job may be claimed again (bounded backoff).
+    # NULL means immediately claimable.
+    next_retry_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     claimed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     last_error: Mapped[str | None] = mapped_column(String(400), default=None)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())

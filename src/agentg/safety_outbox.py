@@ -11,22 +11,28 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from agentg.models import MemberNote, SafetyOutboxJob
+from agentg.models import Member, MemberChannel, MemberNote, SafetyOutboxJob
+
+if TYPE_CHECKING:
+    from agentg.linking_store import LinkingStore  # pragma: no cover
 
 MAX_NOTE_LENGTH = 400
-MAX_RETRIES = 3  # transient failures before permanent failure
 
 # Lease: a job claimed longer than this is considered abandoned and is
 # reset to pending by the next poll cycle (stale-claim recovery).
 LEASE_TIMEOUT_SECONDS = 60
 
 # Backoff: each retry waits retry_count * BASE_BACKOFF seconds before
-# the next attempt (linear backoff).
+# the next attempt (linear backoff), capped at MAX_BACKOFF_SECONDS.
+# Jobs are never permanently failed solely from retry count (P1 #4).
 BASE_BACKOFF_SECONDS = 5
+MAX_BACKOFF_SECONDS = 300  # 5-minute cap on retry delay
 
 Clock = Callable[[], datetime]
 
@@ -38,6 +44,33 @@ _STARTUP_BATCH = 50  # max jobs to drain in one batch
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+async def _coaches_for_gym_in_session(
+    db: AsyncSession,
+    gym_id: int,
+    exclude_member_id: int | None = None,
+) -> list[tuple[int, str, str, str]]:
+    """Return the Gym's Coaches reachable on a channel, as
+    ``(member_id, name, channel, channel_user_id)``, queried within an
+    already-open session so eligibility is atomic with the Note commit."""
+    rows = (
+        await db.execute(
+            select(
+                Member.id,
+                Member.name,
+                MemberChannel.channel,
+                MemberChannel.channel_user_id,
+            )
+            .join(MemberChannel, MemberChannel.member_id == Member.id)
+            .where(Member.gym_id == gym_id, Member.is_coach.is_(True))
+        )
+    ).all()
+    return [
+        (member_id, name, channel, channel_user_id)
+        for member_id, name, channel, channel_user_id in rows
+        if member_id != exclude_member_id
+    ]
 
 
 class SafetyOutbox:
@@ -56,10 +89,19 @@ class SafetyOutbox:
         text: str,
         member_name: str,
         member_is_coach: bool,
-        coaches: list[tuple[int, str, str, str]],
+        coaches: list[tuple[int, str, str, str]] | None = None,
+        *,
+        linking_store: "LinkingStore | None" = None,
+        exclude_member_id: int | None = None,
     ) -> tuple[MemberNote, list[SafetyOutboxJob]]:
         """Write a safety Note and one outbox job per eligible Coach in one
         transaction — committing neither if the outbox can't be built.
+
+        When ``linking_store`` is provided, eligible Coaches are queried
+        **inside** the transaction so the committed Note always has one job
+        per Coach that was eligible at commit time (P1 #3).  When
+        ``coaches`` is passed directly (test path), that pre-resolved list
+        is used.
 
         ``coaches`` is ``(member_id, name, channel, channel_user_id)`` as
         returned by ``LinkingStore.coaches_for_gym``.
@@ -75,8 +117,22 @@ class SafetyOutbox:
         async with self._sessions() as db:
             db.add(note)
             await db.flush()  # assign note.id
+
+            # Resolve eligible Coaches inside the transaction when a
+            # linking_store is provided so eligibility is atomic with the
+            # Note commit (P1 #3).
+            resolved_coaches: list[tuple[int, str, str, str]]
+            if linking_store is not None:
+                resolved_coaches = await _coaches_for_gym_in_session(
+                    db, gym_id, exclude_member_id=exclude_member_id,
+                )
+            elif coaches is not None:
+                resolved_coaches = coaches
+            else:
+                resolved_coaches = []
+
             jobs: list[SafetyOutboxJob] = []
-            for coach_id, _coach_name, channel, channel_user_id in coaches:
+            for coach_id, _coach_name, channel, channel_user_id in resolved_coaches:
                 job = SafetyOutboxJob(
                     gym_id=gym_id,
                     note_id=note.id,
@@ -101,16 +157,23 @@ class SafetyOutbox:
         Uses a single UPDATE … RETURNING so the claim is atomic even against
         concurrent connections: the subquery selects pending ids and the
         outer UPDATE transitions them in one step.  Two concurrent calls
-        can never claim the same job.
+        can never claim the same job.  Jobs whose ``next_retry_at`` is still
+        in the future are excluded so bounded backoff survives a restart (P1 #4).
         """
+        now = self._clock()
         async with self._sessions() as db:
             sub = (
                 select(SafetyOutboxJob.id)
-                .where(SafetyOutboxJob.status == "pending")
+                .where(
+                    SafetyOutboxJob.status == "pending",
+                    or_(
+                        SafetyOutboxJob.next_retry_at == None,
+                        SafetyOutboxJob.next_retry_at <= now,
+                    ),
+                )
                 .order_by(SafetyOutboxJob.created_at)
                 .limit(limit)
             )
-            now = self._clock()
             result = await db.execute(
                 update(SafetyOutboxJob)
                 .where(
@@ -159,44 +222,34 @@ class SafetyOutbox:
 
     async def reset_for_retry(self, job: SafetyOutboxJob, reason: str) -> None:
         """Increment the retry counter and reset to ``pending`` so the poller
-        tries again.  After *MAX_RETRIES* the job is permanently failed.
+        tries again.  Jobs are never permanently failed solely from retry
+        count — the backoff is bounded at *MAX_BACKOFF_SECONDS* so
+        persistently-failing jobs retry at that ceiling forever (P1 #4).
 
         Only acts when the job is still ``sending`` — a delivery that
         completed between the attempt and this guard is not overwritten.
         ``claimed_at`` is cleared so the next claim can stamp a fresh lease.
-        ``last_error`` records the transient reason for diagnostics."""
+        ``last_error`` records the transient reason for diagnostics.
+        ``next_retry_at`` gates the next claim so the bounded backoff is
+        honoured even across process restarts."""
+        next_count = job.retry_count + 1
+        delay = min(next_count * BASE_BACKOFF_SECONDS, MAX_BACKOFF_SECONDS)
+        next_retry_at = self._clock() + timedelta(seconds=delay)
         async with self._sessions() as db:
-            next_count = job.retry_count + 1
-            if next_count >= MAX_RETRIES:
-                await db.execute(
-                    update(SafetyOutboxJob)
-                    .where(
-                        SafetyOutboxJob.id == job.id,
-                        SafetyOutboxJob.status == "sending",
-                    )
-                    .values(
-                        status="failed",
-                        retry_count=next_count,
-                        failure_reason=f"retries exhausted: {reason}"[:400],
-                        last_error=reason[:400],
-                        claimed_at=None,
-                        delivered_at=self._clock(),
-                    )
+            await db.execute(
+                update(SafetyOutboxJob)
+                .where(
+                    SafetyOutboxJob.id == job.id,
+                    SafetyOutboxJob.status == "sending",
                 )
-            else:
-                await db.execute(
-                    update(SafetyOutboxJob)
-                    .where(
-                        SafetyOutboxJob.id == job.id,
-                        SafetyOutboxJob.status == "sending",
-                    )
-                    .values(
-                        status="pending",
-                        retry_count=next_count,
-                        last_error=reason[:400],
-                        claimed_at=None,
-                    )
+                .values(
+                    status="pending",
+                    retry_count=next_count,
+                    last_error=reason[:400],
+                    claimed_at=None,
+                    next_retry_at=next_retry_at,
                 )
+            )
             await db.commit()
 
     async def reset_claimed(self) -> int:
@@ -332,36 +385,40 @@ class OutboxWorker:
     async def _deliver_one(self, job: SafetyOutboxJob) -> None:
         """Send one outbox job: heads-up + (optionally) magic link.
 
-        Channel identity is re-resolved at delivery time so a coach who
-        switched gyms after job creation never receives a cross-gym
-        notification (P1 #2).  Transient failures (notifier, DB) are retried
-        up to *MAX_RETRIES* before the job is permanently failed (P1 #1).
+        Channel identity is resolved immediately before each send so a coach
+        who switched gyms after job creation never receives a cross-gym
+        notification (P1 #2).  The zero-await gap between resolution and
+        send closes the TOCTOU window (P1 #5).
+
+        The job and note are re-verified before sending: if the Note was
+        deleted by forget-me between claim and delivery the job is failed
+        instead of sending retained text (P1 #1).
+
+        Transient failures are always retried with bounded backoff — jobs
+        are never permanently failed solely from attempt count (P1 #4).
         """
         # Backoff: wait before attempting delivery so transient outages
-        # (network flap, DB restart) have time to resolve.
+        # (network flap, DB restart) have time to resolve.  The claim_pending
+        # filter gates on next_retry_at (the restart-safe enforcement), so
+        # this sleep is belt-and-suspenders for in-process retries that land
+        # before the poll cycle sets next_retry_at on reset.
         if job.retry_count > 0:
-            delay = job.retry_count * BASE_BACKOFF_SECONDS
+            delay = min(job.retry_count * BASE_BACKOFF_SECONDS, MAX_BACKOFF_SECONDS)
             await asyncio.sleep(delay)
 
         try:
-            # Resolve the current channel identity at delivery time (P1 #2).
-            channel_info = await self._linking.coach_channel_in_gym(
-                job.coach_member_id, job.gym_id,
-            )
-            if channel_info is None:
-                return await self._outbox.mark_failed(
-                    job, "coach no longer reachable in this gym"
-                )
-
-            current_channel, current_channel_user_id = channel_info
-
-            # Resolve the note text; if the note is gone (e.g. forget-me),
-            # fail the job — the safety concern no longer exists.
+            # Resolve note text first — if the note is gone (forget-me),
+            # fail immediately without sending anything.
             note_text = await self._note_text(job.note_id)
             if note_text is None:
                 return await self._outbox.mark_failed(
                     job, "safety note no longer exists"
                 )
+
+            # Verify the job still exists (cascade-delete from forget-me
+            # would remove it).  If it's gone, nothing more to do.
+            if not await self._job_exists(job.id):
+                return
 
             text = f"Heads-up from your member {job.member_name}: {note_text}"
 
@@ -377,8 +434,24 @@ class OutboxWorker:
                 except Exception:
                     logger.exception(
                         "failed to mint dashboard link for coach %s",
-                        current_channel_user_id,
+                        job.coach_member_id,
                     )
+
+            # Resolve channel identity immediately before sending — the
+            # zero-await gap between this resolution and the send closes
+            # the gym-switch TOCTOU window (P1 #5).
+            channel_info = await self._linking.coach_channel_in_gym(
+                job.coach_member_id, job.gym_id,
+            )
+            if channel_info is None:
+                return await self._outbox.mark_failed(
+                    job, "coach no longer reachable in this gym"
+                )
+            current_channel, current_channel_user_id = channel_info
+
+            # Re-verify job still exists after resolution (defense in depth).
+            if not await self._job_exists(job.id):
+                return
 
             # Send heads-up via the current channel identity.
             try:
@@ -396,11 +469,23 @@ class OutboxWorker:
                 )
 
             if link is not None:
+                # Re-resolve channel identity before the link send — the
+                # heads-up send included an await that could have allowed a
+                # gym switch to interleave (P1 #5).
+                link_channel_info = await self._linking.coach_channel_in_gym(
+                    job.coach_member_id, job.gym_id,
+                )
+                if link_channel_info is None:
+                    # Heads-up already landed; link can't be delivered.
+                    # Mark delivered anyway — the safety text arrived.
+                    return await self._outbox.mark_delivered(job)
+                link_channel, link_user_id = link_channel_info
+
                 try:
                     async with self._semaphore:
                         await self._notifier.send(
-                            current_channel,
-                            current_channel_user_id,
+                            link_channel,
+                            link_user_id,
                             link,
                             disable_preview=True,
                             protect_content=True,
@@ -408,7 +493,7 @@ class OutboxWorker:
                 except Exception:
                     logger.exception(
                         "failed to send dashboard link to coach %s",
-                        current_channel_user_id,
+                        link_user_id,
                     )
                     # The heads-up already landed; a missing link is unfortunate
                     # but not worth marking the whole job failed.
@@ -427,3 +512,15 @@ class OutboxWorker:
         async with self._outbox._sessions() as db:
             note = await db.get(MemberNote, note_id)
             return note.text if note is not None else None
+
+    async def _job_still_sending(self, job_id: int) -> bool:
+        """True when the outbox job still exists AND is in ``sending`` status.
+
+        A job that was cascade-deleted (via forget-me deleting its Note)
+        returns False here, so delivery can bail out without sending.
+        A job whose status changed to ``failed`` (e.g. forget-me marking it
+        before cascade) also returns False — defense in depth for P1 #1.
+        """
+        async with self._outbox._sessions() as db:
+            row = await db.get(SafetyOutboxJob, job_id)
+            return row is not None and row.status == "sending"

@@ -244,12 +244,15 @@ async def test_the_referral_never_pings_the_member_themselves(env):
 
 
 async def test_a_headless_context_still_logs(env):
-    # no notifier wired (e.g. a background run) can't ping, but the concern is
-    # still recorded rather than lost.
+    # No notifier wired (e.g. a background run) can't ping, but the concern is
+    # still recorded with durable outbox jobs (P1 #2). The outbox worker
+    # delivers them when it starts — no notifier at action time is fine.
     context = env.context()
     object.__setattr__(context, "notifier", None)  # frozen dataclass
     result = await flag_to_coach_action(context, "shoulder pain")
-    assert result["logged"] is True and result["coaches_to_notify"] == 0
+    assert result["logged"] is True
+    # Outbox jobs are still created even without a notifier wired.
+    assert result["coaches_to_notify"] == 1
     assert env.notifier.sent == []
     safety = [n for n in await env.notes.active(env.member_id) if n.kind == "safety"]
     assert any("shoulder pain" in n.text for n in safety)
