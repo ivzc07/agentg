@@ -251,12 +251,25 @@ async def _hold_lock(
     """Yield every chunk from ``inner``, then release ``lock``.
 
     If the inner stream raises, the lock is released before the exception
-    propagates — the same guarantee ``async with lock`` would give."""
+    propagates — the same guarantee ``async with lock`` would give.
+
+    The outer ``GeneratorExit`` handler ensures the lock is released even
+    when this generator is ``aclose()``-d before the first ``__anext__`` —
+    Python async generators only run ``finally`` blocks after entering the
+    ``try``, and an ``aclose()`` before any ``__anext__`` throws
+    ``GeneratorExit`` at the function entry point before that ``try``."""
+    released = False
     try:
-        async for chunk in inner:
-            yield chunk
-    finally:
-        lock.release()
+        try:
+            async for chunk in inner:
+                yield chunk
+        finally:
+            lock.release()
+            released = True
+    except GeneratorExit:
+        if not released:
+            lock.release()
+        raise
 
 
 async def _stream_text(result: "RunResultStreaming") -> AsyncIterator[str]:

@@ -105,6 +105,7 @@ async def _deliver_streamed(
     sent_messages: dict[int, Message] = {}  # chunk index → sent message
     last_sent_by_index: dict[int, str] = {}  # chunk index → last text sent
     last_yielded: str = ""
+    stream_errored = False
     try:
         async for chunk in reply.stream:
             stripped = chunk.strip().replace("**", "")
@@ -145,10 +146,19 @@ async def _deliver_streamed(
                         sent = await message.answer(part)
                         sent_messages[i] = sent
     except Exception:
+        stream_errored = True
         logger.exception("streaming delivery failed for sender %s", sender_id)
         if not sent_messages:
             sent_messages[-1] = await message.answer(ERROR_REPLY)
     finally:
+        # Close the stream deterministically so _hold_lock releases the
+        # per-identity lock immediately — a delivery error (e.g. message.answer
+        # raising) would otherwise leave the async generator suspended at its
+        # yield until GC (#176).
+        try:
+            await reply.stream.aclose()
+        except Exception:
+            logger.debug("aclose on stream raised", exc_info=True)
         # Ensure typing is always cancelled.
         if not typing_task.done():
             typing_task.cancel()
@@ -162,8 +172,10 @@ async def _deliver_streamed(
     if not sent_messages:
         await message.answer(EMPTY_REPLY_FALLBACK)
 
-    # Follow-up media lands beneath the final reply text.
-    if reply.after_send is not None:
+    # Follow-up media lands beneath the final reply text — skipped when
+    # the stream errored so a demo animation doesn't land beneath an
+    # error message.
+    if not stream_errored and reply.after_send is not None:
         try:
             await reply.after_send()
         except Exception:

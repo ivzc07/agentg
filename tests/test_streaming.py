@@ -689,3 +689,177 @@ async def test_concurrent_same_member_messages_are_serialized(tmp_path):
     assert "consumed:second" in capture
 
     await engine.dispose()
+
+
+# ── lock / stream lifecycle on delivery failure ─────────────────────────
+
+
+async def test_stream_aclosed_on_delivery_error():
+    """When ``message.answer`` raises during stream delivery, the stream is
+    deterministically ``aclose()``-d so ``_hold_lock`` releases the
+    per-identity lock rather than leaving it dangling until GC.
+
+    Revert-proof: without the ``aclose()`` in ``_deliver_streamed``\'s
+    ``finally``, the ``_hold_lock`` generator stays suspended at its
+    ``yield`` after a delivery error and the lock is never released."""
+
+    # Track whether aclose was called on the underlying stream.
+    aclosed = False
+
+    async def inner_stream():
+        yield "Welcome back, Ana!"
+
+    gen = inner_stream()
+
+    class _Tracked:
+        """Wraps an async generator so we can assert aclose() was called."""
+
+        def __init__(self, g):
+            self._g = g
+            self.was_aclosed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            return await self._g.__anext__()
+
+        async def aclose(self):
+            self.was_aclosed = True
+            await self._g.aclose()
+
+    tracked = _Tracked(gen)
+    reply = Reply("", stream=tracked)
+
+    async def reply_fn(msg):
+        return reply
+
+    message = FakeStreamMessage()
+    # First answer() (stream chunk) raises; second answer() (ERROR_REPLY) works.
+    sent_error_reply = SimpleNamespace(edit_text=AsyncMock())
+    message.answer.side_effect = [RuntimeError("network failure"), sent_error_reply]
+
+    await make_message_handler(reply_fn)(message)
+
+    assert tracked.was_aclosed, (
+        "stream must be aclosed after delivery error so _hold_lock releases the lock"
+    )
+
+
+async def test_second_message_not_deadlocked_after_stream_error(tmp_path):
+    """After a stream delivery error, a second message from the same Member
+    does not deadlock — the per-identity lock was released.
+
+    Revert-proof: without proper aclose() and _hold_lock cleanup, the lock
+    stays held after a delivery error and the second ``handle_message``
+    hangs forever at ``lock.acquire()``."""
+    import agentg.runtime as runtime_module
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'nd.db'}")
+    stores = Stores.from_engine(engine)
+    runtime = AgentRuntime(
+        agent=object(),
+        engine=engine,
+        stores=stores,
+        linking=Linking(stores.linking, unused_phraser),
+        summarizer=None,
+        stream_replies=True,
+    )
+    await runtime.ensure_schema()
+    gym = await stores.linking.create_gym("Iron Temple")
+    await stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        runtime_module.Runner,
+        "run_streamed",
+        lambda *a, **kw: type(
+            "Fake", (),
+            {
+                "stream_events": lambda s: _stream_events(
+                    "Welcome back, Ana! Let's train hard today."
+                )
+            },
+        )(),
+    )
+
+    # First message: get a streamed reply.  The lock is acquired in
+    # handle_message and transferred to _hold_lock.
+    reply1 = await runtime.handle_message(
+        IncomingMessage(channel="telegram", channel_user_id="42", text="first")
+    )
+
+    assert reply1.stream is not None
+    # Consume one chunk then aclose — simulating a delivery error scenario
+    # where the channel calls aclose() to recover.
+    try:
+        async for _ in reply1.stream:
+            break
+    finally:
+        await reply1.stream.aclose()
+
+    # Second message: must not deadlock.
+    monkeypatch.setattr(
+        runtime_module.Runner,
+        "run_streamed",
+        lambda *a, **kw: type(
+            "Fake2", (),
+            {
+                "stream_events": lambda s: _stream_events(
+                    "Second reply here. All good."
+                )
+            },
+        )(),
+    )
+
+    reply2 = await runtime.handle_message(
+        IncomingMessage(channel="telegram", channel_user_id="42", text="second")
+    )
+    assert reply2.stream is not None
+    # Consume fully to release the lock cleanly.
+    async for _ in reply2.stream:
+        pass
+
+    await engine.dispose()
+
+
+async def test_no_demo_after_stream_error():
+    """When the stream errors during delivery, ``after_send`` is skipped
+    so a demo animation does not land beneath the error reply."""
+
+    demo_called = False
+
+    async def stream_chunks():
+        yield "Welcome back, Ana!"
+
+    async def after_send():
+        nonlocal demo_called
+        demo_called = True
+
+    reply = Reply("", stream=stream_chunks(), after_send=after_send)
+
+    async def reply_fn(msg):
+        return reply
+
+    message = FakeStreamMessage()
+    # First answer() (stream chunk) raises; second (ERROR_REPLY) succeeds.
+    sent_error = SimpleNamespace(edit_text=AsyncMock())
+    message.answer.side_effect = [RuntimeError("network failure"), sent_error]
+
+    await make_message_handler(reply_fn)(message)
+
+    assert not demo_called, (
+        "after_send must not run when stream delivery errored"
+    )
+    assert ERROR_REPLY in message.answer.await_args_list[-1].args[0]
+
+
+async def _stream_events(text: str):
+    """Helper: yield RawResponsesStreamEvent deltas for each char in *text*."""
+    from agents.stream_events import RawResponsesStreamEvent
+
+    for i, ch in enumerate(text):
+        yield RawResponsesStreamEvent(
+            type="raw_response_event",
+            data=_text_delta(ch, i),
+        )
