@@ -157,6 +157,49 @@ async def test_channel_post_message_gets_rejection():
     )
 
 
+async def test_edited_group_message_gets_rejection():
+    """When a member edits their text in a shared chat the edit arrives
+    as an edited_message update.  The handler must still reject it with
+    the deterministic Spanish rejection — no Agent invocation, no typing,
+    no model call (#211)."""
+    reply_fn = AsyncMock()
+
+    # An edited group message has chat_type != 'private' and carries text.
+    message = FakeMessage(
+        user_id=99, text="edited in group", chat_type="supergroup",
+    )
+    await make_message_handler(reply_fn)(message)
+
+    # The Agent must never run for an edited shared-chat message.
+    reply_fn.assert_not_awaited()
+    # The rejection reply must be sent exactly once.
+    message.answer.assert_awaited_once()
+    rejection_text = message.answer.await_args[0][0]
+    assert rejection_text == (
+        "👋 ¡Hola! Solo puedo entrenarte por chat directo, no en grupos. "
+        "Envíame un mensaje privado y empezamos."
+    )
+
+
+async def test_edited_channel_post_gets_rejection():
+    """An edited channel post arrives as an edited_channel_post update.
+    The handler must reject it the same way as a fresh channel post (#211)."""
+    async def reply_fn(msg):
+        return Reply("should not reach agent")
+
+    message = FakeMessage(
+        user_id=123, text="edited channel post", chat_type="channel",
+    )
+    await make_message_handler(reply_fn)(message)
+
+    message.answer.assert_awaited_once()
+    rejection_text = message.answer.await_args[0][0]
+    assert rejection_text == (
+        "👋 ¡Hola! Solo puedo entrenarte por chat directo, no en grupos. "
+        "Envíame un mensaje privado y empezamos."
+    )
+
+
 async def test_anonymous_admin_group_message_gets_rejection():
     """Messages with no from_user (e.g. anonymous admin / sender-chat)
     in non-private chats must still receive the rejection reply (#211)."""
@@ -278,15 +321,24 @@ def test_split_counts_utf16_units_the_way_telegram_does():
     assert "".join(chunks) == text
 
 
-def test_dispatcher_registers_handler_on_message_and_channel_post():
-    """The handler must be registered on both dispatcher.message (private/group)
-    and dispatcher.channel_post so that channel posts reach the non-private
-    rejection (#211)."""
+def test_dispatcher_registers_handler_on_all_non_private_observers():
+    """The handler must be registered on all four observers that can carry
+    non-private text: message, channel_post, edited_message, and
+    edited_channel_post.  Missing any of them would silently bypass the
+    non-private rejection (#211)."""
     dispatcher = create_dispatcher(AsyncMock())
     assert len(dispatcher.message.handlers) == 1
     assert len(dispatcher.channel_post.handlers) == 1, (
         "channel_post handler is missing — channel posts would silently "
         "bypass the non-private rejection"
+    )
+    assert len(dispatcher.edited_message.handlers) == 1, (
+        "edited_message handler is missing — edited group messages would "
+        "silently bypass the non-private rejection"
+    )
+    assert len(dispatcher.edited_channel_post.handlers) == 1, (
+        "edited_channel_post handler is missing — edited channel posts "
+        "would silently bypass the non-private rejection"
     )
 
 

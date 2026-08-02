@@ -276,6 +276,11 @@ def create_dispatcher(reply_fn: ReplyFn) -> Dispatcher:
     # (where the bot is an admin) arrive as channel_post updates (#211).
     dispatcher.message.register(handler, F.text)
     dispatcher.channel_post.register(handler, F.text)
+    # Edited messages arrive through separate observers — register both
+    # so that edited shared-chat text still receives the non-private
+    # rejection (#211).
+    dispatcher.edited_message.register(handler, F.text)
+    dispatcher.edited_channel_post.register(handler, F.text)
     return dispatcher
 
 
