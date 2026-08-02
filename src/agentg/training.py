@@ -16,7 +16,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from agentg.catalog import find_exercise, find_or_create_exercise, normalize_exercise_name
+from agentg.catalog import (
+    find_exercise,
+    find_or_create_exercise,
+    normalize_exercise_name,
+    resolve_exercise_names,
+)
 from agentg.models import Exercise, Gym, Member, Session, Set
 from agentg.parsing import parse_set_line
 from agentg.timezones import local_date
@@ -387,21 +392,7 @@ class TrainingStore:
         async with self._sessions() as db:
             # Resolve every exercise name to an id in one pass over the
             # catalog (the catalog stays small — issue #162 will index it).
-            all_exercises = list(await db.scalars(select(Exercise)))
-            name_to_id: dict[str, int] = {}
-            for ex_name in exercises:
-                norm = _normalize(ex_name)
-                found = False
-                for row in all_exercises:
-                    if row.name == norm:
-                        name_to_id[ex_name] = row.id
-                        found = True
-                        break
-                if not found:
-                    for row in all_exercises:
-                        if norm in [a for a in row.aliases.split(",") if a]:
-                            name_to_id[ex_name] = row.id
-                            break
+            name_to_id = await resolve_exercise_names(db, exercises)
             ex_ids = list(name_to_id.values())
             result: dict[str, list[dict[str, Any]]] = {
                 ex: [] for ex in exercises
@@ -427,7 +418,7 @@ class TrainingStore:
                         Session.closed_at.is_not(None),
                         Set.exercise_id.in_(ex_ids),
                     )
-                    .order_by(Session.started_at.desc())
+                    .order_by(Session.started_at.desc(), Set.id)
                 )
             )
 
