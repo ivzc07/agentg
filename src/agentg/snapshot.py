@@ -1,8 +1,10 @@
 """The per-turn member snapshot (docs/design/memory.md §Recall).
 
-Always-true, always-cheap facts for the Agent's dynamic instructions:
-identity, gap, last-session headline, active notes. A few hundred tokens;
-anything bulkier stays behind a tool.
+Always-true, always-cheap facts injected as a developer message at the end
+of the model input via call_model_input_filter (#175): identity, gap,
+last-session headline, active notes. A few hundred tokens; anything bulkier
+stays behind a tool. Not part of the system prompt, so the prompt prefix
+stays cacheable.
 """
 
 from __future__ import annotations

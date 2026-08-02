@@ -232,6 +232,15 @@ async def test_snapshot_injected_as_developer_message_at_end_of_input(env):
     assert "Iron Temple" in result.input[1]["content"]
 
 
+async def test_module_docstring_reflects_input_filter_mechanism():
+    """The snapshot module docstring must describe the call_model_input_filter
+    mechanism, not the old dynamic-instructions path."""
+    import agentg.snapshot as snap
+    doc = snap.__doc__ or ""
+    assert "call_model_input_filter" in doc
+    assert "dynamic instructions" not in doc
+
+
 async def test_filter_passes_through_when_context_is_none(env):
     """When no MemberContext is available, the filter is a no-op."""
     model_data = ModelInputData(

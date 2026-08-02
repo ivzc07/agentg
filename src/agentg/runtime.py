@@ -45,6 +45,13 @@ async def _inject_snapshot(data: CallModelData[MemberContext]) -> ModelInputData
     if ctx is None:
         return data.model_data
     snapshot = await member_snapshot(ctx)
+    # The "developer" role works with the default openai/gpt-4o-mini (the
+    # SDK's chatcmpl converter supports it).  Via LiteLLM, some providers
+    # (e.g. Anthropic) hoist developer/system messages into the top-level
+    # system param — which would silently move the snapshot back to the
+    # front and defeat the caching goal of #175.  If MODEL is set to a
+    # provider that does not support developer-role messages as trailing
+    # input items, this mechanism needs a per-provider adaptation.
     snapshot_item: dict = {
         "role": "developer",
         "content": snapshot,
