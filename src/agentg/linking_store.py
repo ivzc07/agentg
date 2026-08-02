@@ -213,12 +213,21 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text("CREATE INDEX ix_member_channels_gym_id ON member_channels (gym_id)")
         )
-    # Safety-outbox retry column (issue #216): transient failures are retried
-    # before a job is permanently failed.
+    # Safety-outbox columns (issue #216): transient failures are retried
+    # before a job is permanently failed; claimed_at enables lease detection;
+    # last_error captures the most recent transient failure reason.
     outbox_columns = {c["name"] for c in inspect(conn).get_columns("safety_outbox_jobs")}
     if "retry_count" not in outbox_columns:
         conn.execute(
             text("ALTER TABLE safety_outbox_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+        )
+    if "claimed_at" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN claimed_at TIMESTAMP")
+        )
+    if "last_error" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN last_error VARCHAR(400)")
         )
 
 

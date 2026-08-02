@@ -353,8 +353,9 @@ class SafetyOutboxJob(Base):
     coach_member_id: Mapped[int] = mapped_column(
         ForeignKey("members.id", ondelete="CASCADE"),
     )
-    # The coach's channel identity at job-creation time (denormalised snapshot
-    # so delivery never depends on the linking table's current state).
+    # The coach's channel identity at job-creation time (audit snapshot only;
+    # delivery re-resolves via coach_channel_in_gym at delivery time so a
+    # coach who switched gyms never receives a cross-gym notification).
     channel: Mapped[str] = mapped_column(String(32))
     channel_user_id: Mapped[str] = mapped_column(String(64))
     # Denormalised snapshot of the flagged Member: the message text and the
@@ -364,6 +365,8 @@ class SafetyOutboxJob(Base):
     member_is_coach: Mapped[bool] = mapped_column(default=False)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     retry_count: Mapped[int] = mapped_column(default=0)
+    claimed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    last_error: Mapped[str | None] = mapped_column(String(400), default=None)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     delivered_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     failure_reason: Mapped[str | None] = mapped_column(String(400), default=None)

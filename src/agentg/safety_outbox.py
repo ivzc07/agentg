@@ -20,6 +20,14 @@ from agentg.models import MemberNote, SafetyOutboxJob
 MAX_NOTE_LENGTH = 400
 MAX_RETRIES = 3  # transient failures before permanent failure
 
+# Lease: a job claimed longer than this is considered abandoned and is
+# reset to pending by the next poll cycle (stale-claim recovery).
+LEASE_TIMEOUT_SECONDS = 60
+
+# Backoff: each retry waits retry_count * BASE_BACKOFF seconds before
+# the next attempt (linear backoff).
+BASE_BACKOFF_SECONDS = 5
+
 Clock = Callable[[], datetime]
 
 logger = logging.getLogger(__name__)
@@ -88,32 +96,31 @@ class SafetyOutbox:
 
     async def claim_pending(self, limit: int = _STARTUP_BATCH) -> list[SafetyOutboxJob]:
         """Atomically claim the oldest pending jobs by transitioning their
-        status from ``pending`` to ``sending`` in one transaction.
+        status from ``pending`` to ``sending`` in one statement.
 
-        The status transition prevents two concurrent ``drain_once`` calls
-        (e.g. shutdown drain vs poll loop) from selecting the same jobs.
+        Uses a single UPDATE … RETURNING so the claim is atomic even against
+        concurrent connections: the subquery selects pending ids and the
+        outer UPDATE transitions them in one step.  Two concurrent calls
+        can never claim the same job.
         """
         async with self._sessions() as db:
-            rows = (
-                await db.scalars(
-                    select(SafetyOutboxJob)
-                    .where(SafetyOutboxJob.status == "pending")
-                    .order_by(SafetyOutboxJob.created_at)
-                    .limit(limit)
-                )
-            ).all()
-            if not rows:
-                return []
-            ids = [r.id for r in rows]
-            await db.execute(
-                update(SafetyOutboxJob)
-                .where(SafetyOutboxJob.id.in_(ids))
-                .values(status="sending")
+            sub = (
+                select(SafetyOutboxJob.id)
+                .where(SafetyOutboxJob.status == "pending")
+                .order_by(SafetyOutboxJob.created_at)
+                .limit(limit)
             )
-            for r in rows:
-                r.status = "sending"
+            now = self._clock()
+            result = await db.execute(
+                update(SafetyOutboxJob)
+                .where(SafetyOutboxJob.id.in_(sub))
+                .values(status="sending", claimed_at=now)
+                .returning(SafetyOutboxJob)
+            )
+            rows = result.fetchall()
             await db.commit()
-            return list(rows)
+            # fetchall returns Row tuples; extract the ORM objects.
+            return [row[0] for row in rows]
 
     async def mark_delivered(self, job: SafetyOutboxJob) -> None:
         """Mark a single job as delivered — only if it is still in the
@@ -125,7 +132,7 @@ class SafetyOutbox:
                     SafetyOutboxJob.id == job.id,
                     SafetyOutboxJob.status == "sending",
                 )
-                .values(status="delivered", delivered_at=self._clock())
+                .values(status="delivered", delivered_at=self._clock(), last_error=None)
             )
             await db.commit()
 
@@ -141,6 +148,7 @@ class SafetyOutbox:
                 .values(
                     status="failed",
                     failure_reason=reason[:400],
+                    last_error=reason[:400],
                     delivered_at=self._clock(),
                 )
             )
@@ -148,7 +156,10 @@ class SafetyOutbox:
 
     async def reset_for_retry(self, job: SafetyOutboxJob, reason: str) -> None:
         """Increment the retry counter and reset to ``pending`` so the poller
-        tries again.  After *MAX_RETRIES* the job is permanently failed."""
+        tries again.  After *MAX_RETRIES* the job is permanently failed.
+
+        ``claimed_at`` is cleared so the next claim can stamp a fresh lease.
+        ``last_error`` records the transient reason for diagnostics."""
         async with self._sessions() as db:
             next_count = job.retry_count + 1
             if next_count >= MAX_RETRIES:
@@ -159,6 +170,8 @@ class SafetyOutbox:
                         status="failed",
                         retry_count=next_count,
                         failure_reason=f"retries exhausted: {reason}"[:400],
+                        last_error=reason[:400],
+                        claimed_at=None,
                         delivered_at=self._clock(),
                     )
                 )
@@ -169,6 +182,8 @@ class SafetyOutbox:
                     .values(
                         status="pending",
                         retry_count=next_count,
+                        last_error=reason[:400],
+                        claimed_at=None,
                     )
                 )
             await db.commit()
@@ -183,10 +198,45 @@ class SafetyOutbox:
             result = await db.execute(
                 update(SafetyOutboxJob)
                 .where(SafetyOutboxJob.status == "sending")
-                .values(status="pending")
+                .values(status="pending", claimed_at=None)
             )
             await db.commit()
             return result.rowcount
+
+    async def reset_stale_claims(
+        self, max_age_seconds: int = LEASE_TIMEOUT_SECONDS
+    ) -> int:
+        """Reset every ``sending`` job whose lease has expired back to
+        ``pending`` so a future poll cycle retries them.
+
+        Called periodically by the poll loop so a hang (not a crash) that
+        outlasts the lease timeout does not permanently strand jobs.
+        """
+        cutoff = self._clock()
+        async with self._sessions() as db:
+            # Use Python-side cutoff because SQLite has no native datetime
+            # arithmetic and the TZDateTime type stores UTC-naive values.
+            rows = (
+                await db.scalars(
+                    select(SafetyOutboxJob).where(
+                        SafetyOutboxJob.status == "sending",
+                    )
+                )
+            ).all()
+            stale_ids = [
+                r.id for r in rows
+                if r.claimed_at is not None
+                and (cutoff - r.claimed_at).total_seconds() > max_age_seconds
+            ]
+            if not stale_ids:
+                return 0
+            await db.execute(
+                update(SafetyOutboxJob)
+                .where(SafetyOutboxJob.id.in_(stale_ids))
+                .values(status="pending", claimed_at=None)
+            )
+            await db.commit()
+            return len(stale_ids)
 
 
 class OutboxWorker:
@@ -253,6 +303,10 @@ class OutboxWorker:
     async def _poll_loop(self) -> None:
         while True:
             try:
+                # Recover jobs stranded by a hang (not a crash).
+                stale = await self._outbox.reset_stale_claims()
+                if stale:
+                    logger.info("reset %d stale outbox claims", stale)
                 await self.drain_once(limit=10)
             except Exception:
                 logger.exception("outbox poll cycle failed")
@@ -266,9 +320,15 @@ class OutboxWorker:
 
         Channel identity is re-resolved at delivery time so a coach who
         switched gyms after job creation never receives a cross-gym
-        notification.  Transient notifier failures are retried up to
-        *MAX_RETRIES* before the job is permanently failed.
+        notification (P1 #2).  Transient failures (notifier, DB) are retried
+        up to *MAX_RETRIES* before the job is permanently failed (P1 #1).
         """
+        # Backoff: wait before attempting delivery so transient outages
+        # (network flap, DB restart) have time to resolve.
+        if job.retry_count > 0:
+            delay = job.retry_count * BASE_BACKOFF_SECONDS
+            await asyncio.sleep(delay)
+
         try:
             # Resolve the current channel identity at delivery time (P1 #2).
             channel_info = await self._linking.coach_channel_in_gym(
@@ -340,12 +400,14 @@ class OutboxWorker:
                     # but not worth marking the whole job failed.
 
             await self._outbox.mark_delivered(job)
-        except Exception:
-            logger.exception("unhandled error delivering outbox job %s", job.id)
+        except Exception as exc:
+            logger.exception("error delivering outbox job %s", job.id)
             try:
-                await self._outbox.mark_failed(job, "unhandled delivery error")
+                await self._outbox.reset_for_retry(
+                    job, f"delivery error: {type(exc).__name__}"
+                )
             except Exception:
-                logger.exception("failed to mark job %s as failed", job.id)
+                logger.exception("failed to reset job %s for retry", job.id)
 
     async def _note_text(self, note_id: int) -> str | None:
         async with self._outbox._sessions() as db:

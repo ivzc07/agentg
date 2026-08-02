@@ -647,6 +647,301 @@ async def test_deleted_note_marks_job_failed(env):
     assert all("no longer exists" in (r.failure_reason or "") for r in rows)
 
 
+# ── lease / stale-claim recovery (P2 #3) ──────────────────────────────────
+
+
+async def test_claimed_at_set_on_claim(env):
+    """claim_pending sets claimed_at to the current timestamp."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 2
+    for job in jobs:
+        assert job.status == "sending"
+        assert job.claimed_at is not None
+
+
+async def test_reset_stale_claims_recovers_hung_jobs(env):
+    """Jobs stuck in 'sending' beyond LEASE_TIMEOUT_SECONDS are reset to
+    'pending' by reset_stale_claims so the poll loop retries them."""
+    from agentg.safety_outbox import LEASE_TIMEOUT_SECONDS
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+
+    # Claim jobs normally.
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 2
+
+    # Backdate claimed_at so they appear stale.
+    async with env.engine.begin() as conn:
+        stale_time = datetime.now(UTC) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
+        await conn.execute(
+            text("UPDATE safety_outbox_jobs SET claimed_at = :ts"),
+            {"ts": stale_time},
+        )
+
+    # reset_stale_claims should recover them.
+    reset_count = await env.outbox.reset_stale_claims()
+    assert reset_count == 2
+
+    # Jobs are now pending again.
+    async with env.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text("SELECT status, claimed_at FROM safety_outbox_jobs")
+            )
+        ).all()
+    assert all(r.status == "pending" for r in rows)
+    assert all(r.claimed_at is None for r in rows)
+
+    # A worker can now deliver them.
+    worker = _make_worker(env)
+    await worker.drain_once(limit=50)
+    assert len(env.notifier.sent) == 4
+
+
+async def test_reset_stale_claims_ignores_fresh_claims(env):
+    """Jobs in 'sending' with a recent claimed_at are NOT reset — only
+    genuinely stale claims are recovered."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+
+    # Claim jobs with a fresh claimed_at.
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 2
+
+    # reset_stale_claims should ignore them (claimed_at is recent).
+    reset_count = await env.outbox.reset_stale_claims()
+    assert reset_count == 0
+
+    # Jobs are still in 'sending'.
+    async with env.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text("SELECT status FROM safety_outbox_jobs")
+            )
+        ).all()
+    assert all(r.status == "sending" for r in rows)
+
+
+# ── last_error tracking (P1 #1) ───────────────────────────────────────────
+
+
+async def test_last_error_recorded_on_transient_failure(env):
+    """When a delivery fails transiently, last_error is set so operators
+    can diagnose what went wrong."""
+    failing_notifier = FakeNotifier(failing_id="7")
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=failing_notifier,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+    await worker.drain_once(limit=50)
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count, last_error, failure_reason "
+                    "FROM safety_outbox_jobs WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.status == "pending"
+    assert row.retry_count == 1
+    assert "notifier send failed" in (row.last_error or "")
+    assert row.failure_reason is None  # not permanent
+
+
+async def test_last_error_cleared_after_successful_retry(env):
+    """When a previously-failed job succeeds on retry, the failure state
+    is cleared and the job is marked delivered."""
+    # First attempt fails.
+    failing_notifier = FakeNotifier(failing_id="7")
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=failing_notifier,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+    await worker.drain_once(limit=50)
+
+    # Job is pending with retry_count=1.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT retry_count FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.retry_count == 1
+
+    # Second attempt with a working notifier succeeds.
+    success_worker = _make_worker(env)
+    await success_worker.drain_once(limit=50)
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count, last_error, failure_reason "
+                    "FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.status == "delivered"
+    assert row.retry_count == 1  # retry_count is preserved for audit
+    assert row.last_error is None  # cleared on successful delivery
+    assert row.failure_reason is None
+
+
+# ── backoff timing (P1 #1) ─────────────────────────────────────────────────
+
+
+async def test_retry_includes_backoff_delay(env):
+    """Each retry waits retry_count * BASE_BACKOFF_SECONDS before
+    attempting delivery."""
+    from agentg.safety_outbox import BASE_BACKOFF_SECONDS
+
+    failing_notifier = FakeNotifier(failing_id="7")
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=failing_notifier,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+
+    # First attempt: retry_count=0 → no backoff.
+    t0 = time.monotonic()
+    await worker.drain_once(limit=50)
+    t1 = time.monotonic()
+    assert (t1 - t0) < BASE_BACKOFF_SECONDS  # no backoff on first attempt
+
+    # Second attempt: retry_count=1 → 1 * BASE_BACKOFF delay.
+    t2 = time.monotonic()
+    await worker.drain_once(limit=50)
+    t3 = time.monotonic()
+    assert (t3 - t2) >= BASE_BACKOFF_SECONDS * 0.8  # allow small timing variance
+
+    # Third attempt: retry_count=2 → 2 * BASE_BACKOFF delay.
+    t4 = time.monotonic()
+    await worker.drain_once(limit=50)
+    t5 = time.monotonic()
+    assert (t5 - t4) >= BASE_BACKOFF_SECONDS * 1.6  # 2 * BASE_BACKOFF, minus variance
+
+
+# ── transient error recovery (P1 #1) ──────────────────────────────────────
+
+
+async def test_transient_db_error_is_retried_not_permanently_failed(env):
+    """When channel resolution raises a transient DB error, the job is
+    retried (reset_to_retry) rather than permanently failed. The original
+    code's outer catch-all called mark_failed — this test proves we now retry."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Make coach_channel_in_gym raise a transient error.
+    real_resolve = env.linking.coach_channel_in_gym
+    call_count = [0]
+
+    async def flaky_resolve(member_id, gym_id):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("simulated DB hiccup")
+        return await real_resolve(member_id, gym_id)
+
+    env.linking.coach_channel_in_gym = flaky_resolve
+
+    worker = _make_worker(env)
+    await worker.drain_once(limit=50)
+
+    # First delivery should have failed transiently — job retried, not failed.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count, last_error, failure_reason "
+                    "FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.status == "pending", f"expected pending (retry), got {row.status}"
+    assert row.retry_count == 1
+    assert "RuntimeError" in (row.last_error or "")
+    assert row.failure_reason is None  # no permanent failure
+
+    # Second attempt succeeds.
+    await worker.drain_once(limit=50)
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"
+
+    # Restore.
+    env.linking.coach_channel_in_gym = real_resolve
+
+
 # ── channel identity re-resolution at delivery time (P1 #2) ────────────────
 
 
