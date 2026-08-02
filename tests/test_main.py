@@ -50,3 +50,19 @@ async def test_shutdown_stops_scheduler_closes_bot_session_and_cleans_up_web_run
 
     # Web runner: cleanup() awaited
     mock_web_runner.cleanup.assert_awaited_once()
+
+
+async def test_shutdown_cleans_up_web_runner_even_when_bot_session_close_raises(
+    mock_scheduler, mock_bot, mock_web_runner
+):
+    """_shutdown must still call web_runner.cleanup() when bot.session.close()
+    raises — the finally guard prevents a failing close from skipping cleanup."""
+    mock_bot.session.close.side_effect = RuntimeError("connection lost")
+
+    with pytest.raises(RuntimeError, match="connection lost"):
+        await _shutdown(mock_scheduler, mock_bot, mock_web_runner)
+
+    # Scheduler shutdown still happens (it runs first, before the raise)
+    mock_scheduler.shutdown.assert_called_once_with(wait=False)
+    # Despite the failing close, cleanup must still be called
+    mock_web_runner.cleanup.assert_awaited_once()

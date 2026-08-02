@@ -101,8 +101,10 @@ async def _shutdown(
 ) -> None:
     """Cleanly stop scheduler, bot HTTP session, and web server."""
     scheduler.shutdown(wait=False)
-    await bot.session.close()
-    await web_runner.cleanup()
+    try:
+        await bot.session.close()
+    finally:
+        await web_runner.cleanup()
 
 
 def main() -> None:
