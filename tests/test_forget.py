@@ -378,6 +378,7 @@ async def test_runtime_expired_pending_with_wrong_phrase_no_deletion(env):
 @pytest.mark.parametrize(
     "text,expected",
     [
+        # English triggers
         ("forget me", True),
         ("Forget Me", True),
         ("I want to delete my data", True),
@@ -387,10 +388,26 @@ async def test_runtime_expired_pending_with_wrong_phrase_no_deletion(env):
         ("delete my info now", True),
         ("how do I forget me?", True),
         ("  FORGET  ME  ", True),
+        # Spanish triggers (ADR-0002; issue #212)
+        ("olvídame", True),
+        ("OLVÍDAME", True),
+        ("bórrame", True),
+        ("elimíname por favor", True),
+        ("quiero borrar mi cuenta", True),
+        ("borra mis datos", True),
+        ("elimina mis datos ya", True),
+        ("elimina mi cuenta", True),
+        ("borra mi información", True),
+        # Non-triggers
         ("hello", False),
         ("what's my routine?", False),
-        ("delete my workout", False),  # no trigger substring
+        ("delete my workout", False),  # no trigger phrase
         ("", False),
+        # Word-boundary guards: these must NOT match (P3)
+        ("forget metal", False),
+        ("erase message", False),
+        ("erase meditation", False),
+        ("delete my datagram", False),
     ],
 )
 def test_is_forget_me_request(text, expected):

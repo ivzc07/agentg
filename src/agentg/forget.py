@@ -7,6 +7,7 @@ wipe — deterministic, model-free, two-turn (issue #212).
 
 from __future__ import annotations
 
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -28,14 +29,31 @@ from agentg.models import (
 )
 
 # Phrases that trigger a new forget-me request (case-insensitive after
-# whitespace normalization).
+# whitespace normalization).  English and Spanish — per ADR-0002 the
+# first-action criterion must be deterministic regardless of which
+# language the Member uses.
 _FORGET_ME_TRIGGERS: tuple[str, ...] = (
+    # English
     "forget me",
     "delete my data",
     "delete my account",
     "delete my info",
     "erase my data",
     "erase me",
+    # Spanish (imperative and infinitive forms)
+    "olvídame",
+    "bórrame",
+    "elimíname",
+    "borra mi cuenta",
+    "borrar mi cuenta",
+    "borra mis datos",
+    "borrar mis datos",
+    "elimina mis datos",
+    "eliminar mis datos",
+    "elimina mi cuenta",
+    "eliminar mi cuenta",
+    "borra mi información",
+    "borrar mi información",
 )
 
 
@@ -159,9 +177,16 @@ class ForgetStore:
 
 
 def is_forget_me_request(text: str) -> bool:
-    """True when *text* looks like a Member asking to be forgotten."""
+    """True when *text* looks like a Member asking to be forgotten.
+
+    Matches whole phrases (word boundaries) so ordinary text like
+    "forget metal" or "erase message" does not trigger.
+    """
     collapsed = " ".join(text.lower().split())
-    return any(trigger in collapsed for trigger in _FORGET_ME_TRIGGERS)
+    return any(
+        re.search(r"\b" + re.escape(trigger) + r"\b", collapsed)
+        for trigger in _FORGET_ME_TRIGGERS
+    )
 
 
 def normalize_confirmation(text: str) -> str:

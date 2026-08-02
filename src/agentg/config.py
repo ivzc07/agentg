@@ -53,6 +53,13 @@ class Settings:
             raise ConfigError(
                 f"DASHBOARD_PORT must be a number, got {env.get('DASHBOARD_PORT')!r}"
             )
+        forget_me = _int_env(
+            env, "FORGET_ME_CONFIRMATION_SECONDS", DEFAULT_FORGET_ME_CONFIRMATION_SECONDS
+        )
+        if forget_me <= 0:
+            raise ConfigError(
+                f"FORGET_ME_CONFIRMATION_SECONDS must be positive, got {forget_me!r}"
+            )
         return cls(
             telegram_bot_token=env["TELEGRAM_BOT_TOKEN"],
             model=env.get("MODEL") or DEFAULT_MODEL,
@@ -65,9 +72,7 @@ class Settings:
             dashboard_port=port,
             dashboard_session_secret=env.get("DASHBOARD_SESSION_SECRET") or None,
             dashboard_spa_dist=env.get("DASHBOARD_SPA_DIST") or "",
-            forget_me_confirmation_seconds=_int_env(
-                env, "FORGET_ME_CONFIRMATION_SECONDS", DEFAULT_FORGET_ME_CONFIRMATION_SECONDS
-            ),
+            forget_me_confirmation_seconds=forget_me,
         )
 
 
