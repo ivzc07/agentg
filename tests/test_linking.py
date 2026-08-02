@@ -41,6 +41,7 @@ async def runtime(tmp_path):
         stores=stores,
         linking=Linking(stores.linking, identity_phraser),
         summarizer=null_summarizer,
+        stream_replies=False,
     )
     await runtime.ensure_schema()
     yield runtime

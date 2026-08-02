@@ -83,6 +83,110 @@ async def _keep_typing(bot: Bot, chat_id: int) -> None:
             logger.debug("typing refresh failed", exc_info=True)
 
 
+async def _deliver_streamed(
+    message: Message,
+    reply: Reply,
+    typing_task: asyncio.Task[None],
+    sender_id: int,
+) -> None:
+    """Stream reply chunks: first yield → new message, later yields → edits.
+
+    Cancels the typing indicator after the first chunk lands so the Member
+    sees the reply start right away.  Demo animations land after the stream
+    is exhausted, preserving the existing ordering guarantee.
+
+    Long replies (exceeding ``MAX_MESSAGE_LENGTH``) are split across
+    multiple messages using ``split_reply`` so no text is silently dropped
+    and every message edit changes the visible text (avoiding Telegram's
+    "message is not modified" error and the duplicate-message burst it
+    caused).
+    """
+    assert reply.stream is not None
+    sent_messages: dict[int, Message] = {}  # chunk index → sent message
+    last_sent_by_index: dict[int, str] = {}  # chunk index → last text sent
+    last_yielded: str = ""
+    stream_errored = False
+    try:
+        async for chunk in reply.stream:
+            stripped = chunk.strip().replace("**", "")
+            if not stripped or stripped == last_yielded:
+                continue
+            last_yielded = stripped
+            chunks = split_reply(stripped)
+            first_ever = len(sent_messages) == 0
+            for i, part in enumerate(chunks):
+                if part == last_sent_by_index.get(i):
+                    continue
+                last_sent_by_index[i] = part
+                existing = sent_messages.get(i)
+                if existing is None:
+                    # New chunk — send as a fresh message.
+                    if first_ever and i == 0:
+                        typing_task.cancel()
+                        try:
+                            await typing_task
+                        except asyncio.CancelledError:
+                            pass
+                    if i == 0 and reply.disable_preview:
+                        sent = await message.answer(
+                            part,
+                            link_preview_options=LinkPreviewOptions(is_disabled=True),
+                        )
+                    else:
+                        sent = await message.answer(part)
+                    sent_messages[i] = sent
+                else:
+                    # Existing chunk grew — edit it in place.
+                    try:
+                        await existing.edit_text(part)
+                    except Exception:
+                        logger.debug(
+                            "edit_text failed, sending as new message", exc_info=True
+                        )
+                        sent = await message.answer(part)
+                        sent_messages[i] = sent
+    except Exception:
+        stream_errored = True
+        logger.exception("streaming delivery failed for sender %s", sender_id)
+        if not sent_messages:
+            sent_messages[-1] = await message.answer(ERROR_REPLY)
+    finally:
+        # Close the stream deterministically so _hold_lock releases the
+        # per-identity lock immediately — a delivery error (e.g. message.answer
+        # raising) would otherwise leave the async generator suspended at its
+        # yield until GC (#176).
+        try:
+            await reply.stream.aclose()
+        except Exception:
+            logger.debug("aclose on stream raised", exc_info=True)
+        # Ensure typing is always cancelled.
+        if not typing_task.done():
+            typing_task.cancel()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                pass
+
+    # after_send carries the deferred rhythm reset (#169), the Coach safety
+    # pings (#172) and the compaction signal (#173) as well as demo media, so
+    # it must run even when the stream errored -- a failed delivery must never
+    # cost a Coach their safety ping.  Only the media is suppressed, which is
+    # all #176 wanted: no animation beneath an error message.  It sits in a
+    # finally so that a fallback send raising cannot drop it either (#172).
+    try:
+        # If nothing was delivered (empty stream, all-whitespace, or error
+        # before any chunk), send the fallback so the Member isn't left in
+        # silence.
+        if not sent_messages:
+            await message.answer(EMPTY_REPLY_FALLBACK)
+    finally:
+        if reply.after_send is not None:
+            try:
+                await reply.after_send(deliver_media=not stream_errored)
+            except Exception:
+                logger.exception("post-reply delivery failed for sender %s", sender_id)
+
+
 def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[None]]:
     async def on_text(message: Message) -> None:
         if message.from_user is None or message.text is None:
@@ -113,9 +217,20 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
                 logger.exception("agent loop failed for sender %s", message.from_user.id)
                 await message.answer(ERROR_REPLY)
                 return
-            # Deliver the reply text; follow-up actions always run in a finally
-            # so a Telegram 403 / 429 / network error on the reply text does not
-            # silently drop deferred coach pings or demo animations (issue #172).
+            if reply.stream is not None:
+                # Streaming path (#176): send the first chunk as a new message,
+                # then edit it with progressively longer text at sentence
+                # boundaries.  Sentence-granularity respects Telegram's rate
+                # limits -- no per-token edits.
+                await _deliver_streamed(
+                    message, reply, typing_task, message.from_user.id
+                )
+                # typing_task already cancelled inside _deliver_streamed
+                return
+            # Non-streaming path: split long replies and send in order.
+            # after_send always runs in a finally so a Telegram 403 / 429 /
+            # network error on the reply text does not silently drop the
+            # deferred coach pings, rhythm reset or demos (issue #172).
             try:
                 for chunk in split_reply(reply) or [EMPTY_REPLY_FALLBACK]:
                     if reply.disable_preview:  # keep the call shape unchanged otherwise

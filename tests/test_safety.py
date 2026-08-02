@@ -516,6 +516,9 @@ async def runtime_env(tmp_path):
     notifier = FakeNotifier()
     runtime = AgentRuntime(
         agent=object(),  # replaced per test via monkeypatch
+        # These tests drive the blocking path (they monkeypatch Runner.run),
+        # so streaming is off -- the #176 convention across the test suite.
+        stream_replies=False,
         engine=engine,
         stores=stores,
         linking=Linking(stores.linking, unused_phraser),

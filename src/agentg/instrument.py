@@ -107,6 +107,12 @@ class TurnContext:
     def __init__(self) -> None:
         self.instrument = TurnInstrument()
         self._token: contextvars.Token[TurnInstrument | None] | None = None
+        # Streaming turns are not over when the ``with`` block exits: the
+        # model generation continues until the channel consumes the stream.
+        # Set this and the exit resets the contextvar but defers the log line
+        # to ``finish()`` (issue #161 + #176).
+        self.defer_logging = False
+        self._logged = False
 
     def __enter__(self) -> TurnInstrument:
         self._token = _turn.set(self.instrument)
@@ -120,6 +126,26 @@ class TurnContext:
             # latency baseline isn't polluted (issue #161: only completed
             # turns are measured).
             return False  # don't suppress the exception
+        if self.defer_logging:
+            # The turn is still running (streaming): finish() logs it once the
+            # stream is consumed, so the counts include the generation.
+            return False
+        self.finish()
+        return False
+
+    def finish(self) -> None:
+        """Log the completed turn.  Safe to call once; later calls are no-ops.
+
+        Separate from ``__exit__`` because the contextvar token can only be
+        reset in the context that set it, while a streaming turn only truly
+        ends later, when the channel finishes consuming the stream.  The
+        model-call and SQL counters keep working across that gap: the task
+        ``Runner.run_streamed`` starts inherits a copy of the context that
+        still points at this instrument.
+        """
+        if self._logged:
+            return
+        self._logged = True
         duration = time.monotonic() - self.instrument.start_time
         logger.info(
             "turn completed in %.3fs, %d model calls, %d SQL statements",
@@ -127,4 +153,3 @@ class TurnContext:
             self.instrument.model_call_count,
             self.instrument.sql_count,
         )
-        return False

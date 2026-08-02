@@ -235,6 +235,8 @@ class TestIntegration:
         stores = Stores.from_engine(engine)
         runtime = AgentRuntime(
             agent=object(),
+            # Blocking path: these tests monkeypatch Runner.run (#176).
+            stream_replies=False,
             engine=engine,
             stores=stores,
             linking=Linking(stores.linking, unused_phraser),
@@ -317,6 +319,8 @@ class TestIntegration:
         # never reached.
         runtime = AgentRuntime(
             agent=object(),
+            # Blocking path: these tests monkeypatch Runner.run (#176).
+            stream_replies=False,
             engine=engine,
             stores=stores,
             linking=Linking(stores.linking, identity_phraser),
@@ -376,6 +380,8 @@ class TestIntegration:
         dashboard_store = DashboardStore(engine)
         runtime = AgentRuntime(
             agent=object(),
+            # Blocking path: these tests monkeypatch Runner.run (#176).
+            stream_replies=False,
             engine=engine,
             stores=stores,
             linking=Linking(stores.linking, unused_phraser),
@@ -417,3 +423,93 @@ class TestIntegration:
             )
         finally:
             await engine.dispose()
+
+    async def test_streaming_turn_is_logged_after_the_stream_not_at_setup(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """On the streaming path the instrument line must cover the whole turn.
+
+        ``Runner.run_streamed`` does no model work until the channel consumes
+        the stream, which happens after ``handle_message`` returns.  Closing
+        the instrument there would log setup-only duration and ``0 model
+        calls`` on every production turn (streaming is the default), so the
+        line is deferred until the stream is exhausted.
+
+        Revert-proof: log at setup instead and the line appears before the
+        stream is consumed, with a zero model-call count.
+        """
+        from types import SimpleNamespace
+
+        from agentg.db import create_engine
+        from agentg.instrument import _turn
+        from agentg.linking import Linking
+        from agentg.messages import IncomingMessage
+        from agentg.runtime import AgentRuntime
+        from agentg.stores import Stores
+        from conftest import unused_phraser
+
+        async def null_summarizer(old_items, existing_notes):
+            raise AssertionError("compaction should not trigger in this test")
+
+        engine = create_engine("sqlite+aiosqlite://")
+        stores = Stores.from_engine(engine)
+        runtime = AgentRuntime(
+            agent=object(),
+            engine=engine,
+            stores=stores,
+            linking=Linking(stores.linking, unused_phraser),
+            summarizer=null_summarizer,
+            stream_replies=True,
+        )
+        await runtime.ensure_schema()
+        gym = await stores.linking.create_gym("Iron Temple")
+        await stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+        async def _pretend_model_call() -> None:
+            # The litellm wrapper attributes each call via the contextvar.
+            inst = _turn.get()
+            assert inst is not None, "the model task did not inherit the turn"
+            inst.model_call_count += 1
+
+        class FakeStreamResult:
+            def __init__(self, task):
+                self._task = task
+
+            async def stream_events(self):
+                await self._task
+                for event in ():  # pragma: no cover - no raw events needed
+                    yield event
+
+        def fake_run_streamed(agent, text, *, session, context=None, run_config=None):
+            # Mirror the SDK (agents/run.py: "Kick off the actual agent loop in
+            # the background"): the task is created HERE, inside the turn, so it
+            # inherits a context copy pointing at this turn's instrument.
+            return FakeStreamResult(asyncio.create_task(_pretend_model_call()))
+
+        import agentg.runtime as runtime_module
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(runtime_module.Runner, "run_streamed", fake_run_streamed)
+            with caplog.at_level(logging.INFO, logger="agentg.instrument"):
+                reply = await runtime.handle_message(
+                    IncomingMessage(
+                        channel="telegram", channel_user_id="42", text="I am here"
+                    )
+                )
+                # Nothing logged yet: the model has not run.
+                assert not [
+                    r for r in caplog.records if "turn completed" in r.getMessage()
+                ], "the turn was logged at setup, before the model ran"
+
+                assert reply.stream is not None
+                [chunk async for chunk in reply.stream]
+
+        lines = [
+            r.getMessage()
+            for r in caplog.records
+            if "turn completed" in r.getMessage()
+        ]
+        assert len(lines) == 1, f"expected exactly one turn line, got {lines}"
+        assert "0 model calls" not in lines[0], (
+            f"streaming turn reported no model calls: {lines[0]}"
+        )

@@ -175,7 +175,7 @@ async def test_notifier_leaves_previews_alone_by_default():
 async def test_after_send_runs_only_once_the_reply_text_is_out():
     order = []
 
-    async def after_send():
+    async def after_send(**_):
         order.append("demo")
 
     async def reply_fn(msg):

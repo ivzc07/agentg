@@ -228,6 +228,7 @@ async def test_runtime_routes_the_command_to_the_door_not_the_agent(stores, engi
         linking=Linking(stores.linking, unused_phraser),
         summarizer=AsyncMock(),
         dashboard=DashboardDoor(stores.dashboard, "https://dash.example.com"),
+        stream_replies=False,
     )
     await make_coach(stores.linking)
 
