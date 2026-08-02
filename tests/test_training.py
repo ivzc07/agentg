@@ -481,3 +481,42 @@ async def test_today_uses_the_gyms_timezone(chicago_env):
     env = chicago_env
     assert env.training.today(CHICAGO) == date(2026, 7, 15)
     assert env.training.today() == date(2026, 7, 16)  # UTC stays the default
+
+
+# --- exercise_history_batch (issue #170) ---
+
+
+async def test_exercise_history_batch_resolves_aliases(env):
+    """Alias resolution works: "bench" finds "bench press" history."""
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+    await env.training.close_session(env.member_id)
+
+    result = await env.training.exercise_history_batch(env.member_id, ["bench"], limit=5)
+
+    assert "bench" in result
+    assert len(result["bench"]) == 1
+    assert result["bench"][0]["top_weight"] == 60.0
+    assert result["bench"][0]["top_reps"] == [8, 8, 8]
+
+
+async def test_exercise_history_batch_unknown_exercise_is_empty(env):
+    """An exercise with no catalog match returns an empty history."""
+    result = await env.training.exercise_history_batch(
+        env.member_id, ["nonexistent"], limit=5
+    )
+
+    assert result["nonexistent"] == []
+
+
+async def test_exercise_history_batch_respects_limit(env):
+    """Per-exercise limit truncates to the most recent sessions."""
+    # Log three sessions, most recent first due to descending order
+    for offset in (9, 6, 3):
+        env.clock.now = FakeClock().now - timedelta(days=offset)
+        await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+        await env.training.close_session(env.member_id)
+    env.clock.now = FakeClock().now
+
+    result = await env.training.exercise_history_batch(env.member_id, ["bench"], limit=2)
+
+    assert len(result["bench"]) == 2  # only the 2 most recent sessions

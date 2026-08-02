@@ -55,12 +55,14 @@ async def suggest_for_today(
     rules = parse_progression_rules(await routines.effective_rules_doc(gym_id))
     gap_days, _last = await training.latest_session_info(member_id)
 
+    exercise_names = [ex["exercise"] for ex in workout["exercises"]]
+    limit = rules.stall_sessions + 1
+    histories = await training.exercise_history_batch(member_id, exercise_names, limit)
+
     suggestions: list[ExerciseSuggestion] = []
     for exercise in workout["exercises"]:
         target_top = parse_top_reps(exercise.get("reps"))
-        rows = await training.exercise_history(
-            member_id, exercise["exercise"], limit=rules.stall_sessions + 1
-        )
+        rows = histories.get(exercise["exercise"], [])
         history = [
             SessionResult(
                 weight=row["top_weight"],

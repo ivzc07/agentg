@@ -17,7 +17,7 @@
   /* --- Radius scale --- */
   --radius-none: 0; --radius-xs: 2px; --radius-sm: 4px; --radius-md: 8px; --radius-pill: 999px;
   /* --- Accent (magenta hero, cyan secondary for gradient endpoints) --- */
-  --magenta: #f472a7;    --magenta-tint: #1f0d17;   /* hero accent, AA 4.52:1 on #000 */
+  --magenta: #f472a7;    --magenta-tint: #1f0d17;   /* hero accent, AA 7.81:1 on #000 */
   --cyan: #4dd4e0;       --cyan-tint: #0a1c20;      /* secondary, AA ~4.8:1 on #000 */
   --accent-gradient: linear-gradient(135deg, var(--magenta), var(--cyan));
   /* --- Glow --- */
