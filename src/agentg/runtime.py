@@ -27,15 +27,6 @@ from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
 from agentg.dashboard import DashboardDoor, is_dashboard_command
 from agentg.demo_media import DemoSender, _send_resolved_demo
-
-
-async def _drain_coach_pings(pings):
-    """Best-effort drain of accumulated coach pings after a Runner failure."""
-    for ping in pings:
-        try:
-            await ping()
-        except Exception:
-            logger.exception("deferred coach ping failed after Runner exception")
 from agentg.messages import IncomingMessage, Reply
 from agentg.linking import Linking
 from agentg.linking_store import LinkedIdentity
@@ -48,6 +39,16 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from agents.result import RunResultStreaming
 
 logger = logging.getLogger(__name__)
+
+
+async def _drain_coach_pings(pings):
+    """Best-effort drain of accumulated coach pings after a Runner failure."""
+    for ping in pings:
+        try:
+            await ping()
+        except Exception:
+            logger.exception("deferred coach ping failed after Runner exception")
+
 
 # How long a turn waits for the previous turn's compaction to signal before
 # giving up and proceeding.  This only covers the window before after_send
@@ -202,10 +203,11 @@ class AgentRuntime:
         await lock.acquire()
         lock_transferred = False
         try:
-            # NOTE: on the streaming path this measures setup up to the first
-            # chunk, not the whole generation -- the model call continues after
-            # this returns (issue #161 + #176).
-            with TurnContext():
+            # The streaming path defers this turn's log line until the stream
+            # is consumed -- otherwise #161 would measure setup only and report
+            # zero model calls on every production turn (issue #161 + #176).
+            turn = TurnContext()
+            with turn:
                 linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
                 reply = await self.linking.handle(msg, linked)
                 if reply is not None:
@@ -247,7 +249,8 @@ class AgentRuntime:
                         # errors, so concurrent messages from the same identity
                         # cannot race the session or interleave chunks (#176).
                         streamed = self._streamed_reply(
-                            msg, context, session, key, member_id, _await_reset, _lock=lock
+                            msg, context, session, key, member_id, _await_reset,
+                            _lock=lock, _turn=turn,
                         )
                         lock_transferred = True
                         return streamed
@@ -307,6 +310,7 @@ class AgentRuntime:
         member_id: int,
         await_reset,
         _lock: asyncio.Lock | None = None,
+        _turn: TurnContext | None = None,
     ) -> Reply:
         """Streaming path: a Reply whose ``.stream`` yields the accumulated
         text at sentence boundaries as the Agent generates it (#176)."""
@@ -318,10 +322,15 @@ class AgentRuntime:
             run_config=_SNAPSHOT_RUN_CONFIG,
         )
         stream = _stream_text(result)
-        # Innermost first: wipe on forget (#166), then release the lock (#176).
+        # Innermost first: wipe on forget (#166), release the lock (#176), then
+        # close the turn's instrument last so its duration and counts cover the
+        # whole generation, not just setup (#161).
         stream = _clear_if_forgotten(stream, context, session)
         if _lock is not None:
             stream = _hold_lock(stream, _lock)
+        if _turn is not None:
+            _turn.defer_logging = True
+            stream = _finish_turn(stream, _turn)
         return Reply(
             "",
             stream=stream,
@@ -462,6 +471,24 @@ async def _clear_if_forgotten(
             await session.clear_session()
 
 
+async def _finish_turn(
+    inner: AsyncIterator[str], turn: TurnContext,
+) -> AsyncIterator[str]:
+    """Yield every chunk from ``inner``, then close out the turn's instrument.
+
+    A streaming turn is not over when ``handle_message`` returns -- the model
+    is still generating.  Logging there would report setup-only duration and
+    zero model calls on every production turn, so the log line is emitted here
+    instead, in a ``finally`` so an aborted stream is still accounted for
+    (issue #161 + #176).
+    """
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        turn.finish()
+
+
 async def _hold_lock(
     inner: AsyncIterator[str], lock: asyncio.Lock,
 ) -> AsyncIterator[str]:
@@ -470,11 +497,11 @@ async def _hold_lock(
     If the inner stream raises, the lock is released before the exception
     propagates — the same guarantee ``async with lock`` would give.
 
-    The outer ``GeneratorExit`` handler ensures the lock is released even
-    when this generator is ``aclose()``-d before the first ``__anext__`` —
-    Python async generators only run ``finally`` blocks after entering the
-    ``try``, and an ``aclose()`` before any ``__anext__`` throws
-    ``GeneratorExit`` at the function entry point before that ``try``."""
+    The outer ``GeneratorExit`` handler covers ``aclose()`` arriving before
+    the body has started.  Note that CPython does not run a never-started
+    async generator's body at all, so that path is belt-and-braces rather
+    than a guarantee to rely on; the channel always starts the stream before
+    closing it (``_deliver_streamed``)."""
     released = False
     try:
         try:

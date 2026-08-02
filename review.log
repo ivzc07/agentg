@@ -1,0 +1,52 @@
+# Review: merge commit `6a50962` (issue-176 ÔÇö streaming rebuild)
+
+I read `runtime.py`, `channels/telegram.py`, `messages.py`, `instrument.py`, `compaction.py`, `main.py`, and the changed tests, and verified behaviour by running the streaming/instrument/compaction/safety suites (92 passed) plus a targeted probe of the #161 path.
+
+## Preserved-feature audit (all confirmed holding except #161)
+- **#166** ÔÇö `_clear_if_forgotten` **is** composed into the streaming path (`_streamed_reply`), wrapped *inside* `_hold_lock` so the wipe runs while the lock is still held. Ô£à
+- **#169** ÔÇö reset settles on every path: `after_send` (`await await_reset()`) for both success paths, and `handle_message`'s `except BaseException` for the blocking-failure path. Ô£à
+- **#172** ÔÇö coach pings drained via `after_send` on the streaming path (runs even on stream error), and via `_drain_coach_pings` in `except BaseException` on the blocking path. No double-drain (streaming never enters the `except`; blocking never builds `after_send` when `Runner.run` raises). Ô£à
+- **#173** ÔÇö bounded wait present (`asyncio.wait_for(prev.wait(), grace)`), event popped-on-read, `compaction_done.set()` in a `finally` covering the whole `after_send` body. Ô£à
+- **#174 / #175 / #179** ÔÇö `await self.member_context(...)`; `_SNAPSHOT_RUN_CONFIG` passed to **both** `Runner.run` and `Runner.run_streamed`; DemoRefs resolved in `after_send`. Ô£à
+
+## Concurrency (the requested "fifth bug" hunt) ÔÇö none found
+I traced the lock end-to-end and could not find a leak, double-release, or deadlock:
+- Streaming: `lock.acquire()` ÔåÆ `lock_transferred=True` set with **no `await` between** `_streamed_reply` returning and the flag, so `handle_message`'s `finally` correctly skips release. `_hold_lock` is outermost, releases exactly once in its inner `finally` (`released=True`), and the outer `except GeneratorExit` guards the double-release. Telegram's `_deliver_streamed` consumes then `aclose()`s the stream (releasing the lock) **before** calling `after_send`, so `after_send`'s `async with lock` cannot deadlock against the stream. Verified: `test_second_message_not_deadlocked_after_stream_error`, `test_stream_aclosed_on_delivery_error`, `test_compaction_*serializes*` all pass. Ô£à
+- Only telegram consumes the stream (`main.py` wires `handle_message` there); no second consumer can violate the "drain-before-after_send" ordering.
+
+One nit on `_hold_lock`'s docstring: the "aclose before the first `__anext__`" claim is inaccurate ÔÇö CPython does **not** run the body (or `finally`, or the `except GeneratorExit`) for a *never-started* async generator, so that branch would leak the lock. It's unreachable in production (telegram always iterates before `aclose`), so it's not a bug today, just a defensive claim that doesn't hold. (P3)
+
+## The `after_send`/`deliver_media=False` behaviour change ÔÇö correct
+Right call and correctly wired end-to-end: `Reply.after_send` widened to `Callable[..., Awaitable[None]]`; `_post_turn` gates only demo media on `deliver_media` while reset/pings/compaction always run; streaming call site passes `deliver_media=not stream_errored`, non-streaming uses the default `True`. All other call sites use kwargs/no-args. `test_no_demo_after_stream_error` asserts `after_send_calls == [False]` ÔÇö revert-proof (old skip-entirely behaviour yields `[]`). Ô£à
+
+---
+
+## Findings
+
+### [P2] `instrument.py:105`+`runtime.py:208` ÔÇö #161 measures setup only on the streaming (production-default) path; the metric is silently corrupt
+`with TurnContext():` wraps setup and then `return streamed` **inside** the block, so `__exit__` fires ÔÇö logging `turn completed` and resetting the `_turn` contextvar ÔÇö *before* the stream (the actual model generation) is consumed. `Runner.run_streamed` does no model work until `stream_events()` is iterated in the channel, which happens after `handle_message` returns.
+
+I confirmed this empirically:
+```
+INFO:agentg.instrument:turn completed in 0.003s, 0 model calls, 2 SQL statements
+--- handle_message returned; now consuming stream (the real model work) ---
+DURING STREAM: _turn.get() -> None
+```
+So on **every production turn** (`stream_replies=True` is the default) the #161 baseline logs setup-only duration, `0 model calls`, and only the setup SQL ÔÇö and because the contextvar is already reset, model calls/SQL during generation are attributed to nothing. #161 was required to "still hold"; it does not on the production path. It's also untested there ÔÇö every `test_instrument.py` case uses `stream_replies=False`, so the gap is invisible to CI. This is a regression: pre-branch the turn was blocking, so `TurnContext` wrapped the whole `Runner.run`.
+
+Concrete fix: keep the instrument alive across the stream on the streaming path ÔÇö e.g. have `_stream_text`/`_hold_lock` run inside the same `TurnContext` (enter in `handle_message`, exit in the outermost stream wrapper's `finally`), reusing the `TurnInstrument`/token so `_counting_acompletion` and the SQL listener attribute generation to the turn and the `turn completed` line is emitted when the stream ends. At minimum, do not emit `turn completed` on the streaming path (defer it), rather than logging a value known to be wrong. Add a streaming-path instrument test (assert `>0 model calls` after consuming the stream) so the fix is revert-proof.
+
+### [P3] `runtime.py:31-38` ÔÇö `_drain_coach_pings` is defined in the middle of the import block
+The function sits between `from agentg.demo_media import ...` and `from agentg.messages import ...`. Harmless, but it splits the imports and hurts readability. Move it below the imports with the other module-level helpers.
+
+### [P3] `runtime.py:_hold_lock` docstring
+See note above ÔÇö the "aclose before first `__anext__`" guarantee described isn't how CPython treats a never-started async generator. Not reachable via telegram, but the comment is misleading; either drop the claim or start the generator eagerly if that guarantee is actually wanted.
+
+---
+
+Test quality: the changed streaming/compaction/safety tests are genuinely revert-proof (they assert the new contract: `deliver_media=False` on error, lock released after `aclose`, `_compaction_done` bounded wait). The one gap is #161's streaming path, called out above.
+
+The P2 (#161 corrupted on the production path) means the "all must still hold" bar is not met.
+
+VERDICT: RED
+RC=0
