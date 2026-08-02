@@ -148,7 +148,9 @@ async def log_sets(
 async def copy_last_sets(ctx: RunContextWrapper[MemberContext], exercise: str) -> dict[str, Any]:
     """Log "same as last time": copy this exercise's Sets from the previous Session.
 
-    Always restate the returned exercise/weight/reps in your reply.
+    When ``copied_sets`` is present, restate each set with its own weight
+    from that list (e.g. "bench 40kg×10, 60kg×5, 60kg×5").  Otherwise
+    restate the summary exercise/weight/reps.
     """
     c = ctx.context
     try:

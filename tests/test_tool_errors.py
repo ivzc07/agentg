@@ -173,6 +173,38 @@ async def test_edit_with_no_sets_in_session_names_exercise_and_recovery(env):
     assert "check" in lower or "ask" in lower or "log" in lower
 
 
+async def test_copy_last_sets_tool_response_includes_ordered_copied_sets(env):
+    """The copy_last_sets tool result carries ``copied_sets`` with mixed
+    weights, optional fields, and ordering so the Agent can restate each
+    set with its own weight."""
+    # Log mixed warm-up and working sets across two log calls (batches).
+    await env.stores.training.log_sets(env.member_id, env.gym_id, "bench 40 10",
+                                       rpe=6.5, note="warm-up")
+    await env.stores.training.log_sets(env.member_id, env.gym_id, "bench 60 5,5",
+                                       rpe=8.0, note="paused")
+    await env.stores.training.close_session(env.member_id)
+
+    # New session — copy the previous.
+    await env.stores.training.open_session(env.member_id, env.gym_id)
+    result = await call_tool(copy_last_sets, env.context, exercise="bench")
+
+    # Top-set summary still works for progression.
+    assert result["exercise"] in ("bench press", "bench")
+    assert result["weight"] == 60.0
+    assert result["reps"] == [10, 5, 5]
+
+    # The per-set detail the Agent needs for an accurate restatement.
+    assert "copied_sets" in result
+    copied = result["copied_sets"]
+    assert isinstance(copied, list)
+    assert len(copied) == 3
+
+    # Order is preserved — warm-up first, then working sets.
+    assert copied[0] == {"weight": 40.0, "reps": 10, "rpe": 6.5, "note": "warm-up"}
+    assert copied[1] == {"weight": 60.0, "reps": 5, "rpe": 8.0, "note": "paused"}
+    assert copied[2] == {"weight": 60.0, "reps": 5, "rpe": 8.0, "note": "paused"}
+
+
 async def _collect_tool_error_messages(env) -> dict[str, str]:
     """Hit every tool error path once; return {label: error message}."""
     errors: dict[str, str] = {}
