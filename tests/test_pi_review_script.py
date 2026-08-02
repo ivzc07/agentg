@@ -77,12 +77,19 @@ def test_script_parses_as_posix_sh():
 WSL_KERNELS = [
     "Linux version 5.15.167.4-microsoft-standard-WSL2 (root@build) #1 SMP",
     "Linux version 4.4.0-19041-Microsoft (Microsoft@Microsoft.com) #1237-Microsoft",
+    # Exercises the `wsl` half of the probe's alternation. A custom-built WSL2
+    # kernel need not carry "microsoft" in its version string, and without this
+    # fixture deleting `|wsl` from the probe would pass the whole suite.
+    "Linux version 6.6.36-WSL2-custom (builder@local) #1 SMP PREEMPT_DYNAMIC",
 ]
 NON_WSL_KERNELS = [
     "MINGW64_NT-10.0-26200 version 3.6.5-22c95533.x86_64 (@runnervm) 2025-10-10",
     "MSYS_NT-10.0-19045 version 3.4.6.x86_64 (@build) 2023-12-01",
     "Linux version 6.8.0-1014-azure (buildd@lcy02) #16-Ubuntu SMP",
 ]
+
+
+STUB_GH_MARKER = "stub gh: no network in tests"
 
 
 def _run_guard(tmp_path, kernel, **env):
@@ -93,19 +100,28 @@ def _run_guard(tmp_path, kernel, **env):
     Linux CI even with the probe widened to match Git Bash, i.e. it could not
     fail where it runs. Feeding known kernel strings makes both directions
     meaningful on every platform.
+
+    `gh` is stubbed so that when the guard correctly stays silent the script
+    cannot reach the network. Without the stub, a host with an authenticated
+    `gh` on PATH would let this test launch a real review against PR 999.
     """
     shell = _find_sh()
     if not shell:
         pytest.skip("no POSIX sh available")
     proc_version = tmp_path / "proc_version"
     proc_version.write_text(kernel + "\n")
+    stub_bin = tmp_path / "bin"
+    stub_bin.mkdir()
+    stub_gh = stub_bin / "gh"
+    stub_gh.write_text(f'#!/usr/bin/env sh\necho "{STUB_GH_MARKER}" >&2\nexit 1\n')
+    stub_gh.chmod(0o755)
     return subprocess.run(
         [shell, str(SCRIPT), "999"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         env={
-            "PATH": "/usr/bin:/bin",
+            "PATH": f"{stub_bin}:/usr/bin:/bin",
             "PI_REVIEW_PROC_VERSION": str(proc_version),
             **env,
         },
@@ -138,6 +154,13 @@ def test_guard_stays_silent_off_wsl(tmp_path, kernel):
     assert "WSL" not in result.stderr, (
         f"the WSL guard fired on a non-WSL kernel ({kernel!r}); this would "
         f"break the gate everywhere. stderr: {result.stderr!r}"
+    )
+    # Positively confirm the script ran *past* the guard rather than dying
+    # early for some unrelated reason, which would make the assertion above
+    # true for the wrong reason.
+    assert STUB_GH_MARKER in result.stderr, (
+        f"expected the script to proceed to `gh` after the guard stayed "
+        f"silent, got: {result.stderr!r}"
     )
 
 
