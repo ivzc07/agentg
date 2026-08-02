@@ -235,10 +235,10 @@ def build_summarizer(settings: Settings) -> Summarizer:
     """The production summarizer: one plain model call over the old turns."""
 
     async def summarize(old_items: list[Any], existing_notes: list[str]) -> CompactionSummary:
-        from litellm import acompletion  # deferred: import cost and test isolation
+        import litellm  # deferred: import cost and test isolation
 
         transcript = "\n".join(str(item) for item in old_items)
-        response = await acompletion(
+        response = await litellm.acompletion(
             model=settings.model,
             api_key=settings.model_api_key,
             messages=[
