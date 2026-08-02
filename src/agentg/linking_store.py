@@ -466,11 +466,13 @@ class LinkingStore:
         self, member_id: int, gym_id: int
     ) -> tuple[str, str] | None:
         """Return ``(channel, channel_user_id)`` for *member_id* if they are
-        still reachable in *gym_id*, or ``None`` when the channel was
-        repointed (gym switch leaving no channel row for the old member).
+        still reachable in *gym_id* and still flagged as Coach, or ``None``
+        when the channel was repointed (gym switch leaving no channel row for
+        the old member) or the Coach flag was removed.
 
-        This is called at delivery time so a coach who switched gyms between
-        job creation and delivery never receives a cross-gym notification.
+        This is called at delivery time so a coach who switched gyms or was
+        demoted between job creation and delivery never receives a cross-gym
+        or cross-role notification.
         """
         async with self._sessions() as db:
             row = (
@@ -478,9 +480,12 @@ class LinkingStore:
                     select(
                         MemberChannel.channel,
                         MemberChannel.channel_user_id,
-                    ).where(
+                    )
+                    .join(Member, Member.id == MemberChannel.member_id)
+                    .where(
                         MemberChannel.member_id == member_id,
                         MemberChannel.gym_id == gym_id,
+                        Member.is_coach.is_(True),
                     )
                 )
             ).first()

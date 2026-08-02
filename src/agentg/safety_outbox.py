@@ -113,7 +113,10 @@ class SafetyOutbox:
             now = self._clock()
             result = await db.execute(
                 update(SafetyOutboxJob)
-                .where(SafetyOutboxJob.id.in_(sub))
+                .where(
+                    SafetyOutboxJob.id.in_(sub),
+                    SafetyOutboxJob.status == "pending",
+                )
                 .values(status="sending", claimed_at=now)
                 .returning(SafetyOutboxJob)
             )
@@ -158,6 +161,8 @@ class SafetyOutbox:
         """Increment the retry counter and reset to ``pending`` so the poller
         tries again.  After *MAX_RETRIES* the job is permanently failed.
 
+        Only acts when the job is still ``sending`` — a delivery that
+        completed between the attempt and this guard is not overwritten.
         ``claimed_at`` is cleared so the next claim can stamp a fresh lease.
         ``last_error`` records the transient reason for diagnostics."""
         async with self._sessions() as db:
@@ -165,7 +170,10 @@ class SafetyOutbox:
             if next_count >= MAX_RETRIES:
                 await db.execute(
                     update(SafetyOutboxJob)
-                    .where(SafetyOutboxJob.id == job.id)
+                    .where(
+                        SafetyOutboxJob.id == job.id,
+                        SafetyOutboxJob.status == "sending",
+                    )
                     .values(
                         status="failed",
                         retry_count=next_count,
@@ -178,7 +186,10 @@ class SafetyOutbox:
             else:
                 await db.execute(
                     update(SafetyOutboxJob)
-                    .where(SafetyOutboxJob.id == job.id)
+                    .where(
+                        SafetyOutboxJob.id == job.id,
+                        SafetyOutboxJob.status == "sending",
+                    )
                     .values(
                         status="pending",
                         retry_count=next_count,
@@ -232,7 +243,10 @@ class SafetyOutbox:
                 return 0
             await db.execute(
                 update(SafetyOutboxJob)
-                .where(SafetyOutboxJob.id.in_(stale_ids))
+                .where(
+                    SafetyOutboxJob.id.in_(stale_ids),
+                    SafetyOutboxJob.status == "sending",
+                )
                 .values(status="pending", claimed_at=None)
             )
             await db.commit()

@@ -148,18 +148,19 @@ class AgentRuntime:
     async def start_background_tasks(self) -> None:
         """Start the outbox worker after ensure_schema has created its table.
 
-        Idempotent: safe to call when no notifier or dashboard is wired
-        (tests, headless runs).
+        Idempotent: safe to call when no notifier is wired (tests, headless
+        runs).  The dashboard is optional — without it, the worker sends
+        text-only notifications.
         """
         if self._outbox_worker is not None:
             return  # already started
-        if self.notifier is None or self.dashboard is None:
+        if self.notifier is None:
             return  # nothing to wire
         worker = OutboxWorker(
             outbox=self.stores.safety_outbox,
             notifier=self.notifier,
             dashboard_store=self.stores.dashboard,
-            dashboard_base_url=self.dashboard.base_url,
+            dashboard_base_url=self.dashboard.base_url if self.dashboard else None,
             linking_store=self.stores.linking,
         )
         await worker.start()

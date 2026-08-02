@@ -82,13 +82,22 @@ def _coaches(env) -> list[tuple[int, str, str, str]]:
     ]
 
 
-def _make_worker(env, notifier=None, base_url=None):
-    """Create an OutboxWorker wired for the test env."""
+_NO_BASE_URL = object()
+
+
+def _make_worker(env, notifier=None, base_url=_NO_BASE_URL):
+    """Create an OutboxWorker wired for the test env.
+
+    Pass ``base_url=None`` to disable dashboard links entirely;
+    omit for the default test dashboard URL.
+    """
+    if base_url is _NO_BASE_URL:
+        base_url = env.DASHBOARD_BASE
     return OutboxWorker(
         outbox=env.outbox,
         notifier=notifier or env.notifier,
         dashboard_store=env.dashboard,
-        dashboard_base_url=base_url or env.DASHBOARD_BASE,
+        dashboard_base_url=base_url,
         linking_store=env.linking,
     )
 
@@ -1067,3 +1076,203 @@ async def test_coach_self_flag_excludes_self(env):
     assert coach3.id not in job_coach_ids
     assert env.coach1_id in job_coach_ids
     assert env.coach2_id in job_coach_ids
+
+
+# ── P1 #2: demoted coach does not receive safety delivery ───────────────────
+
+
+async def test_demoted_coach_not_notified(env):
+    """A Coach demoted after job creation must not receive the safety text
+    or dashboard link."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Demote Coach Sam before delivery.
+    await env.linking.set_coach(env.coach1_id, is_coach=False)
+
+    worker = _make_worker(env)
+    await worker.drain_once(limit=50)
+
+    # No messages should have been sent — the coach is no longer a coach.
+    assert env.notifier.sent == []
+
+    # The job should be marked failed.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, failure_reason FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.status == "failed"
+    assert "no longer reachable" in (row.failure_reason or "")
+
+
+# ── P2 #1: stale-claim reset does not re-deliver a completed job ────────────
+
+
+async def test_reset_stale_claims_does_not_requeue_delivered(env):
+    """A slow delivery that completes between stale-claim SELECT and UPDATE
+    must not be reset to pending and re-sent."""
+    from agentg.safety_outbox import LEASE_TIMEOUT_SECONDS
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+
+    # Claim jobs (puts them in 'sending').
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 2
+
+    # Backdate claimed_at so they look stale.
+    async with env.engine.begin() as conn:
+        stale_time = datetime.now(UTC) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
+        await conn.execute(
+            text("UPDATE safety_outbox_jobs SET claimed_at = :ts"),
+            {"ts": stale_time},
+        )
+
+    # Deliver one job first (simulating slow delivery completing).
+    await env.outbox.mark_delivered(jobs[0])
+
+    # Now reset_stale_claims must NOT reset the delivered job.
+    reset_count = await env.outbox.reset_stale_claims()
+    # Only the one still-sending job should be reset.
+    assert reset_count == 1
+
+    async with env.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT id, status FROM safety_outbox_jobs ORDER BY id"
+                )
+            )
+        ).all()
+    statuses = {r.id: r.status for r in rows}
+    assert statuses[jobs[0].id] == "delivered"  # untouched
+    assert statuses[jobs[1].id] == "pending"    # reset
+
+
+async def test_reset_for_retry_does_not_clobber_delivered(env):
+    """A delivery that completes between an error and reset_for_retry
+    must not be overwritten to pending or failed."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Claim the job.
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 1
+    job = jobs[0]
+
+    # Simulate: delivery succeeds, then a stale reset_for_retry arrives.
+    await env.outbox.mark_delivered(job)
+
+    # Now a stale retry attempt arrives — it must not overwrite "delivered".
+    await env.outbox.reset_for_retry(job, "stale notifier error")
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status, retry_count FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"  # not clobbered
+    assert row.retry_count == 0       # not incremented
+
+
+# ── P2 #2: outbox worker starts without dashboard ───────────────────────────
+
+
+async def test_worker_starts_without_dashboard(env):
+    """The outbox worker must start when a notifier is present even if
+    the dashboard is not wired — text-only notifications still land."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Worker with no dashboard base URL.
+    worker = _make_worker(env, base_url=None)
+    await worker.drain_once(limit=50)
+
+    # Heads-up text was delivered.
+    heads = [m for m in env.notifier.sent if "/login/" not in m[2]]
+    assert len(heads) == 1
+    assert "knee pain" in heads[0][2]
+
+    # No link messages (no dashboard configured).
+    links = [m for m in env.notifier.sent if "/login/" in m[2]]
+    assert len(links) == 0
+
+    # Job is marked delivered.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"
+
+
+# ── P1 #1: concurrent claim cannot double-claim (status guard on outer UPDATE) ─
+
+
+async def test_concurrent_claim_does_not_double_claim(env):
+    """Two overlapping claim_pending calls with the new outer status guard
+    never claim the same job — the second UPDATE sees the rows are no longer
+    pending and returns zero rows."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+
+    # Python-side concurrent fan-out: both calls see the same pending jobs
+    # in their subqueries, but the outer status guard prevents double-claim.
+    results = await asyncio.gather(
+        env.outbox.claim_pending(limit=50),
+        env.outbox.claim_pending(limit=50),
+    )
+
+    first_batch, second_batch = results
+    claimed_ids = {j.id for j in first_batch} | {j.id for j in second_batch}
+
+    # All 2 jobs were claimed, but never by both calls.
+    assert len(first_batch) + len(second_batch) == 2
+    assert len(claimed_ids) == 2
+
+    # All jobs are in 'sending' state (no double-claimed duplicates).
+    async with env.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text("SELECT status FROM safety_outbox_jobs")
+            )
+        ).all()
+    assert all(r.status == "sending" for r in rows)
