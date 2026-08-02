@@ -12,7 +12,6 @@ async def test_clean_bench_log_leaves_three_sets(tmp_path):
             "I'm here",
             steps=[
                 tool("open_session"),
-                tool("suggest_weights"),
                 message("Welcome back."),
             ],
         )

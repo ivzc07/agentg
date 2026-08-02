@@ -18,7 +18,6 @@ from agentg.linking_store import LinkingStore
 from agentg.context import MemberContext
 from agentg.stores import Stores
 from agentg.tools import open_session_payload
-from agentg.advice import suggest_for_today
 from agentg.training import TrainingStore
 
 ROUTINE_TOOLS = {"get_rules_doc", "list_exercises", "save_routine", "get_routine"}
@@ -111,18 +110,24 @@ async def test_the_catalog_is_available_to_draw_a_routine_from(env):
     assert "bench press" in names and "squat" in names
 
 
-async def test_open_session_payload_names_todays_workout(env):
+async def test_open_session_payload_names_todays_workout_and_suggestions(env):
     await env.routines.save_routine(env.member_id, env.gym_id, wednesday_push())
 
     payload = await open_session_payload(env.context)
 
     assert payload["todays_workout"] is not None
     assert payload["todays_workout"]["name"] == "Push"
+    # Suggestions are included in the payload (#171).
+    assert "suggestions" in payload
+    assert len(payload["suggestions"]) == 1
+    assert payload["suggestions"][0]["exercise"] == "bench press"
 
 
 async def test_open_session_payload_without_a_routine_has_no_workout(env):
     payload = await open_session_payload(env.context)
     assert payload["todays_workout"] is None
+    # Suggestions are empty when there is no Workout today (#171).
+    assert payload["suggestions"] == []
 
 
 async def test_snapshot_names_todays_workout_when_a_routine_exists(env):
@@ -153,8 +158,8 @@ class _CountingRoutineStore:
 
 
 async def test_active_routine_is_loaded_exactly_once_per_turn(env):
-    """A full turn (snapshot + open_session + suggest_weights) loads
-    the active Routine exactly once — the cache reuses it (#162)."""
+    """A full turn (snapshot + open_session with suggestions) loads
+    the active Routine exactly once — the cache reuses it (#162, #171)."""
     await env.routines.save_routine(env.member_id, env.gym_id, wednesday_push())
 
     counter = _CountingRoutineStore(env.routines)
@@ -176,32 +181,21 @@ async def test_active_routine_is_loaded_exactly_once_per_turn(env):
         weight_unit="kg",
     )
 
-    # Simulate a full turn: snapshot first, then session opener, then suggestions.
+    # Simulate a full turn: snapshot first, then session opener (which now
+    # includes suggestions inline — #171).
     snapshot = await member_snapshot(context)
     assert "Push" in snapshot
 
     payload = await open_session_payload(context)
     assert payload["todays_workout"] is not None
     assert payload["todays_workout"]["name"] == "Push"
+    # Suggestions are folded into the opener payload.
+    assert "suggestions" in payload
+    assert len(payload["suggestions"]) == 1
+    assert payload["suggestions"][0]["exercise"] == "bench press"
 
-    # Exercise the same code path suggest_weights uses: get the cached
-    # Routine via the public TurnCache API (not the private field), then
-    # pass it to suggest_for_today.
-    routine = await context.turn_cache.get_or_load_routine(
-        context.stores.routines, context.member_id
-    )
-    suggestions = await suggest_for_today(
-        context.stores.training,
-        context.stores.routines,
-        context.member_id,
-        context.gym_id,
-        context.timezone,
-        routine=routine,
-    )
-    assert len(suggestions) == 1
-    assert suggestions[0].exercise == "bench press"
-
-    # The active Routine was loaded exactly once — the cache fed the rest.
+    # The active Routine was loaded exactly once — the cache fed
+    # both the snapshot and the session opener with suggestions.
     assert counter.active_routine_calls == 1
 
 
@@ -227,26 +221,15 @@ async def test_no_routine_loads_exactly_once_per_turn(env):
         weight_unit="kg",
     )
 
-    # Full turn: snapshot, session opener, weight suggestions.
+    # Full turn: snapshot then session opener (which now includes
+    # suggestions inline — #171).
     snapshot = await member_snapshot(context)
     assert "no routine" in snapshot.lower()
 
     payload = await open_session_payload(context)
     assert payload["todays_workout"] is None
-
-    # Exercise the same code path suggest_weights uses.
-    routine = await context.turn_cache.get_or_load_routine(
-        context.stores.routines, context.member_id
-    )
-    suggestions = await suggest_for_today(
-        context.stores.training,
-        context.stores.routines,
-        context.member_id,
-        context.gym_id,
-        context.timezone,
-        routine=routine,  # None — cached, sentinel tells suggest_for_today not to re-query
-    )
-    assert suggestions == []
+    # Suggestions are folded into the opener payload (#171).
+    assert payload["suggestions"] == []
 
     # Exactly one DB load — cached None fed the rest, no fallback re-query.
     assert counter.active_routine_calls == 1
