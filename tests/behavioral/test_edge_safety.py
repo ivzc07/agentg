@@ -89,7 +89,8 @@ async def test_forget_me_wipes_every_member_row(tmp_path):
 
         # Turn 1: request forget-me (pre-model — no model steps needed).
         request_reply = await h.say("forget me")
-        assert "permanentemente" in request_reply.lower()
+        # English trigger → English warning (ADR-0002 mirror).
+        assert "permanently" in request_reply.lower()
         # The reply must include a confirmation phrase like DELETE-ME-XXXXXX.
         phrase = _extract_confirmation_phrase(request_reply)
         assert phrase is not None, f"no confirmation phrase in reply: {request_reply!r}"
@@ -98,7 +99,8 @@ async def test_forget_me_wipes_every_member_row(tmp_path):
 
         # Turn 2: confirm with the exact phrase (pre-model — no model steps).
         confirm_reply = await h.say(phrase)
-        assert "eliminados" in confirm_reply.lower()
+        # Goodbye mirrors the trigger language (English).
+        assert "deleted" in confirm_reply.lower()
 
         # Everything must be gone.
         assert await _count(h._engine, Member, id=member_id) == 0
@@ -121,7 +123,8 @@ async def test_forget_me_wrong_phrase_cancels_and_leaves_data(tmp_path):
 
         # Request forget-me.
         request_reply = await h.say("delete my account")
-        assert "permanentemente" in request_reply.lower()
+        # English trigger → English warning.
+        assert "permanently" in request_reply.lower()
         assert await _count(h._engine, Member, id=member_id) == 1
 
         # Send a wrong phrase — the model runs normally.
@@ -222,7 +225,8 @@ async def test_forget_me_group_message_clears_pending_without_deletion(tmp_path)
 
         # Request forget-me (private).
         request_reply = await h.say("forget me")
-        assert "permanentemente" in request_reply.lower()
+        # English trigger → English warning.
+        assert "permanently" in request_reply.lower()
         phrase = _extract_confirmation_phrase(request_reply)
         assert phrase is not None
         # Pending request exists.
@@ -300,7 +304,8 @@ async def test_forget_me_expired_request_any_message_falls_through(tmp_path):
         # request must cancel first, then re-evaluate (the trigger text
         # below will issue a fresh request).
         request_reply = await h.say("forget me")
-        assert "permanentemente" in request_reply.lower()
+        # English trigger → English warning.
+        assert "permanently" in request_reply.lower()
         # The old expired pending is gone; a fresh request was created.
         pending = await h.stores.forget.get_pending_request(member_id)
         assert pending is not None

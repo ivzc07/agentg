@@ -97,6 +97,39 @@ async def _inject_snapshot(data: CallModelData[MemberContext]) -> ModelInputData
 _SNAPSHOT_RUN_CONFIG = RunConfig(call_model_input_filter=_inject_snapshot)
 
 
+# Per-language forget-me response templates (issue #212).  The language is
+# detected from the triggering raw text and persisted with the pending
+# intent so the goodbye mirrors the Member (ADR-0002: mirror, default
+# Spanish when no signal).
+_FORGET_GOODBYE: dict[str, str] = {
+    "en": "Your data has been permanently deleted. Goodbye!",
+    "es": (
+        "Tus datos han sido eliminados permanentemente. \u00a1Adi\u00f3s!"
+    ),
+}
+
+_FORGET_WARNING: dict[str, str] = {
+    "en": (
+        "\u26a0\ufe0f This will PERMANENTLY DELETE ALL your data \u2014 "
+        "every session, routine, note, and all chat history. "
+        "This cannot be undone.\n\n"
+        "To confirm, reply with this exact phrase:\n\n"
+        "{phrase}\n\n"
+        "Any other response will cancel the request. "
+        "This confirmation expires in {minutes} minute{s}."
+    ),
+    "es": (
+        "\u26a0\ufe0f Esto borrar\u00e1 PERMANENTEMENTE TODOS tus datos \u2014 "
+        "cada sesi\u00f3n, rutina, nota y todo el historial de chat. "
+        "No se puede deshacer.\n\n"
+        "Para confirmar, responde con esta frase exacta:\n\n"
+        "{phrase}\n\n"
+        "Cualquier otra respuesta cancelar\u00e1 la solicitud. "
+        "Esta confirmaci\u00f3n expira en {minutes} minuto{s}."
+    ),
+}
+
+
 @dataclass
 class AgentRuntime:
     agent: Agent
@@ -432,56 +465,73 @@ class AgentRuntime:
         Returns a Reply when the message was fully handled (request or
         confirmation), or None to let normal processing continue.
         """
-        from agentg.forget import is_forget_me_request, normalize_confirmation
+        from agentg.forget import (
+            detect_forget_me_language,
+            is_forget_me_request,
+            normalize_confirmation,
+        )
 
         now = datetime.now(timezone.utc)
-        pending = await self.stores.forget.get_pending_request(
-            linked.member.id
-        )
 
         # Group messages never trigger or confirm forget-me, but a
         # group/different message from a Member with a pending request
         # must clear the pending intent without deletion.
         if msg.is_group:
+            pending = await self.stores.forget.get_pending_request(
+                linked.member.id
+            )
             if pending is not None:
                 await self.stores.forget.cancel_forget_me(linked.member.id)
             return None
 
+        pending = await self.stores.forget.get_pending_request(
+            linked.member.id
+        )
+
         if pending is not None:
-            # Expired — cancel silently and fall through.
-            if pending.expires_at < now:
+            # Expired — cancel silently and fall through (P2: <= not <).
+            if pending.expires_at <= now:
                 await self.stores.forget.cancel_forget_me(linked.member.id)
             else:
                 normalized = normalize_confirmation(msg.text)
                 if normalized == pending.confirmation_phrase:
-                    # Exact match — execute the wipe.
-                    await self.stores.forget.forget_member(linked.member.id)
-                    return Reply(
-                        "Tus datos han sido eliminados permanentemente. \u00a1Adi\u00f3s!"
+                    # P1: atomic compare-and-consume so concurrent
+                    # confirmations across runtimes have exactly one
+                    # winner and a stale confirmation cannot delete.
+                    consumed = await self.stores.forget.consume_pending_forget_me(
+                        linked.member.id, normalized, now
                     )
-                # Wrong phrase — cancel the pending request.  A new
-                # forget-me trigger below will create a fresh one.
-                await self.stores.forget.cancel_forget_me(linked.member.id)
+                    if consumed:
+                        await self.stores.forget.forget_member(
+                            linked.member.id
+                        )
+                        lang = pending.language or "es"
+                        return Reply(_FORGET_GOODBYE[lang])
+                    # Lost the race — another runtime already consumed
+                    # this request.  Fall through to normal processing.
+                else:
+                    # Wrong phrase — cancel the pending request.  A new
+                    # forget-me trigger below will create a fresh one.
+                    await self.stores.forget.cancel_forget_me(
+                        linked.member.id
+                    )
 
         # Check if this message looks like a new forget-me request
         # (handles both "no pending" and "wrong phrase, re-asking").
         if is_forget_me_request(msg.text):
+            lang = detect_forget_me_language(msg.text) or "es"
             phrase = await self.stores.forget.request_forget_me(
                 linked.member.id,
                 linked.gym.id,
                 now,
                 self.forget_me_confirmation_seconds,
+                lang,
             )
             minutes = max(1, self.forget_me_confirmation_seconds // 60)
-            warning = (
-                f"\u26a0\ufe0f Esto borrar\u00e1 PERMANENTEMENTE TODOS tus datos \u2014 "
-                f"cada sesi\u00f3n, rutina, nota y todo el historial de chat. "
-                f"No se puede deshacer.\n\n"
-                f"Para confirmar, responde con esta frase exacta:\n\n"
-                f"{phrase}\n\n"
-                f"Cualquier otra respuesta cancelar\u00e1 la solicitud. "
-                f"Esta confirmaci\u00f3n expira en {minutes} minuto"
-                f"{'s' if minutes != 1 else ''}."
+            warning = _FORGET_WARNING[lang].format(
+                phrase=phrase,
+                minutes=minutes,
+                s="s" if minutes != 1 else "",
             )
             return Reply(warning)
 

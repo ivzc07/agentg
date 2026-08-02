@@ -199,6 +199,19 @@ def _add_missing_columns(conn: Connection) -> None:
     token_columns = {c["name"] for c in inspect(conn).get_columns("dashboard_login_tokens")}
     if "next_path" not in token_columns:
         conn.execute(text(ADD_NEXT_PATH_DDL))
+    # issue #212: the two-turn forget-me flow persists the detected language
+    # so the goodbye message mirrors the Member (ADR-0002).
+    if "forget_me_requests" in set(inspect(conn).get_table_names()):
+        fme_columns = {
+            c["name"]
+            for c in inspect(conn).get_columns("forget_me_requests")
+        }
+        if "language" not in fme_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE forget_me_requests ADD COLUMN language VARCHAR(2)"
+                )
+            )
     # FK indexes for Gym-scoped reads (issue #178): Coach lookup, roster,
     # and the check-in sweep join on these columns.
     members_indexes = {i["name"] for i in inspect(conn).get_indexes("members")}

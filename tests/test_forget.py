@@ -211,7 +211,7 @@ async def test_messaging_after_forget_dead_ends_in_linking(env):
 
 from datetime import UTC, datetime
 
-from agentg.forget import is_forget_me_request, normalize_confirmation
+from agentg.forget import detect_forget_me_language, is_forget_me_request, normalize_confirmation
 from agentg.models import ForgetMeRequest
 
 
@@ -231,24 +231,30 @@ async def test_request_forget_me_persists_no_delete(env):
     member = await populate(env)
     now = datetime.now(UTC)
 
-    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
     assert phrase.startswith("DELETE-ME-")
     assert len(phrase) == len("DELETE-ME-") + 6  # 3 bytes hex = 6 chars
     # Data still intact.
     assert await count(env, Member, id=member.id) == 1
     assert await count(env, Session, member_id=member.id) == 1
-    # Pending request row exists.
+    # Pending request row exists with the correct language.
     assert await _pending_count(env, member.id) == 1
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending.language == "en"
 
 
 async def test_confirm_phrase_deletes_and_clears_request(env):
     """The exact phrase triggers deletion; the pending row is gone too."""
     member = await populate(env)
     now = datetime.now(UTC)
-    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
-    # Confirm with the exact phrase.
+    # Confirm with the exact phrase via atomic consume.
+    consumed = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert consumed
     await env.forget.forget_member(member.id)
 
     assert await count(env, Member, id=member.id) == 0
@@ -319,7 +325,7 @@ async def test_runtime_expired_pending_is_cancelled_no_deletion(env):
 
     # Expired → cancel silently, fall through to normal processing.
     now = datetime.now(UTC)
-    if pending.expires_at < now:
+    if pending.expires_at <= now:
         await env.forget.cancel_forget_me(member.id)
 
     # Member data still intact.
@@ -338,10 +344,10 @@ async def test_runtime_expired_pending_with_phrase_no_deletion(env):
 
     pending = await env.forget.get_pending_request(member.id)
     now = datetime.now(UTC)
-    assert pending.expires_at < now
+    assert pending.expires_at <= now
 
     # The runtime checks expiry first — expired → cancel, no match attempted.
-    if pending.expires_at < now:
+    if pending.expires_at <= now:
         await env.forget.cancel_forget_me(member.id)
         # Falls through; model runs normally.  No forget_member call.
 
@@ -359,10 +365,10 @@ async def test_runtime_expired_pending_with_wrong_phrase_no_deletion(env):
 
     pending = await env.forget.get_pending_request(member.id)
     now = datetime.now(UTC)
-    assert pending.expires_at < now
+    assert pending.expires_at <= now
 
     # Runtime: expired → cancel silently.
-    if pending.expires_at < now:
+    if pending.expires_at <= now:
         await env.forget.cancel_forget_me(member.id)
 
     # Wrong phrase (not the confirmation) — but it doesn't matter because
@@ -427,3 +433,213 @@ def test_is_forget_me_request(text, expected):
 )
 def test_normalize_confirmation(text, expected):
     assert normalize_confirmation(text) == expected
+
+
+# -- Language detection --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # English
+        ("forget me", "en"),
+        ("Forget Me", "en"),
+        ("delete my data", "en"),
+        ("delete my account please", "en"),
+        ("erase me", "en"),
+        # Spanish
+        ("olvídame", "es"),
+        ("OLVÍDAME", "es"),
+        ("bórrame", "es"),
+        ("borra mi cuenta", "es"),
+        ("elimina mis datos", "es"),
+        # Non-triggers
+        ("hello", None),
+        ("delete my workout", None),
+        ("", None),
+    ],
+)
+def test_detect_forget_me_language(text, expected):
+    assert detect_forget_me_language(text) == expected
+
+
+# -- Atomic consume (P1) -------------------------------------------------
+
+
+async def test_consume_pending_succeeds_with_matching_unexpired(env):
+    """An exact match on an unexpired request consumes it."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+
+    consumed = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert consumed
+    # The row is gone.
+    assert await _pending_count(env, member.id) == 0
+
+
+async def test_consume_pending_fails_with_wrong_phrase(env):
+    """A non-matching phrase does not consume the request."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+
+    consumed = await env.forget.consume_pending_forget_me(
+        member.id, "WRONG-PHRASE", datetime.now(UTC)
+    )
+    assert not consumed
+    # The row is still there.
+    assert await _pending_count(env, member.id) == 1
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending.confirmation_phrase == phrase
+
+
+async def test_consume_pending_fails_with_expired_request(env):
+    """An expired request is not consumed even with the correct phrase."""
+    member = await populate(env)
+    past = datetime(2020, 1, 1, tzinfo=UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, past, 1)
+
+    consumed = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert not consumed
+    # The row is still there (runtime's job to cancel expired ones).
+    assert await _pending_count(env, member.id) == 1
+
+
+async def test_consume_pending_fails_with_no_request(env):
+    """Consuming when there's no pending request returns False."""
+    member = await populate(env)
+    consumed = await env.forget.consume_pending_forget_me(
+        member.id, "DELETE-ME-XXXXXX", datetime.now(UTC)
+    )
+    assert not consumed
+
+
+async def test_consume_pending_exactly_at_expiry_is_expired(env):
+    """When expires_at == now the request is expired (P2: <= not <)."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+    # expires_at == now (lifetime=0)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 0)
+
+    consumed = await env.forget.consume_pending_forget_me(
+        member.id, phrase, now
+    )
+    assert not consumed, "expires_at == now must be expired"
+
+
+async def test_consume_pending_is_idempotent(env):
+    """A second consume on an already-consumed request returns False."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+
+    consumed = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert consumed
+    # Second attempt with the same phrase finds nothing.
+    consumed2 = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert not consumed2
+
+
+# -- Residue test with chat history (P2) ---------------------------------
+
+
+async def test_two_turn_forget_with_chat_history_leaves_zero_residue(env):
+    """The full two-turn flow — trigger, confirm, hard delete — must wipe
+    the SDK chat history alongside every domain row."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    # Seed a real conversation turn: user message + assistant response.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "bench 60 8,8,8"},
+        {"role": "assistant", "content": "Logged! 3 sets at 60 kg."},
+    ])
+    # Verify history is seeded.
+    items = await session.get_items()
+    assert len(items) == 2
+
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Consume (like the runtime does) then hard-delete.
+    consumed = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert consumed
+    await env.forget.forget_member(member.id)
+
+    # Domain rows must be gone.
+    assert await count(env, Member, id=member.id) == 0
+    assert await count(env, Session, member_id=member.id) == 0
+    assert await count(env, MemberNote, member_id=member.id) == 0
+    assert await count(env, Routine, member_id=member.id) == 0
+    # Chat history must be gone.
+    items = await session.get_items()
+    assert items == [], "SDK chat history must be wiped"
+    # No residue anywhere.
+    assert await count(env, Set) == 0
+    assert await count(env, Workout) == 0
+    assert await count(env, WorkoutExercise) == 0
+    assert await _pending_count(env, member.id) == 0
+
+
+# -- Separate-session concurrency (P1) -----------------------------------
+
+
+async def test_consume_pending_concurrent_sessions_one_winner(env):
+    """Two separate sessions trying to consume the same pending request
+    must have exactly one winner.  SQLite serializes writes (single-writer
+    design), so the sessions are run sequentially under the same engine,
+    but Postgres would also serialise the conditional DELETEs — the
+    second one always sees zero rows.  Either way, the DB guarantees
+    at most one row is ever deleted."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from sqlalchemy import delete
+    from agentg.models import ForgetMeRequest
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+
+    # Session A consumes first.
+    rowcount_a: int = 0
+    async with async_sessionmaker(env.engine)() as db:
+        result = await db.execute(
+            delete(ForgetMeRequest).where(
+                ForgetMeRequest.member_id == member.id,
+                ForgetMeRequest.confirmation_phrase == phrase,
+                ForgetMeRequest.expires_at > datetime.now(UTC),
+            )
+        )
+        await db.commit()
+        rowcount_a = result.rowcount
+
+    # Session B tries to consume the same row — must see zero rows.
+    rowcount_b: int = 0
+    async with async_sessionmaker(env.engine)() as db:
+        result = await db.execute(
+            delete(ForgetMeRequest).where(
+                ForgetMeRequest.member_id == member.id,
+                ForgetMeRequest.confirmation_phrase == phrase,
+                ForgetMeRequest.expires_at > datetime.now(UTC),
+            )
+        )
+        await db.commit()
+        rowcount_b = result.rowcount
+
+    # Exactly one winner.
+    assert rowcount_a == 1, f"session A should have won, got {rowcount_a}"
+    assert rowcount_b == 0, f"session B should have lost, got {rowcount_b}"
+
+    # The pending row is gone.
+    assert await _pending_count(env, member.id) == 0

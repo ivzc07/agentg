@@ -28,19 +28,19 @@ from agentg.models import (
     WorkoutExercise,
 )
 
-# Phrases that trigger a new forget-me request (case-insensitive after
-# whitespace normalization).  English and Spanish — per ADR-0002 the
-# first-action criterion must be deterministic regardless of which
-# language the Member uses.
-_FORGET_ME_TRIGGERS: tuple[str, ...] = (
-    # English
+# Forget-me trigger phrases grouped by language so the deterministic
+# reply language can be derived from the raw text that started the flow
+# (ADR-0002: mirror the Member, default Spanish when no signal).
+_FORGET_ME_TRIGGERS_EN: tuple[str, ...] = (
     "forget me",
     "delete my data",
     "delete my account",
     "delete my info",
     "erase my data",
     "erase me",
-    # Spanish (imperative and infinitive forms)
+)
+
+_FORGET_ME_TRIGGERS_ES: tuple[str, ...] = (
     "olvídame",
     "bórrame",
     "elimíname",
@@ -55,6 +55,9 @@ _FORGET_ME_TRIGGERS: tuple[str, ...] = (
     "borra mi información",
     "borrar mi información",
 )
+
+# Combined list for backward-compatible is_forget_me_request checks.
+_FORGET_ME_TRIGGERS: tuple[str, ...] = _FORGET_ME_TRIGGERS_EN + _FORGET_ME_TRIGGERS_ES
 
 
 class ForgetStore:
@@ -124,12 +127,19 @@ class ForgetStore:
     # -- Two-turn confirmation (issue #212) -----------------------------------
 
     async def request_forget_me(
-        self, member_id: int, gym_id: int, now: datetime, lifetime_seconds: int
+        self,
+        member_id: int,
+        gym_id: int,
+        now: datetime,
+        lifetime_seconds: int,
+        language: str = "es",
     ) -> str:
         """Persist an expiring confirmation and return the exact phrase the
         Member must send to complete deletion.
 
         Replaces any prior pending request for this Member atomically.
+        ``language`` is the two-letter code detected from the triggering
+        message so the confirmation goodbye can mirror the Member.
         """
         phrase = "DELETE-ME-" + secrets.token_hex(3).upper()
         expires_at = now + timedelta(seconds=lifetime_seconds)
@@ -146,6 +156,7 @@ class ForgetStore:
                     confirmation_phrase=phrase,
                     expires_at=expires_at,
                     created_at=now,
+                    language=language,
                 )
             )
             await db.commit()
@@ -172,6 +183,29 @@ class ForgetStore:
             )
             await db.commit()
 
+    async def consume_pending_forget_me(
+        self, member_id: int, confirmation_phrase: str, now: datetime
+    ) -> bool:
+        """Atomically delete the pending request only when the confirmation
+        phrase matches and hasn't expired yet.
+
+        A single conditional DELETE is the compare-and-consume primitive:
+        two concurrent sessions can't both delete the same row — exactly
+        one sees ``rowcount > 0`` and becomes the winner.  The loser
+        (wrong phrase, expired, or beaten by a concurrent winner) sees
+        zero rows deleted and must not proceed.
+        """
+        async with self._sessions() as db:
+            result = await db.execute(
+                delete(ForgetMeRequest).where(
+                    ForgetMeRequest.member_id == member_id,
+                    ForgetMeRequest.confirmation_phrase == confirmation_phrase,
+                    ForgetMeRequest.expires_at > now,
+                )
+            )
+            await db.commit()
+            return result.rowcount > 0
+
 
 # -- Module-level helpers --------------------------------------------------
 
@@ -182,11 +216,26 @@ def is_forget_me_request(text: str) -> bool:
     Matches whole phrases (word boundaries) so ordinary text like
     "forget metal" or "erase message" does not trigger.
     """
+    return detect_forget_me_language(text) is not None
+
+
+def detect_forget_me_language(text: str) -> str | None:
+    """Return ``"en"``, ``"es"``, or ``None`` depending on which
+    language's trigger phrases appear in *text* (English checked first
+    so a mixed message picks English; in practice a Member will use one
+    or the other).
+
+    The caller defaults to ``"es"`` when this returns ``None`` — mirror
+    the Member, safe-default Spanish (ADR-0002).
+    """
     collapsed = " ".join(text.lower().split())
-    return any(
-        re.search(r"\b" + re.escape(trigger) + r"\b", collapsed)
-        for trigger in _FORGET_ME_TRIGGERS
-    )
+    for trigger in _FORGET_ME_TRIGGERS_EN:
+        if re.search(r"\b" + re.escape(trigger) + r"\b", collapsed):
+            return "en"
+    for trigger in _FORGET_ME_TRIGGERS_ES:
+        if re.search(r"\b" + re.escape(trigger) + r"\b", collapsed):
+            return "es"
+    return None
 
 
 def normalize_confirmation(text: str) -> str:

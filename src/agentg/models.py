@@ -182,6 +182,7 @@ class ForgetMeRequest(Base):
     )
     gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
     confirmation_phrase: Mapped[str] = mapped_column(String(64))
+    language: Mapped[str | None] = mapped_column(String(2), default=None)
     expires_at: Mapped[datetime] = mapped_column(TZDateTime())
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
 
