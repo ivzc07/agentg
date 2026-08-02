@@ -463,6 +463,12 @@ async def _clear_if_forgotten(
     persists this turn's items afterwards.  The clear runs in a ``finally``
     so a stream that errors part-way still leaves no residue behind a
     committed domain wipe."""
+    # Known limitation (#161): the wipe below runs during stream teardown, in
+    # the channel's task, which never entered ``with turn:``.  The SQL counter
+    # reads the contextvar, so these statements are not attributed to the turn
+    # -- a small undercount on forget-me turns only.  Duration and model-call
+    # count are unaffected: the run-loop task inherits the contextvar because
+    # ``run_streamed`` creates it inside the with-block.
     try:
         async for chunk in inner:
             yield chunk
