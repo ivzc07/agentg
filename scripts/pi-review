@@ -78,8 +78,14 @@ resolve_herdr() {
 # emits one count per page, so sum the lines. Prints ERR on API failure so
 # callers never mistake an outage for zero comments.
 comment_count() {
-    a=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '[.[] | select(.body | test("pi code-review"))] | length' 2>/dev/null) || { echo ERR; return; }
-    b=$(gh api --paginate "repos/${REPO}/pulls/${PR}/comments" --jq '[.[] | select(.body | test("pi code-review"))] | length' 2>/dev/null) || { echo ERR; return; }
+    # Match the signature on a line of its own, not anywhere in the body: the
+    # count gates success, and a human reply *quoting* a finding would other-
+    # wise inflate it. Filtering by author cannot help here - pi posts through
+    # gh as the repo owner, the same login a human reply carries.
+    a=$(gh api --paginate "repos/${REPO}/issues/${PR}/comments" --jq '[.[] | select(.body | test("
+- pi code-review"))] | length' 2>/dev/null) || { echo ERR; return; }
+    b=$(gh api --paginate "repos/${REPO}/pulls/${PR}/comments" --jq '[.[] | select(.body | test("
+- pi code-review"))] | length' 2>/dev/null) || { echo ERR; return; }
     printf '%s\n%s\n' "$a" "$b" | awk '{s += $1} END {print s + 0}'
 }
 
@@ -141,7 +147,16 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
         fi
         i=$((i + 1))
     done
-    [ "$picked_up" = 1 ] || { echo "pi-review: pi never picked up the review for PR ${PR}" >&2; exit 1; }
+    # The prompt was already typed and submitted above, so it is still live in
+    # the pane: pi may pick it up after this budget expires and run a stray
+    # review. Say so, rather than leaving the operator to discover a duplicate.
+    # A re-run is still safe on its own: it waits for `idle` before snapshotting
+    # BEFORE, so a stray already in flight is counted as prior state.
+    [ "$picked_up" = 1 ] || {
+        echo "pi-review: pi never picked up the review for PR ${PR}" >&2
+        echo "pi-review: the prompt is still pending in pane ${PANE} - it may yet run; check for a duplicate review before re-running" >&2
+        exit 1
+    }
     "$H" agent wait pi-review --status idle --timeout 3000000 >/dev/null
     # The wait also releases on blocked; that is an operator situation, not a
     # finished review.

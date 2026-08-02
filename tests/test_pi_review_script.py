@@ -296,8 +296,18 @@ def _herdr_binary():
         return found
     # Windows Python does not see Git Bash's usr/bin on PATH, so without this
     # the live check silently skips on the machines that actually run it.
-    candidate = Path("C:/Program Files/Git/usr/bin/herdr")
-    return str(candidate) if candidate.is_file() else None
+    # Both install shapes: system-wide, and the per-user one the script's own
+    # WSL note calls out (%LOCALAPPDATA%\Programs\Git).
+    candidates = [Path("C:/Program Files/Git/usr/bin/herdr")]
+    if local_app_data:
+        candidates.append(Path(local_app_data) / "Programs" / "Git" / "usr" / "bin" / "herdr")
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
 
 
 def _herdr_help(group):
