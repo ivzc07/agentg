@@ -8,7 +8,7 @@ Run: `uv run pytest tests/test_redesign_acceptance_sweep.py -v`
 | Gate | Tests | Status | Notes |
 |---|---|---|---|
 | AA contrast (>= 4.5:1) | 7 | ✅ PASS | One low-impact gap filed (#156) |
-| 375px bar | 5 | ✅ PASS | CSS structural checks only; browser verification deferred (#157) |
+| 375px bar | 5 | ✅ PASS | CSS structural checks; real-browser verification added in `tests/test_375px_playwright.py` (#157) |
 | Reduced motion | 7 | ✅ PASS | Universal `*` selector + `!important` |
 | htmx swap parity | 4 | ✅ PASS | Editor fragment vs full page structural match |
 | Screen coverage | 9 | ✅ PASS | Every screen renders, member page + editor included |
