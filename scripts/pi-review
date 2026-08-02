@@ -157,14 +157,20 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
     # but puts the queued text back *into the editor*; with an idle pi holding
     # a non-empty input box it does nothing at all. A later `pane run` would
     # then append the next prompt to the leftover text and submit the
-    # concatenation. ctrl+u clears the editor (both behaviours verified against
-    # a live pi pane), so send Escape to stop a queued run and ctrl+u to empty
-    # the box.
+    # concatenation. So: Escape to stop a queued run, then ctrl+u to empty the
+    # box (both verified against a live pi pane).
+    #
+    # ctrl+u is deleteToLineStart, not "clear the editor": it empties the
+    # single-line prompt this path leaves behind, but multi-line residue (two
+    # or more queued messages, which restoreQueuedMessagesToEditor joins with
+    # blank lines) would keep its earlier lines. That is why the message below
+    # asks the operator to confirm an empty input box rather than trusting the
+    # drain outright.
     [ "$picked_up" = 1 ] || {
         "$H" pane send-keys "$PANE" Escape >/dev/null 2>&1 || true
         "$H" pane send-keys "$PANE" ctrl+u >/dev/null 2>&1 || true
         echo "pi-review: pi never picked up the review for PR ${PR}" >&2
-        echo "pi-review: cleared the pending prompt in pane ${PANE} (Escape + ctrl+u); check the pane is idle with an empty input box before re-running" >&2
+        echo "pi-review: tried to clear the pending prompt in pane ${PANE} (Escape + ctrl+u); check the pane is idle with an empty input box before re-running" >&2
         exit 1
     }
     "$H" agent wait pi-review --status idle --timeout 3000000 >/dev/null
