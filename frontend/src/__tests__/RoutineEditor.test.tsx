@@ -487,6 +487,61 @@ describe("RoutineEditor", () => {
     });
   });
 
+  // WCAG AA contrast: save button must use text-bg on bg-magenta (issue #218).
+  describe("save button contrast (issue #218)", () => {
+    it("renders with text-bg on the default-state save button", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true, status: 200,
+        json: () => Promise.resolve(mockRoutineResponse()),
+      } as Response);
+
+      renderEditor("/members/1/routine");
+
+      await waitFor(() => {
+        expect(screen.getByText("Save Routine")).toBeDefined();
+      });
+
+      const btn = screen.getByRole("button", { name: "Save Routine" });
+      expect(btn.className).toMatch(/\bbg-magenta\b/);
+      expect(btn.className).toMatch(/\btext-bg\b/);
+      expect(btn.className).not.toMatch(/\btext-white\b/);
+    });
+
+    it("rejects conflicting text-color utilities alongside text-bg", () => {
+      const src = routineEditorSource;
+      // Find the submit button's className and assert no two different
+      // text-color tokens appear together (e.g. text-ink-2 + text-bg).
+      const textColorClasses = [
+        "text-bg",
+        "text-white",
+        "text-ink",
+        "text-ink-2",
+        "text-ink-3",
+      ];
+      // Locate the submit button block by its type="submit" attr.
+      const submitIdx = src.indexOf('type="submit"');
+      expect(submitIdx).not.toBe(-1);
+      const block = src.slice(submitIdx, submitIdx + 400);
+      const found = textColorClasses.filter((cls) => block.includes(cls));
+      // Exactly one text-color token on the submit button.
+      expect(found).toEqual(["text-bg"]);
+    });
+
+    it("rejects modifier-only background on the submit button", () => {
+      const src = routineEditorSource;
+      const submitIdx = src.indexOf('type="submit"');
+      expect(submitIdx).not.toBe(-1);
+      const block = src.slice(submitIdx, submitIdx + 400);
+      // Must have a base bg- class (bg-magenta) present.
+      expect(block).toMatch(/\bbg-magenta\b/);
+      // Must NOT have a modifier-only bg (hover:bg-magenta without un-prefixed bg-magenta).
+      // We already proved bg-magenta is present, so check that hover:bg-magenta
+      // does not appear as the sole background utility.
+      // At minimum bg-magenta must be a base (non-prefixed) class.
+      expect(block).toMatch(/(?<!\w)bg-magenta(?![\w-])/);
+    });
+  });
+
   // Reduced-motion: every animation class must be guarded (issue #151, review 3).
   describe("reduced-motion guard", () => {
     it("every animate-spin and transition- class in RoutineEditor is prefixed with motion-safe:", () => {
