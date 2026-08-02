@@ -63,20 +63,46 @@ async def test_handler_passes_the_incoming_message_and_sends_the_reply():
     assert msg.text == "I'm here"
     assert msg.display_name == "Ana García"
     assert msg.link_code is None
-    assert msg.is_group is False
+    assert msg.is_private is True
     message.answer.assert_awaited_once_with("welcome back!")
 
 
-async def test_handler_marks_group_messages_so_secrets_stay_out():
-    calls = {}
+async def test_group_messages_are_rejected_before_agent_work():
+    """Shared chats get the deterministic Spanish rejection; the Agent
+    (reply_fn) is never invoked — no identity resolution, no typing, no
+    model call (#211)."""
+    reply_fn_calls = []
 
     async def reply_fn(msg):
-        calls["msg"] = msg
+        reply_fn_calls.append(msg)
         return Reply("ok")
 
-    await make_message_handler(reply_fn)(FakeMessage(text="/dashboard", chat_type="supergroup"))
+    message = FakeMessage(text="/dashboard", chat_type="supergroup")
+    await make_message_handler(reply_fn)(message)
 
-    assert calls["msg"].is_group is True
+    # The Agent must never run for a group message.
+    assert reply_fn_calls == []
+    # The rejection reply must be sent exactly once.
+    message.answer.assert_awaited_once()
+    rejection_text = message.answer.await_args[0][0]
+    assert "privado" in rejection_text or "directo" in rejection_text
+
+
+async def test_group_messages_get_no_typing_indicator():
+    """Rejection must happen before any typing activity (#211)."""
+    bot_send_chat_action = AsyncMock()
+    reply_fn = AsyncMock()
+
+    message = FakeMessage(
+        text="hello", chat_type="group",
+        bot_send_chat_action=bot_send_chat_action,
+    )
+    await make_message_handler(reply_fn)(message)
+
+    # No typing sent.
+    bot_send_chat_action.assert_not_awaited()
+    # Agent never called.
+    reply_fn.assert_not_awaited()
 
 
 async def test_handler_sends_model_markdown_as_plain_text():

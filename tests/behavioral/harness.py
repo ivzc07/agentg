@@ -213,13 +213,11 @@ class ConversationHarness:
         link_code: str | None = None,
         channel_user_id: str | None = None,
         display_name: str | None = None,
-        is_group: bool = False,
     ) -> str:
         """Send one member message. ``steps`` scripts the model for this turn.
 
         Linking turns (invite codes, name confirms) need no steps — the Agent
         does not run. Agent turns must supply steps ending in a ``message``.
-        ``is_group`` reports the message as arriving in a shared chat.
         """
         if steps:
             self.model.enqueue(steps)
@@ -230,7 +228,6 @@ class ConversationHarness:
                 text=text,
                 display_name=display_name if display_name is not None else self.display_name,
                 link_code=link_code,
-                is_group=is_group,
             )
         )
         # Run the post-send hook the way a real channel does (see

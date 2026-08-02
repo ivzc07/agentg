@@ -24,6 +24,10 @@ CHANNEL = "telegram"
 MAX_MESSAGE_LENGTH = 4096  # Telegram's hard cap per message
 ERROR_REPLY = "Uy — algo falló de mi lado. Inténtalo de nuevo en un momento."
 EMPTY_REPLY_FALLBACK = "Mmm, me quedé en blanco — ¿lo intentas de nuevo?"
+GROUP_REJECTION_REPLY = (
+    "👋 ¡Hola! Solo puedo entrenarte por chat directo, no en grupos. "
+    "Envíame un mensaje privado y empezamos."
+)
 
 ReplyFn = Callable[[IncomingMessage], Awaitable[Reply]]
 
@@ -191,13 +195,18 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
     async def on_text(message: Message) -> None:
         if message.from_user is None or message.text is None:
             return
+        # Reject shared chats at the highest channel boundary — no typing,
+        # no identity resolution, no model call, no store access (#211).
+        if message.chat.type != "private":
+            await message.answer(GROUP_REJECTION_REPLY)
+            return
         incoming = IncomingMessage(
             channel=CHANNEL,
             channel_user_id=str(message.from_user.id),  # numeric id, never @username
             text=message.text,
             display_name=message.from_user.full_name or "",
             link_code=parse_start_payload(message.text),
-            is_group=message.chat.type != "private",
+            is_private=True,
         )
         # Send the first typing action synchronously so it lands before the
         # Agent starts work, then keep refreshing in the background (Telegram

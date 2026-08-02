@@ -276,3 +276,19 @@ async def test_member_context_can_author_routine_for_coach_with_own_routine(runt
     ctx = await runtime.member_context(linked)
     assert ctx.can_author_routine is True
 
+
+# --- defense in depth: non-private messages are refused (#211) ---
+
+
+async def test_runtime_refuses_non_private_messages(runtime):
+    """A message with is_private=False must raise — the channel adapter
+    is responsible for rejecting shared chats before the runtime (#211)."""
+    msg = IncomingMessage(
+        channel="telegram",
+        channel_user_id="42",
+        text="hello",
+        is_private=False,
+    )
+    with pytest.raises(RuntimeError, match="non-private"):
+        await runtime.handle_message(msg)
+

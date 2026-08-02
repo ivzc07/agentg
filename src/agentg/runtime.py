@@ -172,6 +172,15 @@ class AgentRuntime:
         )
 
     async def handle_message(self, msg: IncomingMessage) -> Reply:
+        # Defense in depth: the channel adapter must have already filtered
+        # non-private conversations (#211).  A False value here means a
+        # future channel adapter is forwarding shared-chat messages and
+        # must be fixed.
+        if not msg.is_private:
+            raise RuntimeError(
+                f"non-private message received from {msg.channel}; "
+                "channel adapter must reject shared chats before the runtime"
+            )
         key = (msg.channel, msg.channel_user_id)
         # Await the previous turn's compaction (if any) before acquiring the
         # lock.  This is done outside the lock so that after_send (which
@@ -217,7 +226,7 @@ class AgentRuntime:
                 # `/dashboard` is a deterministic door, not Agent chat: it never
                 # touches the check-in rhythm, compaction, or history.
                 if self.dashboard is not None and is_dashboard_command(msg.text):
-                    return await self.dashboard.handle(linked, is_group=msg.is_group)
+                    return await self.dashboard.handle(linked)
                 session = self.session_for_member(linked.member.id)
                 # Awaited: the tool set is scoped to the caller's role, which
                 # needs a Routine lookup (issue #174).

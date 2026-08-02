@@ -205,19 +205,6 @@ async def test_a_non_coach_is_refused_and_no_token_is_issued(stores):
     assert count == 0
 
 
-async def test_a_group_chat_gets_no_link_and_no_token(stores):
-    linked = await make_coach(stores.linking)  # even a coach
-    door = DashboardDoor(stores.dashboard, "https://dash.example.com")
-
-    reply = await door.handle(linked, is_group=True)
-
-    assert "/login/" not in reply
-    assert "privado" in reply or "directo" in reply  # pointed at the DM
-    async with stores.dashboard._sessions() as db:
-        count = await db.scalar(select(func.count(DashboardLoginToken.id)))
-    assert count == 0
-
-
 async def test_runtime_routes_the_command_to_the_door_not_the_agent(stores, engine, monkeypatch):
     run = AsyncMock()
     monkeypatch.setattr(runtime_module.Runner, "run", run)
