@@ -417,7 +417,7 @@ class OutboxWorker:
 
             # Verify the job still exists (cascade-delete from forget-me
             # would remove it).  If it's gone, nothing more to do.
-            if not await self._job_exists(job.id):
+            if not await self._job_still_sending(job.id):
                 return
 
             text = f"Heads-up from your member {job.member_name}: {note_text}"
@@ -449,8 +449,9 @@ class OutboxWorker:
                 )
             current_channel, current_channel_user_id = channel_info
 
-            # Re-verify job still exists after resolution (defense in depth).
-            if not await self._job_exists(job.id):
+            # Re-verify job still exists and is sending after resolution
+            # (defense in depth for P1 #1 — forget-me may have interleaved).
+            if not await self._job_still_sending(job.id):
                 return
 
             # Send heads-up via the current channel identity.

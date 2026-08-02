@@ -607,7 +607,13 @@ async def test_notifier_failure_always_retries_never_permanently_fails(env, monk
 
     # Each drain_once increments retry_count and resets to pending.
     # The job is never permanently failed.
+    # Mutable clock so claim_pending always sees next_retry_at in the past.
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+
     for attempt in range(1, 6):  # go well past the old MAX_RETRIES=3
+        # Keep clock ahead of next_retry_at so claim_pending gates pass.
+        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
         await worker.drain_once(limit=50)
         async with env.engine.connect() as conn:
             row = (
@@ -631,6 +637,7 @@ async def test_notifier_failure_always_retries_never_permanently_fails(env, monk
     # After many retries the backoff should be capped at MAX_BACKOFF_SECONDS.
     # retry_count keeps growing for audit, but the delay is bounded.
     for _ in range(10):
+        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
         await worker.drain_once(limit=50)
     async with env.engine.connect() as conn:
         row = (
@@ -849,6 +856,10 @@ async def test_last_error_cleared_after_successful_retry(env):
         ).first()
     assert row.retry_count == 1
 
+    # Advance clock past next_retry_at so claim_pending can claim the job.
+    future = datetime.now(UTC) + timedelta(days=1)
+    env.outbox._clock = lambda: future
+
     # Second attempt with a working notifier succeeds.
     success_worker = _make_worker(env)
     await success_worker.drain_once(limit=50)
@@ -905,16 +916,23 @@ async def test_retry_includes_backoff_delay(env, monkeypatch):
         linking_store=env.linking,
     )
 
+    # Mutable clock: advance it before each drain so claim_pending sees
+    # next_retry_at in the past (P1 #4 gate).
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+
     # First attempt: retry_count=0 → no backoff.
     await worker.drain_once(limit=50)
     assert len(sleep_durations) == 0  # no sleep on first attempt
 
     # Second attempt: retry_count=1 → 1 * BASE_BACKOFF delay.
+    clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
     await worker.drain_once(limit=50)
     assert len(sleep_durations) == 1
     assert sleep_durations[0] == pytest.approx(BASE_BACKOFF_SECONDS * 1)
 
     # Third attempt: retry_count=2 → 2 * BASE_BACKOFF delay.
+    clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
     await worker.drain_once(limit=50)
     assert len(sleep_durations) == 2
     assert sleep_durations[1] == pytest.approx(BASE_BACKOFF_SECONDS * 2)
@@ -922,6 +940,7 @@ async def test_retry_includes_backoff_delay(env, monkeypatch):
     # Run enough attempts that the backoff reaches and stays at the cap
     # (retry_count * BASE_BACKOFF >= MAX_BACKOFF for retry_count >= 60).
     for _ in range(60):
+        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
         await worker.drain_once(limit=50)
     # The last sleep should be capped at MAX_BACKOFF_SECONDS.
     assert sleep_durations[-1] == pytest.approx(MAX_BACKOFF_SECONDS)
@@ -974,6 +993,10 @@ async def test_transient_db_error_is_retried_not_permanently_failed(env):
     assert row.retry_count == 1
     assert "RuntimeError" in (row.last_error or "")
     assert row.failure_reason is None  # no permanent failure
+
+    # Advance clock past next_retry_at so claim_pending can claim the job.
+    future = datetime.now(UTC) + timedelta(days=1)
+    env.outbox._clock = lambda: future
 
     # Second attempt succeeds.
     await worker.drain_once(limit=50)
@@ -1529,3 +1552,72 @@ async def test_gym_switch_toctou_channel_resolved_immediately_before_send(env, m
             )
         ).first()
     assert row.status == "delivered"
+
+
+# ── P1 #4: claim_pending respects next_retry_at ───────────────────────────
+
+
+async def test_claim_pending_respects_next_retry_at(env):
+    """claim_pending must not claim jobs whose next_retry_at is still in
+    the future — bounded backoff survives process restart (P1 #4)."""
+    from agentg.safety_outbox import BASE_BACKOFF_SECONDS
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Claim and immediately reset to simulate a transient failure.
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 1
+    await env.outbox.reset_for_retry(jobs[0], "transient failure")
+
+    # Job is now pending with next_retry_at = now + 5s.
+    # claim_pending should NOT claim it (next_retry_at hasn't passed).
+    claimed_now = await env.outbox.claim_pending(limit=50)
+    assert len(claimed_now) == 0, (
+        "claim_pending must not claim jobs with future next_retry_at"
+    )
+
+    # Advance clock past next_retry_at.
+    future = datetime.now(UTC) + timedelta(seconds=BASE_BACKOFF_SECONDS + 10)
+    env.outbox._clock = lambda: future
+
+    # Now claim_pending should claim it.
+    claimed_later = await env.outbox.claim_pending(limit=50)
+    assert len(claimed_later) == 1
+    assert claimed_later[0].status == "sending"
+
+
+async def test_job_still_sending_rejects_non_sending_status(env):
+    """_job_still_sending returns False when the job exists but its status
+    is no longer 'sending' — defense in depth for P1 #1."""
+    from agentg.safety_outbox import OutboxWorker
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Claim the job so it's in 'sending' state.
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 1
+
+    worker = _make_worker(env)
+
+    # Should return True when status is 'sending'.
+    assert await worker._job_still_sending(jobs[0].id) is True
+
+    # Mark the job as failed (simulating forget-me or permanent failure).
+    await env.outbox.mark_failed(jobs[0], "member data deleted")
+
+    # Should now return False — status is 'failed', not 'sending'.
+    assert await worker._job_still_sending(jobs[0].id) is False
