@@ -112,37 +112,59 @@ def _extract_simple_hex_from_block(block: str, key: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _load_token_pairs() -> tuple[dict[str, str], dict[str, str]]:
-    """Parse ``frontend/tailwind.config.ts`` and return (inks, elevations).
+def _load_token_pairs(
+    raw: str | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Parse ``frontend/tailwind.config.ts`` and return (inks, surfaces).
 
-    Inks are keyed as ``"ink"``, ``"ink-2"``, ``"ink-3"``.
-    Elevations are keyed as ``"elevation-0"`` … ``"elevation-3"``.
+    Inks are keyed as ``"ink"``, ``"ink-2"``, ``"ink-3"`` — all parsed
+    from the unquoted ``ink`` block, **fail-closed**: any missing or
+    malformed required token raises ``AssertionError``.
+
+    Surfaces are keyed as ``"elevation-0"`` … ``"elevation-3"`` plus
+    ``"bg"`` (the page-level background used with text in Shell.tsx).
     """
-    raw = TAILWIND_CONFIG.read_text(encoding="utf-8")
+    if raw is None:
+        raw = TAILWIND_CONFIG.read_text(encoding="utf-8")
+
+    # --- inks: all parsed from the unquoted ink block, fail-closed ---
+    ink_block_m = re.search(r'ink\s*:\s*\{(.*?)\}', raw, re.DOTALL)
+    assert ink_block_m is not None, (
+        "Could not parse ink block from tailwind.config.ts"
+    )
+    ink_block = ink_block_m.group(1)
 
     inks: dict[str, str] = {}
-    # ink is a nested block: ink: { DEFAULT: "#fff", 2: "#9a9a9a", 3: "#85858a" }
-    inks["ink"] = _extract_nested_hex(raw, "ink") or "#fff"
-    # ink-2 / ink-3 are numeric keys inside the ink block
-    ink2 = _extract_simple_hex(raw, "2")
-    ink3 = _extract_simple_hex(raw, "3")
-    # But beware: "2" and "3" could match other things; narrow to the ink block first
-    ink_block_match = re.search(r'ink\s*:\s*\{(.*?)\}', raw, re.DOTALL)
-    if ink_block_match:
-        ink_block = ink_block_match.group(1)
-        ink2 = _extract_simple_hex_from_block(ink_block, "2")
-        ink3 = _extract_simple_hex_from_block(ink_block, "3")
-    inks["ink-2"] = ink2 or "#9a9a9a"
-    inks["ink-3"] = ink3 or "#85858a"
+    for token_key, pattern_key in [
+        ("ink", "DEFAULT"),
+        ("ink-2", "2"),
+        ("ink-3", "3"),
+    ]:
+        m = re.search(
+            r'\b' + re.escape(pattern_key) + r'\s*:\s*"([^"]*)"',
+            ink_block,
+        )
+        assert m is not None, (
+            f"Could not parse ink.{pattern_key} from tailwind.config.ts"
+        )
+        inks[token_key] = m.group(1)
 
-    elevations: dict[str, str] = {}
+    # --- surfaces: elevations + bg ---
+    surfaces: dict[str, str] = {}
+
     for i in range(4):
         key = f"elevation-{i}"
         hex_val = _extract_nested_hex(raw, key)
-        assert hex_val is not None, f"Could not parse {key} from tailwind.config.ts"
-        elevations[key] = hex_val
+        assert hex_val is not None, (
+            f"Could not parse {key} from tailwind.config.ts"
+        )
+        surfaces[key] = hex_val
 
-    return inks, elevations
+    bg_m = re.search(r'\bbg\s*:\s*"([^"]*)"', raw)
+    assert bg_m is not None, "Could not parse bg from tailwind.config.ts"
+    surfaces["bg"] = bg_m.group(1)
+
+    return inks, surfaces
 
 
 # ---------------------------------------------------------------------------
@@ -160,23 +182,24 @@ def test_tailwind_config_exists() -> None:
     assert TAILWIND_CONFIG.is_file(), f"Tailwind config not found at {TAILWIND_CONFIG}"
 
 
-def test_all_ink_elevation_pairs_pass_aa(
+def test_all_ink_surface_pairs_pass_aa(
     token_pairs: tuple[dict[str, str], dict[str, str]],
 ) -> None:
-    """Every ink / elevation pair must satisfy WCAG AA (≥ 4.5:1).
+    """Every ink / surface pair must satisfy WCAG AA (≥ 4.5:1).
 
     This is the automated regression gate for issues like #156: if a token
-    value drifts below AA the test flags it immediately.
+    value drifts below AA the test flags it immediately.  Surfaces include
+    all elevation levels plus the page-level ``bg`` token.
     """
-    inks, elevations = token_pairs
+    inks, surfaces = token_pairs
 
     failures: list[str] = []
     for ink_name, ink_hex in inks.items():
-        for elev_name, elev_hex in elevations.items():
-            cr = contrast_ratio(ink_hex, elev_hex)
+        for surf_name, surf_hex in surfaces.items():
+            cr = contrast_ratio(ink_hex, surf_hex)
             if cr < AA_MINIMUM:
                 failures.append(
-                    f"{ink_name} ({ink_hex}) on {elev_name} ({elev_hex}): "
+                    f"{ink_name} ({ink_hex}) on {surf_name} ({surf_hex}): "
                     f"{cr:.2f}:1 < {AA_MINIMUM}:1"
                 )
 
@@ -190,10 +213,10 @@ def test_ink3_on_elevation3_is_the_regression_canary(
     token_pairs: tuple[dict[str, str], dict[str, str]],
 ) -> None:
     """Direct regression test for issue #156 — the exact pair that failed."""
-    inks, elevations = token_pairs
-    cr = contrast_ratio(inks["ink-3"], elevations["elevation-3"])
+    inks, surfaces = token_pairs
+    cr = contrast_ratio(inks["ink-3"], surfaces["elevation-3"])
     assert cr >= AA_MINIMUM, (
-        f"ink-3 ({inks['ink-3']}) on elevation-3 ({elevations['elevation-3']}) "
+        f"ink-3 ({inks['ink-3']}) on elevation-3 ({surfaces['elevation-3']}) "
         f"= {cr:.2f}:1 < {AA_MINIMUM}:1 — #156 regression"
     )
 
@@ -206,7 +229,10 @@ def test_elevation_scale_is_monotonic(
     The design intent: elevation-0 is the ground (darkest), elevation-3 is
     the most elevated surface (lightest).
     """
-    _, elevations = token_pairs
+    _, surfaces = token_pairs
+    elevations = {
+        k: v for k, v in surfaces.items() if k.startswith("elevation-")
+    }
     lums = {
         name: _relative_luminance(hex_val)
         for name, hex_val in elevations.items()
@@ -216,3 +242,75 @@ def test_elevation_scale_is_monotonic(
         assert lums[lo] < lums[hi], (
             f"Elevation scale broken: {lo} ({lums[lo]:.5f}) >= {hi} ({lums[hi]:.5f})"
         )
+
+
+# ---------------------------------------------------------------------------
+# P1 regression — fail-closed ink parsing (no silent fallbacks)
+# ---------------------------------------------------------------------------
+
+_VALID_SKELETON = '''
+    ink: { DEFAULT: "#fff", 2: "#9a9a9a", 3: "#85858a" }
+    bg: "#000"
+    "elevation-0": { DEFAULT: "#000", stroke: "#2a2b2d" }
+    "elevation-1": { DEFAULT: "#131313", stroke: "#2a2b2d" }
+    "elevation-2": { DEFAULT: "#1b1c1e", stroke: "#3a3a3c" }
+    "elevation-3": { DEFAULT: "#1c1d1f", stroke: "#4a4b4e" }
+'''
+
+
+def test_synthetic_skeleton_parses() -> None:
+    """The synthetic config skeleton is valid — guard against test-rot."""
+    inks, surfaces = _load_token_pairs(_VALID_SKELETON)
+    assert inks == {"ink": "#fff", "ink-2": "#9a9a9a", "ink-3": "#85858a"}
+    assert surfaces["bg"] == "#000"
+    assert surfaces["elevation-0"] == "#000"
+
+
+def test_missing_ink_block_fails_closed() -> None:
+    """Parser must raise when the ink block is absent."""
+    with pytest.raises(AssertionError, match="Could not parse ink block"):
+        _load_token_pairs("{}")
+
+
+def test_missing_ink_default_fails_closed() -> None:
+    """Parser must raise when ink.DEFAULT is missing."""
+    no_default = _VALID_SKELETON.replace('DEFAULT: "#fff",', "")
+    with pytest.raises(AssertionError, match="ink.DEFAULT"):
+        _load_token_pairs(no_default)
+
+
+def test_missing_ink_2_fails_closed() -> None:
+    """Parser must raise when ink.2 is missing."""
+    no_2 = _VALID_SKELETON.replace('2: "#9a9a9a",', "")
+    with pytest.raises(AssertionError, match="ink.2"):
+        _load_token_pairs(no_2)
+
+
+def test_missing_ink_3_fails_closed() -> None:
+    """Parser must raise when ink.3 is missing."""
+    no_3 = _VALID_SKELETON.replace('3: "#85858a"', "")
+    with pytest.raises(AssertionError, match="ink.3"):
+        _load_token_pairs(no_3)
+
+
+# ---------------------------------------------------------------------------
+# P2 regression — bg surface included in contrast matrix
+# ---------------------------------------------------------------------------
+
+
+def test_bg_is_in_surface_audit(
+    token_pairs: tuple[dict[str, str], dict[str, str]],
+) -> None:
+    """bg from tailwind.config.ts must be included as a surface."""
+    _, surfaces = token_pairs
+    assert "bg" in surfaces, "bg surface not extracted from tailwind.config.ts"
+    assert surfaces["bg"] == "#000", (
+        f"bg surface value mismatch: {surfaces['bg']}"
+    )
+
+
+def test_missing_bg_fails_closed() -> None:
+    """Parser must raise when the bg token is absent."""
+    no_bg = _VALID_SKELETON.replace('bg: "#000"', "")
+    with pytest.raises(AssertionError, match="Could not parse bg"):
+        _load_token_pairs(no_bg)
