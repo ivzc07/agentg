@@ -243,3 +243,79 @@ def normalize_confirmation(text: str) -> str:
     whitespace and uppercase so the Member's casing and spacing don't
     matter."""
     return " ".join(text.strip().upper().split())
+
+
+# Per-language signal words for whole-conversation language detection
+# (ADR-0002: sticky whole-conversation language, not trigger-text language).
+# These are high-frequency words that carry clear language signal — terse
+# lift logs like "bench 60 8,8,8" have none of these and carry no signal.
+_SPANISH_SIGNAL_WORDS: set[str] = {
+    "hola", "gracias", "por", "favor", "quiero", "entrenar", "entrenamiento",
+    "rutina", "ejercicio", "peso", "series", "repeticiones", "hoy", "mañana",
+    "día", "semana", "bien", "bueno", "buena", "así", "cómo", "qué", "cuál",
+    "cuándo", "dónde", "puedo", "puedes", "tengo", "tienes", "hacer",
+    "vamos", "claro", "vale", "genial", "perfecto", "ayuda", "duele", "dolor",
+    "pecho", "pierna", "brazo", "espalda", "hombro", "músculo", "fuerza",
+    "masa", "grasa", "perder", "ganar", "objetivo", "lesión", "calentamiento",
+    "descanso", "comida", "dieta", "agua", "suplemento", "proteína",
+    "adiós", "hasta", "luego", "nos", "vemos", "ánimo", "fuerte",
+    "eso", "muy", "mucho", "más", "menos", "mejor", "peor", "nada", "todo",
+    "siempre", "nunca", "tal", "vez", "creo", "pienso",
+    "dime", "cuéntame", "explica", "enséñame", "muéstrame",
+    "registrado", "anotado", "apuntado", "hecho", "listo",
+}
+
+_ENGLISH_SIGNAL_WORDS: set[str] = {
+    "hello", "hi", "hey", "thanks", "thank", "please", "want", "train",
+    "training", "routine", "exercise", "weight", "sets", "reps", "today",
+    "tomorrow", "day", "week", "good", "great", "awesome", "nice", "well",
+    "how", "what", "when", "where", "can", "could", "would", "should",
+    "have", "has", "do", "does", "did", "let", "go", "going", "come",
+    "sure", "ok", "okay", "fine", "cool", "perfect", "help", "hurt", "pain",
+    "chest", "leg", "arm", "back", "shoulder", "muscle", "strength",
+    "mass", "fat", "lose", "gain", "goal", "injury", "warmup", "warm",
+    "rest", "food", "diet", "water", "supplement", "protein",
+    "goodbye", "bye", "see", "later", "keep", "strong",
+    "that", "very", "much", "more", "less", "better", "worse", "nothing",
+    "everything", "always", "never", "maybe", "think", "thought",
+    "tell", "explain", "show", "logged", "noted", "done", "ready",
+}
+
+
+async def detect_conversation_language(session) -> str | None:
+    """Return ``"en"``, ``"es"``, or ``None`` by scanning the Member's
+    SDK chat history for language signal words.  Terse lift logs like
+    "bench 60 8,8,8" carry no signal and are skipped.
+
+    Returns ``None`` when there is no clear signal (no history or not
+    enough signal words) — the caller must fall back to trigger-text
+    language.
+
+    ADR-0002: sticky whole-conversation language, not just the last
+    message or the trigger text.
+    """
+    items = await session.get_items()
+    if not items:
+        return None
+
+    es_score = 0
+    en_score = 0
+
+    for item in items:
+        content = item.get("content", "")
+        if not isinstance(content, str):
+            continue
+        # Collapse whitespace and lowercase for word matching.
+        words = set(content.lower().split())
+        es_score += len(words & _SPANISH_SIGNAL_WORDS)
+        en_score += len(words & _ENGLISH_SIGNAL_WORDS)
+
+    # Require at least a modest signal before deciding.
+    if es_score == 0 and en_score == 0:
+        return None
+    if es_score > en_score:
+        return "es"
+    if en_score > es_score:
+        return "en"
+    # Tie — no clear signal.
+    return None

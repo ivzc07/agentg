@@ -250,15 +250,17 @@ class AgentRuntime:
                     return Reply(reply)
                 if linked is None:  # linking always replies for unlinked identities
                     raise RuntimeError("unlinked message reached the agent loop")
+                # Pre-model forget-me check (issue #212): handles both
+                # initiating the two-turn flow and confirming deletion.
+                # Must run before `/dashboard` dispatch so an ordinary
+                # message (including /dashboard) cancels a pending intent.
+                forget_reply = await self._handle_forget_me(msg, linked)
+                if forget_reply is not None:
+                    return forget_reply
                 # `/dashboard` is a deterministic door, not Agent chat: it never
                 # touches the check-in rhythm, compaction, or history.
                 if self.dashboard is not None and is_dashboard_command(msg.text):
                     return await self.dashboard.handle(linked, is_group=msg.is_group)
-                # Pre-model forget-me check (issue #212): handles both
-                # initiating the two-turn flow and confirming deletion.
-                forget_reply = await self._handle_forget_me(msg, linked)
-                if forget_reply is not None:
-                    return forget_reply
                 session = self.session_for_member(linked.member.id)
                 # Awaited: the tool set is scoped to the caller's role, which
                 # needs a Routine lookup (issue #174).
@@ -466,6 +468,7 @@ class AgentRuntime:
         confirmation), or None to let normal processing continue.
         """
         from agentg.forget import (
+            detect_conversation_language,
             detect_forget_me_language,
             is_forget_me_request,
             normalize_confirmation,
@@ -507,8 +510,22 @@ class AgentRuntime:
                         )
                         lang = pending.language or "es"
                         return Reply(_FORGET_GOODBYE[lang])
-                    # Lost the race — another runtime already consumed
-                    # this request.  Fall through to normal processing.
+                    # P1: Lost the race — another runtime already consumed
+                    # this request and may have already deleted the Member.
+                    # Re-verify the identity: if the Member is already gone,
+                    # return a dead-end reply without touching the model.
+                    identity = await self.stores.linking.identity_for(
+                        msg.channel, msg.channel_user_id
+                    )
+                    if identity is None:
+                        # The winning runtime already deleted the Member.
+                        # Return a goodbye — the language was stored on the
+                        # now-consumed pending, so fall back to Spanish
+                        # (ADR-0002 default).
+                        return Reply(_FORGET_GOODBYE["es"])
+                    # The pending was consumed by another runtime but the
+                    # Member wasn't deleted yet (transient).  Fall through
+                    # to normal processing — the model runs.
                 else:
                     # Wrong phrase — cancel the pending request.  A new
                     # forget-me trigger below will create a fresh one.
@@ -519,7 +536,12 @@ class AgentRuntime:
         # Check if this message looks like a new forget-me request
         # (handles both "no pending" and "wrong phrase, re-asking").
         if is_forget_me_request(msg.text):
-            lang = detect_forget_me_language(msg.text) or "es"
+            # ADR-0002: language from the whole conversation, not just the
+            # trigger text.  A Spanish-conversation Member typing "forget me"
+            # in English must still receive Spanish warning and goodbye.
+            session = self.session_for_member(linked.member.id)
+            conv_lang = await detect_conversation_language(session)
+            lang = conv_lang or detect_forget_me_language(msg.text) or "es"
             phrase = await self.stores.forget.request_forget_me(
                 linked.member.id,
                 linked.gym.id,

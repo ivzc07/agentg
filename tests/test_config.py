@@ -100,7 +100,7 @@ def test_forget_me_confirmation_default_is_positive():
     assert settings.forget_me_confirmation_seconds == 300
 
 
-@pytest.mark.parametrize("bad_value", ["0", "-1", "-300"])
+@pytest.mark.parametrize("bad_value", ["0", "-1", "-300", "30", "59"])
 def test_non_positive_forget_me_confirmation_seconds_raises_config_error(bad_value):
     with pytest.raises(ConfigError, match="FORGET_ME_CONFIRMATION_SECONDS"):
         Settings.from_env({**FULL_ENV, "FORGET_ME_CONFIRMATION_SECONDS": bad_value})

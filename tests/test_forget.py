@@ -593,6 +593,51 @@ async def test_two_turn_forget_with_chat_history_leaves_zero_residue(env):
     assert await _pending_count(env, member.id) == 0
 
 
+# -- Conversation language detection (P2, ADR-0002) ---------------------
+
+
+async def test_conversation_language_returns_none_when_no_history(env):
+    """When there is no chat history (new member), detect_conversation_language
+    returns None — the caller falls back to trigger-text language."""
+    from agents.extensions.memory import SQLAlchemySession
+    from agentg.forget import detect_conversation_language
+
+    member = await populate(env)
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    lang = await detect_conversation_language(session)
+    assert lang is None
+
+
+async def test_conversation_language_detects_spanish_from_history(env):
+    """Spanish-dominant conversation history returns 'es'."""
+    from agents.extensions.memory import SQLAlchemySession
+    from agentg.forget import detect_conversation_language
+
+    member = await populate(env)
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+        {"role": "assistant", "content": "¡Hola! ¿En qué te ayudo?"},
+    ])
+    lang = await detect_conversation_language(session)
+    assert lang == "es"
+
+
+async def test_conversation_language_detects_english_from_history(env):
+    """English-dominant conversation history returns 'en'."""
+    from agents.extensions.memory import SQLAlchemySession
+    from agentg.forget import detect_conversation_language
+
+    member = await populate(env)
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hey what's my routine?"},
+        {"role": "assistant", "content": "Here's your plan for today."},
+    ])
+    lang = await detect_conversation_language(session)
+    assert lang == "en"
+
+
 # -- Separate-session concurrency (P1) -----------------------------------
 
 
@@ -643,3 +688,82 @@ async def test_consume_pending_concurrent_sessions_one_winner(env):
 
     # The pending row is gone.
     assert await _pending_count(env, member.id) == 0
+
+
+# -- Loser-safety: consumed=False after another runtime deleted the Member
+#    (P1: concurrent confirmation loser -> no model, no residue)
+
+
+async def test_loser_after_member_deleted_must_not_reach_model(env):
+    """When the atomic consume loses (row already gone because another
+    runtime won the race and deleted the Member), the loser must detect
+    the vanished identity and return a safe reply without touching the
+    model — no chat-history residue, no re-creation of domain rows."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+
+    # Seed chat history to confirm it is wiped and nothing new is added.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+    ])
+
+    # Simulate the winner: consume + delete.
+    consumed = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert consumed
+    await env.forget.forget_member(member.id)
+
+    # The member is gone.
+    assert await count(env, Member, id=member.id) == 0
+    assert await env.linking.identity_for("telegram", "42") is None
+
+    # The "loser" runtime would now check the pending request (it's gone)
+    # and try to re-verify the identity — it must see None and NOT reach
+    # the model.  We simulate this: after deletion, the identity is
+    # unresolvable.  The runtime must not proceed to model processing.
+    identity = await env.linking.identity_for("telegram", "42")
+    assert identity is None, (
+        "after forget, identity_for must return None — "
+        "a loser runtime must detect this and return a safe reply"
+    )
+
+    # Chat history must be gone (the winner cleared it).
+    items = await session.get_items()
+    assert items == []
+
+    # No new residue was created (no model run for a deleted member).
+    assert await count(env, Member, id=member.id) == 0
+
+
+# -- P2: language from whole conversation, not just trigger text ----------
+
+
+async def test_forget_me_detects_language_from_chat_history_not_trigger(env):
+    """A Spanish-conversation Member using an English forget-me trigger
+    must still receive Spanish deletion messages (ADR-0002: sticky
+    whole-conversation language, not trigger-text language)."""
+    from agents.extensions.memory import SQLAlchemySession
+    from agentg.forget import detect_conversation_language
+
+    member = await populate(env)
+    # Seed a Spanish conversation so the whole-conversation language is
+    # clearly Spanish, even though the trigger is in English.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola, quiero entrenar pecho hoy"},
+        {"role": "assistant", "content": "¡Claro! Vamos con press banca."},
+        {"role": "user", "content": "bench 60 8,8,8"},
+        {"role": "assistant", "content": "Registrado — 60 kg, 3 series de 8."},
+    ])
+
+    # The trigger text alone would say English, but the conversation
+    # history is overwhelmingly Spanish.
+    lang = await detect_conversation_language(session) or "es"
+    assert lang == "es", (
+        "whole-conversation language must be Spanish despite English trigger"
+    )

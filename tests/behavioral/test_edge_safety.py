@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -251,7 +251,6 @@ async def test_forget_me_group_message_clears_pending_without_deletion(tmp_path)
 async def test_forget_me_expired_request_cancels_and_falls_through_to_model(tmp_path):
     """An expired forget-me request must not delete — the runtime cancels
     the pending intent silently and falls through to the model (issue #212)."""
-    from datetime import datetime, timezone
 
     async with ConversationHarness.create(tmp_path) as h:
         await h.linked_member()
@@ -287,7 +286,6 @@ async def test_forget_me_expired_request_cancels_and_falls_through_to_model(tmp_
 async def test_forget_me_expired_request_any_message_falls_through(tmp_path):
     """Any message on an expired forget-me request must cancel the pending
     silently and let the model run — no deletion (issue #212)."""
-    from datetime import datetime, timezone
 
     async with ConversationHarness.create(tmp_path) as h:
         await h.linked_member()
@@ -372,6 +370,164 @@ async def test_snooze_checkins_sets_date(tmp_path):
         state, until = await h.stores.checkins.get_state(h.member_id)
         assert state == "snoozed"
         assert until == date(2026, 7, 29)
+
+
+async def test_forget_me_pending_cancelled_by_dashboard_command(tmp_path):
+    """P2: /dashboard must cancel a pending forget-me intent before
+    dispatching — an ordinary message should clear the pending, and
+    /dashboard is just another ordinary message in this regard."""
+    async with ConversationHarness.create(
+        tmp_path, dashboard_base_url="https://dash.test"
+    ) as h:
+        await h.linked_member()
+        await h.seed_closed_session("bench 60 8,8,8")
+        member_id = h.member_id
+
+        # Request forget-me.
+        request_reply = await h.say("forget me")
+        assert "permanently" in request_reply.lower()
+
+        # Pending request exists.
+        pending = await h.stores.forget.get_pending_request(member_id)
+        assert pending is not None
+
+        # Send /dashboard — must cancel the pending intent, then dispatch.
+        await h.say("/dashboard")
+
+        # Pending is cancelled.
+        pending = await h.stores.forget.get_pending_request(member_id)
+        assert pending is None, (
+            "/dashboard must cancel pending forget-me before dispatching"
+        )
+        # Data still intact.
+        assert await _count(h._engine, Member, id=member_id) == 1
+
+
+async def test_forget_me_loser_does_not_reach_model_after_member_deleted(tmp_path):
+    """P1: A losing concurrent confirmation must not reach the model after
+    another runtime consumed the request and deleted the member.  The loser
+    must detect the vanished identity and return a dead-end reply without
+    creating chat-history residue."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        await h.seed_closed_session("bench 60 8,8,8")
+        member_id = h.member_id
+
+        # Seed chat history so we can verify no new residue is created.
+        session = SQLAlchemySession(f"member:{member_id}", engine=h._engine)
+        await session.add_items([
+            {"role": "user", "content": "hola"},
+        ])
+
+        # Create a pending request.
+        request_reply = await h.say("forget me")
+        phrase = _extract_confirmation_phrase(request_reply)
+        assert phrase is not None
+
+        # Simulate the winning runtime: consume + delete.
+        consumed = await h.stores.forget.consume_pending_forget_me(
+            member_id, phrase, datetime.now(timezone.utc),
+        )
+        assert consumed
+        await h.stores.forget.forget_member(member_id)
+
+        # Now the "loser" sends the confirmation phrase.  The pending is
+        # already consumed, and the member is gone.  The loser's runtime
+        # must detect the vanished identity and return a dead-end reply
+        # without touching the model (no scripted model steps defined).
+        loser_reply = await h.say(phrase)
+
+        # The loser must not have run the model — the reply should be a
+        # linking dead-end (identity_for returns None after deletion).
+        # Data is still gone (no re-creation).
+        assert await _count(h._engine, Member, id=member_id) == 0
+        # Chat history must still be gone (no new residue from the loser's
+        # model run — because the model never ran).
+        items = await session.get_items()
+        assert items == [], (
+            "loser must not create chat-history residue after member deletion"
+        )
+
+
+async def test_forget_me_spanish_conversation_english_trigger_gives_spanish_replies(tmp_path):
+    """P2 (ADR-0002): A Spanish-conversation Member who types an English
+    forget-me trigger must still receive Spanish warning and goodbye
+    messages — the language comes from the whole conversation, not the
+    trigger text."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        await h.seed_closed_session("bench 60 8,8,8")
+        member_id = h.member_id
+
+        # Seed a Spanish conversation so the whole-conversation language
+        # is clearly Spanish.
+        session = SQLAlchemySession(f"member:{member_id}", engine=h._engine)
+        await session.add_items([
+            {"role": "user", "content": "hola, quiero entrenar pecho hoy"},
+            {"role": "assistant", "content": "¡Claro! Vamos con press banca."},
+            {"role": "user", "content": "bench 60 8,8,8"},
+            {"role": "assistant", "content": "Registrado — 60 kg, 3 series de 8."},
+        ])
+
+        # English trigger → Spanish warning (language from conversation).
+        request_reply = await h.say("forget me")
+        # Must be Spanish, not English.
+        assert "permanentemente" in request_reply or "borrará" in request_reply, (
+            f"Spanish conversation must yield Spanish warning, got: {request_reply!r}"
+        )
+
+        phrase = _extract_confirmation_phrase(request_reply)
+        assert phrase is not None
+
+        # Confirm → Spanish goodbye.
+        confirm_reply = await h.say(phrase)
+        assert "eliminados" in confirm_reply or "adiós" in confirm_reply.lower() or (
+            "Adiós" in confirm_reply
+        ), f"Spanish conversation must yield Spanish goodbye, got: {confirm_reply!r}"
+
+        # Data is gone.
+        assert await _count(h._engine, Member, id=member_id) == 0
+
+
+async def test_forget_me_english_conversation_spanish_trigger_gives_english_replies(tmp_path):
+    """P2 (ADR-0002): An English-conversation Member who types a Spanish
+    forget-me trigger must still receive English messages — language from
+    the whole conversation, not the trigger text."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        await h.seed_closed_session("bench 60 8,8,8")
+        member_id = h.member_id
+
+        # Seed an English conversation.
+        session = SQLAlchemySession(f"member:{member_id}", engine=h._engine)
+        await session.add_items([
+            {"role": "user", "content": "hey what's my routine?"},
+            {"role": "assistant", "content": "Here's your plan for today."},
+        ])
+
+        # Spanish trigger → English warning (language from conversation).
+        request_reply = await h.say("olvídame")
+        assert "permanently" in request_reply.lower(), (
+            f"English conversation must yield English warning, got: {request_reply!r}"
+        )
+
+        phrase = _extract_confirmation_phrase(request_reply)
+        assert phrase is not None
+
+        # Confirm → English goodbye.
+        confirm_reply = await h.say(phrase)
+        assert "deleted" in confirm_reply.lower(), (
+            f"English conversation must yield English goodbye, got: {confirm_reply!r}"
+        )
+
+        # Data is gone.
+        assert await _count(h._engine, Member, id=member_id) == 0
 
 
 async def test_resume_checkins_turns_state_on(tmp_path):

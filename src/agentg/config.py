@@ -56,9 +56,9 @@ class Settings:
         forget_me = _int_env(
             env, "FORGET_ME_CONFIRMATION_SECONDS", DEFAULT_FORGET_ME_CONFIRMATION_SECONDS
         )
-        if forget_me <= 0:
+        if forget_me < 60:
             raise ConfigError(
-                f"FORGET_ME_CONFIRMATION_SECONDS must be positive, got {forget_me!r}"
+                f"FORGET_ME_CONFIRMATION_SECONDS must be at least 60, got {forget_me!r}"
             )
         return cls(
             telegram_bot_token=env["TELEGRAM_BOT_TOKEN"],
