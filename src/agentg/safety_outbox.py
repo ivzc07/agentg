@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from agentg.models import Member, MemberChannel, MemberNote, SafetyOutboxJob
+from agentg.models import Gym, Member, MemberChannel, MemberNote, SafetyOutboxJob
 
 if TYPE_CHECKING:
     from agentg.linking_store import LinkingStore  # pragma: no cover
@@ -53,7 +53,17 @@ async def _coaches_for_gym_in_session(
 ) -> list[tuple[int, str, str, str]]:
     """Return the Gym's Coaches reachable on a channel, as
     ``(member_id, name, channel, channel_user_id)``, queried within an
-    already-open session so eligibility is atomic with the Note commit."""
+    already-open session so eligibility is atomic with the Note commit.
+
+    The Gym row is locked (SELECT … FOR UPDATE) so a concurrent
+    *promote_to_coach* or *set_coach* serializes with this query — a
+    coach-flag change that lands before this lock is visible to the
+    eligibility check; one that starts after the lock waits until we
+    commit (P1 #3)."""
+    # Lock the Gym row to prevent concurrent coach flag changes.
+    await db.execute(
+        select(Gym).where(Gym.id == gym_id).with_for_update()
+    )
     rows = (
         await db.execute(
             select(
@@ -437,67 +447,76 @@ class OutboxWorker:
                         job.coach_member_id,
                     )
 
-            # Resolve channel identity immediately before sending — the
-            # zero-await gap between this resolution and the send closes
-            # the gym-switch TOCTOU window (P1 #5).
-            channel_info = await self._linking.coach_channel_in_gym(
-                job.coach_member_id, job.gym_id,
-            )
-            if channel_info is None:
+            # Send heads-up — re-authorize inside the semaphore so no
+            # Gym switch or Forget-me can commit between authorization
+            # and send (P1 #2).
+            headsup_failed: str | None = None
+            async with self._semaphore:
+                channel_info = await self._linking.coach_channel_in_gym(
+                    job.coach_member_id, job.gym_id,
+                )
+                if channel_info is None:
+                    headsup_failed = "coach no longer reachable in this gym"
+                elif not await self._job_still_sending(job.id):
+                    headsup_failed = "job_gone"
+                else:
+                    try:
+                        await self._notifier.send(
+                            channel_info[0], channel_info[1],
+                            text, disable_preview=True,
+                        )
+                    except Exception:
+                        headsup_failed = "notifier send failed"
+                        logger.exception(
+                            "failed to send heads-up to coach %s",
+                            channel_info[1],
+                        )
+
+            if headsup_failed == "coach no longer reachable in this gym":
                 return await self._outbox.mark_failed(
                     job, "coach no longer reachable in this gym"
                 )
-            current_channel, current_channel_user_id = channel_info
-
-            # Re-verify job still exists and is sending after resolution
-            # (defense in depth for P1 #1 — forget-me may have interleaved).
-            if not await self._job_still_sending(job.id):
+            elif headsup_failed == "job_gone":
                 return
-
-            # Send heads-up via the current channel identity.
-            try:
-                async with self._semaphore:
-                    await self._notifier.send(
-                        current_channel, current_channel_user_id,
-                        text, disable_preview=True,
-                    )
-            except Exception:
-                logger.exception(
-                    "failed to send heads-up to coach %s", current_channel_user_id,
-                )
+            elif headsup_failed == "notifier send failed":
                 return await self._outbox.reset_for_retry(
                     job, "notifier send failed"
                 )
 
             if link is not None:
-                # Re-resolve channel identity before the link send — the
-                # heads-up send included an await that could have allowed a
-                # gym switch to interleave (P1 #5).
-                link_channel_info = await self._linking.coach_channel_in_gym(
-                    job.coach_member_id, job.gym_id,
-                )
-                if link_channel_info is None:
+                # Re-resolve channel identity inside the semaphore so no
+                # Gym switch can commit between authorization and the
+                # link send (P1 #2).
+                link_failed: str | None = None
+                async with self._semaphore:
+                    link_channel_info = await self._linking.coach_channel_in_gym(
+                        job.coach_member_id, job.gym_id,
+                    )
+                    if link_channel_info is None:
+                        link_failed = "unauthorized"
+                    else:
+                        try:
+                            await self._notifier.send(
+                                link_channel_info[0],
+                                link_channel_info[1],
+                                link,
+                                disable_preview=True,
+                                protect_content=True,
+                            )
+                        except Exception:
+                            link_failed = "notifier"
+                            logger.exception(
+                                "failed to send dashboard link to coach %s",
+                                link_channel_info[1],
+                            )
+
+                if link_failed == "unauthorized":
                     # Heads-up already landed; link can't be delivered.
                     # Mark delivered anyway — the safety text arrived.
                     return await self._outbox.mark_delivered(job)
-                link_channel, link_user_id = link_channel_info
-
-                try:
-                    async with self._semaphore:
-                        await self._notifier.send(
-                            link_channel,
-                            link_user_id,
-                            link,
-                            disable_preview=True,
-                            protect_content=True,
-                        )
-                except Exception:
-                    logger.exception(
-                        "failed to send dashboard link to coach %s",
-                        link_user_id,
-                    )
-                    # The heads-up already landed; a missing link is unfortunate
-                    # but not worth marking the whole job failed.
+                # link_failed == "notifier": the heads-up already landed;
+                # a missing link is unfortunate but not worth marking the
+                # whole job failed.
 
             await self._outbox.mark_delivered(job)
         except Exception as exc:

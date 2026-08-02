@@ -416,6 +416,13 @@ class LinkingStore:
 
     async def set_coach(self, member_id: int, is_coach: bool = True) -> None:
         async with self._sessions() as db:
+            # Lock the Gym row to serialize with coach eligibility queries
+            # so a concurrent safety flag sees a consistent coach set (P1 #3).
+            member = await db.get(Member, member_id)
+            if member is not None:
+                await db.execute(
+                    select(Gym).where(Gym.id == member.gym_id).with_for_update()
+                )
             await db.execute(update(Member).where(Member.id == member_id).values(is_coach=is_coach))
             await db.commit()
 

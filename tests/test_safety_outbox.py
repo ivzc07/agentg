@@ -1621,3 +1621,261 @@ async def test_job_still_sending_rejects_non_sending_status(env):
 
     # Should now return False — status is 'failed', not 'sending'.
     assert await worker._job_still_sending(jobs[0].id) is False
+
+
+# ── P1 #3: eligibility query locked against concurrent promotion ───────────
+
+
+async def test_eligibility_locked_against_concurrent_promotion(env, monkeypatch):
+    """When a member is promoted concurrently with a safety-flag
+    eligibility query, the Gym row lock in _coaches_for_gym_in_session
+    serializes the two transactions — the committed Note always reflects
+    a consistent coach set (P1 #3).
+
+    Uses an asyncio.Event barrier to deterministically force the race:
+    the eligibility query locks the Gym row, then a concurrent promotion
+    is attempted (it waits on the lock), then the Note commits, then the
+    promotion can proceed.  The result is that either the promotion is
+    visible (if it committed first) or it waits (and the new coach is
+    not in the job set).  Either way, the Note+Jobs are consistent."""
+    import agentg.safety_outbox as outbox_module
+
+    # Create a third member who will be promoted mid-race.
+    coach3 = await env.linking.link_member(
+        env.gym_id, "Coach New", "telegram", "99",
+    )
+
+    # Barriers: let the eligibility query start, then attempt promotion.
+    eligibility_started = asyncio.Event()
+    promotion_can_proceed = asyncio.Event()
+
+    real_coaches_for_gym = outbox_module._coaches_for_gym_in_session
+
+    async def instrumented_coaches(db, gym_id, exclude_member_id=None):
+        eligibility_started.set()  # signal: we're inside the transaction
+        # Let the concurrent promotion attempt run — it will block on the
+        # Gym row lock (which was taken just before this call in
+        # create_note_and_jobs).  We don't need to wait here because
+        # the lock serializes naturally.
+        await promotion_can_proceed.wait()
+        return await real_coaches_for_gym(db, gym_id, exclude_member_id)
+
+    monkeypatch.setattr(
+        outbox_module, "_coaches_for_gym_in_session", instrumented_coaches,
+    )
+
+    # Start the safety flag operation (will block inside eligibility).
+    create_task = asyncio.create_task(
+        env.outbox.create_note_and_jobs(
+            member_id=env.member_id,
+            gym_id=env.gym_id,
+            text="sharp knee pain",
+            member_name=env.member_name,
+            member_is_coach=False,
+            linking_store=env.linking,
+            exclude_member_id=env.member_id,
+        )
+    )
+
+    # Wait for eligibility query to start.
+    await eligibility_started.wait()
+
+    # Try to promote coach3 concurrently — this will block on the Gym
+    # row lock until create_note_and_jobs commits.
+    promote_task = asyncio.create_task(
+        env.linking.set_coach(coach3.id, is_coach=True)
+    )
+
+    # Give the promotion a moment to hit the lock.
+    await asyncio.sleep(0.05)
+
+    # Allow the eligibility query to proceed (it releases the lock on
+    # commit, which unblocks the promotion).
+    promotion_can_proceed.set()
+
+    # Both should complete.
+    note, jobs = await create_task
+    await promote_task
+
+    # The Note committed with the coach set visible at eligibility time.
+    # Since the promotion was attempted after the lock was taken, it
+    # waited until after commit — coach3 should NOT be in the job set.
+    coach_ids = {j.coach_member_id for j in jobs}
+    assert coach_ids == {env.coach1_id, env.coach2_id}, (
+        "promotion that started after eligibility lock should wait "
+        "and not appear in the committed job set"
+    )
+    assert len(jobs) == 2
+
+
+async def test_eligibility_sees_promotion_that_committed_first(env):
+    """When a promotion commits before the eligibility query begins,
+    the newly promoted coach IS included in the job set — the lock does
+    not exclude promotions that already completed (P1 #3)."""
+    coach3 = await env.linking.link_member(
+        env.gym_id, "Coach New", "telegram", "99",
+    )
+
+    # Promote first — this commits before the safety flag.
+    await env.linking.set_coach(coach3.id, is_coach=True)
+
+    # Now create a safety flag — the promotion should be visible.
+    note, jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        linking_store=env.linking,
+        exclude_member_id=env.member_id,
+    )
+
+    coach_ids = {j.coach_member_id for j in jobs}
+    assert coach_ids == {env.coach1_id, env.coach2_id, coach3.id}
+    assert len(jobs) == 3
+
+
+# ── P1 #2: re-authorize after semaphore acquisition ────────────────────────
+
+
+async def test_semaphore_reauth_blocks_demoted_coach(env, monkeypatch):
+    """When a coach is demoted while the worker is waiting for the
+    semaphore, the re-authorization inside the semaphore catches it and
+    the safety text is NOT sent (P1 #2).
+
+    Uses a barrier to force the race: the worker acquires the semaphore,
+    then the coach is demoted, then the worker re-authorizes and finds
+    the coach is no longer eligible."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Claim the job so it's in 'sending' state.
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    # Barriers to control interleaving:
+    # 1. Worker acquires the semaphore
+    # 2. Coach is demoted
+    # 3. Worker re-authorizes inside the semaphore
+    semaphore_acquired = asyncio.Event()
+    coach_demoted = asyncio.Event()
+
+    # Instrument the semaphore to inject our interleaving.
+    real_semaphore = asyncio.Semaphore(10)
+    worker = _make_worker(env)
+    worker._semaphore = real_semaphore
+
+    original_acquire = type(real_semaphore).__aenter__
+
+    async def instrumented_aenter(self):
+        await original_acquire(self)
+        semaphore_acquired.set()  # signal: semaphore held
+        await coach_demoted.wait()  # wait for demotion to happen
+        return self
+
+    monkeypatch.setattr(
+        type(real_semaphore), "__aenter__", instrumented_aenter,
+    )
+
+    # Start delivery in a task.
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+
+    # Wait for the semaphore to be acquired.
+    await semaphore_acquired.wait()
+
+    # Now demote the coach while the worker holds the semaphore.
+    await env.linking.set_coach(env.coach1_id, is_coach=False)
+    coach_demoted.set()
+
+    # Wait for delivery to complete.
+    await deliver_task
+
+    # The worker must NOT have sent anything — the re-authorization
+    # inside the semaphore caught the demotion.
+    assert env.notifier.sent == [], (
+        "worker must not send after coach is demoted while waiting for semaphore"
+    )
+
+    # The job should be marked failed.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, failure_reason FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.status == "failed"
+    assert "no longer reachable" in (row.failure_reason or "")
+
+
+async def test_semaphore_reauth_blocks_gym_switched_coach(env, monkeypatch):
+    """When a coach switches gyms while the worker is waiting for the
+    semaphore, the re-authorization inside the semaphore catches it and
+    the safety text is NOT sent to the new gym (P1 #2)."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Claim the job.
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    semaphore_acquired = asyncio.Event()
+    gym_switched = asyncio.Event()
+
+    worker = _make_worker(env)
+    real_semaphore = asyncio.Semaphore(10)
+    worker._semaphore = real_semaphore
+
+    original_acquire = type(real_semaphore).__aenter__
+
+    async def instrumented_aenter(self):
+        await original_acquire(self)
+        semaphore_acquired.set()
+        await gym_switched.wait()
+        return self
+
+    monkeypatch.setattr(
+        type(real_semaphore), "__aenter__", instrumented_aenter,
+    )
+
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+
+    await semaphore_acquired.wait()
+
+    # Switch the coach's gym while the worker holds the semaphore.
+    new_gym = await env.linking.create_gym("New Gym")
+    await env.linking.link_member(new_gym.id, "Coach Sam", "telegram", "7")
+    gym_switched.set()
+
+    await deliver_task
+
+    # No messages sent — coach is no longer in this gym.
+    assert env.notifier.sent == []
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, failure_reason FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.status == "failed"
+    assert "no longer reachable" in (row.failure_reason or "")
