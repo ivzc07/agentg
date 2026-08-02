@@ -152,10 +152,19 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
     # the agent idle, snapshots BEFORE without the stray, submits a second
     # prompt, and then attributes the stray's comments to itself - a silent
     # overcount plus a duplicate review. So clear it rather than warn about it.
+    # Escape alone is not enough, and believing it was would send the operator
+    # into a garbled re-run. In pi's TUI, Escape aborts a queued/streaming run
+    # but puts the queued text back *into the editor*; with an idle pi holding
+    # a non-empty input box it does nothing at all. A later `pane run` would
+    # then append the next prompt to the leftover text and submit the
+    # concatenation. ctrl+u clears the editor (both behaviours verified against
+    # a live pi pane), so send Escape to stop a queued run and ctrl+u to empty
+    # the box.
     [ "$picked_up" = 1 ] || {
         "$H" pane send-keys "$PANE" Escape >/dev/null 2>&1 || true
+        "$H" pane send-keys "$PANE" ctrl+u >/dev/null 2>&1 || true
         echo "pi-review: pi never picked up the review for PR ${PR}" >&2
-        echo "pi-review: sent Escape to pane ${PANE} to clear the pending prompt; confirm the pane is idle before re-running" >&2
+        echo "pi-review: cleared the pending prompt in pane ${PANE} (Escape + ctrl+u); check the pane is idle with an empty input box before re-running" >&2
         exit 1
     }
     "$H" agent wait pi-review --status idle --timeout 3000000 >/dev/null

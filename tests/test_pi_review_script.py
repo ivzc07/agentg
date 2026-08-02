@@ -375,7 +375,10 @@ def test_prompt_states_the_signature_convention_the_counter_enforces():
     comments".
     """
     body = SCRIPT.read_text(encoding="utf-8")
-    assert "on a line of its own" in body, (
+    # Assert the PROMPT's own wording, not the bare phrase: that phrase also
+    # appears in comment_count's comment, so a looser check stays green even
+    # if the PROMPT reverts to inline signing - the very drift this prevents.
+    assert "'- pi code-review' on a line of its own" in body, (
         "the PROMPT must tell the reviewer to put the signature on its own "
         "line, because comment_count matches \n- pi code-review"
     )
