@@ -14,18 +14,18 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.models import MemberNote, SafetyOutboxJob
 
 MAX_NOTE_LENGTH = 400
+MAX_RETRIES = 3  # transient failures before permanent failure
 
 Clock = Callable[[], datetime]
 
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 10  # seconds between pending-job sweeps
-_STARTUP_BATCH = 50  # max jobs to drain in one startup recovery batch
+_STARTUP_BATCH = 50  # max jobs to drain in one batch
 
 
 def _utcnow() -> datetime:
@@ -35,7 +35,9 @@ def _utcnow() -> datetime:
 class SafetyOutbox:
     """Create and manage outbox jobs for safety-flag coach notifications."""
 
-    def __init__(self, engine: AsyncEngine, clock: Clock = _utcnow) -> None:
+    def __init__(self, engine, clock: Clock = _utcnow) -> None:
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
         self._sessions = async_sessionmaker(engine, expire_on_commit=False)
         self._clock = clock
 
@@ -85,7 +87,12 @@ class SafetyOutbox:
         return note, jobs
 
     async def claim_pending(self, limit: int = _STARTUP_BATCH) -> list[SafetyOutboxJob]:
-        """Return the oldest pending jobs, ordered by creation time."""
+        """Atomically claim the oldest pending jobs by transitioning their
+        status from ``pending`` to ``sending`` in one transaction.
+
+        The status transition prevents two concurrent ``drain_once`` calls
+        (e.g. shutdown drain vs poll loop) from selecting the same jobs.
+        """
         async with self._sessions() as db:
             rows = (
                 await db.scalars(
@@ -95,24 +102,42 @@ class SafetyOutbox:
                     .limit(limit)
                 )
             ).all()
+            if not rows:
+                return []
+            ids = [r.id for r in rows]
+            await db.execute(
+                update(SafetyOutboxJob)
+                .where(SafetyOutboxJob.id.in_(ids))
+                .values(status="sending")
+            )
+            for r in rows:
+                r.status = "sending"
+            await db.commit()
             return list(rows)
 
     async def mark_delivered(self, job: SafetyOutboxJob) -> None:
-        """Mark a single job as delivered."""
+        """Mark a single job as delivered — only if it is still in the
+        ``sending`` state (a retry may have already reset it)."""
         async with self._sessions() as db:
             await db.execute(
                 update(SafetyOutboxJob)
-                .where(SafetyOutboxJob.id == job.id)
+                .where(
+                    SafetyOutboxJob.id == job.id,
+                    SafetyOutboxJob.status == "sending",
+                )
                 .values(status="delivered", delivered_at=self._clock())
             )
             await db.commit()
 
     async def mark_failed(self, job: SafetyOutboxJob, reason: str) -> None:
-        """Mark a single job as failed with a reason (capped)."""
+        """Mark a single job as permanently failed — only if still ``sending``."""
         async with self._sessions() as db:
             await db.execute(
                 update(SafetyOutboxJob)
-                .where(SafetyOutboxJob.id == job.id)
+                .where(
+                    SafetyOutboxJob.id == job.id,
+                    SafetyOutboxJob.status == "sending",
+                )
                 .values(
                     status="failed",
                     failure_reason=reason[:400],
@@ -121,12 +146,55 @@ class SafetyOutbox:
             )
             await db.commit()
 
+    async def reset_for_retry(self, job: SafetyOutboxJob, reason: str) -> None:
+        """Increment the retry counter and reset to ``pending`` so the poller
+        tries again.  After *MAX_RETRIES* the job is permanently failed."""
+        async with self._sessions() as db:
+            next_count = job.retry_count + 1
+            if next_count >= MAX_RETRIES:
+                await db.execute(
+                    update(SafetyOutboxJob)
+                    .where(SafetyOutboxJob.id == job.id)
+                    .values(
+                        status="failed",
+                        retry_count=next_count,
+                        failure_reason=f"retries exhausted: {reason}"[:400],
+                        delivered_at=self._clock(),
+                    )
+                )
+            else:
+                await db.execute(
+                    update(SafetyOutboxJob)
+                    .where(SafetyOutboxJob.id == job.id)
+                    .values(
+                        status="pending",
+                        retry_count=next_count,
+                    )
+                )
+            await db.commit()
+
+    async def reset_claimed(self) -> int:
+        """Reset every ``sending`` job back to ``pending``.
+
+        Called on startup so jobs orphaned by a prior crash (claimed but
+        never delivered) are retried.
+        """
+        async with self._sessions() as db:
+            result = await db.execute(
+                update(SafetyOutboxJob)
+                .where(SafetyOutboxJob.status == "sending")
+                .values(status="pending")
+            )
+            await db.commit()
+            return result.rowcount
+
 
 class OutboxWorker:
     """Background task that sends pending safety-outbox jobs.
 
-    On ``start()`` it drains every pending job before returning (startup
-    recovery).  After that it polls ``_POLL_INTERVAL`` seconds for new work.
+    On ``start()`` it resets any claimed-but-undelivered jobs from a prior
+    crash and begins polling.  Delivery does not block startup — backlog
+    drain is incremental so Member replies are never delayed after a restart.
     """
 
     def __init__(
@@ -135,20 +203,28 @@ class OutboxWorker:
         notifier,  # Notifier protocol — channel adapter
         dashboard_store,  # DashboardStore — to mint magic links
         dashboard_base_url: str | None,
+        linking_store,  # LinkingStore — to resolve channel identity at delivery time
         clock: Clock = _utcnow,
     ) -> None:
         self._outbox = outbox
         self._notifier = notifier
         self._dashboard = dashboard_store
         self._base_url = dashboard_base_url
+        self._linking = linking_store
         self._clock = clock
         self._task: asyncio.Task[None] | None = None
         # Bounded fan-out like the old in-memory pings (P3 #5153518045).
         self._semaphore = asyncio.Semaphore(10)
 
     async def start(self) -> None:
-        """Drain every pending job now (startup recovery), then begin polling."""
-        await self._drain_all()
+        """Recover orphaned jobs from a prior crash, then begin polling.
+
+        Unlike the original implementation this does *not* drain the entire
+        backlog synchronously — a large backlog would delay all Member
+        replies after restart.  The poll loop handles pending jobs
+        incrementally.
+        """
+        await self._outbox.reset_claimed()
         self._task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:
@@ -174,13 +250,6 @@ class OutboxWorker:
 
     # ── internals ────────────────────────────────────────────────────────
 
-    async def _drain_all(self) -> None:
-        """Keep claiming and delivering until no pending jobs remain."""
-        while True:
-            delivered = await self.drain_once()
-            if delivered == 0:
-                break
-
     async def _poll_loop(self) -> None:
         while True:
             try:
@@ -193,8 +262,25 @@ class OutboxWorker:
                 raise
 
     async def _deliver_one(self, job: SafetyOutboxJob) -> None:
-        """Send one outbox job: heads-up + (optionally) magic link."""
+        """Send one outbox job: heads-up + (optionally) magic link.
+
+        Channel identity is re-resolved at delivery time so a coach who
+        switched gyms after job creation never receives a cross-gym
+        notification.  Transient notifier failures are retried up to
+        *MAX_RETRIES* before the job is permanently failed.
+        """
         try:
+            # Resolve the current channel identity at delivery time (P1 #2).
+            channel_info = await self._linking.coach_channel_in_gym(
+                job.coach_member_id, job.gym_id,
+            )
+            if channel_info is None:
+                return await self._outbox.mark_failed(
+                    job, "coach no longer reachable in this gym"
+                )
+
+            current_channel, current_channel_user_id = channel_info
+
             # Resolve the note text; if the note is gone (e.g. forget-me),
             # fail the job — the safety concern no longer exists.
             note_text = await self._note_text(job.note_id)
@@ -217,19 +303,21 @@ class OutboxWorker:
                 except Exception:
                     logger.exception(
                         "failed to mint dashboard link for coach %s",
-                        job.channel_user_id,
+                        current_channel_user_id,
                     )
 
+            # Send heads-up via the current channel identity.
             try:
                 async with self._semaphore:
                     await self._notifier.send(
-                        job.channel, job.channel_user_id, text, disable_preview=True,
+                        current_channel, current_channel_user_id,
+                        text, disable_preview=True,
                     )
             except Exception:
                 logger.exception(
-                    "failed to send heads-up to coach %s", job.channel_user_id,
+                    "failed to send heads-up to coach %s", current_channel_user_id,
                 )
-                return await self._outbox.mark_failed(
+                return await self._outbox.reset_for_retry(
                     job, "notifier send failed"
                 )
 
@@ -237,8 +325,8 @@ class OutboxWorker:
                 try:
                     async with self._semaphore:
                         await self._notifier.send(
-                            job.channel,
-                            job.channel_user_id,
+                            current_channel,
+                            current_channel_user_id,
                             link,
                             disable_preview=True,
                             protect_content=True,
@@ -246,7 +334,7 @@ class OutboxWorker:
                 except Exception:
                     logger.exception(
                         "failed to send dashboard link to coach %s",
-                        job.channel_user_id,
+                        current_channel_user_id,
                     )
                     # The heads-up already landed; a missing link is unfortunate
                     # but not worth marking the whole job failed.

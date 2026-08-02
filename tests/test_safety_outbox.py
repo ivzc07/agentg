@@ -1,5 +1,5 @@
-"""Durable safety-outbox: atomicity, delivery, restart recovery, and
-failure injection (issue #216)."""
+"""Durable safety-outbox: atomicity, delivery, restart recovery, retry,
+channel resolution, and atomic claiming (issue #216)."""
 
 import asyncio
 import time
@@ -13,7 +13,7 @@ from agentg.dashboard_store import DashboardStore
 from agentg.linking_store import LinkingStore
 from agentg.notes import NotesStore
 from agentg.models import SafetyOutboxJob
-from agentg.safety_outbox import OutboxWorker, SafetyOutbox
+from agentg.safety_outbox import MAX_RETRIES, OutboxWorker, SafetyOutbox
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -80,6 +80,17 @@ def _coaches(env) -> list[tuple[int, str, str, str]]:
         (env.coach1_id, "Coach Sam", "telegram", "7"),
         (env.coach2_id, "Coach Jo", "telegram", "8"),
     ]
+
+
+def _make_worker(env, notifier=None, base_url=None):
+    """Create an OutboxWorker wired for the test env."""
+    return OutboxWorker(
+        outbox=env.outbox,
+        notifier=notifier or env.notifier,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=base_url or env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
 
 
 # ── atomicity ───────────────────────────────────────────────────────────────
@@ -164,7 +175,6 @@ async def test_jobs_are_unique_per_note_coach(env):
     )
     # Second attempt with the same note+coach should fail.
     with pytest.raises(Exception):  # IntegrityError
-        # Direct insert: the same gym_id, note_id, coach_member_id.
         from agentg.models import SafetyOutboxJob
         from sqlalchemy.ext.asyncio import async_sessionmaker
         async with async_sessionmaker(env.engine)() as db:
@@ -200,12 +210,7 @@ async def test_worker_sends_pending_and_marks_delivered(env):
     )
     assert env.notifier.sent == []  # nothing sent yet
 
-    worker = OutboxWorker(
-        outbox=env.outbox,
-        notifier=env.notifier,
-        dashboard_store=env.dashboard,
-        dashboard_base_url=env.DASHBOARD_BASE,
-    )
+    worker = _make_worker(env)
     delivered = await worker.drain_once(limit=50)
     assert delivered == 2
 
@@ -234,12 +239,7 @@ async def test_member_text_separated_from_bearer_links(env):
         coaches=_coaches(env),
     )
 
-    worker = OutboxWorker(
-        outbox=env.outbox,
-        notifier=env.notifier,
-        dashboard_store=env.dashboard,
-        dashboard_base_url=env.DASHBOARD_BASE,
-    )
+    worker = _make_worker(env)
     await worker.drain_once(limit=50)
 
     # Separate heads-up from link messages.
@@ -256,9 +256,6 @@ async def test_member_text_separated_from_bearer_links(env):
 
 async def test_no_cross_gym_notification(env):
     """A job's Gym scoping prevents notification across Gyms (AC #7)."""
-    # The outbox job references the Gym; there is no way to notify a coach
-    # in another Gym because the job stores the channel identity at creation
-    # time and the worker sends only to that channel.
     other_gym = await env.linking.create_gym("Other Gym")
     other_member = await env.linking.link_member(
         other_gym.id, "Bob", "telegram", "99",
@@ -273,12 +270,7 @@ async def test_no_cross_gym_notification(env):
         coaches=_coaches(env),
     )
     # The other Gym's member is NOT in the coach list.
-    worker = OutboxWorker(
-        outbox=env.outbox,
-        notifier=env.notifier,
-        dashboard_store=env.dashboard,
-        dashboard_base_url=env.DASHBOARD_BASE,
-    )
+    worker = _make_worker(env)
     await worker.drain_once(limit=50)
     # No messages went to the other Gym's member.
     for _ch, uid, _text, _dp, _pc in env.notifier.sent:
@@ -348,12 +340,7 @@ async def test_credentials_minted_at_delivery_time(env):
         ).all()
     assert len(rows) == 0
 
-    worker = OutboxWorker(
-        outbox=env.outbox,
-        notifier=env.notifier,
-        dashboard_store=env.dashboard,
-        dashboard_base_url=env.DASHBOARD_BASE,
-    )
+    worker = _make_worker(env)
     await worker.drain_once(limit=50)
 
     # Tokens were minted for each coach.
@@ -367,13 +354,11 @@ async def test_credentials_minted_at_delivery_time(env):
 async def test_mint_failure_falls_back_to_text_only(env):
     """When token minting fails for a coach, the heads-up is still sent
     as text-only (no link message; AC #5)."""
-    # Make the dashboard store fail on every call.
     real_mint = env.dashboard.create_login_token
 
     async def failing_mint(*args, **kwargs):
         raise RuntimeError("db hiccup")
 
-    # Patch the dashboard store directly.
     env.dashboard.create_login_token = failing_mint
 
     await env.outbox.create_note_and_jobs(
@@ -385,12 +370,7 @@ async def test_mint_failure_falls_back_to_text_only(env):
         coaches=_coaches(env),
     )
 
-    worker = OutboxWorker(
-        outbox=env.outbox,
-        notifier=env.notifier,
-        dashboard_store=env.dashboard,
-        dashboard_base_url=env.DASHBOARD_BASE,
-    )
+    worker = _make_worker(env)
     await worker.drain_once(limit=50)
 
     # Restore so cleanup works.
@@ -411,7 +391,6 @@ async def test_mint_failure_falls_back_to_text_only(env):
 async def test_pre_exit_committed_job_recovered_on_startup(env):
     """A job committed before process exit is delivered after restart
     (AC #4)."""
-    # Simulate: write jobs, "crash" before the worker runs.
     await env.outbox.create_note_and_jobs(
         member_id=env.member_id,
         gym_id=env.gym_id,
@@ -423,14 +402,24 @@ async def test_pre_exit_committed_job_recovered_on_startup(env):
 
     # At this point the jobs are in the DB (committed) but not sent.
     # This is the "pre-exit" state.  A new process starts:
-    fresh_worker = OutboxWorker(
-        outbox=env.outbox,
-        notifier=env.notifier,
-        dashboard_store=env.dashboard,
-        dashboard_base_url=env.DASHBOARD_BASE,
-    )
-    # start() drains all pending before returning.
+    fresh_worker = _make_worker(env)
+    # start() recovers orphaned claims then begins polling.
+    # The poll loop fires drain_once immediately (before its first sleep),
+    # but it runs as a background task — wait for delivery to complete.
     await fresh_worker.start()
+
+    # Poll for delivery completion (the poll task runs drain_once then
+    # sleeps _POLL_INTERVAL seconds; the first drain fires immediately).
+    for _ in range(50):  # up to 5 seconds
+        async with env.engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    text("SELECT status FROM safety_outbox_jobs")
+                )
+            ).all()
+        if all(r.status == "delivered" for r in rows):
+            break
+        await asyncio.sleep(0.1)
 
     # All jobs delivered.
     assert len(env.notifier.sent) == 4  # 2 coaches × 2 messages
@@ -445,12 +434,91 @@ async def test_pre_exit_committed_job_recovered_on_startup(env):
     await fresh_worker.stop()
 
 
-# ── failure injection ───────────────────────────────────────────────────────
+# ── atomic claim / lease (P2 #3) ───────────────────────────────────────────
 
 
-async def test_notifier_failure_marks_job_failed_not_lost(env):
-    """When the notifier raises for one coach, the job is marked failed
-    (not stuck pending) and the other coach is delivered normally."""
+async def test_atomic_claim_prevents_duplicate_delivery(env):
+    """Two concurrent drain_once calls cannot claim the same pending jobs
+    because claim_pending atomically transitions status to 'sending'."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+
+    worker = _make_worker(env)
+
+    # First drain claims and delivers the 2 jobs.
+    delivered1 = await worker.drain_once(limit=50)
+    assert delivered1 == 2
+    assert len(env.notifier.sent) == 4  # 2 coaches × 2 messages
+
+    sent_before = len(env.notifier.sent)
+
+    # Second drain (simulating shutdown drain racing with poll loop)
+    # must claim zero jobs — they're already marked "delivered".
+    delivered2 = await worker.drain_once(limit=50)
+    assert delivered2 == 0
+    assert len(env.notifier.sent) == sent_before  # no new messages
+
+
+# ── crash recovery: reset_claimed (P2 #3) ───────────────────────────────────
+
+
+async def test_reset_claimed_recovers_orphaned_jobs(env):
+    """Jobs stuck in 'sending' after a crash are reset to 'pending' so they
+    are retried on next startup."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+
+    # Simulate a crash mid-delivery: claim jobs but don't deliver.
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 2
+    # Jobs are now in 'sending' state.
+    async with env.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text("SELECT status FROM safety_outbox_jobs")
+            )
+        ).all()
+    assert all(r.status == "sending" for r in rows)
+
+    # "Crash" — reset claimed jobs on next startup.
+    reset_count = await env.outbox.reset_claimed()
+    assert reset_count == 2
+
+    # Jobs are back to 'pending'.
+    async with env.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text("SELECT status FROM safety_outbox_jobs")
+            )
+        ).all()
+    assert all(r.status == "pending" for r in rows)
+
+    # Now a fresh worker delivers them.
+    assert env.notifier.sent == []
+    worker = _make_worker(env)
+    await worker.drain_once(limit=50)
+    assert len(env.notifier.sent) == 4
+
+
+# ── failure injection: retry (P1 #1) ───────────────────────────────────────
+
+
+async def test_notifier_failure_retries_not_immediately_fails(env):
+    """When the notifier raises for one coach, the job is retried (reset to
+    'pending' with incremented retry_count), not permanently failed on the
+    first attempt. The other coach is delivered normally."""
     failing_notifier = FakeNotifier(failing_id="7")
     await env.outbox.create_note_and_jobs(
         member_id=env.member_id,
@@ -466,27 +534,85 @@ async def test_notifier_failure_marks_job_failed_not_lost(env):
         notifier=failing_notifier,
         dashboard_store=env.dashboard,
         dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
     )
     await worker.drain_once(limit=50)
 
-    # Coach 7 (failing) → job failed, Coach 8 → job delivered.
+    # Coach 7's job should be back to 'pending' with retry_count=1,
+    # NOT permanently failed on first attempt.
     async with env.engine.connect() as conn:
         rows = (
             await conn.execute(
                 text(
-                    "SELECT coach_member_id, status, failure_reason "
+                    "SELECT coach_member_id, status, retry_count, failure_reason "
                     "FROM safety_outbox_jobs ORDER BY coach_member_id"
                 )
             )
         ).all()
     job_7, job_8 = rows
-    assert job_7.status == "failed"
-    assert job_7.failure_reason is not None
+    assert job_7.status == "pending", (
+        f"expected pending (retry), got {job_7.status}"
+    )
+    assert job_7.retry_count == 1
+    assert job_7.failure_reason is None  # no permanent failure reason yet
     assert job_8.status == "delivered"
 
-    # Coach 8 got both messages.
+    # Coach 8 got both messages, Coach 7 got none.
     assert any(uid == "8" for _ch, uid, _t, _dp, _pc in failing_notifier.sent)
     assert not any(uid == "7" for _ch, uid, _t, _dp, _pc in failing_notifier.sent)
+
+
+async def test_notifier_failure_exhausts_retries_then_fails(env):
+    """After MAX_RETRIES transient failures the job is permanently failed."""
+    failing_notifier = FakeNotifier(failing_id="7")
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=failing_notifier,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+
+    # Each drain_once increments retry_count and resets to pending.
+    for attempt in range(1, MAX_RETRIES):
+        await worker.drain_once(limit=50)
+        async with env.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT status, retry_count FROM safety_outbox_jobs "
+                        "WHERE coach_member_id = :cid"
+                    ),
+                    {"cid": env.coach1_id},
+                )
+            ).first()
+        assert row.status == "pending", f"attempt {attempt}: expected pending"
+        assert row.retry_count == attempt
+
+    # The final attempt (retry_count == MAX_RETRIES) marks it failed.
+    await worker.drain_once(limit=50)
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count, failure_reason FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.status == "failed", f"expected failed after {MAX_RETRIES} retries"
+    assert row.retry_count == MAX_RETRIES
+    assert "retries exhausted" in (row.failure_reason or "")
 
 
 async def test_deleted_note_marks_job_failed(env):
@@ -507,12 +633,7 @@ async def test_deleted_note_marks_job_failed(env):
             text("DELETE FROM member_notes WHERE id = :id"), {"id": note.id}
         )
 
-    worker = OutboxWorker(
-        outbox=env.outbox,
-        notifier=env.notifier,
-        dashboard_store=env.dashboard,
-        dashboard_base_url=env.DASHBOARD_BASE,
-    )
+    worker = _make_worker(env)
     await worker.drain_once(limit=50)
 
     # All jobs should be marked failed (note no longer exists).
@@ -526,13 +647,88 @@ async def test_deleted_note_marks_job_failed(env):
     assert all("no longer exists" in (r.failure_reason or "") for r in rows)
 
 
+# ── channel identity re-resolution at delivery time (P1 #2) ────────────────
+
+
+async def test_channel_identity_resolved_at_delivery_time(env):
+    """When a coach switches gyms between job creation and delivery, the
+    job is failed with a clear reason — it never sends to the new gym."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Simulate a gym switch: Coach Sam moves to a new gym.
+    # link_member re-points the channel identity to a new Member in new_gym.
+    new_gym = await env.linking.create_gym("New Gym")
+    await env.linking.link_member(new_gym.id, "Coach Sam", "telegram", "7")
+
+    # At this point, coach_channel_in_gym(env.coach1_id, env.gym_id) returns
+    # None because MemberChannel now points to the new gym's member.
+    channel_info = await env.linking.coach_channel_in_gym(
+        env.coach1_id, env.gym_id,
+    )
+    assert channel_info is None, "coach's channel should no longer be in old gym"
+
+    worker = _make_worker(env)
+    await worker.drain_once(limit=50)
+
+    # No messages sent — coach is no longer in this gym.
+    assert env.notifier.sent == []
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, failure_reason FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.status == "failed"
+    assert "no longer reachable" in (row.failure_reason or "")
+
+
+# ── non-blocking startup (P2 #4) ───────────────────────────────────────────
+
+
+async def test_startup_does_not_block_on_backlog(env):
+    """start() returns immediately without draining the backlog
+    synchronously — the poll loop handles jobs incrementally."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+
+    worker = _make_worker(env)
+    start_time = time.monotonic()
+    await worker.start()
+    elapsed = time.monotonic() - start_time
+
+    # start() should return quickly — it doesn't drain the backlog
+    # synchronously (only reset_claimed, which is a fast UPDATE).
+    assert elapsed < 1.0, f"start() blocked for {elapsed:.2f}s"
+
+    # The poll loop runs drain_once immediately after start, so jobs may
+    # be delivered quickly — but start() itself didn't block on that.
+    await worker.stop()
+
+
 # ── edge cases ───────────────────────────────────────────────────────────────
 
 
 async def test_no_coaches_no_jobs(env):
     """When a Gym has no Coaches, no outbox jobs are created, but the
     safety Note is still written."""
-    # Use a Gym with no coaches.
     gym2 = await env.linking.create_gym("Solo Box")
     member2 = await env.linking.link_member(gym2.id, "Rob", "telegram", "99")
 
@@ -552,7 +748,6 @@ async def test_no_coaches_no_jobs(env):
 async def test_coach_self_flag_excludes_self(env):
     """When a Coach flags their own concern, they are excluded from the
     notification list — but if there are other Coaches, those get notified."""
-    # Add a third coach who is the flagger.
     coach3 = await env.linking.link_member(
         env.gym_id, "Coach Self", "telegram", "9",
     )

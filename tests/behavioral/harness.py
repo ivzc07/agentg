@@ -249,6 +249,7 @@ class ConversationHarness:
                 notifier=self.notifier,
                 dashboard_store=self.stores.dashboard,
                 dashboard_base_url=self.runtime.dashboard.base_url,
+                linking_store=self.stores.linking,
             )
             await worker.drain_once(limit=50)
         return str(reply)

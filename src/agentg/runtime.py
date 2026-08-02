@@ -160,6 +160,7 @@ class AgentRuntime:
             notifier=self.notifier,
             dashboard_store=self.stores.dashboard,
             dashboard_base_url=self.dashboard.base_url,
+            linking_store=self.stores.linking,
         )
         await worker.start()
         self._outbox_worker = worker
@@ -168,6 +169,8 @@ class AgentRuntime:
         """Stop background tasks.  Safe to call when none were started."""
         if self._outbox_worker is not None:
             # Final drain before stopping the poll loop.
+            # Atomically claimed jobs prevent duplication with the poll
+            # task (claim_pending transitions status pending→sending).
             try:
                 await self._outbox_worker.drain_once()
             except Exception:

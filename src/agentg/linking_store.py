@@ -213,6 +213,13 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text("CREATE INDEX ix_member_channels_gym_id ON member_channels (gym_id)")
         )
+    # Safety-outbox retry column (issue #216): transient failures are retried
+    # before a job is permanently failed.
+    outbox_columns = {c["name"] for c in inspect(conn).get_columns("safety_outbox_jobs")}
+    if "retry_count" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+        )
 
 
 @dataclass(frozen=True)
@@ -445,6 +452,32 @@ class LinkingStore:
             for member_id, name, channel, channel_user_id in rows
             if member_id != exclude_member_id
         ]
+
+    async def coach_channel_in_gym(
+        self, member_id: int, gym_id: int
+    ) -> tuple[str, str] | None:
+        """Return ``(channel, channel_user_id)`` for *member_id* if they are
+        still reachable in *gym_id*, or ``None`` when the channel was
+        repointed (gym switch leaving no channel row for the old member).
+
+        This is called at delivery time so a coach who switched gyms between
+        job creation and delivery never receives a cross-gym notification.
+        """
+        async with self._sessions() as db:
+            row = (
+                await db.execute(
+                    select(
+                        MemberChannel.channel,
+                        MemberChannel.channel_user_id,
+                    ).where(
+                        MemberChannel.member_id == member_id,
+                        MemberChannel.gym_id == gym_id,
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        return (row.channel, row.channel_user_id)
 
     async def regenerate_invite_code(self, gym_id: int) -> str:
         """The old code stops matching the moment this commits."""

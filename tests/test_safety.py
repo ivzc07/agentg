@@ -352,6 +352,7 @@ async def _drain_outbox(ctx, notifier, base_url=BASE_URL):
         notifier=notifier,
         dashboard_store=ctx.stores.dashboard,
         dashboard_base_url=base_url,
+        linking_store=ctx.stores.linking,
     )
     await worker.drain_once(limit=50)
 

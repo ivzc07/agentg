@@ -363,6 +363,7 @@ class SafetyOutboxJob(Base):
     member_name: Mapped[str] = mapped_column(String(100))
     member_is_coach: Mapped[bool] = mapped_column(default=False)
     status: Mapped[str] = mapped_column(String(20), default="pending")
+    retry_count: Mapped[int] = mapped_column(default=0)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     delivered_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     failure_reason: Mapped[str | None] = mapped_column(String(400), default=None)
