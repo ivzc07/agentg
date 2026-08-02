@@ -290,7 +290,9 @@ def _write_stub_dist(dist_dir: Path, *, assets: bool = True) -> None:
     that triggers the missing-assets guard."""
     dist_dir.mkdir(parents=True, exist_ok=True)
     (dist_dir / "index.html").write_text(
-        '<!DOCTYPE html><html><head><title>SPA</title></head>'
+        # lang="en" hardcoded like the real Vite template - the server must
+        # rewrite it to the resolved language (P2, PR #206 review round 2).
+        '<!DOCTYPE html><html lang="en"><head><title>SPA</title></head>'
         '<body><div id="root"></div></body></html>',
         encoding="utf-8",
     )
@@ -951,14 +953,15 @@ async def test_api_roster_slides_session_cookie(spa_env):
 
 
 async def test_api_seed_not_an_http_endpoint(spa_env):
-    """/api/seed was removed from the HTTP surface — no POST handler exists
-    (the GET catch-all leaves unmatched POSTs answering 405).  Use
+    """/api/seed was removed from the HTTP surface — an unknown /api/* path
+    answers the JSON 404 for any method.  Use
     ``python -m agentg.scripts.seed_demo`` instead."""
     cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
     response = await spa_env.client.post(
         "/api/seed", cookies={SESSION_COOKIE: cookie}
     )
-    assert response.status == 405
+    assert response.status == 404
+    assert response.content_type == "application/json"
 
 
 # --- SPA fallback for React Router deep links (issue #149) ---
@@ -976,6 +979,64 @@ async def test_unknown_api_paths_answer_json_404_not_the_shell(spa_env):
     assert response.status == 404
     assert response.content_type == "application/json"
     assert json.loads(await response.text()) == {"error": "not found"}
+
+    # Any method, not just GET: a typo'd POST endpoint must not get an
+    # HTML 405 (P3, PR #206 review round 2).
+    posted = await spa_env.client.post(
+        "/api/no-such-endpoint", cookies={SESSION_COOKIE: cookie}
+    )
+    assert posted.status == 404
+    assert posted.content_type == "application/json"
+
+
+async def test_the_shell_lang_attribute_follows_the_resolved_language(spa_env):
+    """The Vite template hardcodes <html lang="en">; the server rewrites it
+    to the resolved language before serving — screen readers and translators
+    read this attribute (P2, PR #206 review round 2)."""
+    cookie = sign_session(spa_env.member.id, spa_env.gym.id, SECRET, spa_env.clock())
+
+    es = await spa_env.client.get(
+        "/", cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "es"}
+    )
+    assert '<html lang="es">' in await es.text()
+
+    en = await spa_env.client.get(
+        "/", cookies={SESSION_COOKIE: cookie, "agentg_dashboard_lang": "en"}
+    )
+    assert '<html lang="en">' in await en.text()
+
+    # The public login shell follows the same rule (Spanish no-signal default).
+    login = await spa_env.client.get("/login/some-token")
+    assert '<html lang="es">' in await login.text()
+
+
+async def test_a_bundle_built_after_boot_stays_503_until_restart(tmp_path, monkeypatch):
+    """The /assets/ mount is decided at boot; a bundle appearing later must
+    not flip the shell to 200 — its asset requests would still miss the
+    unregistered mount and come back as HTML. The consistent honest answer
+    is 503 until a restart (P3, PR #206 review round 2)."""
+    from agentg import dashboard_web
+
+    engine, clock, linking, store, gym, member = await _setup_stores(tmp_path)
+    late_dist = tmp_path / "late-dist"
+    monkeypatch.setattr(dashboard_web, "_FRONTEND_DIST", late_dist)
+    try:
+        app = build_app(
+            store,
+            linking,
+            session_secret=SECRET,
+            bot_username="testbot",
+            secure_cookies=False,
+            clock=clock,
+        )
+        async with TestClient(TestServer(app)) as client:
+            cookie = sign_session(member.id, gym.id, SECRET, clock())
+            # The bundle lands after the server booted.
+            _write_stub_dist(late_dist)
+            response = await client.get("/", cookies={SESSION_COOKIE: cookie})
+            assert response.status == 503
+    finally:
+        await engine.dispose()
 
 
 async def test_spa_fallback_serves_shell_for_deep_links(spa_env):

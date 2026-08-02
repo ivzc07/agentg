@@ -34,7 +34,7 @@ class Notifier:
 
 
 @pytest.fixture
-async def env(tmp_path):
+async def env(tmp_path, stub_spa_dist):
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'dashboard-presets.db'}")
     clock = FakeClock()
     linking = LinkingStore(engine)
@@ -53,6 +53,7 @@ async def env(tmp_path):
         secure_cookies=False,
         clock=clock,
         notifier=notifier,
+        spa_dist=stub_spa_dist,
     )
     async with TestClient(TestServer(app)) as client:
         class Env:

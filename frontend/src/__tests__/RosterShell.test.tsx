@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { MemoryRouter, Routes, Route, useLocation } from "react-router-dom";
 import { RosterShell } from "../components/RosterShell";
 import * as rosterApi from "../api/roster";
 import * as memberApi from "../api/member";
@@ -225,6 +225,51 @@ describe("RosterShell", () => {
 
     await waitFor(() => {
       expect(screen.getByLabelText("Table")).toHaveAttribute("aria-current", "page");
+    });
+  });
+
+  it("writes the picked view into the URL and clears it for the table (P3, PR #206 review round 2)", async () => {
+    // A probe alongside the route observes the router's location, which
+    // MemoryRouter keeps off window.location.
+    function LocationProbe() {
+      const location = useLocation();
+      return <div data-testid="loc">{location.search}</div>;
+    }
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    vi.spyOn(rosterApi, "fetchRoster").mockResolvedValue(
+      makeResponse({
+        active: [makeMember(1, { name: "Alice", attendance: [] })],
+        counts: { active: 1, lapsed: 0 },
+      })
+    );
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/"]}>
+          <LocationProbe />
+          <Routes>
+            <Route path="/" element={<RosterShell name="Coach" gym="Iron Temple" />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    const user = userEvent.setup();
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Cards")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByLabelText("Cards"));
+    await waitFor(() => {
+      expect(screen.getByTestId("loc")).toHaveTextContent("?view=cards");
+    });
+
+    // Back to the table: the param clears rather than lingering as
+    // ?view=table — the server's canonical URLs never carried it either.
+    await user.click(screen.getByLabelText("Table"));
+    await waitFor(() => {
+      expect(screen.getByTestId("loc")).toHaveTextContent(/^$/);
     });
   });
 

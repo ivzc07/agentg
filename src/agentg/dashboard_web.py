@@ -61,6 +61,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1233,13 +1234,26 @@ def build_app(
     # --- SPA shell and static assets (issue #155, ADR 0004) ---
 
     resolved_dist = spa_dist or _FRONTEND_DIST
+    # Judged once, at boot: the /assets/ static mount can only be registered
+    # now, so a bundle that appears later must NOT flip the shell to 200 —
+    # its asset requests would still fall through to the catch-all as HTML.
+    # Consistent honest answer until a restart: 503 (P3, PR #206 review
+    # round 2).
+    bundle_ready = (resolved_dist / "assets").is_dir()
+
+    _HTML_LANG = re.compile(r"(<html\b[^>]*\blang=\")[^\"]*(\")")
 
     def _inject_i18n(html: str, t: dict, lang: str) -> str:
         """Inject ``window.__I18N__`` bootstrap into the SPA shell HTML.
 
         Includes STRINGS plus the ``_months``, ``_weekday_initials`` and
         ``_decimal_mark`` keys the frontend's ``i18n.ts`` reads through
-        ``getMonths`` / ``getWeekdayInitials`` / ``getDecimalMark``."""
+        ``getMonths`` / ``getWeekdayInitials`` / ``getDecimalMark``.
+
+        Also rewrites the ``<html lang>`` attribute: the Vite template
+        hardcodes ``en``, and the server is the one place that knows the
+        resolved language before React runs — screen readers and
+        translators read this attribute (P2, PR #206 review round 2)."""
         i18n_payload: dict = dict(t)
         # The active language rides along so the React chrome can mark the
         # EN/ES toggle and build /lang/{lang} links (#154 — the toggle
@@ -1258,6 +1272,8 @@ def build_app(
             .replace("\u2029", "\\u2029")
         )
         i18n_script = f"<script>window.__I18N__ = {safe_json};</script>"
+        # The resolved language wins over the template's hardcoded lang.
+        html = _HTML_LANG.sub(rf"\g<1>{lang}\g<2>", html, count=1)
         # Insert after </head> (if present) or at the start of <body>.
         if "</head>" in html:
             html = html.replace("</head>", f"{i18n_script}\n</head>")
@@ -1272,12 +1288,12 @@ def build_app(
     def _read_spa_index() -> str | None:
         """Read the Vite-built index.html; ``None`` if not built.
 
-        A dist/ with index.html but no assets/ is treated as not built too:
-        serving a shell whose bundle files cannot load would render a blank
-        page, where the 503 says what is actually wrong (spec-dashboard
-        §Stack; P3, PR #206 review)."""
+        A dist/ with index.html but no assets/ at boot is treated as not
+        built too: serving a shell whose bundle files cannot load would
+        render a blank page, where the 503 says what is actually wrong
+        (spec-dashboard §Stack; P3, PR #206 review)."""
         index_path = resolved_dist / "index.html"
-        if not index_path.exists() or not (resolved_dist / "assets").is_dir():
+        if not bundle_ready or not index_path.exists():
             return None
         return index_path.read_text(encoding="utf-8")
 
@@ -1370,7 +1386,7 @@ def build_app(
     # The Vite bundle's asset files.  Guarded so a missing/partial bundle
     # degrades to a 503 shell instead of killing the bot at boot
     # (add_static raises on a missing directory).
-    if (resolved_dist / "assets").is_dir():
+    if bundle_ready:
         app.router.add_static("/assets/", resolved_dist / "assets")
     else:
         logger.warning(
@@ -1384,7 +1400,9 @@ def build_app(
     async def api_not_found(request: web.Request) -> web.Response:
         return web.json_response({"error": "not found"}, status=404)
 
-    app.router.add_get("/api/{tail:.*}", api_not_found)
+    # ``*``: a typo'd POST/PUT/DELETE must get the JSON 404 too, not
+    # aiohttp's HTML 405 (P3, PR #206 review round 2).
+    app.router.add_route("*", "/api/{tail:.*}", api_not_found)
     # SPA fallback, registered last so every real route above wins: any
     # unmatched GET is a React Router deep link on a cold load and gets the
     # authenticated shell (issue #149).

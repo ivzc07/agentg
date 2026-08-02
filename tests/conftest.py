@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 
 async def unused_phraser(instruction: str, member_text: str) -> str:
     """A Linking phraser for tests that don't exercise linking replies."""
@@ -14,6 +16,24 @@ async def identity_phraser(instruction: str, member_text: str) -> str:
     (gym/name) exercise the real instruction text the production phraser
     would receive."""
     return instruction
+
+
+@pytest.fixture
+def stub_spa_dist(tmp_path):
+    """A minimal built-SPA shape for Python tests that exercise shell URLs.
+
+    Required ``pytest`` intentionally runs before the frontend build in CI;
+    web tests must therefore supply their own bundle instead of accidentally
+    depending on a developer's leftover ``frontend/dist`` directory.
+    """
+    dist = tmp_path / "spa-dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text(
+        '<!DOCTYPE html><html lang="en"><head></head>'
+        '<body><div id="root"></div></body></html>',
+        encoding="utf-8",
+    )
+    return dist
 
 
 class FakeClock:
@@ -31,7 +51,6 @@ class FakeClock:
 
 # --- The dashboard roster test world (test_roster.py, test_roster_severity.py) ---
 
-import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -131,7 +150,7 @@ class RosterEnv:
 
 
 @pytest.fixture
-async def roster_env(tmp_path):
+async def roster_env(tmp_path, stub_spa_dist):
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'domain.db'}")
     clock = FakeClock()
     linking = LinkingStore(engine)
@@ -148,6 +167,7 @@ async def roster_env(tmp_path):
         bot_username="testbot",
         secure_cookies=False,
         clock=clock,
+        spa_dist=stub_spa_dist,
     )
     async with TestClient(TestServer(app)) as client:
         yield RosterEnv(clock, engine, linking, store, client, gym, coach)

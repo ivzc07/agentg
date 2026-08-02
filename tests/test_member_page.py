@@ -29,7 +29,7 @@ BOUNCE_MARKER = "/dashboard"  # the bounce page tells you to send /dashboard
 
 
 @pytest.fixture
-async def env(tmp_path):
+async def env(tmp_path, stub_spa_dist):
     engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'domain.db'}")
     clock = FakeClock()
     linking = LinkingStore(engine)
@@ -51,6 +51,7 @@ async def env(tmp_path):
         bot_username="testbot",
         secure_cookies=False,
         clock=clock,
+        spa_dist=stub_spa_dist,
     )
     async with TestClient(TestServer(app)) as client:
         yield Env(clock, engine, linking, store, client, gym, coach)
@@ -272,11 +273,11 @@ async def test_roster_rows_carry_the_member_id_the_links_are_built_from(env):
     assert [r["member_id"] for r in data["active"]] == [member.id]
 
 
-async def test_the_gap_wording_matches_the_roster(env):
+async def test_member_and_roster_apis_agree_that_a_member_trained_today(env):
     member = await env.add_member("Hoy")
     await env.train(member, 0, "squat 60 8")
 
-    _, member_text = await env.page(member.id)
+    _, member_data = await env.api(member.id)
     cookie = sign_session(env.coach.id, env.gym.id, SECRET, env.clock())
     roster = json.loads(
         await (
@@ -284,9 +285,10 @@ async def test_the_gap_wording_matches_the_roster(env):
         ).text()
     )
 
-    assert "entrenó hoy" in member_text
-    # The roster row carries the same facts the React row words from:
-    # trained today = gap 0 with sessions (never "0 días sin venir").
+    # Both contracts carry the same facts React words as "entrenó hoy":
+    # gap 0 with sessions (never "0 días sin venir"). Copy itself belongs
+    # to RTL; Python must not grep a developer's compiled JavaScript bundle.
+    assert member_data["gap_days"] == 0 and member_data["has_sessions"] is True
     row = next(r for r in roster["active"] if r["member_id"] == member.id)
     assert row["gap_days"] == 0 and row["has_sessions"] is True
 
