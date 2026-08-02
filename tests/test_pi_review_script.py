@@ -11,6 +11,7 @@ once in `docs/agents/pr-merges.md` ("Windows environment traps") and in the
 has one place to change rather than three.
 """
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -196,7 +197,7 @@ HERDR_CONTRACT = [
     (("agent", "get"), ()),
     (("agent", "rename"), ()),
     (("agent", "wait"), ("--status", "--timeout")),
-    (("pane", "split"), ("--direction", "--cwd", "--no-focus")),
+    (("pane", "split"), ("--current", "--direction", "--cwd", "--no-focus")),
     (("pane", "run"), ()),
 ]
 
@@ -220,18 +221,35 @@ def _script_invocations():
 
 
 def test_every_herdr_call_is_declared_in_the_contract():
-    """No `"$H" ...` call may use a command outside HERDR_CONTRACT.
+    """No `"$H" ...` call may use a command *or flag* outside HERDR_CONTRACT.
 
-    Forces anyone reaching for a new herdr subcommand to add it here, where
-    the next test will check it actually exists.
+    Flags matter as much as command words: `--until` was a bogus flag on a
+    real command, so checking only the command words would let that exact bug
+    class back in.  Forces anyone reaching for a new subcommand or flag to add
+    it here, where the live check below verifies it actually exists.
     """
-    declared = {words for words, _ in HERDR_CONTRACT}
-    used = {words for words, _ in _script_invocations()}
-    undeclared = used - declared
+    calls = _script_invocations()
+    assert calls, (
+        "no herdr invocations found in the script - the parser has gone blind "
+        "(did the `\"$H\" ...` idiom change?) and this test is checking nothing"
+    )
+
+    declared = {words: set(flags) for words, flags in HERDR_CONTRACT}
+    used: dict[tuple, set] = {}
+    for words, flags in calls:
+        used.setdefault(words, set()).update(flags)
+
+    undeclared = set(used) - set(declared)
     assert not undeclared, (
         f"pi-review calls herdr commands that are not in HERDR_CONTRACT: "
         f"{sorted(undeclared)}"
     )
+    for words, flags in used.items():
+        extra = flags - declared[words]
+        assert not extra, (
+            f"`herdr {' '.join(words)}` is called with flags missing from "
+            f"HERDR_CONTRACT: {sorted(extra)}"
+        )
 
 
 def test_script_does_not_use_retired_herdr_commands():
@@ -258,9 +276,26 @@ def _herdr_binary():
     on the *Windows* PATH, so ``shutil.which`` alone reports it missing and the
     live check below would silently skip on the very machines that run it.
     """
+    # Mirror resolve_herdr's order, or this can validate a different herdr
+    # than the script runs: the script deliberately prefers the installed copy
+    # over PATH ("PATH may hold a stale copy").
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        installed = Path(local_app_data) / "Programs" / "Herdr" / "bin" / "herdr"
+        # is_file() itself can raise here: on this very path Windows reports
+        # "[WinError 448] the path cannot be traversed because it contains an
+        # untrusted mount point" -- the same reparse point that defeated the
+        # script's `-x` test.  Treat anything unreadable as "not the binary".
+        try:
+            if installed.is_file():
+                return str(installed)
+        except OSError:
+            pass
     found = shutil.which("herdr")
     if found:
         return found
+    # Windows Python does not see Git Bash's usr/bin on PATH, so without this
+    # the live check silently skips on the machines that actually run it.
     candidate = Path("C:/Program Files/Git/usr/bin/herdr")
     return str(candidate) if candidate.is_file() else None
 
@@ -294,13 +329,25 @@ def test_declared_herdr_commands_exist(words, flags):
     group, sub = words
     help_text = _herdr_help(group)
     assert help_text is not None, f"could not read `herdr {group} --help`"
-    assert f"{group} {sub}" in help_text, (
+
+    # Match the subcommand's own usage line, not the group-wide text: herdr has
+    # no per-subcommand help (`herdr agent wait --help` -> "missing required
+    # --status"; `herdr pane split --help` -> "unknown option: --help"), so a
+    # plain substring check would pass a flag that only exists on a *sibling*
+    # subcommand.
+    usage = [
+        line for line in help_text.splitlines()
+        if line.strip().startswith(f"herdr {group} {sub}")
+    ]
+    assert usage, (
         f"`herdr {group} {sub}` is not in `herdr {group} --help` - "
         f"the script calls a command this herdr does not have"
     )
+    usage_line = usage[0]
     for flag in flags:
-        assert flag in help_text, (
-            f"`herdr {group} {sub}` has no {flag} in this herdr build"
+        assert flag in usage_line, (
+            f"`herdr {group} {sub}` has no {flag} in this herdr build; "
+            f"its usage is: {usage_line.strip()}"
         )
 
 

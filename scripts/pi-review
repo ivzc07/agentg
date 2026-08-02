@@ -118,12 +118,30 @@ if [ "${HERDR_ENV:-}" = 1 ]; then
     BEFORE=$(comment_count)
     [ "$BEFORE" != ERR ] || { echo "pi-review: cannot read PR ${PR} comments" >&2; exit 1; }
     "$H" pane run "$PANE" "$PROMPT" >/dev/null
-    # Settle-based completion: let the agent pick the work up first, otherwise
-    # the idle wait below returns immediately on the still-idle agent and we
-    # count comments before the review has written any. Picking it up is fast,
-    # so a short timeout is enough, and a miss is not fatal - the comment-count
-    # delta below is the real gate.
-    "$H" agent wait pi-review --status working --timeout 60000 >/dev/null 2>&1 || true
+    # Settle-based completion. An idle wait against a still-idle agent returns
+    # in ~0.09s, so `working` must be observed before `idle` can be read as
+    # "the review finished" - otherwise comments get counted before any were
+    # written. Pickup is normally fast, but a slow one (rate limit, delivery
+    # lag) must not be mistaken for a finished review, so keep looking until it
+    # picks up or the comments land, rather than assuming a single short wait
+    # is enough. A budget miss is reported as what it is: never picked up.
+    picked_up=0
+    i=0
+    while [ $i -lt 20 ]; do
+        if "$H" agent wait pi-review --status working --timeout 30000 >/dev/null 2>&1; then
+            picked_up=1
+            break
+        fi
+        # It can also finish entirely inside one poll window; comments are the
+        # real signal, so treat a delta as pickup too.
+        seen=$(comment_count)
+        if [ "$seen" != ERR ] && [ "$seen" -gt "$BEFORE" ]; then
+            picked_up=1
+            break
+        fi
+        i=$((i + 1))
+    done
+    [ "$picked_up" = 1 ] || { echo "pi-review: pi never picked up the review for PR ${PR}" >&2; exit 1; }
     "$H" agent wait pi-review --status idle --timeout 3000000 >/dev/null
     # The wait also releases on blocked; that is an operator situation, not a
     # finished review.
