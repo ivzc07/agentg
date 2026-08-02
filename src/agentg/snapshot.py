@@ -7,6 +7,7 @@ anything bulkier stays behind a tool.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from agentg.context import MemberContext
@@ -27,12 +28,19 @@ def _headline(exercises: list[dict[str, Any]], unit: str) -> str:
 
 
 async def member_snapshot(context: MemberContext) -> str:
-    days, last = await context.stores.training.latest_session_info(context.member_id)
-    routine = await context.turn_cache.get_or_load_routine(
-        context.stores.routines, context.member_id
+    # Three independent reads — the two pure reads run concurrently while
+    # latest_session_info runs serial because it may write (auto-close a
+    # stale open session), which would lock SQLite if gathered (#169).
+    (days, last) = await context.stores.training.latest_session_info(
+        context.member_id
+    )
+    routine, notes = await asyncio.gather(
+        context.turn_cache.get_or_load_routine(
+            context.stores.routines, context.member_id
+        ),
+        context.stores.notes.active(context.member_id),
     )
     todays_workout = context.stores.routines.pick_todays_workout(routine, context.timezone)
-    notes = await context.stores.notes.active(context.member_id)
 
     role = "Coach (coach tools available)" if context.is_coach else "Member"
     today = context.stores.training.today(context.timezone).isoformat()

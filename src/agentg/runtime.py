@@ -113,8 +113,6 @@ class AgentRuntime:
                 # touches the check-in rhythm, compaction, or history.
                 if self.dashboard is not None and is_dashboard_command(msg.text):
                     return await self.dashboard.handle(linked, is_group=msg.is_group)
-                # Any reply resets the check-in rhythm and revives a lapsed Member.
-                await self.stores.checkins.reset_rhythm(linked.member.id)
                 session = self.session_for_member(linked.member.id)
                 try:
                     await maybe_compact(
@@ -130,6 +128,22 @@ class AgentRuntime:
                 # MaxTurnsExceeded) -- the safety note was already committed
                 # and silence is not an option (issue #172).
                 result = None
+                # Any reply resets the check-in rhythm and revives a lapsed
+                # Member.  Fired concurrently with the model call rather than
+                # in front of it, so the DB write overlaps the LLM round-trip
+                # and never adds to the Member's wait (issue #169).  It is
+                # awaited on every exit path below, including failure.
+                member_id = linked.member.id
+                reset_task = asyncio.create_task(
+                    self.stores.checkins.reset_rhythm(member_id)
+                )
+
+                async def _await_reset() -> None:
+                    try:
+                        await reset_task
+                    except Exception:
+                        logger.exception("reset_rhythm failed for %d", member_id)
+
                 try:
                     try:
                         result = await Runner.run(
@@ -149,10 +163,9 @@ class AgentRuntime:
                             await session.clear_session()
                     text = str(result.final_output)
                     sender = self.demo_sender
-                    has_demos = sender is not None and context.demo_requests
-                    has_pings = bool(context.coach_pings)
-                    if not has_demos and not has_pings:
-                        return Reply(text)
+                    # after_send is always attached now: even with no demos and
+                    # no pings it is what settles the deferred rhythm reset
+                    # after the reply is delivered (issue #169).
                     # Already-resolved DemoRefs -- no second Catalog lookup (#179).
                     demo_refs = list(context.demo_requests) if sender is not None else []
                     coach_pings = list(context.coach_pings)
@@ -177,6 +190,9 @@ class AgentRuntime:
                             except Exception:
                                 logger.exception("deferred coach ping failed")
 
+                        # The rhythm reset is settled here too, isolated from
+                        # the demo/ping fan-out so one failure cannot block it.
+                        await _await_reset()
                         tasks = [_send_demo(ref) for ref in demo_refs] + [
                             _run_ping(p) for p in coach_pings
                         ]
@@ -185,6 +201,9 @@ class AgentRuntime:
 
                     return Reply(text, after_send=after_send)
                 except BaseException:
+                    # On model failure the reset must still land, or a lapsed
+                    # Member is never revived (issue #169).
+                    await _await_reset()
                     # Runner failed after the safety tool already ran -- drain
                     # the accumulated pings so no Coach notification is lost.
                     if context.coach_pings:

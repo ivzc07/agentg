@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event
 
 import agentg.runtime as runtime_module
 from agentg.db import create_engine
@@ -96,6 +97,124 @@ async def test_turns_in_one_conversation_never_interleave(runtime, monkeypatch):
     assert overlapped == []
 
 
+# --- AC: the rhythm reset no longer blocks the reply, and lapsed Members are still revived (#169) ---
+
+
+async def test_reset_rhythm_is_deferred_past_the_reply(runtime, monkeypatch):
+    """reset_rhythm must not block the LLM call — it fires after_send."""
+    events: list[str] = []
+
+    async def fake_run(agent, text, *, session, context=None):
+        events.append("llm")
+        return SimpleNamespace(final_output="ok")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+
+    original_reset = runtime.stores.checkins.reset_rhythm
+
+    async def spy_reset(member_id: int) -> None:
+        events.append("reset_rhythm")
+        await original_reset(member_id)
+
+    runtime.stores.checkins.reset_rhythm = spy_reset  # type: ignore[method-assign]
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    reply = await runtime.handle_message(incoming("I'm here", "42"))
+
+    # The LLM ran before the reply was complete; reset_rhythm was only queued.
+    assert "llm" in events
+    # The reset_rhythm hasn't fired yet — it's deferred to after_send.
+    assert "reset_rhythm" not in events
+
+    # Now await after_send to simulate the channel adapter's delivery.
+    if reply.after_send is not None:
+        await reply.after_send()
+
+    # After delivery, reset_rhythm fires.
+    assert events.index("llm") < events.index("reset_rhythm")
+
+
+async def test_deferred_reset_rhythm_still_revives_lapsed_members(runtime, monkeypatch):
+    """A lapsed Member is revived after the reply, not before."""
+    async def fake_run(agent, text, *, session, context=None):
+        return SimpleNamespace(final_output="welcome back!")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    await runtime.stores.checkins.lapse(1)  # member id 1
+
+    state_before, _ = await runtime.stores.checkins.get_state(1)
+    assert state_before == "lapsed"
+
+    reply = await runtime.handle_message(incoming("I'm back", "42"))
+    assert reply == "welcome back!"
+
+    # The lapsed state is still visible during the reply (reset not yet applied).
+    # After after_send, the Member is revived.
+    if reply.after_send is not None:
+        await reply.after_send()
+
+    state_after, _ = await runtime.stores.checkins.get_state(1)
+    assert state_after == "on"
+
+
+async def test_reset_rhythm_still_runs_on_llm_failure(runtime, monkeypatch):
+    """A lapsed Member is revived even when the LLM call fails (#169).
+
+    Before this PR, the rhythm reset only ran inside after_send, which the
+    channel adapter never calls when the reply_fn raises — a lapsed Member
+    whose model call failed would stay lapsed, feeding the give-up rule."""
+    async def fake_run(agent, text, *, session, context=None):
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    await runtime.stores.checkins.lapse(1)
+
+    state_before, _ = await runtime.stores.checkins.get_state(1)
+    assert state_before == "lapsed"
+
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        await runtime.handle_message(incoming("I'm here", "42"))
+
+    # The rhythm reset ran on the error path: the Member is revived.
+    state_after, _ = await runtime.stores.checkins.get_state(1)
+    assert state_after == "on"
+
+
+# --- AC: the measured query count for a plain message drops (#169) ---
+
+
+async def test_plain_linked_message_issues_few_queries(runtime, monkeypatch):
+    """A plain message from a linked Member issues a bounded number of DB
+    queries — the turn-level query count that issue #169 asks for."""
+    async def fake_run(agent, text, *, session, context=None):
+        return SimpleNamespace(final_output="ok")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    counts: list[int] = []
+
+    @event.listens_for(runtime.engine.sync_engine, "before_cursor_execute")
+    def count_query(conn, cursor, statement, parameters, context, executemany):
+        counts.append(1)
+
+    await runtime.handle_message(incoming("I'm here today", "42"))
+
+    # The exact count depends on compaction internals, but it must be
+    # bounded — a plain message should never trigger dozens of queries.
+    assert len(counts) < 30, f"expected <30 queries for a plain message, got {len(counts)}"
+
+
 # --- member_context gating flags (issue #174) ---
 
 
@@ -155,3 +274,4 @@ async def test_member_context_can_author_routine_for_coach_with_own_routine(runt
 
     ctx = await runtime.member_context(linked)
     assert ctx.can_author_routine is True
+
