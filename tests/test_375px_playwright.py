@@ -1,24 +1,29 @@
 """Real-browser 375px rendering checks for every dashboard screen (issue #157).
 
-`test_redesign_acceptance_sweep.py::Test375pxBar` asserts the *stylesheet* carries
-the right responsive rules. That is a structural proxy: it cannot see a screen
-that still overflows because some element outside those rules is too wide, and it
-cannot see a primary action pushed off-canvas. This module closes that gap by
-rendering each screen in a real browser at 375x812 (iPhone SE) and asserting on
-the layout the user actually gets.
+Since the React cutover (#154) every screen is the SPA, so a static analysis
+of a stylesheet cannot see layout at all - only a real browser can. This
+module renders each screen at 375x812 (iPhone SE) and asserts on the layout
+the user actually gets: no horizontal overflow, and no primary action pushed
+off-canvas.
+
+The server serves the built bundle, so these tests need `npm run build` in
+frontend/ first; they skip with a clear message when the bundle is absent.
 
 ## Why this skips rather than fails when Playwright is absent
 
-Playwright and its browser binaries are a heavy, optional dev dependency the repo
-does not install today, so by default every test here skips - the issue asked for
-exactly that.
+Playwright and its browser binaries are a heavy, optional dev dependency the
+default `pytest` run does not install, so locally these tests skip unless you
+opt in. In CI they run for real: the `e2e-375px` job in tests.yml installs
+Chromium and builds the bundle - since #154 made React the only dashboard,
+this is the layout gate (it was pointless to pay 115 MB per run to guard a
+dashboard scheduled for deletion; that reason expired with the cutover).
 
-It is deliberately an *importorskip* rather than the `@pytest.mark.skip` the issue
-suggested. An unconditional skip can never fail, so it would rot silently: the
-selectors below would drift out of sync with the markup and nobody would learn
-until someone finally installed Playwright and found the module broken. With
-importorskip the moment the dependency exists - locally or in a future CI job -
-these tests run and bite.
+It is deliberately an *importorskip* rather than the `@pytest.mark.skip` the
+issue suggested. An unconditional skip can never fail, so it would rot
+silently: the selectors below would drift out of sync with the markup and
+nobody would learn until someone finally installed Playwright and found the
+module broken. With importorskip the moment the dependency exists these tests
+run and bite.
 
 To run them:
 
@@ -31,11 +36,11 @@ extra carries the `>=1.40` pin, and bypassing it is how the two drift apart.
 ## Two deviations from the issue text, recorded rather than glossed
 
 Step 2 says the test "signs in". It injects a pre-signed session cookie instead
-of redeeming a login token. Login tokens are single-use, and the interstitial
-submits itself, so redeeming one to reach the roster would both consume the
-token the login screen needs and make every other screen depend on that
-redirect landing. The cookie is the same credential the redemption would
-issue, so the screens under test are identical - only the route in differs.
+of redeeming a login token. Login tokens are single-use, so redeeming one to
+reach the roster would consume the token the login screen needs and make every
+other screen depend on that redirect landing. The cookie is the same credential
+the redemption would issue, so the screens under test are identical - only the
+route in differs.
 
 Step 3 says primary actions must be "within the viewport bounds". The check is
 horizontal-only. A strict vertical check would fail every page taller than
@@ -83,7 +88,11 @@ SHOT_DIR = Path(__file__).resolve().parents[1] / "docs" / "design" / "375px"
 
 # Elements that must stay fully inside the viewport: a primary action the coach
 # cannot reach is a broken screen even if nothing technically overflows.
-REACHABLE = "button.btn-primary, button[type=submit], .seg a"
+REACHABLE = "button[type=submit], .seg button, nav.quick a"
+
+# The Vite bundle the server serves; without it every screen answers 503.
+FRONTEND_DIST = Path(__file__).resolve().parents[1] / "frontend" / "dist"
+MISSING_BUNDLE = "SPA bundle not built: run `npm run build` in frontend/"
 
 MISSING_BROWSER = (
     "playwright browsers not installed: run `uv run playwright install chromium`"
@@ -95,22 +104,23 @@ class Screen:
     """One dashboard screen to render.
 
     ``marker`` is a selector this screen renders and its siblings do not.
-    Asserting it is present is what stops a screen from silently passing while
-    showing something else - the login interstitial auto-submits itself, so
-    without this the suite happily screenshotted the roster and reported the
-    login screen as clean. Markers must discriminate against the screens most
-    likely to be served by mistake, which for the roster views means each other:
-    a selector from the shared chrome would pass on all three.
+    Asserting it is present (after React has painted - the wait below is on
+    this marker, not on document load) is what stops a screen from silently
+    passing while showing something else: the first version of this file
+    happily screenshotted the roster and reported the login screen as clean.
+    Markers must discriminate against the screens most likely to be served by
+    mistake, which for the roster views means each other: a selector from the
+    shared chrome would pass on all three.
 
-    ``javascript`` is off only for that interstitial, whose inline script posts
-    the form immediately; with JS disabled the static page it renders for a
-    no-JS client stays put and can actually be measured.
+    ``click`` optionally names an element to click once the screen is up -
+    the Split view opens a member client-side, with no URL of its own since
+    #154, so that variant is reached by clicking the rail.
     """
 
     name: str
     path: str
     marker: str
-    javascript: bool = True
+    click: str | None = None
 
 
 @dataclass
@@ -219,32 +229,47 @@ async def live_dashboard(tmp_path_factory):
 
 
 def _screens(env) -> list[Screen]:
-    """Every screen the issue lists, with the selector that proves we're on it."""
+    """Every screen the issue lists, with the selector that proves we're on it.
+
+    All selectors are the React DOM's (#154). Discrimination notes:
+    - table vs split: both render ``ul#roster``, but only the table's rows
+      are links (the split rail uses buttons);
+    - cards is the only view with the attendance ``.legend``;
+    - the standalone member page is the only screen whose header links back
+      to the roster (its back link carries the view it was opened from);
+    - the two editors share a component, told apart by their back links.
+    """
     member = env["members"][0].id
     return [
-        # `ul#roster`, not `#search`: the search box lives in the chrome shared
-        # by all three roster views, so it would not have caught table silently
-        # rendering as cards.
-        Screen("table", "/?view=table", "ul#roster"),
-        Screen("cards", "/?view=cards", ".grid"),
-        # Both Split variants: the roster-level one renders _split_placeholder
-        # in the right pane, a different layout from the member-open variant.
-        Screen("split-empty", "/?view=split", ".split"),
-        Screen("split", f"/members/{member}?view=split", ".split"),
-        Screen("member", f"/members/{member}", "header.mhead"),
-        Screen("routine-editor", f"/members/{member}/routine", ".editor-wrap"),
+        Screen("table", "/?view=table", "ul#roster > li > a"),
+        Screen("cards", "/?view=cards", ".legend"),
+        # Both Split variants: the empty pane, and a member opened from the
+        # rail — a client-side selection with no URL of its own since #154.
+        Screen("split-empty", "/?view=split", ".split .pane-empty"),
+        Screen(
+            "split",
+            "/?view=split",
+            ".split .pane section.card",
+            click="ul#roster > li > button",
+        ),
+        Screen("member", f"/members/{member}", 'header a[href^="/?view="]'),
+        Screen(
+            "routine-editor",
+            f"/members/{member}/routine",
+            f'header a[href="/members/{member}"]',
+        ),
         # The Preset master editor is a separate route and was the last
         # coach-facing screen with no 375px verification at all.
         Screen(
             "preset-routine-editor",
             f"/presets/{env['preset']}/routine",
-            ".editor-wrap",
+            'header a[href="/presets"]',
         ),
-        Screen("presets", "/presets", ".actions"),
-        Screen("settings", "/settings", ".setcard"),
-        # JS off: the interstitial's inline script submits the form on load, so
-        # with JS on this lands on the roster and measures the wrong page.
-        Screen("login", f"/login/{env['token']}", "form#go", javascript=False),
+        Screen("presets", "/presets", "#preset-name"),
+        Screen("settings", "/settings", "#invite"),
+        # The React interstitial waits for a click (no auto-submit), so the
+        # login screen measures itself even with JS on.
+        Screen("login", f"/login/{env['token']}", 'form[action^="/login/"]'),
     ]
 
 
@@ -258,6 +283,8 @@ async def rendered(live_dashboard) -> list[Rendered]:
     numbers. The tests only read from the result, so sharing it is safe.
     """
     env = live_dashboard
+    if not (FRONTEND_DIST / "index.html").exists():
+        pytest.skip(MISSING_BUNDLE)
     SHOT_DIR.mkdir(parents=True, exist_ok=True)
     results: list[Rendered] = []
 
@@ -284,9 +311,7 @@ async def rendered(live_dashboard) -> list[Rendered]:
             pytest.skip(f"{MISSING_BROWSER} ({exc.__class__.__name__})")
         try:
             for screen in _screens(env):
-                context = await browser.new_context(
-                    viewport=VIEWPORT, java_script_enabled=screen.javascript
-                )
+                context = await browser.new_context(viewport=VIEWPORT)
                 await context.add_cookies(
                     [
                         {
@@ -297,10 +322,10 @@ async def rendered(live_dashboard) -> list[Rendered]:
                     ]
                 )
                 page = await context.new_page()
-                # `load`, not `networkidle`: Playwright documents networkidle as
-                # discouraged, and it is what hid the login redirect in the first
-                # version of this file. These pages are static server-rendered
-                # HTML, so `load` is both sufficient and less prone to hanging.
+                # `load`, not `networkidle`: Playwright documents networkidle
+                # as discouraged, and it is what hid the login redirect in the
+                # first version of this file. React paints after load, so the
+                # on-screen proof below waits on the marker instead.
                 response = await page.goto(
                     f"{env['base']}{screen.path}", wait_until="load"
                 )
@@ -309,14 +334,19 @@ async def rendered(live_dashboard) -> list[Rendered]:
                     results.append(Rendered(screen.name, error=f"HTTP {status}"))
                     await context.close()
                     continue
-                # Proves we are on the intended screen before measuring it.
-                if await page.query_selector(screen.marker) is None:
+                try:
+                    if screen.click is not None:
+                        await page.click(screen.click, timeout=10_000)
+                    # Proves we are on the intended screen - and that React
+                    # has painted it - before measuring.
+                    await page.wait_for_selector(screen.marker, timeout=10_000)
+                except PlaywrightError:
                     results.append(
                         Rendered(
                             screen.name,
                             error=f"marker {screen.marker!r} absent - the browser is not on "
-                            f"this screen (redirected?), so its 375px result "
-                            f"would be meaningless",
+                            f"this screen (redirected? bundle stale?), so its "
+                            f"375px result would be meaningless",
                         )
                     )
                     await context.close()

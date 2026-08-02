@@ -198,6 +198,36 @@ describe("RosterShell", () => {
     });
   });
 
+  it("opens the view named in the URL, like the server ?view= links did (#154)", async () => {
+    renderShell(
+      makeResponse({
+        active: [makeMember(1, { name: "Alice", attendance: [] })],
+        counts: { active: 1, lapsed: 0 },
+      }),
+      ["/?view=cards"]
+    );
+
+    await waitFor(() => {
+      // Cards view shows the legend — without any click.
+      expect(screen.getByText("session")).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("Cards")).toHaveAttribute("aria-current", "page");
+  });
+
+  it("falls back to the table on an unknown ?view=, like the server did", async () => {
+    renderShell(
+      makeResponse({
+        active: [makeMember(1, { name: "Alice", attendance: [] })],
+        counts: { active: 1, lapsed: 0 },
+      }),
+      ["/?view=mosaic"]
+    );
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Table")).toHaveAttribute("aria-current", "page");
+    });
+  });
+
   it("switches to cards view", async () => {
     const user = userEvent.setup();
     renderShell(makeResponse({
