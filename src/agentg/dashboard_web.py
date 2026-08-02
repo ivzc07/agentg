@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -75,9 +76,11 @@ from multidict import MultiDictProxy
 
 from agentg.checkin_sweep import Notifier
 from agentg.dashboard_i18n import (
+    DECIMAL_MARK,
     LANG_COOKIE,
     LANG_COOKIE_TTL_SECONDS,
     LANGS,
+    MONTHS,
     NOTE_KIND_LABELS,
     STRINGS,
     WEEKDAY_INITIALS,
@@ -95,8 +98,8 @@ from agentg.dashboard_store import (
     DayCell,
     MemberPage,
     NoteView,
-    RoutineDayView,
     RosterRow,
+    RoutineDayView,
 )
 from agentg.linking_store import GYM_NAME_MAX_LENGTH, LinkingStore
 from agentg.models import Gym, Member, RoutinePreset
@@ -1105,6 +1108,53 @@ placeholder="squat, 4, 8-10">{escape(exercises_text)}</textarea></label>
 </fieldset>"""
 
 
+def _parse_workouts_from_json(raw_workouts: list, lang: str) -> list[WorkoutSpec]:
+    """The JSON editor body into WorkoutSpecs — the same rules as the form
+    parser, with the same Coach-readable error messages."""
+    t = STRINGS[lang]
+    specs = []
+    seen_weekdays: set[int] = set()
+    for item in raw_workouts:
+        if not isinstance(item, dict):
+            raise ValueError(t["bad_weekday_error"])
+        weekday = item.get("weekday")
+        if weekday is None or not isinstance(weekday, int) or not 0 <= weekday <= 6:
+            raise ValueError(t["bad_weekday_error"])
+        if weekday in seen_weekdays:
+            raise ValueError(t["duplicate_weekday_error"])
+        seen_weekdays.add(weekday)
+        name = item.get("name", "")
+        if not isinstance(name, str):
+            name = ""
+        raw_exercises = item.get("exercises")
+        if not isinstance(raw_exercises, list) or not raw_exercises:
+            raise ValueError(t["empty_workout_error"])
+        exercises = []
+        for ex in raw_exercises:
+            if not isinstance(ex, dict):
+                raise ValueError(t["bad_sets_error"])
+            exercise_name = ex.get("exercise", "")
+            if not isinstance(exercise_name, str) or not exercise_name.strip():
+                raise ValueError(t["empty_workout_error"])
+            sets = ex.get("sets")
+            if sets is not None:
+                if not isinstance(sets, int):
+                    raise ValueError(t["bad_sets_error"])
+                if not SETS_MIN <= sets <= SETS_MAX:
+                    raise ValueError(t["sets_range_error"])
+            reps = ex.get("reps")
+            if reps is not None:
+                if not isinstance(reps, str):
+                    reps = str(reps)
+                if len(reps) > REPS_MAX_LENGTH:
+                    raise ValueError(t["reps_too_long"])
+            exercises.append(ExerciseSpec(exercise_name, sets, reps))
+        if len(name) > WORKOUT_NAME_MAX_LENGTH:
+            raise ValueError(t["workout_name_too_long"])
+        specs.append(WorkoutSpec(weekday, name or WEEKDAYS[lang][weekday], exercises))
+    return specs
+
+
 def _parse_workouts(form: MultiDictProxy, lang: str) -> list[WorkoutSpec]:
     """The editor form into WorkoutSpecs. A fully blank block (the spare one
     the page always appends) is dropped; anything malformed or half-filled —
@@ -1536,6 +1586,12 @@ def verify_session(value: str, secret: str, now: datetime) -> tuple[int, int] | 
         return None
 
 
+# The directory where the Vite-built React bundle lives.
+_FRONTEND_DIST = Path(__file__).parent.parent.parent / "frontend" / "dist"
+# The hidden route the SPA shell mounts at (ADR 0004 §Migration 5b).
+SPA_MOUNT = "/dashboard"
+
+
 def build_app(
     store: DashboardStore,
     linking: LinkingStore,
@@ -1545,6 +1601,8 @@ def build_app(
     secure_cookies: bool = True,
     clock: Clock = _utcnow,
     notifier: Notifier | None = None,
+    spa_enabled: bool = False,
+    spa_dist: Path | None = None,
 ) -> web.Application:
     def set_session(response: web.StreamResponse, member_id: int, gym_id: int) -> None:
         response.set_cookie(
@@ -2274,11 +2332,734 @@ def build_app(
         set_session(response, token.member_id, token.gym_id)
         raise response
 
+    # --- /api/session JSON endpoint (issue #155) ---
+
+    async def api_session(request: web.Request) -> web.Response:
+        """``GET /api/session`` — cookie-auth via ``require_coach``; returns
+        the Coach's name and gym as JSON. Unauthenticated answers 401."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        response = web.json_response({"name": member.name, "gym": gym.name})
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    # --- /api/settings JSON endpoints (issue #153) ---
+
+
+    async def api_login_peek(request: web.Request) -> web.Response:
+        """``GET /api/login/{token}`` — validate a login token without spending
+        it.  Returns ``{valid: true}`` or ``{valid: false}`` so the SPA
+        interstitial can distinguish "click to sign in" from a dead link."""
+        token = request.match_info["token"]
+        row = await store.peek_login_token(token)
+        return web.json_response({"valid": row is not None})
+
+
+    async def api_settings(request: web.Request) -> web.Response:
+        """``GET /api/settings`` — cookie-auth via ``require_coach``; returns
+        gym name, both invite codes/URLs, QR SVG, and the bot username as JSON.
+        Unauthenticated answers 401."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        # require_coach → coach_identity already SELECTs Member+Gym in the
+        # same request, so the Gym row here is fresh — no stale read (the
+        # re-fetch was redundant).  Serialize what the store computed.
+        invite_url = _invite_url(bot_username, gym.invite_code)
+        coach_url = _invite_url(bot_username, gym.coach_invite_code or "")
+        response = web.json_response({
+            "gym_name": gym.name,
+            "invite_code": gym.invite_code,
+            "invite_url": invite_url,
+            "qr_svg": _qr_svg(invite_url),
+            "coach_invite_code": gym.coach_invite_code,
+            "coach_invite_url": coach_url,
+            "bot_username": bot_username,
+        })
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def api_settings_regenerate_invite(request: web.Request) -> web.Response:
+        """``POST /api/settings/regenerate-invite`` — typed-confirm gated
+        regeneration of the member invite code. Returns the new code and URL."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            body = {}
+        confirm = (body.get("confirm") or "").strip().lower()
+        if confirm != t["confirm_word"]:
+            return web.json_response(
+                {"error": t["confirm_mismatch"].format(word=t["confirm_word"])},
+                status=400,
+            )
+        new_code = await linking.regenerate_invite_code(gym.id)
+        new_url = _invite_url(bot_username, new_code)
+        response = web.json_response({
+            "invite_code": new_code,
+            "invite_url": new_url,
+            "qr_svg": _qr_svg(new_url),
+        })
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def api_settings_regenerate_coach(request: web.Request) -> web.Response:
+        """``POST /api/settings/regenerate-coach`` — typed-confirm gated
+        regeneration of the coach invite code. Returns the new code and URL."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            body = {}
+        confirm = (body.get("confirm") or "").strip().lower()
+        if confirm != t["confirm_word"]:
+            return web.json_response(
+                {"error": t["confirm_mismatch"].format(word=t["confirm_word"])},
+                status=400,
+            )
+        new_code = await linking.regenerate_coach_invite_code(gym.id)
+        new_url = _invite_url(bot_username, new_code)
+        response = web.json_response({
+            "coach_invite_code": new_code,
+            "coach_invite_url": new_url,
+        })
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def api_settings_gym_name(request: web.Request) -> web.Response:
+        """``POST /api/settings/gym-name`` — rename the gym. Returns the new name."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            body = {}
+        name = body.get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            return web.json_response(
+                {"error": t["gym_name_empty"]},
+                status=400,
+            )
+        new_name = await linking.rename_gym(gym.id, name)
+        response = web.json_response({"gym_name": new_name})
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    # --- /api/members/{id}/routine JSON endpoint (issue #151) ---
+
+    async def api_member_routine_get(request: web.Request) -> web.Response:
+        """``GET /api/members/{id}/routine`` — cookie-auth via ``require_coach``;
+        returns the member's active Routine as JSON: weekday blocks, ownership
+        info, the routine_id stamp for stale-save checks, and the exercise
+        catalog. Unauthenticated answers 401; an unknown or unreachable member
+        answers 404."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        _, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+        except ValueError:
+            return web.json_response({"error": "not found"}, status=404)
+        view = await store.member_page(gym.id, member_id)
+        if view is None:
+            return web.json_response({"error": "not found"}, status=404)
+        catalog = await store.catalog_exercises()
+
+        def serialise_day(day: RoutineDayView) -> dict:
+            return {
+                "weekday": day.weekday,
+                "name": day.name,
+                "exercises": [
+                    {"exercise": name, "sets": sets, "reps": reps}
+                    for name, sets, reps in day.exercises
+                ],
+            }
+
+        body = {
+            "member_id": view.member_id,
+            "name": view.name,
+            "routine": [serialise_day(day) for day in view.routine],
+            "routine_id": view.routine_id,
+            "coach_authored": view.coach_authored,
+            "routine_author": view.routine_author,
+            "routine_preset_name": view.routine_preset_name,
+            "catalog": catalog,
+        }
+        response = web.json_response(body)
+        set_session(response, coach[0].id, gym.id)
+        return response
+
+    async def api_member_routine_put(request: web.Request) -> web.Response:
+        """``PUT /api/members/{id}/routine`` — cookie-auth via ``require_coach``;
+        saves a coach-authored Routine through the supersession machinery.
+        Accepts a JSON body with ``base_routine_id`` and ``workouts`` array.
+        Answers 200 on success (with the fresh routine and notified flag),
+        400 on validation errors, 409 on a stale save (with the fresh version),
+        and 401/404 like the GET."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+        except ValueError:
+            return web.json_response({"error": "not found"}, status=404)
+        target = await store.roster_member(gym.id, member_id)
+        if target is None:
+            return web.json_response({"error": "not found"}, status=404)
+
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+
+        base_routine_id = body.get("base_routine_id")
+        raw_workouts = body.get("workouts")
+        if not isinstance(raw_workouts, list):
+            return web.json_response({"error": t["empty_routine_error"]}, status=400)
+
+        # Parse workouts from JSON into WorkoutSpecs, reusing the existing
+        # validation rules (weekday ranges, duplicates, sets/reps limits).
+        try:
+            workouts = _parse_workouts_from_json(raw_workouts, lang)
+        except ValueError as error:
+            return web.json_response({"error": str(error)}, status=400)
+
+        if not workouts:
+            return web.json_response({"error": t["empty_routine_error"]}, status=400)
+
+        try:
+            await store.save_routine_from_web(
+                gym.id, member_id, coach_member.id, base_routine_id, workouts
+            )
+        except StaleRoutineError:
+            view = await store.member_page(gym.id, member_id)
+            assert view is not None
+            fresh = [
+                {
+                    "weekday": day.weekday,
+                    "name": day.name,
+                    "exercises": [
+                        {"exercise": name, "sets": sets, "reps": reps}
+                        for name, sets, reps in day.exercises
+                    ],
+                }
+                for day in view.routine
+            ]
+            return web.json_response(
+                {"error": t["stale_error"], "fresh_routine": fresh,
+                 "fresh_routine_id": view.routine_id},
+                status=409,
+            )
+        except UnknownExercisesError as error:
+            message = t["unknown_exercises_error"].format(names=", ".join(error.names))
+            return web.json_response({"error": message}, status=400)
+
+        notified = False
+        if notifier is not None:
+            try:
+                channel = await store.member_channel(member_id)
+                if channel is not None:
+                    await notifier.send(
+                        channel[0],
+                        channel[1],
+                        routine_notice(coach_member.name, workouts),
+                    )
+                    notified = True
+            except Exception:
+                logger.exception("failed to notify member %s of the routine save", member_id)
+
+        view = await store.member_page(gym.id, member_id)
+        assert view is not None
+        response = web.json_response(
+            {
+                "ok": True,
+                "routine_id": view.routine_id,
+                "routine": [
+                    {
+                        "weekday": day.weekday,
+                        "name": day.name,
+                        "exercises": [
+                            {"exercise": name, "sets": sets, "reps": reps}
+                            for name, sets, reps in day.exercises
+                        ],
+                    }
+                    for day in view.routine
+                ],
+                "coach_authored": view.coach_authored,
+                "routine_author": view.routine_author,
+                "routine_preset_name": view.routine_preset_name,
+                "notified": notified,
+            }
+        )
+        set_session(response, coach_member.id, gym.id)
+        return response
+
+    # --- /api/roster JSON endpoint (issue #149) ---
+
+    # --- /api/presets JSON endpoints (issue #152) ---
+
+    async def api_presets_list(request: web.Request) -> web.Response:
+        """``GET /api/presets`` — cookie-auth via ``require_coach``; returns
+        the Gym's live Presets, eligible Members, and the default Preset id.
+        Unauthenticated answers 401."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        presets = await store.presets(gym.id)
+        members = await store.preset_members(gym.id)
+        default_id = await store.default_preset_id(gym.id)
+        master_ids = await store.preset_ids_with_masters(gym.id)
+
+        body = {
+            "presets": [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "is_default": p.id == default_id,
+                    "has_master": p.id in master_ids,
+                }
+                for p in presets
+            ],
+            "members": [{"id": m.id, "name": m.name} for m in members],
+            "default_preset_id": default_id,
+        }
+        response = web.json_response(body)
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def api_presets_create(request: web.Request) -> web.Response:
+        """``POST /api/presets`` — create a new Preset. Body: ``{"name": "..."}``.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        try:
+            payload = await request.json()
+            name = payload.get("name", "")
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        if not isinstance(name, str) or not name.strip():
+            return web.json_response({"error": "preset_name_empty"}, status=400)
+        if len(name.strip()) > 100:
+            return web.json_response({"error": "preset_name_too_long"}, status=400)
+        try:
+            preset = await store.create_preset(gym.id, name)
+        except DuplicatePresetNameError:
+            return web.json_response({"error": "duplicate_preset_name"}, status=400)
+        except ValueError:
+            return web.json_response({"error": "preset_name_empty"}, status=400)
+        response = web.json_response({"id": preset.id, "name": preset.name}, status=201)
+        set_session(response, member.id, gym.id)
+        return response
+
+    async def api_presets_apply(request: web.Request) -> web.Response:
+        """``POST /api/presets/{preset_id}/apply`` — apply a Preset to chosen
+        Members. Body: ``{"member_ids": [...], "apply_all": bool}``.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        if await store.preset_for_gym(gym.id, preset_id) is None:
+            return web.json_response({"error": "not_found"}, status=404)
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid json"}, status=400)
+        apply_all = bool(payload.get("apply_all", False))
+        raw_ids = payload.get("member_ids", [])
+        if not isinstance(raw_ids, list):
+            return web.json_response({"error": "preset_no_selection"}, status=400)
+        try:
+            member_ids = [int(v) for v in raw_ids]
+        except (ValueError, TypeError):
+            return web.json_response({"error": "not_found"}, status=404)
+        if apply_all:
+            member_ids = [m.id for m in await store.preset_members(gym.id)]
+        elif not member_ids:
+            return web.json_response({"error": "preset_no_selection"}, status=400)
+        try:
+            copies = await store.apply_preset(gym.id, preset_id, coach_member.id, member_ids)
+        except NoPresetMasterError:
+            return web.json_response({"error": "preset_no_master"}, status=400)
+        except StaleRoutineError:
+            return web.json_response({"error": "stale_error"}, status=409)
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        # Best-effort notify each member.
+        for copy in copies:
+            try:
+                channel = await store.member_channel(copy.member_id)
+                if channel is not None and notifier is not None:
+                    await notifier.send(
+                        channel[0],
+                        channel[1],
+                        routine_notice(coach_member.name, copy.workouts),
+                    )
+            except Exception:
+                logger.exception("failed to notify member %s of the Preset apply", copy.member_id)
+        response = web.json_response({"applied": len(copies)})
+        set_session(response, coach_member.id, gym.id)
+        return response
+
+    async def api_presets_default(request: web.Request) -> web.Response:
+        """``POST /api/presets/{preset_id}/default`` — set or clear the default
+        Preset. Toggling the current default clears it.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        if await store.preset_for_gym(gym.id, preset_id) is None:
+            return web.json_response({"error": "not_found"}, status=404)
+        try:
+            current_default = await store.default_preset_id(gym.id)
+            clearing = current_default == preset_id
+            await store.set_default_preset(gym.id, None if clearing else preset_id)
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        new_default = await store.default_preset_id(gym.id)
+        response = web.json_response({"default_preset_id": new_default})
+        set_session(response, coach_member.id, gym.id)
+        return response
+
+    async def api_presets_retire(request: web.Request) -> web.Response:
+        """``POST /api/presets/{preset_id}/retire`` — retire a Preset.
+        Members keep their copies; the Preset can no longer be edited or applied.
+        Flag-gated, cookie-auth via ``require_coach``."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        coach_member, gym = coach
+        try:
+            preset_id = int(request.match_info["preset_id"])
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        try:
+            await store.retire_preset(gym.id, preset_id)
+        except ValueError:
+            return web.json_response({"error": "not_found"}, status=404)
+        response = web.json_response({"retired": True})
+        set_session(response, coach_member.id, gym.id)
+        return response
+
+    async def api_roster(request: web.Request) -> web.Response:
+        """``GET /api/roster`` — cookie-auth via ``require_coach``; returns
+        the roster as JSON: active rows, lapsed tail, counts, and the sort
+        key. Unauthenticated answers 401.
+
+        Each row carries its attendance grid (4-week day cells) so the
+        Cards view renders with one round-trip. No domain logic moves into
+        the web layer — this endpoint serializes what the store already
+        computes."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        rows, lapsed = await store.roster(gym.id)
+        member_ids = [row.member_id for row in rows] + [row.member_id for row in lapsed]
+        grids = await store.attendance(gym.id, member_ids) if member_ids else {}
+
+        def serialise(row: RosterRow) -> dict:
+            cells = grids.get(row.member_id, [])
+            return {
+                "member_id": row.member_id,
+                "name": row.name,
+                "gap_days": row.gap_days,
+                "has_sessions": row.has_sessions,
+                "is_new": row.is_new,
+                "snoozed_until": row.snoozed_until.isoformat() if row.snoozed_until else None,
+                "missed_days": row.missed_days,
+                "severity": row.severity,
+                "has_safety_flag": row.has_safety_flag,
+                "attendance": [{"on": c.on.isoformat(), "state": c.state} for c in cells],
+            }
+
+        body = {
+            "active": [serialise(row) for row in rows],
+            "lapsed": [serialise(row) for row in lapsed],
+            "counts": {"active": len(rows), "lapsed": len(lapsed)},
+            "sortedBy": "gap_days",
+        }
+        response = web.json_response(body)
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    # --- /api/members/{id} JSON endpoint (issue #150) ---
+
+    def _serialise_member_page(view: MemberPage) -> dict:
+        """Serialize a ``MemberPage`` to JSON — no domain logic, just
+        shape translation. Dates become ISO strings."""
+        return {
+            "member_id": view.member_id,
+            "name": view.name,
+            "member_since": view.member_since.isoformat(),
+            "weight_unit": view.weight_unit,
+            "session_count": view.session_count,
+            "gap_days": view.gap_days,
+            "has_sessions": view.has_sessions,
+            "last_session_on": view.last_session_on.isoformat() if view.last_session_on else None,
+            "lapsed": view.lapsed,
+            "snoozed_until": view.snoozed_until.isoformat() if view.snoozed_until else None,
+            "routine": [
+                {
+                    "weekday": day.weekday,
+                    "name": day.name,
+                    "exercises": [
+                        {"name": name, "sets": sets, "reps": reps}
+                        for name, sets, reps in day.exercises
+                    ],
+                }
+                for day in view.routine
+            ],
+            "routine_id": view.routine_id,
+            "routine_preset_name": view.routine_preset_name,
+            "coach_authored": view.coach_authored,
+            "routine_author": view.routine_author,
+            "sessions": [
+                {
+                    "on": session.on.isoformat(),
+                    "sets": [
+                        {"exercise": name, "weight": weight, "reps": reps, "note": note}
+                        for name, weight, reps, note in session.sets
+                    ],
+                }
+                for session in view.sessions
+            ],
+            "page": view.page,
+            "pages": view.pages,
+            "weights": [
+                {
+                    "exercise": w.exercise,
+                    "weight": w.weight,
+                    "reps": w.reps,
+                    "on": w.on.isoformat(),
+                }
+                for w in view.weights
+            ],
+            "notes": [
+                {
+                    "kind": n.kind,
+                    "text": n.text,
+                    "on": n.on.isoformat(),
+                    "retired_on": n.retired_on.isoformat() if n.retired_on else None,
+                }
+                for n in view.notes
+            ],
+            "retired_notes": [
+                {
+                    "kind": n.kind,
+                    "text": n.text,
+                    "on": n.on.isoformat(),
+                    "retired_on": n.retired_on.isoformat() if n.retired_on else None,
+                }
+                for n in view.retired_notes
+            ],
+            "safety_flags": [
+                {
+                    "note_id": f.note_id,
+                    "text": f.text,
+                    "on": f.on.isoformat(),
+                    "status": f.status,
+                    "acknowledged_on": f.acknowledged_on.isoformat() if f.acknowledged_on else None,
+                    "acknowledged_by": f.acknowledged_by,
+                }
+                for f in view.safety_flags
+            ],
+        }
+
+    async def api_member(request: web.Request) -> web.Response:
+        """``GET /api/members/{id}`` — cookie-auth via ``require_coach``;
+        returns the full Member page as JSON. Unauthenticated answers 401;
+        unknown/ghost/coach answers 404. No domain logic moves into the
+        web layer — this endpoint serializes what the store already computes."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        _, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+            if not 0 < member_id < 2**63:
+                return web.json_response({"error": "not found"}, status=404)
+        except (ValueError, OverflowError):
+            return web.json_response({"error": "not found"}, status=404)
+        try:
+            page = int(request.query.get("page", "1"))
+        except ValueError:
+            page = 1
+        view = await store.member_page(gym.id, member_id, page=page)
+        if view is None:
+            return web.json_response({"error": "not found"}, status=404)
+        body = _serialise_member_page(view)
+        response = web.json_response(body)
+        set_session(response, coach[0].id, gym.id)  # sliding 90-day refresh
+        return response
+
+    # --- /api/members/{id}/flags/{note_id}/tick-off JSON endpoint (issue #150) ---
+
+    async def api_tick_off_flag(request: web.Request) -> web.Response:
+        """``POST /api/members/{id}/flags/{note_id}/tick-off`` —
+        acknowledge a safety flag via the JSON API. Same store call as the
+        server-HTML path; returns JSON confirming the acknowledgement."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.json_response({"error": "unauthorized"}, status=401)
+        member, gym = coach
+        try:
+            member_id = int(request.match_info["member_id"])
+            note_id = int(request.match_info["note_id"])
+            if not (0 < member_id < 2**63 and 0 < note_id < 2**63):
+                return web.json_response({"error": "not found"}, status=404)
+        except (ValueError, OverflowError):
+            return web.json_response({"error": "not found"}, status=404)
+        note = await store.acknowledge_flag(gym.id, member_id, note_id, member.id)
+        if note is None:
+            return web.json_response({"error": "not found"}, status=404)
+        response = web.json_response({"note_id": note.id, "acknowledged": True})
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    # --- /api/seed dev/demo data endpoint (issue #149) ---
+
+    # --- SPA shell and static assets (issue #155, ADR 0004) ---
+
+    resolved_dist = spa_dist or _FRONTEND_DIST
+
+    def _inject_i18n(html: str, t: dict, lang: str) -> str:
+        """Inject ``window.__I18N__`` bootstrap into the SPA shell HTML.
+
+        Includes STRINGS plus the ``_months``, ``_weekday_initials`` and
+        ``_decimal_mark`` keys the frontend's ``i18n.ts`` reads through
+        ``getMonths`` / ``getWeekdayInitials`` / ``getDecimalMark``."""
+        i18n_payload: dict = dict(t)
+        i18n_payload["_months"] = list(MONTHS[lang])
+        i18n_payload["_weekday_initials"] = list(WEEKDAY_INITIALS[lang])
+        i18n_payload["_weekdays"] = list(WEEKDAYS[lang])
+        i18n_payload["_decimal_mark"] = DECIMAL_MARK[lang]
+        i18n_json = json.dumps(i18n_payload, ensure_ascii=False)
+        # Escape <, U+2028, and U+2029 so no string value can close the
+        # <script> tag early or inject a line separator (ADR 0004 §i18n 7a).
+        safe_json = (
+            i18n_json.replace("<", "\\u003c")
+            .replace("\u2028", "\\u2028")
+            .replace("\u2029", "\\u2029")
+        )
+        i18n_script = f"<script>window.__I18N__ = {safe_json};</script>"
+        # Insert after </head> (if present) or at the start of <body>.
+        if "</head>" in html:
+            html = html.replace("</head>", f"{i18n_script}\n</head>")
+        elif "<body" in html:
+            body_start = html.index("<body")
+            body_close = html.index(">", body_start) + 1
+            html = html[:body_close] + i18n_script + html[body_close:]
+        else:
+            html = i18n_script + html
+        return html
+
+    def _read_spa_index() -> str | None:
+        """Read the Vite-built index.html; ``None`` if not built."""
+        index_path = resolved_dist / "index.html"
+        if not index_path.exists():
+            return None
+        return index_path.read_text(encoding="utf-8")
+
+    async def spa_login_shell(request: web.Request) -> web.Response:
+        """Serve the SPA shell **without** auth for the login/interstitial
+        screen (issue #153).  The React app at ``/dashboard/login/:token``
+        detects the route and renders the interstitial — no session required.
+
+        The i18n bootstrap uses the language cookie if set, else the
+        no-signal default (Spanish) — the same rule as the door pages."""
+        lang = resolve_lang(
+            request.cookies.get(LANG_COOKIE),
+            request.headers.get("Accept-Language"),
+        )
+        t = STRINGS[lang]
+
+        html = _read_spa_index()
+        if html is None:
+            return web.Response(
+                text="SPA bundle not built — run `npm run build` in frontend/",
+                status=503,
+                content_type="text/plain",
+            )
+
+        html = _inject_i18n(html, t, lang)
+        return web.Response(text=html, content_type="text/html")
+
+    async def spa_shell(request: web.Request) -> web.Response:
+        """Serve the Vite-built React bundle shell with ``window.__I18N__``
+        bootstrap injected (ADR 0004 §i18n 7a). Only reachable when the
+        ``spa_enabled`` flag is on."""
+        coach = await require_coach(request)
+        if coach is None:
+            return web.Response(text=_bounce_page(), content_type="text/html")
+        member, gym = coach
+        lang = _lang_of(request)
+        t = STRINGS[lang]
+
+        html = _read_spa_index()
+        if html is None:
+            return web.Response(
+                text="SPA bundle not built — run `npm run build` in frontend/",
+                status=503,
+                content_type="text/plain",
+            )
+
+        html = _inject_i18n(html, t, lang)
+        response = web.Response(text=html, content_type="text/html")
+        set_session(response, member.id, gym.id)  # sliding 90-day refresh
+        return response
+
+    async def spa_catchall(request: web.Request) -> web.Response:
+        """SPA fallback: serve the shell for any unmatched ``/dashboard/*`` path
+        so React Router deep links resolve on a cold load (issue #149).
+
+        Real bundle files are served by the ``/dashboard/assets/`` static mount
+        registered ahead of this route; everything else is a client-side route,
+        and the shell it gets is the authenticated one.
+        """
+        return await spa_shell(request)
+
     app = web.Application()
     app.router.add_get("/", home)
+    # /api/session is registered unconditionally — the JSON session-info
+    # endpoint is tiny and useful for any non-SPA consumer (CLI scripts,
+    # health-check probes) so there is no value in gating it behind the flag.
+    app.router.add_get("/api/session", api_session)
     app.router.add_get("/members/{member_id}", member_page)
-    app.router.add_get("/members/{member_id}/routine", routine_editor)
-    app.router.add_post("/members/{member_id}/routine", routine_save)
     app.router.add_get("/presets", presets_page)
     app.router.add_post("/presets", preset_create)
     app.router.add_get("/presets/{preset_id}/routine", preset_editor)
@@ -2295,6 +3076,64 @@ def build_app(
     app.router.add_get("/login/{token}", login_form)
     app.router.add_post("/login/{token}", login_redeem)
     app.router.add_static("/static/", STATIC_DIR)
+    # The server-HTML Routine editor is production today — registered
+    # unconditionally like member_page and the /presets routes (#151, #154).
+    app.router.add_get("/members/{member_id}/routine", routine_editor)
+    app.router.add_post("/members/{member_id}/routine", routine_save)
+    if spa_enabled:
+        # /api/login/{token} peek is SPA-only — serves the interstitial's
+        # token validation without spending the token.  Flag-gated so the
+        # flag-off rollback contract holds.
+        app.router.add_get("/api/login/{token}", api_login_peek)
+        # /api/roster is the SPA's JSON endpoint — it has no server-HTML
+        # consumer, so flag-gating it keeps the prod surface minimal.
+        app.router.add_get("/api/roster", api_roster)
+        # /api/settings and its write routes (issue #153) — flag-gated like
+        # /api/roster so the flag-off rollback holds.
+        app.router.add_get("/api/settings", api_settings)
+        app.router.add_post("/api/settings/regenerate-invite", api_settings_regenerate_invite)
+        app.router.add_post("/api/settings/regenerate-coach", api_settings_regenerate_coach)
+        app.router.add_post("/api/settings/gym-name", api_settings_gym_name)
+        # JSON endpoints for the SPA — flag-gated so the flag-off rollback
+        # holds (ADR 0004 §Migration 5b).
+        # /api/members/{id}/routine is the JSON Routine editor endpoint
+        # (issue #151).
+        app.router.add_get("/api/members/{member_id}/routine", api_member_routine_get)
+        app.router.add_put("/api/members/{member_id}/routine", api_member_routine_put)
+        # /api/members/{id} and tick-off are the SPA's member-page JSON
+        # endpoints (issue #150).
+        app.router.add_get("/api/members/{member_id}", api_member)
+        app.router.add_post(
+            "/api/members/{member_id}/flags/{note_id}/tick-off", api_tick_off_flag
+        )
+        # /api/presets JSON endpoints (issue #152).
+        app.router.add_get("/api/presets", api_presets_list)
+        app.router.add_post("/api/presets", api_presets_create)
+        app.router.add_post("/api/presets/{preset_id}/apply", api_presets_apply)
+        app.router.add_post("/api/presets/{preset_id}/default", api_presets_default)
+        app.router.add_post("/api/presets/{preset_id}/retire", api_presets_retire)
+        if not (resolved_dist / "assets").is_dir():
+            logger.warning(
+                "SPA enabled but %s missing — not serving /dashboard; "
+                "run `npm run build` in frontend/",
+                resolved_dist / "assets",
+            )
+        else:
+            # Public (no-auth) SPA shell for the login/interstitial screen
+            # (issue #153).  Registered first so the authenticated catch-all
+            # only covers routes that need a session.
+            app.router.add_get(
+                f"{SPA_MOUNT}/login/{{token}}", spa_login_shell
+            )
+            app.router.add_get(SPA_MOUNT, spa_shell)
+            app.router.add_get(f"{SPA_MOUNT}/", spa_shell)
+            # Assets first: the catch-all below would otherwise swallow them.
+            app.router.add_static(
+                f"{SPA_MOUNT}/assets/", resolved_dist / "assets"
+            )
+            # Every other /dashboard/* path is a React Router deep link, so it
+            # gets the authenticated shell (issue #149).
+            app.router.add_get(f"{SPA_MOUNT}/{{tail:.*}}", spa_catchall)
     return app
 
 

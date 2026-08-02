@@ -60,21 +60,38 @@ def parse_progression_rules(doc: str) -> ProgressionRules:
     """Read progression numbers from ``key: value`` lines in the doc.
 
     Missing keys keep their default, so a doc that omits a number (or the
-    whole section) still works.
+    whole section) still works.  Out-of-range values are clamped to the
+    defaults — a Coach's typo must never reach a Member as a coaching
+    instruction (issue #167).
     """
     values: dict[str, float] = {}
     for field, aliases in _KEYS.items():
         for alias in aliases:
-            match = re.search(rf"(?mi)^\s*[-*]?\s*{alias}\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", doc)
+            match = re.search(rf"(?mi)^\s*[-*]?\s*{alias}\s*[:=]\s*(-?[0-9]+(?:\.[0-9]+)?)", doc)
             if match:
                 values[field] = float(match.group(1))
                 break
+
+    raw_increment = float(values.get("increment", ProgressionRules.increment))
+    raw_deload_percent = float(values.get("deload_percent", ProgressionRules.deload_percent))
+    raw_stall_sessions = int(values.get("stall_sessions", ProgressionRules.stall_sessions))
+    raw_gap_deload_days = int(values.get("gap_deload_days", ProgressionRules.gap_deload_days))
+    raw_gap_deload_percent = float(values.get("gap_deload_percent", ProgressionRules.gap_deload_percent))
+
     return ProgressionRules(
-        increment=values.get("increment", ProgressionRules.increment),
-        deload_percent=values.get("deload_percent", ProgressionRules.deload_percent),
-        stall_sessions=int(values.get("stall_sessions", ProgressionRules.stall_sessions)),
-        gap_deload_days=int(values.get("gap_deload_days", ProgressionRules.gap_deload_days)),
-        gap_deload_percent=values.get("gap_deload_percent", ProgressionRules.gap_deload_percent),
+        increment=raw_increment if 0 < raw_increment <= 100 else ProgressionRules.increment,
+        deload_percent=raw_deload_percent
+        if 0 < raw_deload_percent < 100
+        else ProgressionRules.deload_percent,
+        stall_sessions=raw_stall_sessions
+        if 1 <= raw_stall_sessions <= 52
+        else ProgressionRules.stall_sessions,
+        gap_deload_days=raw_gap_deload_days
+        if 1 <= raw_gap_deload_days <= 365
+        else ProgressionRules.gap_deload_days,
+        gap_deload_percent=raw_gap_deload_percent
+        if 0 < raw_gap_deload_percent < 100
+        else ProgressionRules.gap_deload_percent,
     )
 
 
@@ -90,6 +107,19 @@ def _plate_round(weight: float) -> float:
     return round(weight / PLATE_STEP) * PLATE_STEP
 
 
+def _apply_deload(last_weight: float, percent: float) -> float:
+    """Reduce *last_weight* by *percent*, plate-round, and guarantee the
+    result sits below *last_weight* (never an increase or no-op)."""
+    reduced = _plate_round(last_weight * (1 - percent / 100))
+    if reduced >= last_weight:
+        reduced = last_weight - PLATE_STEP
+    if reduced > 0:
+        reduced = max(PLATE_STEP, reduced)
+    if reduced >= last_weight:
+        reduced = max(0.0, last_weight - PLATE_STEP)
+    return max(0.0, reduced)
+
+
 def suggest_weight(
     history: list[SessionResult], gap_days: int | None, rules: ProgressionRules
 ) -> Suggestion:
@@ -100,7 +130,7 @@ def suggest_weight(
 
     # A real break wins over any progression — ease back from the last weight.
     if gap_days is not None and gap_days >= rules.gap_deload_days:
-        eased = _plate_round(last_weight * (1 - rules.gap_deload_percent / 100))
+        eased = _apply_deload(last_weight, rules.gap_deload_percent)
         return Suggestion(
             eased,
             "gap_deload",
@@ -127,9 +157,7 @@ def suggest_weight(
         )
     )
     if stalled:
-        deloaded = _plate_round(last_weight * (1 - rules.deload_percent / 100))
-        if deloaded >= last_weight:  # rounding must never leave a "deload" heavier or equal
-            deloaded = max(PLATE_STEP, last_weight - PLATE_STEP)
+        deloaded = _apply_deload(last_weight, rules.deload_percent)
         return Suggestion(
             deloaded,
             "deload",

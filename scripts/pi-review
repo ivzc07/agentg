@@ -11,6 +11,38 @@
 set -eu
 
 PR="${1:?usage: scripts/pi-review <pr-number>}"
+
+# On Windows, `bash` on the PATH can resolve to WSL (C:\Windows\System32\bash.exe)
+# ahead of Git Bash - notably from a PowerShell pane. That breaks this script in a
+# way whose error message points nowhere near the cause: a linked worktree's .git
+# is a FILE containing a Windows path (`gitdir: C:/Users/...`), which WSL's git
+# cannot follow, so every git/gh call dies with `fatal: not a git repository:
+# /mnt/c/...`. Detect it up front and say what to do instead.
+#
+# The probe must not fire under Git Bash, which reports MINGW64_NT/MSYS_NT in
+# /proc/version; only WSL reports a Linux kernel carrying "microsoft"/"WSL".
+# PI_REVIEW_PROC_VERSION is a test seam, not a knob for callers: it lets the
+# probe be exercised against known kernel strings (MINGW64_NT vs WSL2) on any
+# platform, so the "must stay silent under Git Bash" case is a real test rather
+# than something only reproducible on a Windows box.
+_proc_version="${PI_REVIEW_PROC_VERSION:-/proc/version}"
+if [ -n "${WSL_DISTRO_NAME:-}" ] ||
+    { [ -r "$_proc_version" ] && grep -qiE 'microsoft|wsl' "$_proc_version" 2>/dev/null; }; then
+    cat >&2 <<EOF
+pi-review: running under WSL bash, which cannot read this repository.
+
+  A linked git worktree records its metadata as a Windows path, and WSL cannot
+  resolve it - git would fail with "fatal: not a git repository: /mnt/c/...".
+
+  Re-run from Git Bash instead - the bash.exe inside your Git for Windows
+  install, typically:
+    "C:\\Program Files\\Git\\bin\\bash.exe" scripts/pi-review ${PR}
+  A per-user install lives under %LOCALAPPDATA%\\Programs\\Git instead; if
+  neither path exists, \`where.exe bash\` will list the candidates.
+EOF
+    exit 1
+fi
+
 REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 
 PROMPT="Run the code-review workflow on GitHub PR ${PR} of repo ${REPO}. \
