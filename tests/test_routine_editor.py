@@ -220,16 +220,21 @@ async def test_a_stale_save_is_refused_and_changes_nothing(env):
 # --- Page level: the chip, the save flow, the stale refusal, the notice ---
 
 
-async def test_the_member_page_links_the_editor_and_shows_the_agent_chip(env):
+async def test_the_member_api_carries_the_agent_chip_facts(env):
+    """The React member page renders the Edit link and the ownership chip
+    from these fields (MemberPage RTL covers the link and chip markup)."""
+    import json
+
     member = await env.add_member("Luis")
     await env.give_routine(member)
 
-    status, text = await env.get(f"/members/{member.id}")
+    status, text = await env.get(f"/api/members/{member.id}")
+    data = json.loads(text)
 
     assert status == 200
-    # The Edit journey keeps the view it started from, like tick-off does.
-    assert f'href="/members/{member.id}/routine?view=table"' in text
-    assert AGENT_CHIP in text
+    assert data["coach_authored"] is False  # -> the Agent chip
+    assert data["routine_author"] is None
+    assert data["routine_preset_name"] is None
 
 
 async def test_the_editor_shows_the_consequence_line_before_the_first_save(env):
@@ -289,8 +294,12 @@ async def test_a_web_save_replaces_the_routine_stamps_it_and_notifies_the_member
     assert "Escrita por Coach Ana" in editor
     assert AGENT_CHIP not in editor
     assert CONSEQUENCE_LINE not in editor
-    _, page = await env.get(f"/members/{member.id}")
-    assert "Escrita por Coach Ana" in page
+    import json
+
+    _, page = await env.get(f"/api/members/{member.id}")
+    page_data = json.loads(page)
+    assert page_data["coach_authored"] is True
+    assert page_data["routine_author"] == "Coach Ana"
 
 
 async def test_editing_a_linked_member_silently_forks_and_shows_the_consequence_before_save(env):
@@ -1068,23 +1077,15 @@ async def test_without_the_header_the_save_still_redirects(env):
     assert response.headers["Location"] == f"/members/{member.id}?view=table"
 
 
-# --- Flag-off regression: the member page Edit link must work ---
+# --- Regression: the member page's Edit link target must answer 200 ---
 
 
-async def test_member_page_edit_link_is_200_with_flag_off(env):
-    """The member page renders an Edit link to the server-HTML Routine
-    editor.  When spa_enabled is False (production today) that link must
-    answer 200 — the SPA cutover is #154's job, not #151's."""
+async def test_member_page_edit_link_target_answers_200(env):
+    """The React member page links Edit at /members/{id}/routine (its RTL
+    test asserts the href); a deleted or broken route here is the silent
+    404-Edit-link regression class from #151's review."""
     member = await env.add_member("Luis")
     await env.give_routine(member)
 
-    # Fetch the member page and confirm its Edit link.
-    status, body = await env.get("/members/{}".format(member.id))
-    assert status == 200
-    assert 'href="/members/{}/routine'.format(member.id) in body
-
-    # Follow the Edit link.
-    status, _ = await env.get(
-        "/members/{}/routine?view=table".format(member.id)
-    )
+    status, _ = await env.get("/members/{}/routine".format(member.id))
     assert status == 200

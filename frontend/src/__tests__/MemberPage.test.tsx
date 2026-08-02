@@ -27,6 +27,7 @@ vi.mock("../hooks/useT", () => ({
       days_away: "{n} days away",
       // Routine
       routine: "Routine",
+      edit: "Edit",
       no_routine: "No active routine",
       chip_agent: "Agent",
       chip_coach: "Coach",
@@ -54,6 +55,7 @@ vi.mock("../hooks/useT", () => ({
       flag_seen_by: "Seen by {who} on {date}",
       flag_expired_unseen: "expired, never seen",
       save_failed: "Failed to save.",
+      verbatim_tag: "as written",
       // Weights
       bodyweight: "BW",
     };
@@ -87,9 +89,9 @@ const makeMember = (overrides: Partial<MemberPageData> = {}): MemberPageData => 
     {
       on: "2026-07-12",
       sets: [
-        { exercise: "squat", weight: 65, reps: 8, note: null },
-        { exercise: "squat", weight: 65, reps: 8, note: null },
-        { exercise: "squat", weight: 65, reps: 6, note: "felt heavy" },
+        { exercise: "squat", weight: 65, reps: 8, note: null, note_lang: null },
+        { exercise: "squat", weight: 65, reps: 8, note: null, note_lang: null },
+        { exercise: "squat", weight: 65, reps: 6, note: "felt heavy", note_lang: "en" },
       ],
     },
   ],
@@ -123,6 +125,7 @@ function mockT(key: string): string {
     days_away: "{n} days away",
     // Routine
     routine: "Routine",
+    edit: "Edit",
     no_routine: "No active routine",
     chip_agent: "Agent",
     chip_coach: "Coach",
@@ -150,6 +153,7 @@ function mockT(key: string): string {
     flag_seen_by: "Seen by {who} on {date}",
     flag_expired_unseen: "expired, never seen",
     save_failed: "Failed to save.",
+    verbatim_tag: "as written",
     // Weights
     bodyweight: "BW",
   };
@@ -257,6 +261,12 @@ describe("MemberPage", () => {
     expect(screen.getByText(/4 × 8-10/)).toBeInTheDocument();
   });
 
+  it("links the routine card to the editor (the Edit journey, #100/#154)", () => {
+    renderPage(makeMember());
+    const link = screen.getByRole("link", { name: "Edit" });
+    expect(link).toHaveAttribute("href", "/members/1/routine");
+  });
+
   it("shows no routine message when routine is empty", () => {
     renderPage(makeMember({ routine: [] }));
     expect(screen.getByText("No active routine")).toBeInTheDocument();
@@ -276,6 +286,26 @@ describe("MemberPage", () => {
   it("shows session notes as quoted text", () => {
     renderPage(makeMember());
     expect(screen.getByText(/felt heavy/)).toBeInTheDocument();
+  });
+
+  it("quotes a note stamped on every rep set exactly once", () => {
+    // log_sets stamps the same note on each rep Set; the collapsed
+    // (exercise, weight) line must still quote it once.
+    renderPage(
+      makeMember({
+        sessions: [
+          {
+            on: "2026-07-12",
+            sets: [
+              { exercise: "squat", weight: 60, reps: 8, note: "shoulder hurt", note_lang: "en" },
+              { exercise: "squat", weight: 60, reps: 8, note: "shoulder hurt", note_lang: "en" },
+              { exercise: "squat", weight: 60, reps: 8, note: "shoulder hurt", note_lang: "en" },
+            ],
+          },
+        ],
+      })
+    );
+    expect(screen.getAllByText(/shoulder hurt/)).toHaveLength(1);
   });
 
   it("renders the weights card", () => {
@@ -299,7 +329,7 @@ describe("MemberPage", () => {
     renderPage(
       makeMember({
         notes: [
-          { kind: "injury", text: "Left knee", on: "2026-07-10", retired_on: null },
+          { kind: "injury", text: "Left knee", lang: "en", on: "2026-07-10", retired_on: null },
         ],
       })
     );
@@ -307,11 +337,41 @@ describe("MemberPage", () => {
     expect(screen.getByText("injury")).toBeInTheDocument();
   });
 
+  it("tags a foreign-language note with its source language (§Language: the Member's own words never translate)", () => {
+    // No window.__I18N__ in tests → the active language is the no-signal
+    // default (Spanish); an English note must carry the EN tag.
+    renderPage(
+      makeMember({
+        notes: [
+          { kind: "injury", text: "Left knee", lang: "en", on: "2026-07-10", retired_on: null },
+        ],
+      })
+    );
+    expect(screen.getAllByText(/EN · as written/).length).toBeGreaterThan(0);
+  });
+
+  it("leaves a same-language note untagged", () => {
+    renderPage(
+      makeMember({
+        sessions: [],  // the fixture's session note would tag otherwise
+        notes: [
+          { kind: "constraint", text: "Solo mañanas", lang: "es", on: "2026-07-10", retired_on: null },
+        ],
+      })
+    );
+    expect(screen.queryByText(/· as written/)).not.toBeInTheDocument();
+  });
+
+  it("tags a foreign-language set comment", () => {
+    renderPage(makeMember()); // the fixture's "felt heavy" note is lang en
+    expect(screen.getAllByText(/EN · as written/).length).toBeGreaterThan(0);
+  });
+
   it("shows retired notes in collapsed details", () => {
     renderPage(
       makeMember({
         retired_notes: [
-          { kind: "goal", text: "Run marathon", on: "2026-06-01", retired_on: "2026-07-01" },
+          { kind: "goal", text: "Run marathon", lang: "en", on: "2026-06-01", retired_on: "2026-07-01" },
         ],
       })
     );

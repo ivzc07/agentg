@@ -1303,15 +1303,6 @@ class TestScreenCoverage:
             f"{screen} does not reference the design token stylesheet"
         )
 
-    async def test_member_page_renders(self, sweep_env):
-        """The member page (non-coach) must render."""
-        ana_id = sweep_env.ana.id
-        resp = await sweep_env.client.get(f"/members/{ana_id}?view=table")
-        assert resp.status == 200, f"Member page returned {resp.status}"
-        html = await resp.text()
-        assert "/static/dashboard.css" in html
-        assert "Ana" in html
-
     async def test_routine_editor_renders(self, sweep_env):
         """The routine editor must render for a non-coach member."""
         ana_id = sweep_env.ana.id

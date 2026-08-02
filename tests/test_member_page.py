@@ -113,8 +113,15 @@ class Env:
         )
         return response.status, await response.text()
 
+    async def api(self, member_id, query: str = "") -> tuple[int, dict]:
+        cookie = sign_session(self.coach.id, self.gym.id, SECRET, self.clock())
+        response = await self.client.get(
+            f"/api/members/{member_id}{query}", cookies={SESSION_COOKIE: cookie}
+        )
+        return response.status, json.loads(await response.text())
 
-async def test_the_page_shows_header_routine_sessions_weights_and_notes(env):
+
+async def test_the_api_serves_header_routine_sessions_weights_and_notes(env):
     member = await env.add_member("Luis")
     await env.give_routine(member)
     await env.train(member, 5, "squat 60 8,8,8", "bench press 40 10,10")
@@ -123,31 +130,36 @@ async def test_the_page_shows_header_routine_sessions_weights_and_notes(env):
     retired = await env.notes.remember(member.id, env.gym.id, "goal", "Correr un maratón")
     await env.notes.retire(member.id, retired.id)
 
-    status, text = await env.page(member.id)
+    status, data = await env.api(member.id)
 
     assert status == 200
-    # Header: name, member-since, Session count, Gap, last Session.
-    assert "Luis" in text
-    assert f"Miembro desde {fmt_date(member.created_at.date(), 'es')}" in text
-    assert "2 sesiones" in text
-    assert 'numeral-sm">2</span> días sin venir' in text
-    assert "última sesión" in text
-    # Routine: pinned weekday names and the set/rep scheme.
-    assert "Rutina" in text
-    assert "miércoles" in text and "Piernas" in text
-    assert "squat — 4 × 8-10" in text
-    # Sessions: per-Exercise sets with the gym's weight unit.
-    assert "Sesiones" in text
-    assert "squat 65 kg × 8,8,6" in text
+    # Header facts: name, member-since, Session count, Gap, last Session.
+    assert data["name"] == "Luis"
+    assert data["member_since"] == member.created_at.date().isoformat()
+    assert data["session_count"] == 2
+    assert data["gap_days"] == 2 and data["has_sessions"] is True
+    assert data["last_session_on"] is not None
+    # Routine: pinned weekday numbers and the set/rep scheme fields.
+    day = next(d for d in data["routine"] if d["name"] == "Piernas")
+    assert day["weekday"] == 2  # miércoles
+    assert {"name": "squat", "sets": 4, "reps": "8-10"} in day["exercises"]
+    # Sessions: per-Exercise sets with the gym's weight unit for the page.
+    assert data["weight_unit"] == "kg"
+    newest = data["sessions"][0]
+    assert [(s["exercise"], s["weight"], s["reps"]) for s in newest["sets"]] == [
+        ("squat", 65, 8),
+        ("squat", 65, 8),
+        ("squat", 65, 6),
+    ]
     # Last weight per Exercise: the newest Session's top set.
-    assert "Últimos pesos" in text
-    assert "squat" in text and "65 kg" in text
-    assert "bench press" in text and "40 kg" in text
-    # Notes, with the retired tail collapsed and dated.
-    assert "Rodilla izquierda molesta" in text
-    assert "Retiradas (1)" in text
-    assert "Correr un maratón" in text
-    assert "retirada el" in text
+    weights = {w["exercise"]: w for w in data["weights"]}
+    assert weights["squat"]["weight"] == 65
+    assert weights["bench press"]["weight"] == 40
+    # Notes, with the retired tail separate and dated.
+    assert data["notes"][0]["text"] == "Rodilla izquierda molesta"
+    [gone] = data["retired_notes"]
+    assert gone["text"] == "Correr un maratón"
+    assert gone["retired_on"] is not None
 
 
 async def test_the_header_tags_lapsed_and_snoozed_members(env):
@@ -158,11 +170,11 @@ async def test_the_header_tags_lapsed_and_snoozed_members(env):
     until = env.clock.now.date() + timedelta(days=5)
     await env.checkins.snooze_until(snoozed.id, until)
 
-    _, lapsed_text = await env.page(lapsed.id)
-    _, snoozed_text = await env.page(snoozed.id)
+    _, lapsed_data = await env.api(lapsed.id)
+    _, snoozed_data = await env.api(snoozed.id)
 
-    assert "se perdió" in lapsed_text
-    assert f"en pausa hasta el {fmt_date(until, 'es')}" in snoozed_text
+    assert lapsed_data["lapsed"] is True
+    assert snoozed_data["snoozed_until"] == until.isoformat()
 
 
 async def test_sessions_paginate_ten_at_a_time(env):
@@ -170,21 +182,19 @@ async def test_sessions_paginate_ten_at_a_time(env):
     for days_ago in range(12):
         await env.train(member, days_ago, "squat 60 8")
 
-    status, first = await env.page(member.id)
+    status, first = await env.api(member.id)
     assert status == 200
-    assert "12 sesiones" in first
-    assert "página 1 de 2" in first
-    assert "más antiguas ›" in first
+    assert first["session_count"] == 12
+    assert first["page"] == 1 and first["pages"] == 2
+    assert len(first["sessions"]) == 10
 
-    status, second = await env.page(member.id, "?page=2")
+    status, second = await env.api(member.id, "?page=2")
     assert status == 200
-    assert "página 2 de 2" in second
-    assert "‹ más recientes" in second
+    assert second["page"] == 2 and second["pages"] == 2
     # The two pages show different Sessions (the oldest only on page 2).
-    # Anchored to the markup: a bare "4 jul 2026" would also match the
-    # "14 jul 2026" that legitimately sits on page 1.
-    oldest = f"<b>{fmt_date(env.clock.now.date() - timedelta(days=11), 'es')}</b>"
-    assert oldest in second and oldest not in first
+    oldest = (env.clock.now.date() - timedelta(days=11)).isoformat()
+    assert oldest in [sess["on"] for sess in second["sessions"]]
+    assert oldest not in [sess["on"] for sess in first["sessions"]]
 
 
 async def test_last_weight_reads_the_latest_sessions_top_set(env):
@@ -209,12 +219,12 @@ async def test_a_coach_member_ghost_or_other_gyms_member_is_the_same_404(env):
     other_gym = await env.linking.create_gym("Other Gym")
     outsider = await env.linking.link_member(other_gym.id, "Outsider", "telegram", ghost_uid)
 
-    baseline = (await env.page(99999))[1]
+    baseline = (await env.api(99999))[1]
     for url_id in (99999, outsider.id, ghost.id, env.coach.id, "abc"):
-        status, text = await env.page(url_id)
+        status, body = await env.api(url_id)
         assert status == 404
-        assert text == baseline
-        assert "Visible" not in text and BOUNCE_MARKER not in text
+        assert body == baseline
+        assert "Visible" not in str(body) and BOUNCE_MARKER not in str(body)
 
 
 async def test_a_forgotten_members_url_is_the_same_bare_404(env):
@@ -223,19 +233,21 @@ async def test_a_forgotten_members_url_is_the_same_bare_404(env):
     member_id = member.id
     await ForgetStore(env.engine).forget_member(member_id)
 
-    status, text = await env.page(member_id)
+    status, body = await env.api(member_id)
 
     assert status == 404
-    assert text == (await env.page(99999))[1]
-    assert "Olvidado" not in text
+    assert body == (await env.api(99999))[1]
+    assert "Olvidado" not in str(body)
 
 
 async def test_the_member_page_bounces_anonymous_and_demoted_coaches(env):
     member = await env.add_member("Luis")
 
+    # The shell URL bounces without a session; the API answers 401.
     response = await env.client.get(f"/members/{member.id}")
     assert response.status == 200
     assert BOUNCE_MARKER in await response.text()
+    assert (await env.client.get(f"/api/members/{member.id}")).status == 401
 
     cookie = sign_session(env.coach.id, env.gym.id, SECRET, env.clock())
     await env.linking.set_coach(env.coach.id, False)
@@ -243,6 +255,10 @@ async def test_the_member_page_bounces_anonymous_and_demoted_coaches(env):
         f"/members/{member.id}", cookies={SESSION_COOKIE: cookie}
     )
     assert BOUNCE_MARKER in await response.text()
+    api = await env.client.get(
+        f"/api/members/{member.id}", cookies={SESSION_COOKIE: cookie}
+    )
+    assert api.status == 401
 
 
 async def test_roster_rows_carry_the_member_id_the_links_are_built_from(env):
@@ -285,7 +301,10 @@ async def test_a_sets_only_prescription_renders_its_set_count(env):
         [WorkoutSpec(weekday=0, name="Pesado", exercises=[ExerciseSpec("squat", 5, None)])],
     )
 
-    status, text = await env.page(member.id)
+    status, data = await env.api(member.id)
 
     assert status == 200
-    assert "squat — 5" in text
+    # A sets-only prescription: sets carried, reps None — the React scheme
+    # renderer words it "squat — 5" (MemberPage RTL covers the wording).
+    [day] = data["routine"]
+    assert day["exercises"] == [{"name": "squat", "sets": 5, "reps": None}]

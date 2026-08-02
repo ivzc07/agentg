@@ -40,10 +40,12 @@ def _cookie(env):
     return {SESSION_COOKIE: sign_session(env.coach.id, env.gym.id, "test-secret", env.clock())}
 
 
-async def _member_page(env, member_id: int):
-    response = await env.client.get(f"/members/{member_id}", cookies=_cookie(env))
+async def _member_api(env, member_id: int) -> dict:
+    import json
+
+    response = await env.client.get(f"/api/members/{member_id}", cookies=_cookie(env))
     assert response.status == 200
-    return await response.text()
+    return json.loads(await response.text())
 
 
 # --- the roster marker ---
@@ -120,13 +122,17 @@ async def test_the_api_serves_the_marker_on_flagged_rows(env):
 # --- the Member page banner and the tick-off ---
 
 
-async def test_the_member_page_shows_the_open_flag_with_a_tick_off_action(env):
+async def test_the_member_api_shows_the_open_flag_with_its_note_id(env):
     member = await env.add_member("Ana")
     note = await _flag(env, member)
 
-    html = await _member_page(env, member.id)
-    assert "sharp knee pain on squats" in html
-    assert f"/members/{member.id}/flags/{note.id}/tick-off" in html
+    data = await _member_api(env, member.id)
+    [flag] = data["safety_flags"]
+    assert flag["text"] == "sharp knee pain on squats"
+    assert flag["status"] == "open"
+    # The React banner POSTs /api/members/{id}/flags/{note_id}/tick-off
+    # from exactly this id (frontend MemberPage RTL covers the button).
+    assert flag["note_id"] == note.id
 
 
 async def test_tick_off_records_who_and_when_and_keeps_the_note_live(env):
@@ -134,7 +140,7 @@ async def test_tick_off_records_who_and_when_and_keeps_the_note_live(env):
     note = await _flag(env, member)
 
     response = await env.client.post(
-        f"/members/{member.id}/flags/{note.id}/tick-off", cookies=_cookie(env)
+        f"/api/members/{member.id}/flags/{note.id}/tick-off", cookies=_cookie(env)
     )
     assert response.status == 200
 
@@ -148,16 +154,22 @@ async def test_tick_off_records_who_and_when_and_keeps_the_note_live(env):
     row = await env.roster_row(member)  # the roster marker is silenced
     assert not row.has_safety_flag
 
-    html = await _member_page(env, member.id)  # the page shows who saw it
-    assert "Coach Ana" in html
+    data = await _member_api(env, member.id)  # the page shows who saw it
+    [flag] = data["safety_flags"]
+    assert flag["status"] == "acknowledged"
+    assert flag["acknowledged_by"] == "Coach Ana"
 
 
 async def test_an_expired_unacknowledged_flag_reads_expired_never_seen(env):
     member = await env.add_member("Ana")
     await _flag(env, member, days_ago=31)
 
-    html = await _member_page(env, member.id)
-    assert "caducada, nunca vista" in html
+    data = await _member_api(env, member.id)
+    [flag] = data["safety_flags"]
+    # The React banner words this as "caducada, nunca vista" from the
+    # status plus the missing acknowledgement stamp.
+    assert flag["status"] == "expired"
+    assert flag["acknowledged_on"] is None
 
 
 async def test_tick_off_of_a_foreign_gyms_flag_is_the_shared_404(env):
@@ -167,7 +179,7 @@ async def test_tick_off_of_a_foreign_gyms_flag_is_the_shared_404(env):
     foreign = await _notes(env).remember_safety(outsider.id, outsider_gym.id, "dizzy")
 
     response = await env.client.post(
-        f"/members/{member.id}/flags/{foreign.id}/tick-off",
+        f"/api/members/{member.id}/flags/{foreign.id}/tick-off",
         cookies=_cookie(env),
         allow_redirects=False,
     )
@@ -184,7 +196,7 @@ async def test_tick_off_of_another_members_flag_is_the_shared_404(env):
     beas_flag = await _flag(env, bea)
 
     response = await env.client.post(
-        f"/members/{ana.id}/flags/{beas_flag.id}/tick-off",
+        f"/api/members/{ana.id}/flags/{beas_flag.id}/tick-off",
         cookies=_cookie(env),
         allow_redirects=False,
     )
@@ -198,10 +210,9 @@ async def test_tick_off_requires_a_coach_session(env):
     note = await _flag(env, member)
 
     response = await env.client.post(
-        f"/members/{member.id}/flags/{note.id}/tick-off", allow_redirects=False
+        f"/api/members/{member.id}/flags/{note.id}/tick-off", allow_redirects=False
     )
-    assert response.status == 200  # the bounce page, not a tick
-    assert "/dashboard" in await response.text()
+    assert response.status == 401  # unauthorized, not a tick
     stored = await _notes(env).active(member.id)
     assert stored[0].acknowledged_at is None
 
@@ -223,8 +234,13 @@ async def test_the_flag_deep_link_lands_signed_in_on_the_members_page(env):
     cookies = {SESSION_COOKIE: response.cookies[SESSION_COOKIE].value}
     page = await env.client.get(f"/members/{member.id}", cookies=cookies)
     assert page.status == 200
-    html = await page.text()
-    assert "Ana" in html and "sharp knee pain on squats" in html
+    assert 'id="root"' in await page.text()  # the SPA shell, signed in
+    import json
+
+    api = await env.client.get(f"/api/members/{member.id}", cookies=cookies)
+    data = json.loads(await api.text())
+    assert data["name"] == "Ana"
+    assert data["safety_flags"][0]["text"] == "sharp knee pain on squats"
 
 
 async def test_a_magic_link_without_a_next_path_lands_on_the_roster(env):
@@ -239,7 +255,7 @@ async def test_tick_off_rejects_a_non_safety_note(env):
     injury = await _notes(env).remember(member.id, env.gym.id, "injury", "bad knee")
 
     response = await env.client.post(
-        f"/members/{member.id}/flags/{injury.id}/tick-off",
+        f"/api/members/{member.id}/flags/{injury.id}/tick-off",
         cookies=_cookie(env),
         allow_redirects=False,
     )
@@ -255,7 +271,7 @@ async def test_tick_off_rejects_a_retired_flag(env):
     await _notes(env).retire(member.id, note.id)
 
     response = await env.client.post(
-        f"/members/{member.id}/flags/{note.id}/tick-off",
+        f"/api/members/{member.id}/flags/{note.id}/tick-off",
         cookies=_cookie(env),
         allow_redirects=False,
     )
@@ -267,7 +283,7 @@ async def test_tick_off_rejects_an_unknown_note_id(env):
     member = await env.add_member("Ana")
 
     response = await env.client.post(
-        f"/members/{member.id}/flags/999999/tick-off",
+        f"/api/members/{member.id}/flags/999999/tick-off",
         cookies=_cookie(env),
         allow_redirects=False,
     )
@@ -324,7 +340,7 @@ async def test_tick_off_with_foreign_consistent_ids_is_the_shared_404(env):
     foreign = await _notes(env).remember_safety(outsider.id, outsider_gym.id, "dizzy")
 
     response = await env.client.post(
-        f"/members/{outsider.id}/flags/{foreign.id}/tick-off",
+        f"/api/members/{outsider.id}/flags/{foreign.id}/tick-off",
         cookies=_cookie(env),  # our coach, their ids
         allow_redirects=False,
     )
@@ -344,30 +360,11 @@ async def test_an_acknowledged_flag_never_reads_expired(env):
 
     env.clock.advance(timedelta(days=31))
 
-    html = await _member_page(env, member.id)
-    assert "Vista por Coach Ana" in html
-    assert "caducada, nunca vista" not in html
-
-
-async def test_the_tick_off_form_keeps_the_view_it_was_opened_from(env):
-    """A Coach in Split (or Cards) must not bounce to Table after ticking
-    off: the form action carries the view, and the POST redirects back to
-    it (review on PR #120)."""
-    member = await env.add_member("Ana")
-    note = await _flag(env, member)
-
-    html = await (
-        await env.client.get(f"/members/{member.id}?view=split", cookies=_cookie(env))
-    ).text()
-    assert f"/members/{member.id}/flags/{note.id}/tick-off?view=split" in html
-
-    response = await env.client.post(
-        f"/members/{member.id}/flags/{note.id}/tick-off?view=split",
-        cookies=_cookie(env),
-        allow_redirects=False,
-    )
-    assert response.status == 302
-    assert response.headers["Location"] == f"/members/{member.id}?view=split&done=flag_seen"
+    data = await _member_api(env, member.id)
+    [flag] = data["safety_flags"]
+    assert flag["status"] == "acknowledged"  # never "expired"
+    assert flag["acknowledged_by"] == "Coach Ana"
+    assert flag["acknowledged_on"] is not None
 
 
 async def test_two_open_flags_each_get_their_own_tick_off(env):
@@ -378,45 +375,49 @@ async def test_two_open_flags_each_get_their_own_tick_off(env):
     knee = await _flag(env, member, "sharp knee pain on squats")
     dizzy = await _flag(env, member, "dizzy during warmup")
 
-    html = await _member_page(env, member.id)
-    assert "sharp knee pain on squats" in html and "dizzy during warmup" in html
-    assert f"/members/{member.id}/flags/{knee.id}/tick-off" in html
-    assert f"/members/{member.id}/flags/{dizzy.id}/tick-off" in html
+    data = await _member_api(env, member.id)
+    flags = {f["note_id"]: f for f in data["safety_flags"]}
+    assert flags[knee.id]["text"] == "sharp knee pain on squats"
+    assert flags[dizzy.id]["text"] == "dizzy during warmup"
+    assert flags[knee.id]["status"] == "open" and flags[dizzy.id]["status"] == "open"
     assert (await env.roster_row(member)).has_safety_flag
 
     # Tick off ONE: only that note is stamped; the other stays open.
     await env.client.post(
-        f"/members/{member.id}/flags/{knee.id}/tick-off", cookies=_cookie(env)
+        f"/api/members/{member.id}/flags/{knee.id}/tick-off", cookies=_cookie(env)
     )
     stored = {n.id: n for n in await _notes(env).active(member.id)}
     assert stored[knee.id].acknowledged_by_member_id == env.coach.id
     assert stored[dizzy.id].acknowledged_at is None
 
-    html = await _member_page(env, member.id)
-    assert "Vista por Coach Ana" in html  # the ticked one reads acknowledged
-    assert f"/members/{member.id}/flags/{dizzy.id}/tick-off" in html  # still open
+    data = await _member_api(env, member.id)
+    flags = {f["note_id"]: f for f in data["safety_flags"]}
+    assert flags[knee.id]["status"] == "acknowledged"
+    assert flags[knee.id]["acknowledged_by"] == "Coach Ana"
+    assert flags[dizzy.id]["status"] == "open"  # still open
     assert (await env.roster_row(member)).has_safety_flag  # an open flag still marks
 
     # Tick the second: no open flags left, the marker clears.
     await env.client.post(
-        f"/members/{member.id}/flags/{dizzy.id}/tick-off", cookies=_cookie(env)
+        f"/api/members/{member.id}/flags/{dizzy.id}/tick-off", cookies=_cookie(env)
     )
     assert not (await env.roster_row(member)).has_safety_flag
 
 
-async def test_tick_off_redirects_with_the_done_key_and_the_member_page_confirms(env):
-    """Issue #129: the tick-off lands back on the page with a notice."""
+async def test_tick_off_confirms_in_the_response_body(env):
+    """Issue #129's confirmation notice is client-side now: the API answers
+    the acknowledgement in the body and the React banner renders the
+    notice from it (frontend MemberPage RTL covers the notice)."""
+    import json
+
     member = await env.add_member("Ana")
     note = await _flag(env, member)
 
     response = await env.client.post(
-        f"/members/{member.id}/flags/{note.id}/tick-off?view=split",
+        f"/api/members/{member.id}/flags/{note.id}/tick-off",
         cookies=_cookie(env),
         allow_redirects=False,
     )
-    assert response.status == 302
-    assert response.headers["Location"] == f"/members/{member.id}?view=split&done=flag_seen"
-
-    landing = await env.client.get(response.headers["Location"], cookies=_cookie(env))
-    text = await landing.text()
-    assert "notice-ok" in text and "Marcada como vista." in text
+    assert response.status == 200
+    body = json.loads(await response.text())
+    assert body == {"note_id": note.id, "acknowledged": True}

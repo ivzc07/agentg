@@ -81,20 +81,15 @@ from agentg.dashboard_i18n import (
     LANG_COOKIE_TTL_SECONDS,
     LANGS,
     MONTHS,
-    NOTE_KIND_LABELS,
     STRINGS,
     WEEKDAY_INITIALS,
     WEEKDAYS,
     detect_language,
-    fmt_date,
-    fmt_number,
     resolve_lang,
-    verbatim,
 )
 from agentg.dashboard_store import (
     DashboardStore,
     MemberPage,
-    NoteView,
     RosterRow,
     RoutineDayView,
 )
@@ -427,151 +422,6 @@ def _chrome(
 </header>"""
 
 
-def _member_href(member_id: int, view: str) -> str:
-    """Member links carry the view they were opened from, so the way back
-    (or the Split pane) matches where the Coach was."""
-    return f"/members/{member_id}?view={view}"
-
-
-def _initials(name: str) -> str:
-    """The row tile's two-letter monogram."""
-    parts = name.split()
-    return "".join(part[0] for part in parts[:2]).upper() or "?"
-
-
-def _severity_text(row: RosterRow, lang: str) -> str:
-    """The severity sentence beside the away text — the count in words, so
-    urgency is never conveyed by color alone."""
-    if not row.severity:
-        return ""
-    t = STRINGS[lang]
-    label = (
-        t["missed_one"] if row.missed_days == 1 else t["missed_n"].format(n=row.missed_days)
-    )
-    return f'<span class="sev sev-{row.severity}">{label}</span>'
-
-
-def _row_gap_html(has_sessions: bool, gap_days: int, lang: str) -> str:
-    """Gap text with a large bold numeral for roster rows.
-
-    When there is a numeric gap the number renders as ``<span class="numeral">N</span>``
-    so the ``.row .numeral`` CSS rule (gradient, large mono numeral) applies.
-    """
-    t = STRINGS[lang]
-    if not has_sessions:
-        return t["no_sessions_yet"]
-    if gap_days == 0:
-        return t["trained_today"]
-    if gap_days == 1:
-        return f'<span class="numeral">1</span> {t["gap_label_one"]}'
-    return f'<span class="numeral">{gap_days}</span> {t["gap_label"]}'
-
-
-def _roster_row(
-    row: RosterRow, view: str, lang: str, current_member_id: int | None = None
-) -> str:
-    t = STRINGS[lang]
-    tags = ""
-    if row.is_new:
-        tags += f' <span class="tag tag-new">{t["new_tag"]}</span>'
-    if row.snoozed_until is not None:
-        until = fmt_date(row.snoozed_until, lang)
-        tags += f' <span class="tag">{t["snoozed_tag"].format(date=until)}</span>'
-    if row.has_safety_flag:
-        # A marker on the row, never a re-sort (spec-dashboard §Safety flags).
-        tags += f' <span class="tag tag-flag">{t["flag_tag"]}</span>'
-    current = ' aria-current="true"' if row.member_id == current_member_id else ""
-    # One physical line per row: the whole row is the link.
-    return (
-        f'<li class="row" data-name="{escape(row.name)}">'
-        f'<a href="{_member_href(row.member_id, view)}"{current}>'
-        f'<span class="tile" aria-hidden="true">{escape(_initials(row.name))}</span>'
-        f'<span><span class="t"><span class="nm">{escape(row.name)}</span>{tags}</span>'
-        f'<span class="meta"><span class="away">{_row_gap_html(row.has_sessions, row.gap_days, lang)}</span>'
-        f"{_severity_text(row, lang)}</span></span></a></li>"
-    )
-
-
-def _lapsed_section(
-    lapsed: list[RosterRow], view: str, lang: str, current_member_id: int | None = None
-) -> str:
-    """The collapsed tail, identical in the three views: out of the Gap sort
-    and the counters, most-recently-active first (spec-dashboard §The
-    roster)."""
-    if not lapsed:
-        return ""
-    t = STRINGS[lang]
-    items = "".join(_roster_row(row, view, lang, current_member_id) for row in lapsed)
-    return f"""<details id="lapsed">
-<summary>{t["lapsed_tail"].format(n=len(lapsed))}</summary>
-<ul>{items}</ul>
-</details>"""
-
-
-def _countbar(t: dict, count: int = 0) -> str:
-    """The line that names the ordering with an icon chip and a large bold
-    numeral of the active Member count, so the sort is never mysterious."""
-    numeral = f' <span class="numeral">{count}</span>' if count else ""
-    return f'<div class="countbar"><span class="chip-icon" aria-hidden="true">≡</span>{t["sorted_by_gap"]}{numeral}</div>'
-
-
-def _no_matches(t: dict) -> str:
-    """The search's zero-result line; the filter script unhides it."""
-    return f'<p id="no-matches" class="emptystate" hidden>{t["no_matches"]}</p>'
-
-
-def _empty_roster(t: dict) -> str:
-    """A brand-new gym: no Members at all — point at the invite link."""
-    return f"""<div class="emptystate">
-<div class="chip-icon" aria-hidden="true">◎</div>
-<h2>{t["empty_roster_title"]}</h2>
-<p>{t["empty_roster_body"]}</p>
-</div>"""
-
-
-def _roster_document(
-    gym_name: str, view: str, lang: str, next_path: str, count: int | None, body: str, split: bool
-) -> str:
-    t = STRINGS[lang]
-    content = f"""{_chrome(gym_name, t, next_path, lang, view=view, count=count)}
-{body}"""
-    return _document(
-        f"{escape(gym_name)} — Dashboard", lang, content, scripts=SEARCH_SCRIPT
-    )
-
-
-def _split_page(
-    gym_name: str,
-    rows: list[RosterRow],
-    lapsed: list[RosterRow],
-    pane: str,
-    lang: str,
-    next_path: str,
-    current_member_id: int | None = None,
-) -> str:
-    """Split: a permanent left rail with the roster, the right pane holding
-    a Member page or the pick-a-member placeholder. The switcher (and the
-    search) stay visible with a Member open — nothing was left. The rail
-    scrolls on its own, the open Member's row stays marked, and below 900px
-    the two columns stack (no back link: still nothing was left)."""
-    t = STRINGS[lang]
-    if not rows and not lapsed:
-        rail = _empty_roster(t)
-    else:
-        items = "".join(_roster_row(row, "split", lang, current_member_id) for row in rows)
-        rail = f"""{_countbar(t, count=len(rows))}
-<ul id="roster">{items}</ul>
-{_no_matches(t)}
-{_lapsed_section(lapsed, "split", lang, current_member_id)}"""
-    body = f"""<div class="split">
-<div class="rail">
-{rail}
-</div>
-<div class="pane">{pane}</div>
-</div>"""
-    return _roster_document(gym_name, "split", lang, next_path, len(rows), body, split=True)
-
-
 # --- The Member page (issue #99, spec-dashboard §The Member page) ---
 #
 # Read-only apart from the safety-flag banner's Tick off (issue #101); the
@@ -585,55 +435,6 @@ def _not_found() -> web.Response:
     get the same bare 404 — no tombstone, no "this member left" wording, so
     the two exits stay indistinguishable (spec-dashboard §What a Coach sees)."""
     return web.Response(status=404, text="404", content_type="text/plain")
-
-
-def _fmt_load(weight: float | None, unit: str, lang: str) -> str:
-    """One wording for a set's load — Sessions and Últimos pesos never drift.
-    The decimal mark follows the page language."""
-    if weight is None:
-        return STRINGS[lang]["bodyweight"]
-    return f"{fmt_number(weight, lang)} {unit}"
-
-
-def _scheme(sets: int | None, reps: str | None) -> str:
-    if sets is not None and reps is not None:
-        return f" — {sets} × {escape(reps)}"
-    if reps is not None:
-        return f" — {escape(reps)}"
-    if sets is not None:
-        return f" — {sets}"
-    return ""
-
-
-def _verbatim_quote(text: str, lang: str) -> str:
-    """The Member's own words: never translated, carrying a small
-    source-language tag when they differ from the language the Coach reads
-    (spec-dashboard §Language)."""
-    tag = verbatim(detect_language(text), lang)
-    tag_html = f'<span class="langtag">{escape(tag)}</span>' if tag else ""
-    return f'<span class="verbatim">{escape(text)}{tag_html}</span>'
-
-
-def _set_lines(sets: list[tuple[str, float | None, int, str | None]], unit: str, lang: str) -> str:
-    """Collapse a Session's sets into one line per (Exercise, weight):
-    ``bench press 60 kg × 8,8,8`` — warm-ups at another weight stay separate.
-    Set comments render below their line, verbatim, as the Member's words."""
-    lines = []
-    grouped: dict[tuple[str, float | None], list[int]] = {}
-    comments: dict[tuple[str, float | None], list[str]] = {}
-    for name, weight, reps, note in sets:
-        grouped.setdefault((name, weight), []).append(reps)
-        # log_sets stamps the same comment on every rep Set of the line —
-        # quote it once per collapsed line, not once per rep.
-        if note and note not in comments.setdefault((name, weight), []):
-            comments[(name, weight)].append(note)
-    for (name, weight), reps_list in grouped.items():
-        lines.append(
-            f'<div class="set">{escape(name)} {_fmt_load(weight, unit, lang)} × {",".join(str(r) for r in reps_list)}</div>'
-        )
-        for note in comments.get((name, weight), []):
-            lines.append(f'<div class="said">“{_verbatim_quote(note, lang)}”</div>')
-    return "".join(lines)
 
 
 def _ownership_chip(
@@ -651,226 +452,6 @@ def _ownership_chip(
     else:
         label = t["chip_agent"]
     return f'<span class="tag chip">{label}</span>'
-
-
-def _routine_card(view: MemberPage, lang: str, roster_view: str) -> str:
-    t = STRINGS[lang]
-    if not view.routine:
-        body = f'<p class="muted">{t["no_routine"]}</p>'
-    else:
-        days = []
-        for day in view.routine:
-            exercises = "".join(
-                f"<li>{escape(name)}{_scheme(sets, reps)}</li>"
-                for name, sets, reps in day.exercises
-            )
-            days.append(
-                f'<div class="day"><b>{WEEKDAYS[lang][day.weekday]}</b>'
-                f'<span class="dayname">{escape(day.name)}</span><ul>{exercises}</ul></div>'
-            )
-        body = "".join(days)
-    # The Edit journey keeps the view it started from, like tick-off does.
-    chip = f'<span class="icon-chip"><span class="ic-icon">📋</span> {t["routine"]}</span>'
-    header = (
-        f'<h2>{chip} {_ownership_chip(view.coach_authored, view.routine_author, lang, view.routine_preset_name)} '
-        f'<a class="edit" href="/members/{view.member_id}/routine?view={roster_view}">{t["edit"]}</a></h2>'
-    )
-    return f'<section class="card card-elevated">{header}{body}</section>'
-
-
-def _sessions_card(view: MemberPage, lang: str, roster_view: str) -> str:
-    t = STRINGS[lang]
-    items = []
-    for session in view.sessions:
-        count = len(session.sets)
-        if count == 0:
-            headline = t["visit_no_sets"]
-        elif count == 1:
-            headline = t["one_set"]
-        else:
-            headline = t["n_sets"].format(n=count)
-        items.append(
-            f'<div class="sess"><b>{fmt_date(session.on, lang)}</b> '
-            f'<span class="muted">{headline}</span>'
-            f"{_set_lines(session.sets, view.weight_unit, lang)}</div>"
-        )
-    if not items:
-        items.append(f'<p class="muted">{t["no_sessions_yet"]}</p>')
-    nav = ""
-    if view.pages > 1:
-        # Pagination keeps the view the Member page was opened in, so Split
-        # never drops the Coach out of the pane — and lands on #sessions so
-        # paging never teleports the Coach back to the top of the page.
-        newer = (
-            f'<a href="/members/{view.member_id}?page={view.page - 1}&view={roster_view}#sessions">{t["newer_page"]}</a>'
-            if view.page > 1
-            else ""
-        )
-        older = (
-            f'<a href="/members/{view.member_id}?page={view.page + 1}&view={roster_view}#sessions">{t["older_page"]}</a>'
-            if view.page < view.pages
-            else ""
-        )
-        nav = (
-            f'<nav class="pages" aria-label="{escape(t["sessions"], quote=True)}">{newer}'
-            f'<span class="muted">{t["page_x_of_y"].format(page=view.page, pages=view.pages)}</span>{older}</nav>'
-        )
-    chip = f'<span class="icon-chip"><span class="ic-icon">📊</span> {t["sessions"]}</span>'
-    return f'<section class="card card-elevated" id="sessions"><h2>{chip}</h2>{"".join(items)}{nav}</section>'
-
-
-def _weights_card(view: MemberPage, lang: str) -> str:
-    t = STRINGS[lang]
-    if not view.weights:
-        rows = f'<p class="muted">{t["nothing_logged"]}</p>'
-    else:
-        rows = "".join(
-            f'<li class="weight-line"><b>{escape(w.exercise)}</b> '
-            f'<span class="numeral-sm">{_fmt_load(w.weight, view.weight_unit, lang)}</span>'
-            f' × {",".join(str(r) for r in w.reps)}'
-            f' <span class="muted">· {fmt_date(w.on, lang)}</span></li>'
-            for w in view.weights
-        )
-        rows = f"<ul>{rows}</ul>"
-    chip = f'<span class="icon-chip"><span class="ic-icon">⚖️</span> {t["last_weights"]}</span>'
-    return f'<section class="card card-elevated"><h2>{chip}</h2>{rows}</section>'
-
-
-def _note_row(note: NoteView, lang: str) -> str:
-    t = STRINGS[lang]
-    label = NOTE_KIND_LABELS[lang].get(note.kind, note.kind)
-    retired = (
-        f' <span class="muted">· {t["retired_on"].format(date=fmt_date(note.retired_on, lang))}</span>'
-        if note.retired_on is not None
-        else ""
-    )
-    return (
-        f'<div class="note"><span class="tag">{escape(label)}</span> '
-        f"{_verbatim_quote(note.text, lang)}"
-        f' <span class="muted">· {fmt_date(note.on, lang)}</span>{retired}</div>'
-    )
-
-
-def _notes_card(view: MemberPage, lang: str) -> str:
-    t = STRINGS[lang]
-    body = "".join(_note_row(note, lang) for note in view.notes) or (
-        f'<p class="muted">{t["no_notes"]}</p>'
-    )
-    if view.retired_notes:
-        retired = "".join(_note_row(note, lang) for note in view.retired_notes)
-        body += f"""<details class="tail">
-<summary>{t["retired_tail"].format(n=len(view.retired_notes))}</summary>
-{retired}
-</details>"""
-    return f'<section class="card"><h2>{t["notes"]}</h2>{body}</section>'
-
-
-def _safety_banner(view: MemberPage, lang: str, roster_view: str) -> str:
-    """The safety-flag banner above the Member page's columns.
-
-    Open flags carry the Tick off action; acknowledged ones name the Coach
-    and the date (acknowledging is not retiring — the Note stays in the
-    Notes card too); an expired unacknowledged flag stays labelled
-    "expired, never seen" (spec-dashboard §Safety flags). The form keeps
-    the view the page was opened from, so ticking off never bounces a
-    Split or Cards Coach back to Table."""
-    if not view.safety_flags:
-        return ""
-    t = STRINGS[lang]
-    items = []
-    for flag in view.safety_flags:
-        if flag.status == "open":
-            action = (
-                f'<form method="post" '
-                f'action="/members/{view.member_id}/flags/{flag.note_id}/tick-off'
-                f'?view={roster_view}">'
-                f'<button type="submit">{t["tick_off"]}</button></form>'
-            )
-        elif flag.status == "acknowledged":
-            who = flag.acknowledged_by or "—"
-            when = fmt_date(flag.acknowledged_on, lang) if flag.acknowledged_on else ""
-            action = (
-                f'<span class="flag-feedback ack">'
-                f'{t["flag_seen_by"].format(who=escape(who), date=when)}</span>'
-            )
-        else:
-            action = f'<span class="flag-feedback exp">{t["flag_expired_unseen"]}</span>'
-        body = f'<div class="flag-body"><b>{escape(flag.text)}</b>'
-        body += f'<div class="flag-meta">{fmt_date(flag.on, lang)}</div></div>'
-        items.append(f'<div class="flag">{body} {action}</div>')
-    return (
-        f'<section class="card safety-banner"><h2>{t["safety_section"]}</h2>'
-        + "".join(items)
-        + "</section>"
-    )
-
-
-def _member_content(view: MemberPage, lang: str, roster_view: str, notice: str = "") -> str:
-    """The one Member page body, shared by the standalone page and Split's
-    right pane. Status chips live in their own row — never inside the
-    ``<h1>``, where a screen reader would announce them as the page name."""
-    t = STRINGS[lang]
-    tags = ""
-    if view.lapsed:
-        tags += f'<span class="tag">{t["lapsed_tag"]}</span> '
-    if view.snoozed_until is not None:
-        until = fmt_date(view.snoozed_until, lang)
-        tags += f'<span class="tag">{t["snoozed_tag"].format(date=until)}</span> '
-    chips = f'<div class="chips">{tags.rstrip()}</div>' if tags else ""
-    count = t["one_session"] if view.session_count == 1 else t["n_sessions"].format(n=view.session_count)
-    dot = '<span class="dot"></span>'
-    if view.has_sessions:
-        if view.gap_days == 0:
-            gap_html = t["trained_today"]
-        else:
-            n_html = f'<span class="numeral-sm">{view.gap_days}</span>'
-            gap_html = t["one_day_away"] if view.gap_days == 1 else t["days_away"].format(n=n_html)
-    else:
-        gap_html = t["no_sessions_yet"]
-    facts = (
-        f"{t['member_since'].format(date=fmt_date(view.member_since, lang))}{dot}{count}"
-        f"{dot}{gap_html}"
-    )
-    if view.last_session_on is not None:
-        facts += f"{dot}{t['last_session'].format(date=fmt_date(view.last_session_on, lang))}"
-    return f"""<header class="mhead">
-<span class="eyebrow">{t["member_eyebrow"]}</span>
-<h1>{escape(view.name)}</h1>
-{chips}
-<div class="facts">{facts}</div>
-</header>
-{notice}
-{_safety_banner(view, lang, roster_view)}
-<div class="columns">
-<div class="col">
-{_routine_card(view, lang, roster_view)}
-{_sessions_card(view, lang, roster_view)}
-</div>
-<div class="col">
-{_weights_card(view, lang)}
-{_notes_card(view, lang)}
-</div>
-</div>"""
-
-
-def _member_page(
-    gym_name: str, view: MemberPage, roster_view: str, lang: str, next_path: str, notice: str = ""
-) -> str:
-    """The standalone Member page: the switcher (and the search) hide per
-    the spec, but the rest of the chrome stays, and a back link returns to
-    the view the Member was opened from."""
-    t = STRINGS[lang]
-    back = f'<a class="back" href="/?view={roster_view}">{t["back_to_roster"]}</a>'
-    content = f"""{_chrome(gym_name, t, next_path, lang)}
-<div class="member-wrap">
-{back}
-{_member_content(view, lang, roster_view, notice)}
-</div>"""
-    return _document(
-        f"{escape(view.name)} — {escape(gym_name)}",
-        lang,
-        content,
-    )
 
 
 # --- The Routine editor (issue #100, spec-dashboard §Routines & Presets) ---
@@ -1488,39 +1069,6 @@ def build_app(
         view = request.query.get("view", "table")
         return view if view in VIEWS else "table"
 
-    async def member_page(request: web.Request) -> web.Response:
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        try:
-            member_id = int(request.match_info["member_id"])
-        except ValueError:
-            return _not_found()
-        try:
-            page = int(request.query.get("page", "1"))
-        except ValueError:
-            page = 1
-        view = await store.member_page(gym.id, member_id, page=page)
-        if view is None:  # departed, forgotten, or another Gym's: the shared 404
-            return _not_found()
-        lang = _lang_of(request)
-        roster_view = _view_of(request)
-        next_path = _next_path_sans_done(request)
-        notice = _done_notice(request.query.get("done"), STRINGS[lang])
-        if roster_view == "split":
-            # Split keeps the rail and the switcher with a Member open.
-            rows, lapsed = await store.roster(gym.id)
-            pane = _member_content(view, lang, roster_view, notice)
-            text = _split_page(
-                gym.name, rows, lapsed, pane, lang, next_path, current_member_id=member_id
-            )
-        else:
-            text = _member_page(gym.name, view, roster_view, lang, next_path, notice)
-        response = web.Response(text=text, content_type="text/html")
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
-        return response
-
     async def set_language(request: web.Request) -> web.Response:
         """The chrome's EN/ES toggle: persist the pick in the long-lived
         cookie beside the session cookie and land back where the Coach was.
@@ -2036,32 +1584,6 @@ def build_app(
             return _not_found()
         response = web.HTTPFound("/presets?done=preset_retired")
         set_session(response, coach_member.id, gym.id)
-        raise response
-
-    async def tick_off_flag(request: web.Request) -> web.Response:
-        """Tick a safety flag off: stamp who (this Coach) and when.
-
-        Acknowledging is not retiring — the Note stays live for the Agent.
-        Anything unreachable (unknown, foreign, non-safety, retired) gets
-        the shared 404."""
-        coach = await require_coach(request)
-        if coach is None:
-            return web.Response(text=_bounce_page(), content_type="text/html")
-        member, gym = coach
-        try:
-            member_id = int(request.match_info["member_id"])
-            note_id = int(request.match_info["note_id"])
-        except ValueError:
-            return _not_found()
-        note = await store.acknowledge_flag(gym.id, member_id, note_id, member.id)
-        if note is None:
-            return _not_found()
-        # Back to the Member's page, in the view it was opened from — Split
-        # must not drop the Coach out of the pane.
-        view = request.query.get("view", "table")
-        view = view if view in VIEWS else "table"
-        response = web.HTTPFound(f"/members/{member_id}?view={view}&done=flag_seen")
-        set_session(response, member.id, gym.id)  # sliding 90-day refresh
         raise response
 
     async def settings(request: web.Request) -> web.Response:
@@ -2680,7 +2202,17 @@ def build_app(
                 {
                     "on": session.on.isoformat(),
                     "sets": [
-                        {"exercise": name, "weight": weight, "reps": reps, "note": note}
+                        {
+                            "exercise": name,
+                            "weight": weight,
+                            "reps": reps,
+                            "note": note,
+                            # The Member's own words never translate; the
+                            # detected source language lets the React page
+                            # tag foreign quotes ("EN · textual") exactly
+                            # like the server renderer did (#154 parity).
+                            "note_lang": detect_language(note) if note else None,
+                        }
                         for name, weight, reps, note in session.sets
                     ],
                 }
@@ -2701,6 +2233,7 @@ def build_app(
                 {
                     "kind": n.kind,
                     "text": n.text,
+                    "lang": detect_language(n.text),
                     "on": n.on.isoformat(),
                     "retired_on": n.retired_on.isoformat() if n.retired_on else None,
                 }
@@ -2710,6 +2243,7 @@ def build_app(
                 {
                     "kind": n.kind,
                     "text": n.text,
+                    "lang": detect_language(n.text),
                     "on": n.on.isoformat(),
                     "retired_on": n.retired_on.isoformat() if n.retired_on else None,
                 }
@@ -2879,7 +2413,7 @@ def build_app(
     # the React SPA shell; the data lives behind /api/*.
     app.router.add_get("/", spa_shell)
     app.router.add_get("/api/session", api_session)
-    app.router.add_get("/members/{member_id}", member_page)
+    app.router.add_get("/members/{member_id}", spa_shell)
     app.router.add_get("/presets", presets_page)
     app.router.add_post("/presets", preset_create)
     app.router.add_get("/presets/{preset_id}/routine", preset_editor)
@@ -2887,7 +2421,6 @@ def build_app(
     app.router.add_post("/presets/{preset_id}/apply", preset_apply)
     app.router.add_post("/presets/{preset_id}/default", preset_default)
     app.router.add_post("/presets/{preset_id}/retire", preset_retire)
-    app.router.add_post("/members/{member_id}/flags/{note_id}/tick-off", tick_off_flag)
     app.router.add_get("/settings", settings)
     app.router.add_post("/settings/regenerate-invite", regenerate_invite)
     app.router.add_post("/settings/regenerate-coach", regenerate_coach)

@@ -172,7 +172,13 @@ async def test_an_external_redirect_target_is_refused(env):
 # --- what translates ---
 
 
-async def test_the_member_page_translates_chrome_dates_relative_time_and_decimals(env):
+async def test_the_member_shell_and_api_carry_what_the_page_translates(env):
+    """The chrome strings, weekday/month names and the decimal mark ride in
+    the shell's i18n bootstrap; the API serves the raw facts the React page
+    formats with them (frontend i18n + MemberPage RTL cover the formatting
+    itself)."""
+    import json
+
     member = await env.add_member("Luis")
     await env.give_routine(member)
     await env.train(member, 2, "squat 62.5 8,8,6")
@@ -180,20 +186,18 @@ async def test_the_member_page_translates_chrome_dates_relative_time_and_decimal
     en = await env.page(f"/members/{member.id}", headers={"Accept-Language": "en"})
     es = await env.page(f"/members/{member.id}")
 
-    # Chrome and headings.
-    assert "Routine" in en and "Sessions" in en and "Last weights" in en
-    assert "Rutina" in es and "Sesiones" in es and "Últimos pesos" in es
-    # Weekdays.
-    assert "Wednesday" in en and "miércoles" in es
-    # Months in the formatted dates (linking stamps created_at itself; the
-    # gym is UTC, so the row's date is the gym-local one).
-    joined = member.created_at.date()
-    assert f"Member since {fmt_date(joined, 'en')}" in en
-    assert f"Miembro desde {fmt_date(joined, 'es')}" in es
-    # Relative time (the gap number is wrapped in a numeral span).
-    assert 'numeral-sm">2</span> days away' in en and 'numeral-sm">2</span> días sin venir' in es
-    # The decimal mark.
-    assert "62.5 kg" in en and "62,5 kg" in es
+    # Chrome and headings in the bootstrap payload.
+    assert "Routine" in en and "Last weights" in en
+    assert "Rutina" in es and "Últimos pesos" in es
+    # Weekdays and the decimal mark ride along for the formatters.
+    assert '"Wednesday"' in en and '"miércoles"' in es
+    assert '"_decimal_mark": "."' in en and '"_decimal_mark": ","' in es
+
+    # The API serves the raw facts the page formats.
+    data = json.loads(await env.page(f"/api/members/{member.id}"))
+    assert data["member_since"] == member.created_at.date().isoformat()
+    assert data["gap_days"] == 2
+    assert data["weights"][0]["weight"] == 62.5
 
 
 async def test_the_settings_screen_translates(env):
@@ -208,34 +212,45 @@ async def test_the_settings_screen_translates(env):
 
 
 async def test_exercise_and_workout_names_never_translate(env):
+    import json
+
     member = await env.add_member("Luis")
     await env.give_routine(member)  # Workout "Piernas", Exercise "squat"
 
-    en = await env.page(f"/members/{member.id}", headers={"Accept-Language": "en"})
+    # The API serves the names untranslated regardless of the UI language
+    # (the header cannot change them: they are data, not strings).
+    data = json.loads(
+        await env.page(f"/api/members/{member.id}", headers={"Accept-Language": "en"})
+    )
+    [day] = data["routine"]
+    assert day["name"] == "Piernas"
+    assert day["exercises"][0]["name"] == "squat"
 
-    assert "Piernas" in en
-    assert "squat" in en
 
+async def test_notes_carry_their_detected_source_language(env):
+    """The React page renders the "EN · textual" / "ES · as written" tag
+    only on a language mismatch (MemberPage RTL covers the tag); the API's
+    job is to serve the words untranslated plus the detected language."""
+    import json
 
-async def test_notes_carry_a_source_language_tag_only_on_mismatch(env):
     member = await env.add_member("Luis")
     await env.notes.remember(member.id, env.gym.id, "preference", "Hates burpees, will not do them")
     await env.notes.remember(member.id, env.gym.id, "constraint", "Solo puede entrenar por la mañana")
 
-    es = await env.page(f"/members/{member.id}")
-    en = await env.page(f"/members/{member.id}", headers={"Accept-Language": "en"})
+    data = json.loads(await env.page(f"/api/members/{member.id}"))
 
+    by_text = {n["text"]: n for n in data["notes"]}
     # The words themselves never move…
-    assert "Hates burpees, will not do them" in es
-    assert "Solo puede entrenar por la mañana" in en
-    # …and only a foreign-language quote carries the small tag.
-    assert "EN · textual" in es
-    assert "ES · textual" not in es
-    assert "ES · as written" in en
-    assert "EN · as written" not in en
+    assert "Hates burpees, will not do them" in by_text
+    assert "Solo puede entrenar por la mañana" in by_text
+    # …and each carries its detected source language for the tag.
+    assert by_text["Hates burpees, will not do them"]["lang"] == "en"
+    assert by_text["Solo puede entrenar por la mañana"]["lang"] == "es"
 
 
-async def test_set_comments_render_verbatim_with_the_same_tag(env):
+async def test_set_comments_carry_their_detected_source_language(env):
+    import json
+
     member = await env.add_member("Luis")
     await env.training.ensure_seeded()
     now = env.clock.now
@@ -247,18 +262,22 @@ async def test_set_comments_render_verbatim_with_the_same_tag(env):
     await env.training.close_session(member.id)
     env.clock.now = now
 
-    es = await env.page(f"/members/{member.id}")
-    en = await env.page(f"/members/{member.id}", headers={"Accept-Language": "en"})
+    data = json.loads(await env.page(f"/api/members/{member.id}"))
 
-    assert "my shoulder hurt, stopped early" in es
-    assert "EN · textual" in es
-    assert "my shoulder hurt, stopped early" in en
-    assert "EN · as written" not in en
+    [session] = data["sessions"]
+    noted = [st for st in session["sets"] if st["note"]]
+    assert noted, "the set comment must survive serialization"
+    for st in noted:
+        assert st["note"] == "my shoulder hurt, stopped early"
+        assert st["note_lang"] == "en"  # the React page tags from this
 
 
-async def test_a_set_comment_renders_once_no_matter_the_rep_count(env):
-    """log_sets stamps the same note on every rep Set; the collapsed
-    (Exercise, weight) line must still quote it exactly once."""
+async def test_a_repeated_set_comment_is_collapsible_client_side(env):
+    """log_sets stamps the same note on every rep Set; the API serves it
+    per set and the React sessions card deduplicates the quote (the RTL
+    suite covers the once-only rendering)."""
+    import json
+
     member = await env.add_member("Luis")
     await env.training.ensure_seeded()
     await env.training.open_session(member.id, env.gym.id)
@@ -267,9 +286,11 @@ async def test_a_set_comment_renders_once_no_matter_the_rep_count(env):
     )
     await env.training.close_session(member.id)
 
-    text = await env.page(f"/members/{member.id}")
+    data = json.loads(await env.page(f"/api/members/{member.id}"))
 
-    assert text.count("my shoulder hurt, stopped early") == 1
+    [session] = data["sessions"]
+    notes = {st["note"] for st in session["sets"] if st["note"]}
+    assert notes == {"my shoulder hurt, stopped early"}
 
 
 # --- the source-language heuristic itself ---
