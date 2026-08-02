@@ -42,6 +42,12 @@ from agentg.stores import Stores
 
 logger = logging.getLogger(__name__)
 
+# How long a turn waits for the previous turn's compaction to signal before
+# giving up and proceeding.  This only covers the window before after_send
+# starts; once compaction runs it holds the per-identity lock, which
+# serialises the turns regardless.
+COMPACTION_SIGNAL_GRACE_SECONDS = 5.0
+
 
 async def _inject_snapshot(data: CallModelData[MemberContext]) -> ModelInputData:
     """call_model_input_filter: append the per-turn member snapshot as a
@@ -91,12 +97,25 @@ class AgentRuntime:
     # The dashboard door (`/dashboard` -> magic link); None in tests that
     # don't exercise the dashboard.
     dashboard: DashboardDoor | None = None
+    # How long a turn waits for the previous turn's compaction to signal
+    # before proceeding without it (see COMPACTION_SIGNAL_GRACE_SECONDS).
+    compaction_grace_seconds: float = COMPACTION_SIGNAL_GRACE_SECONDS
     # One lock per channel identity so a rapid double message can't interleave
     # turns (or linking steps). Unbounded, but one entry per person who
     # ever messaged this process — fine at this scale.
     _locks: defaultdict[tuple[str, str], asyncio.Lock] = field(
         default_factory=lambda: defaultdict(asyncio.Lock)
     )
+    # One pending-compaction event per identity.  Before processing a turn,
+    # handle_message awaits the previous turn's compaction (if any) outside
+    # the lock — after_send still acquires the lock to compact, so the
+    # event-based wait avoids a deadlock (issue #173 criterion 2).
+    #
+    # after_send is caller-driven: the runtime hands it back and trusts the
+    # channel to run it.  A channel that drops it (or dies first) must never
+    # wedge that Member, so the wait is bounded and the entry is consumed on
+    # read — ordering is a nicety, liveness is not negotiable.
+    _compaction_done: dict[tuple[str, str], asyncio.Event] = field(default_factory=dict)
 
     async def ensure_schema(self) -> None:
         """Create the domain and SDK session tables once at startup."""
@@ -136,7 +155,31 @@ class AgentRuntime:
         )
 
     async def handle_message(self, msg: IncomingMessage) -> Reply:
-        async with self._locks[(msg.channel, msg.channel_user_id)]:
+        key = (msg.channel, msg.channel_user_id)
+        # Await the previous turn's compaction (if any) before acquiring the
+        # lock.  This is done outside the lock so that after_send (which
+        # also acquires the lock) can still make progress (issue #173).
+        #
+        # The wait is bounded: it only covers the window before after_send
+        # starts.  Once compaction is actually running it holds the lock, so
+        # the acquire below serialises us anyway.  If the signal never comes
+        # (a channel that dropped after_send), we proceed with an uncompacted
+        # prompt — the pre-#173 behaviour — rather than wedging the Member.
+        # popping consumes the event so one dropped after_send costs one
+        # grace period, not every turn thereafter, and the dict cannot grow
+        # without bound.
+        prev = self._compaction_done.pop(key, None)
+        if prev is not None and not prev.is_set():
+            try:
+                await asyncio.wait_for(prev.wait(), self.compaction_grace_seconds)
+            except TimeoutError:
+                logger.warning(
+                    "previous turn's compaction never signalled for %s:%s; "
+                    "proceeding (the per-identity lock still serialises it)",
+                    msg.channel,
+                    msg.channel_user_id,
+                )
+        async with self._locks[key]:
             with TurnContext():
                 linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
                 reply = await self.linking.handle(msg, linked)
@@ -149,12 +192,6 @@ class AgentRuntime:
                 if self.dashboard is not None and is_dashboard_command(msg.text):
                     return await self.dashboard.handle(linked, is_group=msg.is_group)
                 session = self.session_for_member(linked.member.id)
-                try:
-                    await maybe_compact(
-                        session, self.summarizer, self.stores.notes, linked.member.id, linked.gym.id
-                    )
-                except Exception:
-                    logger.exception("compaction failed for member %d", linked.member.id)
                 # Awaited: the tool set is scoped to the caller's role, which
                 # needs a Routine lookup (issue #174).
                 context = await self.member_context(linked)
@@ -207,6 +244,19 @@ class AgentRuntime:
                     coach_pings = list(context.coach_pings)
                     channel, user_id = msg.channel, msg.channel_user_id
 
+                    # Compaction only affects the *next* turn's prompt, so it
+                    # runs in after_send instead of in front of the reply --
+                    # that takes a model call off the critical path (#173).
+                    # The next turn waits on this signal (bounded) before it
+                    # takes the lock.  Registered only on the success path, so
+                    # a failed turn leaves no signal for anyone to wait on.
+                    compaction_done = asyncio.Event()
+                    self._compaction_done[key] = compaction_done
+                    summarizer = self.summarizer
+                    notes_store = self.stores.notes
+                    lock = self._locks[key]
+                    gym_id = context.gym_id
+
                     async def after_send() -> None:
                         async def _send_demo(ref) -> None:
                             try:
@@ -226,14 +276,33 @@ class AgentRuntime:
                             except Exception:
                                 logger.exception("deferred coach ping failed")
 
-                        # The rhythm reset is settled here too, isolated from
-                        # the demo/ping fan-out so one failure cannot block it.
-                        await _await_reset()
-                        tasks = [_send_demo(ref) for ref in demo_refs] + [
-                            _run_ping(p) for p in coach_pings
-                        ]
-                        if tasks:
-                            await asyncio.gather(*tasks, return_exceptions=True)
+                        # Whatever happens below, the next turn must be
+                        # released: the signal is set in a finally covering the
+                        # whole body, not just the compaction call (#173).
+                        try:
+                            # The rhythm reset is settled here too, isolated
+                            # from the demo/ping fan-out so one failure cannot
+                            # block it.
+                            await _await_reset()
+                            # Demos and pings go first -- they must not wait on
+                            # the summarizer (timeout=60, num_retries=1 -> up
+                            # to ~2 min).
+                            tasks = [_send_demo(ref) for ref in demo_refs] + [
+                                _run_ping(p) for p in coach_pings
+                            ]
+                            if tasks:
+                                await asyncio.gather(*tasks, return_exceptions=True)
+                            async with lock:
+                                try:
+                                    await maybe_compact(
+                                        session, summarizer, notes_store, member_id, gym_id
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "compaction failed for member %d", member_id
+                                    )
+                        finally:
+                            compaction_done.set()
 
                     return Reply(text, after_send=after_send)
                 except BaseException:
