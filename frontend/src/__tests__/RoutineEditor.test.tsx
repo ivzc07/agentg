@@ -235,11 +235,12 @@ const CSS_NAMED_COLORS: Set<string> = new Set([
   "wheat",
   "whitesmoke",
   "yellowgreen",
-  // transparent / currentColor are already in TEXT_COLOR_INVENTORY as
-  // text-transparent / text-current, but they are also valid CSS named
-  // colours inside text-[…] so include them here too.
+  // transparent / currentColor / inherit are already in TEXT_COLOR_INVENTORY
+  // as text-transparent / text-current / text-inherit, but they are also
+  // valid CSS named colours inside text-[…] so include them here too.
   "transparent",
   "currentcolor",
+  "inherit",
 ]);
 
 /** True when `value` looks like a colour: hex, CSS colour function, CSS
@@ -263,6 +264,8 @@ function looksLikeColor(value: string): boolean {
  *  `text-[font-size:14px]`, and ambiguous bare CSS variables like
  *  `text-[--custom]`. */
 function isArbitraryTextColor(cls: string): boolean {
+  // Strip important prefix before matching (e.g. !text-[color:inherit]).
+  cls = cls.replace(/^!/, "");
   // Match text-[<value>] or text-[<type>:<value>] with an optional
   // /<alpha-modifier>.  Modifiers may be numeric (/50) or arbitrary
   // bracket opacity (/[.5], /[var(--my-opacity)]).
@@ -297,6 +300,8 @@ function stripOpacityModifier(cls: string): string {
  *  Slash-opacity variants (text-bg/50, text-white/50, text-red-500/25) are
  *  classified by stripping the modifier and checking the base class. */
 function isTextColorClass(cls: string): boolean {
+  // Strip important prefix before classifying (e.g. !text-[color:inherit]).
+  cls = cls.replace(/^!/, "");
   if (!cls.startsWith("text-")) return false;
   // Strip slash-opacity modifier before classifying (P2, PR review)
   const base = stripOpacityModifier(cls);
@@ -910,11 +915,18 @@ describe("RoutineEditor", () => {
         expect(isTextColorClass("text-[color:rgb(255,0,0)]")).toBe(true);
         expect(isTextColorClass("text-[color:hsl(0,100%,50%)]")).toBe(true);
         expect(isTextColorClass("text-[color:oklch(0.5_0.2_180)]")).toBe(true);
+        // Typed color: inherit / currentColor (P2, fix-r5)
+        expect(isTextColorClass("text-[color:inherit]")).toBe(true);
+        expect(isTextColorClass("text-[color:currentColor]")).toBe(true);
+        expect(isTextColorClass("text-[color:CurrentColor]")).toBe(true);
       });
 
       it("recognises typed arbitrary-value colour classes with alpha modifier", () => {
         expect(isTextColorClass("text-[color:#fff]/50")).toBe(true);
         expect(isTextColorClass("text-[color:var(--foreground)]/75")).toBe(true);
+        // Typed color: inherit / currentColor with alpha modifier (P2, fix-r5)
+        expect(isTextColorClass("text-[color:inherit]/50")).toBe(true);
+        expect(isTextColorClass("text-[color:currentColor]/75")).toBe(true);
       });
 
       it("recognises arbitrary-value colour classes", () => {
@@ -948,16 +960,21 @@ describe("RoutineEditor", () => {
         // Case-insensitive
         expect(isTextColorClass("text-[RebeccaPurple]")).toBe(true);
         expect(isTextColorClass("text-[CornflowerBlue]")).toBe(true);
-        // transparent / currentColor
+        // transparent / currentColor / inherit
         expect(isTextColorClass("text-[transparent]")).toBe(true);
         expect(isTextColorClass("text-[currentcolor]")).toBe(true);
         expect(isTextColorClass("text-[currentColor]")).toBe(true);
+        expect(isTextColorClass("text-[inherit]")).toBe(true);
+        expect(isTextColorClass("text-[Inherit]")).toBe(true);
       });
 
       it("recognises CSS named-colour arbitrary values with alpha modifier", () => {
         expect(isTextColorClass("text-[red]/50")).toBe(true);
         expect(isTextColorClass("text-[rebeccapurple]/25")).toBe(true);
         expect(isTextColorClass("text-[cornflowerblue]/[.5]")).toBe(true);
+        // inherit with alpha modifier (P2, fix-r5)
+        expect(isTextColorClass("text-[inherit]/50")).toBe(true);
+        expect(isTextColorClass("text-[inherit]/[.5]")).toBe(true);
       });
 
       it("rejects non-colour bare words in arbitrary values", () => {
@@ -970,6 +987,10 @@ describe("RoutineEditor", () => {
         // Bogus bare word that isn't a valid CSS colour
         expect(isTextColorClass("text-[squat]")).toBe(false);
         expect(isTextColorClass("text-[bench]")).toBe(false);
+        // Typed non-colour property with a valid colour value is not a
+        // colour utility (P2, fix-r5)
+        expect(isTextColorClass("text-[line-height:inherit]")).toBe(false);
+        expect(isTextColorClass("text-[font-weight:inherit]")).toBe(false);
       });
 
       it("rejects typography / non-colour text-* utilities", () => {
@@ -1114,6 +1135,73 @@ describe("RoutineEditor", () => {
       expect(colorClasses3).toHaveLength(2);
       expect(colorClasses3).toContain("text-bg");
       expect(colorClasses3).toContain("text-[red]/50");
+    });
+
+    // P2, fix-r5: typed arbitrary colour forms with important prefix or
+    // inherit / currentColor values must be recognised as colour utilities.
+    describe("important-prefixed and inherit/currentColor typed arbitrary values", () => {
+      it("recognises important-prefixed colour utilities", () => {
+        // Important-prefixed standard tokens
+        expect(isTextColorClass("!text-white")).toBe(true);
+        expect(isTextColorClass("!text-bg")).toBe(true);
+        expect(isTextColorClass("!text-red-500")).toBe(true);
+        // Important-prefixed slash-opacity
+        expect(isTextColorClass("!text-white/50")).toBe(true);
+        expect(isTextColorClass("!text-bg/[.5]")).toBe(true);
+        // Important-prefixed arbitrary-value colours
+        expect(isTextColorClass("!text-[#fff]")).toBe(true);
+        expect(isTextColorClass("!text-[red]")).toBe(true);
+        expect(isTextColorClass("!text-[#fff]/50")).toBe(true);
+        // Important-prefixed typed arbitrary colour values (the motivating case)
+        expect(isTextColorClass("!text-[color:inherit]")).toBe(true);
+        expect(isTextColorClass("!text-[color:currentColor]")).toBe(true);
+        expect(isTextColorClass("!text-[color:#fff]")).toBe(true);
+        expect(isTextColorClass("!text-[color:var(--foreground)]")).toBe(true);
+        expect(isTextColorClass("!text-[color:rgb(255,0,0)]")).toBe(true);
+        // Important-prefixed typed arbitrary colour with alpha modifier
+        expect(isTextColorClass("!text-[color:inherit]/50")).toBe(true);
+        expect(isTextColorClass("!text-[color:currentColor]/75")).toBe(true);
+      });
+
+      it("rejects important-prefixed non-colour utilities", () => {
+        expect(isTextColorClass("!text-[14px]")).toBe(false);
+        expect(isTextColorClass("!text-[font-size:14px]")).toBe(false);
+        expect(isTextColorClass("!text-left")).toBe(false);
+        expect(isTextColorClass("!text-sm")).toBe(false);
+        // Important-prefixed typed non-colour still rejected
+        expect(isTextColorClass("!text-[font-weight:inherit]")).toBe(false);
+        expect(isTextColorClass("!text-[line-height:inherit]")).toBe(false);
+      });
+
+      it("rejects conflicting important-prefixed colour tokens alongside text-bg", () => {
+        // Important-prefixed typed arbitrary colour must be flagged
+        const tokens = classTokens("text-bg !text-[color:inherit] bg-magenta");
+        const colorClasses = tokens.filter(isTextColorClass);
+        expect(colorClasses).toHaveLength(2);
+        expect(colorClasses).toContain("text-bg");
+        expect(colorClasses).toContain("!text-[color:inherit]");
+
+        // Important-prefixed named colour
+        const tokens2 = classTokens("text-bg !text-[red] bg-magenta");
+        const colorClasses2 = tokens2.filter(isTextColorClass);
+        expect(colorClasses2).toHaveLength(2);
+        expect(colorClasses2).toContain("text-bg");
+        expect(colorClasses2).toContain("!text-[red]");
+
+        // Important-prefixed standard token
+        const tokens3 = classTokens("text-bg !text-white bg-magenta");
+        const colorClasses3 = tokens3.filter(isTextColorClass);
+        expect(colorClasses3).toHaveLength(2);
+        expect(colorClasses3).toContain("text-bg");
+        expect(colorClasses3).toContain("!text-white");
+
+        // Important-prefixed with alpha modifier
+        const tokens4 = classTokens("text-bg !text-[color:inherit]/50 bg-magenta");
+        const colorClasses4 = tokens4.filter(isTextColorClass);
+        expect(colorClasses4).toHaveLength(2);
+        expect(colorClasses4).toContain("text-bg");
+        expect(colorClasses4).toContain("!text-[color:inherit]/50");
+      });
     });
   });
 
