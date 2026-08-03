@@ -308,6 +308,23 @@ async def _link_member_in_session(
             )
         )
     else:
+        # Gym switch: lock the MemberChannel row to serialize with
+        # _authorized_send so a concurrent safety-flag delivery sees
+        # a consistent channel identity (P1 r8).  Also lock the old
+        # Member row — if the old identity was a Coach, _authorized_send
+        # may be holding it.
+        await db.execute(
+            select(MemberChannel)
+            .where(MemberChannel.id == pointer.id)
+            .with_for_update()
+        )
+        old_member_id = pointer.member_id
+        if old_member_id is not None:
+            await db.execute(
+                select(Member)
+                .where(Member.id == old_member_id)
+                .with_for_update()
+            )
         pointer.member_id = member.id
         pointer.gym_id = gym_id
     return member
@@ -458,6 +475,12 @@ class LinkingStore:
 
     async def set_coach(self, member_id: int, is_coach: bool = True) -> None:
         async with self._sessions() as db:
+            # Lock the Member row to serialize with _authorized_send
+            # (delivery path) so a concurrent safety-flag delivery
+            # sees a consistent coach status (P1 r8).
+            await db.execute(
+                select(Member).where(Member.id == member_id).with_for_update()
+            )
             # Lock the Gym row to serialize with coach eligibility queries
             # so a concurrent safety flag sees a consistent coach set (P1 #3).
             member = await db.get(Member, member_id)

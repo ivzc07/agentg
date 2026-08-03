@@ -421,12 +421,13 @@ class OutboxWorker:
     async def _deliver_one(self, job: SafetyOutboxJob) -> None:
         """Send one outbox job: heads-up + (optionally) magic link.
 
-        The Gym row is locked (SELECT ... FOR UPDATE) before authorization
-        so no Gym switch, demotion, or Forget-me can repoint authorization
-        between the final check and the actual send.  ``set_coach`` and
-        ``link_member`` (gym switch) also lock the Gym row, so they
-        serialize with delivery — the authorization is stable through the
-        entire send (P1 #2 r5).
+        Narrow locks (Coach Member, MemberChannel, Note, job) are acquired
+        before authorization so no demotion, gym-switch, or Forget-me can
+        repoint authorization between the final check and the actual send.
+        ``set_coach``, ``link_member`` (gym switch), and ``ForgetStore``
+        acquire the same narrow locks, so they serialize with delivery —
+        the authorization is stable through the entire send (P1 #2 r5,
+        P1 r8).
 
         The job and note are re-verified before sending: if the Note was
         deleted by forget-me between claim and delivery the job is failed
@@ -474,9 +475,9 @@ class OutboxWorker:
                         job.coach_member_id,
                     )
 
-            # Send heads-up with Gym row locking — the lock serializes
+            # Send heads-up with narrow row locking — the lock serializes
             # with set_coach and link_member so authorization is stable
-            # through the entire send (P1 #2 r5).
+            # through the entire send (P1 #2 r5, P1 r8).
             headsup_failed: str | None = None
             async with self._semaphore:
                 # Pre-verify the job is still sending before authorizing.
@@ -503,9 +504,9 @@ class OutboxWorker:
                 )
 
             if link is not None:
-                # Re-authorize with Gym lock for the link send too — the
-                # lock serializes with set_coach so a demotion cannot land
-                # between authorization and link send (P1 #2 r5).
+                # Re-authorize with narrow locks for the link send too —
+                # the locks serialize with set_coach so a demotion cannot
+                # land between authorization and link send (P1 #2 r5).
                 link_failed: str | None = None
                 async with self._semaphore:
                     if not await self._job_still_sending(job.id):
@@ -550,14 +551,20 @@ class OutboxWorker:
         self, job: SafetyOutboxJob, text: str, *,
         disable_preview: bool = True, protect_content: bool = False,
     ) -> str | None:
-        """Lock the Gym and MemberChannel rows, check authorization, and send.
+        """Lock the Coach Member, MemberChannel, Note, and job rows, check
+        authorization, and send.
 
-        The Gym row lock serializes with ``set_coach`` (which also locks
-        the Gym row via ``SELECT ... FOR UPDATE``).  The MemberChannel row
-        lock serializes with ``link_member`` (gym switch), which repoints
-        the same MemberChannel row.  Together they ensure authorization is
-        stable through the entire send — no demotion or gym-switch can
-        interleave between the check and the notifier call (P1 #2 r5).
+        Narrow, targeted locks replace the broad Gym row lock so network
+        delivery cannot block a concurrent ``flag_to_coach_action`` which
+        locks the Gym row briefly during eligibility resolution (P1 r8).
+
+        * Coach Member row lock serializes with ``set_coach`` (demotion).
+        * MemberChannel row lock serializes with ``link_member`` (gym switch).
+        * Note + job locks serialize with ``ForgetStore`` (forget-me).
+
+        Together they ensure authorization is stable through the entire send
+        — no demotion, gym-switch, or forget-me can interleave between the
+        check and the notifier call.
 
         Returns ``None`` on success, or an error code string on failure.
         """
@@ -566,12 +573,16 @@ class OutboxWorker:
         conn = await self._outbox._engine.connect()
         try:
             await conn.begin()
-            # Lock the Gym row — serializes with set_coach's
-            # ``SELECT ... FOR UPDATE`` on the same row.
-            result = await conn.execute(
-                sa_select(Gym).where(Gym.id == job.gym_id).with_for_update()
-            )
-            if result.first() is None:
+            # Lock the Coach Member row — serializes with set_coach's
+            # ``SELECT ... FOR UPDATE`` on the same Member row.
+            member_row = (
+                await conn.execute(
+                    sa_select(Member)
+                    .where(Member.id == job.coach_member_id)
+                    .with_for_update()
+                )
+            ).first()
+            if member_row is None:
                 await conn.rollback()
                 return "coach no longer reachable in this gym"
 
@@ -586,10 +597,11 @@ class OutboxWorker:
                 .with_for_update()
             )
 
-            # Lock and re-check the job and note while holding the Gym
-            # lock — serializes with ForgetStore which also locks the Gym
-            # row before deleting.  Together they guarantee no notification
-            # can send after the note/job are deleted (P1 #1 r6).
+            # Lock and re-check the job and note — serializes with
+            # ForgetStore which also locks the Member, MemberChannel,
+            # Note, and job rows before deleting.  Together they guarantee
+            # no notification can send after the note/job are deleted
+            # (P1 #1 r6).
             job_row = (
                 await conn.execute(
                     sa_select(SafetyOutboxJob)
@@ -641,9 +653,9 @@ class OutboxWorker:
 
             channel, channel_user_id = row.channel, row.channel_user_id
 
-            # Send while holding both locks — they prevent concurrent
-            # set_coach / link_member from repointing authorization
-            # (P1 #2 r5).
+            # Send while holding the narrow locks — they prevent concurrent
+            # set_coach / link_member / forget-me from repointing
+            # authorization (P1 #2 r5, P1 r8).
             try:
                 await asyncio.wait_for(
                     self._notifier.send(

@@ -1001,7 +1001,7 @@ async def test_retry_includes_backoff_delay(env, monkeypatch):
 
 
 async def test_transient_db_error_is_retried_not_permanently_failed(env, monkeypatch):
-    """When the Gym-locked authorization raises a transient DB error, the
+    """When the narrow-locked authorization raises a transient DB error, the
     job is retried (reset_to_retry) rather than permanently failed. The
     original code's outer catch-all called mark_failed — this test proves
     we now retry."""
@@ -2337,11 +2337,11 @@ async def test_toctou_forget_me_between_precheck_and_send_blocked(env, monkeypat
 
 
 async def test_authorized_send_locks_and_sends(env, monkeypatch):
-    """_authorized_send locks the Gym and MemberChannel rows, checks
+    """_authorized_send locks the Coach Member and MemberChannel rows, checks
     authorization on the locked connection, sends, and releases the
     lock on commit.  The authorization is stable because no concurrent
     set_coach or link_member can acquire the same locks during the send
-    (P1 #2 r5).
+    (P1 #2 r5, P1 r8).
 
     Instruments _authorized_send to verify the lock acquire / auth check
     / send / release sequence."""
@@ -2954,11 +2954,12 @@ async def test_no_double_delay_on_retry_through_restart(env):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-async def test_forget_me_gym_lock_serializes_with_delivery(env, monkeypatch):
-    """Forget-me locks the Gym row before deleting notes/jobs, and
-    _authorized_send locks Gym + re-checks the job/note on the locked
-    connection.  Together they guarantee no notification can send after
-    the note/job are deleted (P1 #1 r6).
+async def test_forget_me_narrow_locks_serialize_with_delivery(env, monkeypatch):
+    """Forget-me locks the Member and MemberChannel rows before deleting
+    notes/jobs, and _authorized_send locks the same narrow rows +
+    re-checks the job/note on the locked connection.  Together they
+    guarantee no notification can send after the note/job are deleted
+    (P1 #1 r6, P1 r8).
 
     This test forces the exact interleaving where forget-me runs between
     _job_still_sending and the _authorized_send lock acquisition, proving
@@ -2993,9 +2994,10 @@ async def test_forget_me_gym_lock_serializes_with_delivery(env, monkeypatch):
 
     # Barriers to force the race:
     # 1. Worker passes _job_still_sending (returns True).
-    # 2. Forget-me acquires Gym lock, updates jobs to failed, deletes notes.
-    # 3. Worker tries _authorized_send, acquires Gym lock,
-    #    re-checks job/note → they're gone → bails.
+    # 2. Forget-me acquires Member + MemberChannel locks, updates jobs to
+    #    failed, deletes notes.
+    # 3. Worker tries _authorized_send, acquires Member + MemberChannel
+    #    locks, re-checks job/note → they're gone → bails.
     pre_check_passed = asyncio.Event()
     forget_done = asyncio.Event()
 
@@ -3022,9 +3024,9 @@ async def test_forget_me_gym_lock_serializes_with_delivery(env, monkeypatch):
     await pre_check_passed.wait()
 
     # Now run the REAL ForgetStore (not manual SQL) while the worker is
-    # blocked at the barrier.  The ForgetStore locks the Gym row before
-    # deleting — it will complete because the worker hasn't acquired
-    # the Gym lock yet.
+    # blocked at the barrier.  The ForgetStore locks the Member and
+    # MemberChannel rows before deleting — it will complete because the
+    # worker hasn't acquired the narrow locks yet.
     forget = ForgetStore(env.engine)
     await forget.forget_member(env.member_id)
     forget_done.set()
@@ -3039,5 +3041,190 @@ async def test_forget_me_gym_lock_serializes_with_delivery(env, monkeypatch):
     # mark_failed() or a silent return.
     assert env.notifier.sent == [], (
         "worker must not send after forget-me deletes note while "
-        "holding the Gym lock"
+        "holding the narrow locks"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Round 8 — P1: hung notifier does not block safety-flag in same Gym
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class GateNotifier:
+    """A notifier whose send blocks on an asyncio.Event — the test controls
+    exactly when (and if) the send unblocks."""
+
+    def __init__(self):
+        self.sent: list[tuple[str, str, str, bool, bool]] = []
+        self._gate = asyncio.Event()
+
+    async def send(self, channel, channel_user_id, text,
+                   disable_preview=False, protect_content=False):
+        await self._gate.wait()
+        self.sent.append(
+            (channel, channel_user_id, text, disable_preview, protect_content),
+        )
+
+
+async def test_hung_notifier_does_not_block_flag_in_same_gym(env, monkeypatch):
+    """When a notifier.send hangs during delivery, a concurrent
+    flag_to_coach_action in the same Gym completes promptly — the narrow
+    locks in _authorized_send (Coach Member + MemberChannel + Note + job)
+    do not block the flag path which only locks Gym briefly during
+    eligibility resolution (P1 r8).
+
+    Sequence:
+    1. Create a safety flag → outbox jobs created.
+    2. Start delivery with a notifier that hangs on send.
+    3. While delivery is hung, a second Member flags in the same Gym.
+    4. The second flag completes promptly — Note + jobs committed.
+    5. Unblock the notifier; delivery completes."""
+    import agentg.safety_outbox as outbox_module
+
+    # Patch SEND_TIMEOUT_SECONDS high so the timeout doesn't interfere.
+    monkeypatch.setattr(outbox_module, "SEND_TIMEOUT_SECONDS", 999)
+
+    gate = GateNotifier()
+
+    # Create a second Member in the same Gym.
+    member2 = await env.linking.link_member(
+        env.gym_id, "Bob", "telegram", "100",
+    )
+
+    # First flag — from Ana.
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Claim the job so drain_once will deliver it.
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=gate,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+
+    # Start delivery — it will hang inside notifier.send (waiting on gate).
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+
+    # Give the delivery task time to enter the notifier.send call.
+    await asyncio.sleep(0.1)
+
+    # Now the second Member (Bob) flags — this must NOT block.
+    start = time.monotonic()
+    note2, jobs2 = await env.outbox.create_note_and_jobs(
+        member_id=member2.id,
+        gym_id=env.gym_id,
+        text="shoulder pain",
+        member_name="Bob",
+        member_is_coach=False,
+        linking_store=env.linking,
+        exclude_member_id=member2.id,
+    )
+    elapsed = time.monotonic() - start
+
+    # The flag must complete promptly — the hung delivery does NOT
+    # block flag_to_coach_action because they lock different rows:
+    # delivery locks Coach Member + MemberChannel + Note + job,
+    # flag locks Gym (briefly during eligibility).
+    assert elapsed < 2.0, (
+        f"flag_to_coach_action blocked for {elapsed:.2f}s "
+        "while notifier was hung — Gym lock contention"
+    )
+    assert note2.kind == "safety"
+    assert len(jobs2) == 2  # both coaches
+
+    # The pending flag jobs should be in the DB.
+    async with env.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text("SELECT COUNT(*) FROM safety_outbox_jobs WHERE note_id = :nid"),
+                {"nid": note2.id},
+            )
+        ).scalar()
+    assert rows == 2
+
+    # Now unblock the notifier.
+    gate._gate.set()
+    await deliver_task
+
+    # Ana's delivery completed.
+    assert len(gate.sent) >= 2  # heads-up + link for Coach Sam
+
+
+async def test_hung_notifier_does_not_block_flag_in_other_gym(env, monkeypatch):
+    """Cross-Gym isolation: when a notifier hangs during delivery for
+    Gym A, a flag in Gym B completes promptly — the locks are on
+    different rows entirely (P1 r8)."""
+    import agentg.safety_outbox as outbox_module
+
+    monkeypatch.setattr(outbox_module, "SEND_TIMEOUT_SECONDS", 999)
+
+    gate = GateNotifier()
+
+    # Create a second Gym with its own Member and Coach.
+    gym2 = await env.linking.create_gym("Other Gym")
+    member_b = await env.linking.link_member(gym2.id, "Eve", "telegram", "200")
+    coach_b = await env.linking.link_member(gym2.id, "Coach B", "telegram", "201")
+    await env.linking.set_coach(coach_b.id)
+
+    # Create a flag in Gym 1.
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=gate,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+
+    # Start delivery to Gym 1's Coach — hangs on notifier.send.
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+    await asyncio.sleep(0.1)
+
+    # Flag in Gym 2 — uses Gym 2's outbox, completely independent.
+    from agentg.safety_outbox import SafetyOutbox
+    outbox2 = SafetyOutbox(env.engine)
+
+    start = time.monotonic()
+    note2, jobs2 = await outbox2.create_note_and_jobs(
+        member_id=member_b.id,
+        gym_id=gym2.id,
+        text="elbow pain",
+        member_name="Eve",
+        member_is_coach=False,
+        linking_store=env.linking,
+        exclude_member_id=member_b.id,
+    )
+    elapsed = time.monotonic() - start
+
+    # Cross-Gym flag must complete immediately — different Gym rows.
+    assert elapsed < 1.0, (
+        f"cross-gym flag blocked for {elapsed:.2f}s"
+    )
+    assert note2.kind == "safety"
+    assert len(jobs2) == 1  # only Coach B
+
+    # Unblock the original delivery.
+    gate._gate.set()
+    await deliver_task
