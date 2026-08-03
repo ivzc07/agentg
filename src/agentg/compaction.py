@@ -54,7 +54,12 @@ class SessionLike(Protocol):  # the SDK session surface compaction touches
 _SQLITE_LOCK_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8)
 
 
-async def _replace_items_atomically(session: Any, new_items: list[Any]) -> None:
+async def _replace_items_atomically(
+    session: Any,
+    new_items: list[Any],
+    *,
+    fence_check: Callable[[Any], Awaitable[bool]] | None = None,
+) -> None:
     """Replace all session items with *new_items* in a single transaction.
 
     The SDK's ``clear_session`` + ``add_items`` pattern runs in two separate
@@ -62,6 +67,10 @@ async def _replace_items_atomically(session: Any, new_items: list[Any]) -> None:
     conversation.  This helper uses the engine directly to delete old rows
     and insert new ones atomically — either both happen or neither does
     (issue #165).
+
+    When *fence_check* is provided it runs inside the atomic transaction
+    BEFORE any write — if it returns False the entire operation is a no-op
+    and the session rows are left untouched (fix-r23 P1 #2).
     """
     import asyncio
 
@@ -81,6 +90,13 @@ async def _replace_items_atomically(session: Any, new_items: list[Any]) -> None:
 
     async def _replace() -> None:
         async with engine.begin() as conn:
+            # fix-r23 P1 #2: verify the fence inside the same transaction
+            # that writes — a concurrent confirmation cannot clear history
+            # then interleave before our write recreates it.
+            if fence_check is not None:
+                if not await fence_check(conn):
+                    return  # Fence lost — no-op, rollback
+
             # Idempotent session-row upsert adapted from the SDK's add_items
             # (check-then-insert with IntegrityError catch — portable across
             # SQLite and Postgres without dialect-specific on_conflict syntax).
@@ -170,7 +186,15 @@ async def maybe_compact(
     notes: NotesStore,
     member_id: int,
     gym_id: int,
+    *,
+    fence_check: Callable[[Any], Awaitable[bool]] | None = None,
 ) -> bool:
+    """Compact session history when above the token threshold.
+
+    When *fence_check* is provided it is forwarded to
+    ``_replace_items_atomically`` so the compaction write is fenced
+    atomically with the lease check (fix-r23 P1 #2).
+    """
     items = await session.get_items()
     if estimate_tokens(items) <= COMPACT_AT_TOKENS:
         return False
@@ -216,8 +240,9 @@ async def maybe_compact(
     new_items = old_summaries + [summary_item] + recent
     # Single-transaction replacement: the old items are only deleted after
     # the new items are committed — a crash cannot leave an empty session
-    # (issue #165).
-    await _replace_items_atomically(session, new_items)
+    # (issue #165).  When fence_check is provided the lease token is
+    # verified inside the same transaction (fix-r23 P1 #2).
+    await _replace_items_atomically(session, new_items, fence_check=fence_check)
     return True
 
 

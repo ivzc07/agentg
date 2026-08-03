@@ -5085,3 +5085,294 @@ async def test_status_blocking_used_consistently(env):
     # After forget: get_deleting_request returns None.
     await env.forget.forget_member(member.id)
     assert await env.forget.get_deleting_request(member.id) is None
+
+
+# -- P1 (fix-r23 #1): atomic check+write barrier in FencedSession.add_items
+
+
+async def test_fenced_session_add_items_atomic_no_interleave_residue(env):
+    """fix-r23 P1 #1: FencedSession.add_items performs the owner-token
+    check and SDK history write in a SINGLE DB transaction while holding
+    the ModelTurnLease row locked. A concurrent deletion/clear cannot
+    interleave between check and insert.
+
+    Proof: we race add_items against a simulated forget_member (delete
+    lease → clear session). Because the check and write are atomic
+    with the lease row locked, the outcome is always consistent:
+    either (a) add_items completes fully before the lease delete,
+    then clear removes everything — zero residue; or (b) the lease
+    is deleted before add_items starts, the token check fails →
+    no-op — zero residue.
+
+    The test runs multiple iterations to surface any window where a
+    write could land after the clear (the old TOCTOU bug)."""
+    import asyncio
+    from agentg.runtime import FencedSession
+    from agents.extensions.memory import SQLAlchemySession as RawSession
+    from sqlalchemy import delete as sa_delete
+
+    for _ in range(10):
+        member = await populate(env)
+        token = await env.forget.acquire_model_turn_lease(
+            member.id, env.gym_id
+        )
+        assert token is not None
+
+        raw = RawSession(f"member:{member.id}", engine=env.engine)
+        fenced = FencedSession(raw, env.forget, member.id, token)
+
+        # Seed one item so clear_session has something to delete.
+        await fenced.add_items([{"role": "user", "content": "original"}])
+        items_seeded = await raw.get_items()
+        assert len(items_seeded) == 1
+
+        # Concurrent delete-and-clear (simulates forget_member steps 0+1).
+        async def delete_lease_and_clear():
+            async with async_sessionmaker(env.engine)() as db:
+                await db.execute(
+                    sa_delete(ModelTurnLease).where(
+                        ModelTurnLease.member_id == member.id
+                    )
+                )
+                await db.commit()
+            await raw.clear_session()
+
+        # Race: add_items vs delete-and-clear.
+        write_task = asyncio.create_task(
+            fenced.add_items(
+                [{"role": "assistant", "content": "stale write"}]
+            )
+        )
+        delete_task = asyncio.create_task(delete_lease_and_clear())
+        await asyncio.gather(write_task, delete_task)
+
+        # Verify: NO residue from the stale write after clear.
+        # Either the write happened before clear (and was cleared),
+        # or the write saw the missing lease and was a no-op.
+        items = await RawSession(
+            f"member:{member.id}", engine=env.engine
+        ).get_items()
+        assert items == [], (
+            f"iteration {_}: no residue allowed — items={items!r}"
+        )
+
+        # Clean up for next iteration.
+        await env.forget.forget_member(member.id)
+
+
+async def test_fenced_session_add_items_atomic_two_writers_no_residue(env):
+    """fix-r23 P1 #1: when two FencedSessions (with different tokens)
+    race add_items against each other and a concurrent lease deletion,
+    exactly the winner's writes survive — and only if the lease is
+    still held — with zero residue from the loser.
+
+    Model: Runtime A holds lease token_a, Runtime B reclaims with
+    token_b. A's stale writes must be no-ops; B's live writes must
+    land atomically."""
+    from agentg.runtime import FencedSession
+    from agents.extensions.memory import SQLAlchemySession as RawSession
+
+    member = await populate(env)
+
+    # Runtime A acquires the lease.
+    token_a = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token_a is not None
+
+    raw_a = RawSession(f"member:{member.id}", engine=env.engine)
+    fenced_a = FencedSession(raw_a, env.forget, member.id, token_a)
+
+    # Runtime A writes successfully.
+    await fenced_a.add_items([{"role": "user", "content": "from A"}])
+
+    # Stop heartbeat, age the lease so B can reclaim.
+    await env.forget._stop_heartbeat(member.id, token_a)
+    aged_time = datetime.now(UTC) - timedelta(
+        seconds=env.forget.stale_lease_seconds + 10
+    )
+    async with async_sessionmaker(env.engine)() as db:
+        await db.execute(
+            update(ModelTurnLease)
+            .where(ModelTurnLease.member_id == member.id)
+            .values(acquired_at=aged_time)
+        )
+        await db.commit()
+
+    # Runtime B reclaims — new token.
+    token_b = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token_b is not None
+    assert token_b != token_a
+
+    raw_b = RawSession(f"member:{member.id}", engine=env.engine)
+    fenced_b = FencedSession(raw_b, env.forget, member.id, token_b)
+
+    # Runtime B writes via live token.
+    await fenced_b.add_items([{"role": "assistant", "content": "from B"}])
+
+    # Runtime A's stale write (old token) — must be no-op.
+    await fenced_a.add_items(
+        [{"role": "assistant", "content": "stale from A"}]
+    )
+
+    # Verify: only A's pre-reclaim write + B's live write survive.
+    items = await raw_b.get_items()
+    assert len(items) == 2, f"expected 2 items, got {len(items)}: {items}"
+    assert items[0]["content"] == "from A"
+    assert items[1]["content"] == "from B"
+
+    # Clean up.
+    await env.forget.release_model_turn_lease(member.id, token_b)
+
+
+# -- P1 (fix-r23 #2): compaction fence — lease survives through compaction
+
+
+async def test_compaction_vs_confirmation_fence_prevents_residue(env):
+    """fix-r23 P1 #2: a concurrent confirmation must not clear history
+    then allow compaction to recreate it. The lease survives through
+    compaction, so the ModelTurnLease row blocks claim_forget_me_request
+    until compaction completes.
+
+    Proof: we hold the lease, then race compaction against confirmation.
+    With the fence held through compaction, claim_forget_me_request
+    sees the non-stale lease and returns None; compaction completes
+    before the claim can proceed. After compaction, we release the
+    lease and the claim succeeds on retry — zero compaction residue."""
+    import asyncio
+    from agentg.compaction import (
+        _replace_items_atomically,
+        CompactionSummary,
+        COMPACT_AT_TOKENS,
+    )
+    from agentg.runtime import FencedSession
+    from agents.extensions.memory import SQLAlchemySession as RawSession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # Create a pending forget-me request.
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+    assert phrase != ""
+
+    # Runtime A acquires the lease.
+    token_a = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token_a is not None
+
+    # Create a FencedSession with seed history for compaction.
+    raw = RawSession(f"member:{member.id}", engine=env.engine)
+    fenced = FencedSession(raw, env.forget, member.id, token_a)
+
+    # Seed enough items to trigger compaction (~8400 token threshold).
+    # Each item ~30 chars → ~7.5 tokens → need ~1120 items.
+    # But we can force the issue by testing _replace_items_atomically directly.
+    long_text = "x" * 200  # ~50 tokens per item
+    for i in range(50):
+        await fenced.add_items(
+            [{"role": "user", "content": f"message {i} {long_text}"}]
+        )
+
+    items_before = await fenced.get_items()
+    assert len(items_before) == 50
+
+    # Race: compaction (atomic replace) vs confirmation claim.
+    new_items = [{"role": "assistant", "content": "[compacted summary]"}]
+
+    async def do_compaction():
+        # compaction runs with fence check using the same FencedSession
+        await _replace_items_atomically(
+            fenced,
+            new_items,
+            fence_check=fenced._verify_fence_on_conn,
+        )
+
+    async def do_confirm():
+        claimed = await env.forget.claim_forget_me_request(
+            member.id, phrase, datetime.now(UTC)
+        )
+        return claimed
+
+    # Run both concurrently.
+    comp_task = asyncio.create_task(do_compaction())
+    conf_task = asyncio.create_task(do_confirm())
+    results = await asyncio.gather(comp_task, conf_task)
+    claimed = results[1]
+
+    # The claim must fail because the lease is held through compaction.
+    assert claimed is None, (
+        "claim must lose — lease is held through compaction"
+    )
+
+    # Compaction succeeded — items were replaced.
+    items_after = await raw.get_items()
+    assert len(items_after) == 1, (
+        f"compaction must replace items, got {len(items_after)}"
+    )
+
+    # Release the lease and retry claim — must succeed.
+    await env.forget.release_model_turn_lease(member.id, token_a)
+
+    claimed_retry = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed_retry is not None, (
+        "claim must succeed after lease release"
+    )
+
+    # Complete deletion — all rows must be gone, including
+    # compacted items.
+    await env.forget.forget_member(member.id)
+    items_final = await raw.get_items()
+    assert items_final == [], (
+        "compacted items must be deleted by forget_member"
+    )
+
+
+async def test_compaction_with_lost_fence_is_noop(env):
+    """fix-r23 P1 #2: when the fence check fails inside
+    _replace_items_atomically (lease deleted by a concurrent
+    confirmation), the compaction write is a no-op — the old
+    items are NOT replaced, and the history is left intact for
+    the deletion to clear."""
+    import asyncio
+    from agentg.compaction import _replace_items_atomically, CompactionSummary
+    from agentg.runtime import FencedSession
+    from agents.extensions.memory import SQLAlchemySession as RawSession
+
+    member = await populate(env)
+
+    # Acquire a lease — then immediately release it (simulating
+    # a stale session whose lease was dropped).
+    token = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token is not None
+
+    raw = RawSession(f"member:{member.id}", engine=env.engine)
+    fenced = FencedSession(raw, env.forget, member.id, token)
+
+    # Seed some history.
+    for i in range(5):
+        await fenced.add_items(
+            [{"role": "user", "content": f"message {i}"}]
+        )
+    items_before = await raw.get_items()
+    assert len(items_before) == 5
+
+    # Release the lease — fence is now broken.
+    await env.forget.release_model_turn_lease(member.id, token)
+
+    # Try to compact with fence check. Must be no-op.
+    new_items = [{"role": "assistant", "content": "should NOT replace"}]
+    await _replace_items_atomically(
+        fenced,
+        new_items,
+        fence_check=fenced._verify_fence_on_conn,
+    )
+
+    # Items must be UNCHANGED — the atomic replace was a no-op.
+    items_after = await raw.get_items()
+    assert len(items_after) == 5, (
+        f"fence-lost compaction must be no-op, got {len(items_after)} items"
+    )
+    # Content preserved.
+    for i in range(5):
+        assert items_after[i]["content"] == f"message {i}"

@@ -186,6 +186,10 @@ class FencedSession:
     Any attribute not explicitly defined here delegates to the inner
     session so the compaction engine and other internal callers can
     access ``.engine``, ``._messages``, ``._sessions``, etc.
+
+    fix-r23 P1 #1: ``add_items`` now locks the ModelTurnLease row,
+    validates the owner_token, and writes the SDK items in a single DB
+    transaction — no TOCTOU gap between check and insert.
     """
 
     def __init__(
@@ -218,20 +222,129 @@ class FencedSession:
         return await self._inner.get_items(*args, **kwargs)
 
     async def add_items(self, items):
-        if not await self._check_fence():
-            return  # No-op: token no longer current (stale reclaim / deletion)
-        return await self._inner.add_items(items)
+        """Write items only when our owner_token is still the current
+        lease owner — checked inside the SAME transaction that writes,
+        with the ModelTurnLease row locked so a concurrent deletion or
+        reclaim serialises before or after us, never in between
+        (fix-r23 P1 #1)."""
+        if not items:
+            return
+        if self._owner_token is None:
+            return
+
+        from sqlalchemy import insert, select as sa_select, update as sa_update
+        from sqlalchemy import text as sql_text
+        from sqlalchemy.exc import IntegrityError, OperationalError
+        from agentg.models import Member, ModelTurnLease
+
+        import json as _json
+
+        engine = self._inner.engine
+        messages = self._inner._messages
+        sessions = self._inner._sessions
+        ensure_ascii = getattr(self._inner, "_ensure_ascii", True)
+        session_id = self._inner.session_id
+        member_id = self._member_id
+        owner_token = self._owner_token
+
+        serialized = [
+            _json.dumps(item, ensure_ascii=ensure_ascii, separators=(",", ":"))
+            for item in items
+        ]
+
+        async def _write() -> None:
+            async with engine.begin() as conn:
+                # Lock the Member row to serialize with acquire/claim
+                # (same protocol as acquire_model_turn_lease / claim_forget_me_request).
+                await conn.execute(
+                    sa_select(Member.id)
+                    .where(Member.id == member_id)
+                    .with_for_update()
+                )
+                # SQLite: take the real write lock via noop UPDATE so
+                # concurrent deletions are serialised before business logic.
+                await conn.execute(
+                    sa_update(Member)
+                    .where(Member.id == member_id)
+                    .values(id=member_id)
+                )
+
+                # Lock and validate the lease row — a concurrent
+                # forget_member (step 0: delete ModelTurnLease) or
+                # stale reclaim will be serialised by this lock.
+                lease_result = await conn.execute(
+                    sa_select(ModelTurnLease.owner_token)
+                    .where(ModelTurnLease.member_id == member_id)
+                    .with_for_update()
+                )
+                current_token = lease_result.scalar_one_or_none()
+                if current_token != owner_token:
+                    return  # Token no longer current — no-op, rollback
+
+                # Write SDK items in the same transaction.
+                existing = await conn.execute(
+                    sa_select(sessions.c.session_id).where(
+                        sessions.c.session_id == session_id
+                    )
+                )
+                if not existing.scalar_one_or_none():
+                    try:
+                        async with conn.begin_nested():
+                            await conn.execute(
+                                insert(sessions).values({"session_id": session_id})
+                            )
+                    except IntegrityError:
+                        pass
+
+                payload = [
+                    {"session_id": session_id, "message_data": item}
+                    for item in serialized
+                ]
+                await conn.execute(insert(messages), payload)
+                await conn.execute(
+                    sa_update(sessions)
+                    .where(sessions.c.session_id == session_id)
+                    .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
+                )
+
+        # Retry transient SQLite lock errors with bounded backoff (same
+        # pattern as the SDK's add_items and _replace_items_atomically).
+        if engine.dialect.name == "sqlite":
+            for attempt, delay in enumerate((0.0, 0.05, 0.1, 0.2, 0.4, 0.8)):
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    await _write()
+                    return
+                except OperationalError as exc:
+                    if "database is locked" not in str(exc).lower():
+                        raise
+                    if attempt == 5:
+                        raise
+        else:
+            await _write()
 
     async def clear_session(self):
         """Always allowed: the caller (forget_member) owns the deletion and
         has already revoked the fence before calling this."""
         return await self._inner.clear_session()
 
-    async def _check_fence(self) -> bool:
-        """Return True when our owner_token is still the live lease owner."""
+    async def _verify_fence_on_conn(self, conn) -> bool:
+        """Check the fence using an active DB *conn* inside an already-open
+        transaction — for use by ``_replace_items_atomically`` so the
+        compaction write is fenced atomically with the lease check
+        (fix-r23 P1 #2)."""
         if self._owner_token is None:
             return False
-        current = await self._forget.get_lease_owner_token(self._member_id)
+        from sqlalchemy import select as sa_select
+        from agentg.models import ModelTurnLease
+
+        result = await conn.execute(
+            sa_select(ModelTurnLease.owner_token).where(
+                ModelTurnLease.member_id == self._member_id
+            )
+        )
+        current = result.scalar_one_or_none()
         return current == self._owner_token
 
 
@@ -645,12 +758,10 @@ class AgentRuntime:
         if _turn is not None:
             _turn.defer_logging = True
             stream = _finish_turn(stream, _turn)
-        # Outermost: release the model-turn lease on every path — a
-        # stream failure, GeneratorExit, or dropped after_send must
-        # not strand deletion (issue #212, fix-r11).
-        stream = _release_lease_on_close(
-            stream, self.stores.forget, member_id, turn_lease_token, logger
-        )
+        # fix-r23 P1 #2: the lease is released in after_send AFTER
+        # compaction — not here.  The heartbeat keeps the lease alive
+        # in the meantime; if after_send is dropped (channel dies),
+        # the stale-lease recovery path reclaims it.
         return Reply(
             "",
             stream=stream,
@@ -691,6 +802,11 @@ class AgentRuntime:
         lock = self._locks[key]
         gym_id = context.gym_id
         channel, user_id = msg.channel, msg.channel_user_id
+        # fix-r23 P1 #2: build a fence check so compaction verifies the
+        # lease inside its atomic write transaction — a concurrent
+        # confirmation cannot clear then allow compaction to recreate
+        # history.
+        _fence_check = getattr(session, "_verify_fence_on_conn", None)
 
         async def after_send(*, deliver_media: bool = True) -> None:
             """``deliver_media=False`` suppresses only the demo animations.
@@ -725,20 +841,6 @@ class AgentRuntime:
                 # The rhythm reset is settled here too, isolated from the
                 # demo/ping fan-out so one failure cannot block it.
                 await await_reset()
-                # Release the model-turn lease after the reset is settled
-                # so we don't race on the SQLite writer lock (the reset
-                # task runs concurrently in the normal path).  The
-                # streaming path releases the lease in _release_lease_on_close
-                # before after_send even starts; the blocking path releases
-                # it here (issue #212, fix-r11).
-                try:
-                    await self.stores.forget.release_model_turn_lease(
-                        member_id, turn_lease_token
-                    )
-                except Exception:
-                    logger.exception(
-                        "release_model_turn_lease failed for %d", member_id
-                    )
                 # Read now, not at build time: on the streaming path the tools
                 # populate these while the stream is being consumed.
                 deliver_demos = sender is not None and deliver_media
@@ -751,13 +853,34 @@ class AgentRuntime:
                 ]
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
+                # fix-r23 P1 #2: lease is released AFTER compaction so
+                # the fence survives through the write — a concurrent
+                # confirmation cannot clear then allow compaction to
+                # recreate history.  Compaction uses the fence_check to
+                # verify the token inside its atomic transaction.
                 async with lock:
                     try:
                         await maybe_compact(
-                            session, summarizer, notes_store, member_id, gym_id
+                            session,
+                            summarizer,
+                            notes_store,
+                            member_id,
+                            gym_id,
+                            fence_check=_fence_check,
                         )
                     except Exception:
                         logger.exception("compaction failed for member %d", member_id)
+                # Release the model-turn lease AFTER compaction — the
+                # fence must survive through every SDK write including
+                # compaction (fix-r23 P1 #2).
+                try:
+                    await self.stores.forget.release_model_turn_lease(
+                        member_id, turn_lease_token
+                    )
+                except Exception:
+                    logger.exception(
+                        "release_model_turn_lease failed for %d", member_id
+                    )
             finally:
                 compaction_done.set()
 
