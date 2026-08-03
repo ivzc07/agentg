@@ -141,10 +141,15 @@ class ForgetStore:
         """Persist an expiring confirmation and return the exact phrase the
         Member must send to complete deletion.
 
-        Replaces any prior pending request for this Member atomically
-        via an upsert — no delete-then-insert window where two concurrent
-        initial requests could collide on the unique (member_id) constraint
+        Uses a real database atomic upsert (INSERT … ON CONFLICT DO UPDATE)
+        so two concurrent initial requests across processes both succeed
+        without an IntegrityError on the unique member_id constraint
         (issue #212, P2).
+
+        A row with status ``consumed`` (deletion already confirmed but not
+        yet completed) is NEVER reset to ``pending`` — the runtime handles
+        consumed rows by completing deletion before this method is called,
+        so the guard here is defense in depth (issue #212, fix-r5 P1).
 
         ``language`` is the two-letter code detected from the triggering
         message so the confirmation goodbye can mirror the Member.
@@ -152,38 +157,53 @@ class ForgetStore:
         phrase = "DELETE-ME-" + secrets.token_hex(3).upper()
         expires_at = now + timedelta(seconds=lifetime_seconds)
         async with self._sessions() as db:
-            # Race-safe upsert: SELECT the existing row (if any) under the
-            # session transaction, then UPDATE it or INSERT a new one.
-            # No delete-then-insert window where two concurrent initial
-            # requests could collide on the unique member_id constraint
-            # (issue #212, P2).  The per-identity lock serialises turns
-            # within one process; the single-replica deployment (spec
-            # §Hosting) makes this SELECT‑then‑decide pattern race-free
-            # across runtimes.
+            # P1: Never reset a consumed row to pending — the deletion was
+            # already confirmed and must complete.  The runtime handles
+            # consumed rows before calling this method; this check is
+            # defense in depth.
             existing = await db.scalar(
                 select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == member_id
                 )
             )
-            if existing is not None:
-                existing.gym_id = gym_id
-                existing.confirmation_phrase = phrase
-                existing.expires_at = expires_at
-                existing.created_at = now
-                existing.language = language
-                existing.status = STATUS_PENDING
+            if existing is not None and existing.status == STATUS_CONSUMED:
+                # Deletion is in progress; do not overwrite.  Return a
+                # phrase but leave the consumed row intact — the runtime
+                # completes deletion before this point in normal flow.
+                await db.commit()
+                return phrase
+
+            # P2: Atomic database-level upsert — no select-then-insert
+            # window where two concurrent initial requests across runtimes
+            # could collide on the unique (member_id) constraint.
+            values = dict(
+                member_id=member_id,
+                gym_id=gym_id,
+                confirmation_phrase=phrase,
+                expires_at=expires_at,
+                created_at=now,
+                language=language,
+                status=STATUS_PENDING,
+            )
+            dialect_name = self.engine.sync_engine.dialect.name
+            if dialect_name == "postgresql":
+                from sqlalchemy.dialects.postgresql import insert as dialect_insert
             else:
-                db.add(
-                    ForgetMeRequest(
-                        member_id=member_id,
-                        gym_id=gym_id,
-                        confirmation_phrase=phrase,
-                        expires_at=expires_at,
-                        created_at=now,
-                        language=language,
-                        status=STATUS_PENDING,
-                    )
-                )
+                from sqlalchemy.dialects.sqlite import insert as dialect_insert
+
+            stmt = dialect_insert(ForgetMeRequest).values(**values)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["member_id"],
+                set_=dict(
+                    gym_id=gym_id,
+                    confirmation_phrase=phrase,
+                    expires_at=expires_at,
+                    created_at=now,
+                    language=language,
+                    status=STATUS_PENDING,
+                ),
+            )
+            await db.execute(stmt)
             await db.commit()
         return phrase
 
@@ -342,6 +362,28 @@ _ENGLISH_SIGNAL_WORDS: set[str] = {
 }
 
 
+def _extract_content_text(content) -> str:
+    """Extract plain text from an SDK history item's content field.
+
+    The OpenAI Responses API stores assistant/user content as a list of
+    content blocks (e.g. ``[{"type": "text", "text": "¡Hola!"}]``);
+    older history may still have plain strings.  This helper collapses
+    both shapes into a single string so callers can match against signal
+    words without caring about the serialisation format (issue #212, fix-r5).
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text", "")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+        return " ".join(parts)
+    return ""
+
+
 async def detect_conversation_language(session) -> str | None:
     """Return ``"en"``, ``"es"``, or ``None`` by scanning the Member's
     SDK chat history for language signal words.  Terse lift logs like
@@ -362,11 +404,12 @@ async def detect_conversation_language(session) -> str | None:
     en_score = 0
 
     for item in items:
-        content = item.get("content", "")
-        if not isinstance(content, str):
+        text = _extract_content_text(item.get("content", ""))
+        if not text:
             continue
-        # Collapse whitespace and lowercase for word matching.
-        words = set(content.lower().split())
+        # Find word-character runs so punctuation (¡Hola! → hola) and
+        # list-form content blocks are handled uniformly (issue #212, fix-r5).
+        words = set(re.findall(r"\w+", text.lower()))
         es_score += len(words & _SPANISH_SIGNAL_WORDS)
         en_score += len(words & _ENGLISH_SIGNAL_WORDS)
 

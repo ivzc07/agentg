@@ -1,6 +1,6 @@
 """Forget-me: a Member's hard delete across all three stores (spec §Privacy)."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -209,7 +209,7 @@ async def test_messaging_after_forget_dead_ends_in_linking(env):
 
 # --- Two-turn confirmation (issue #212) -----------------------------------
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from agentg.forget import detect_forget_me_language, is_forget_me_request, normalize_confirmation
 from agentg.models import ForgetMeRequest
@@ -1065,11 +1065,12 @@ async def test_concurrent_initial_requests_no_integrity_error(env):
     assert pending.status == "pending"
 
 
-async def test_upsert_replaces_consumed_row_back_to_pending(env):
-    """When a new forget-me request arrives after a consumed (but not yet
-    deleted) row exists, the upsert must revert status to 'pending' so
-    the new request is a clean slate.  The Member re-asked after a
-    previous delete was interrupted."""
+async def test_request_forget_me_does_not_reset_consumed_to_pending(env):
+    """P1 fix-r5: a re-request must never reset a consumed row to pending.
+    When a previous deletion was confirmed (consumed) but not yet completed,
+    a new forget-me trigger must NOT overwrite the consumed row — the
+    deletion must complete, not be discarded.  The consumed row stays intact
+    so the runtime can recover it."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
@@ -1085,29 +1086,43 @@ async def test_upsert_replaces_consumed_row_back_to_pending(env):
     assert consumed is not None
     assert consumed.status == "consumed"
 
-    # Member sends a new forget-me trigger — the upsert resets to pending.
+    # A new forget-me request must NOT reset consumed to pending.
     phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
     assert phrase2.startswith("DELETE-ME-")
-    assert phrase2 != phrase1
 
-    # The row is now pending with the new phrase and language.
-    assert await _pending_count(env, member.id) == 1
-    pending = await env.forget.get_pending_request(member.id)
-    assert pending is not None
-    assert pending.confirmation_phrase == phrase2
-    assert pending.language == "es"
-    assert pending.status == "pending"
-
-    # Consumed is gone (overwritten by upsert).
+    # Consumed row is still there — NOT overwritten.
     consumed_after = await env.forget.get_consumed_request(member.id)
-    assert consumed_after is None
+    assert consumed_after is not None, (
+        "consumed row must NOT be reset to pending by a re-request"
+    )
+    assert consumed_after.status == "consumed"
+    assert consumed_after.language == "en"  # original language preserved
+    assert consumed_after.confirmation_phrase == phrase1  # original phrase preserved
+
+    # The runtime would detect the consumed row on next message and complete
+    # the deletion — simulate that flow.
+    recovered = await env.forget.get_consumed_request(member.id)
+    assert recovered is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
 
 
-async def test_upsert_over_replaced_consumed_still_deletes_on_confirm(env):
-    """End-to-end: a consumed-then-overwritten request where the Member
-    confirms with the NEW phrase must delete correctly."""
+async def test_consumed_row_recovered_by_runtime_not_overwritten(env):
+    """End-to-end fix-r5: when a consumed row exists, the runtime detects it
+    first (before calling request_forget_me) and completes the deletion.
+    The store's request_forget_me never overwrites a consumed row, so the
+    original confirmation phrase is preserved and the runtime can complete
+    deletion on the next message."""
+    from agents.extensions.memory import SQLAlchemySession
+
     member = await populate(env)
     now = datetime.now(UTC)
+
+    # Seed chat history.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+    ])
 
     # First request → consume → consumed row exists.
     phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
@@ -1116,16 +1131,254 @@ async def test_upsert_over_replaced_consumed_still_deletes_on_confirm(env):
     )
     assert won
 
-    # Second request overwrites consumed → back to pending with new phrase.
-    phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
-
-    # Confirm with the NEW phrase.
-    consumed = await env.forget.consume_pending_forget_me(
-        member.id, phrase2, datetime.now(UTC)
-    )
-    assert consumed
+    # Simulate the runtime flow: consumed check first → complete deletion.
+    consumed_req = await env.forget.get_consumed_request(member.id)
+    assert consumed_req is not None
+    assert consumed_req.status == "consumed"
     await env.forget.forget_member(member.id)
 
     # Full deletion completed.
     assert await count(env, Member, id=member.id) == 0
     assert await _pending_count(env, member.id) == 0
+    items = await session.get_items()
+    assert items == []
+
+
+# -- P1: group messages must not bypass the consumed gate (fix-r5) --------
+
+
+async def test_group_message_cannot_bypass_consumed_gate(env):
+    """P1 fix-r5: a group message from a Member with a consumed (deletion
+    in progress) request must NOT reach the model.  The consumed check gates
+    ALL paths, including group messages."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Seed chat history to prove nothing is added.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+    ])
+    items_before = await session.get_items()
+    assert len(items_before) == 1
+
+    # Consume the request (deletion confirmed, but not yet completed).
+    won = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert won
+
+    # Simulate what _handle_forget_me now does: consumed check FIRST,
+    # BEFORE the group early return.  A group message should still trigger
+    # completion of the deletion, not fall through to the model.
+    consumed = await env.forget.get_consumed_request(member.id)
+    assert consumed is not None
+    assert consumed.status == "consumed"
+
+    # The runtime completes deletion and returns goodbye.
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+    # Chat history is wiped — model was never reached.
+    items_after = await session.get_items()
+    assert items_after == []
+
+
+async def test_group_message_recovers_interrupted_consumed_deletion(env):
+    """P1 fix-r5: a group message after a crashed deletion (consumed row
+    exists, Member still exists) must complete the deletion rather than
+    cancelling or falling through."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
+
+    # Seed chat history.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+    ])
+
+    # Consume but don't delete — simulating a crash after confirmation.
+    won = await env.forget.consume_pending_forget_me(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert won
+
+    # Consumed row exists, Member still exists (simulated crash).
+    consumed = await env.forget.get_consumed_request(member.id)
+    assert consumed is not None
+    assert consumed.status == "consumed"
+    assert await count(env, Member, id=member.id) == 1
+
+    # A group message now arrives.  With the fix-r5 reorder, the consumed
+    # check runs FIRST and completes the deletion.
+    if consumed is not None:
+        await env.forget.forget_member(member.id)
+
+    # Deletion completed, no model residue.
+    assert await count(env, Member, id=member.id) == 0
+    items = await session.get_items()
+    assert items == []
+
+
+# -- P2: language detection with list-form content and punctuation (fix-r5)
+
+
+async def test_language_detection_handles_list_form_content(env):
+    """P2 fix-r5: the OpenAI Responses API stores assistant/user content as a
+    list of content blocks like [{"type": "text", "text": "¡Hola!"}].
+    detect_conversation_language must extract text from both string and
+    list-form content."""
+    from agents.extensions.memory import SQLAlchemySession
+    from agentg.forget import detect_conversation_language
+
+    member = await populate(env)
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+
+    # List-form content blocks — the real format from the Responses API.
+    await session.add_items([
+        {"role": "user", "content": [{"type": "text", "text": "hola, quiero entrenar"}]},
+        {"role": "assistant", "content": [{"type": "text", "text": "¡Claro! Vamos con press banca."}]},
+    ])
+
+    lang = await detect_conversation_language(session)
+    assert lang == "es", (
+        f"list-form Spanish content must be detected, got {lang}"
+    )
+
+
+async def test_language_detection_strips_punctuation_from_words(env):
+    """P2 fix-r5: punctuation like ¡Hola! must match the signal word 'hola'.
+    Using \\w+ for word extraction strips surrounding punctuation."""
+    from agents.extensions.memory import SQLAlchemySession
+    from agentg.forget import detect_conversation_language
+
+    member = await populate(env)
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+
+    # Mixed punctuation: ¡Hola!, ¿cómo?, etc.
+    await session.add_items([
+        {"role": "user", "content": "¡Hola! ¿Cómo puedo entrenar pecho?"},
+        {"role": "assistant", "content": "¡Claro! Vamos con press banca."},
+    ])
+
+    lang = await detect_conversation_language(session)
+    # "hola" should match _SPANISH_SIGNAL_WORDS after stripping ¡ and !
+    assert lang == "es", (
+        f"punctuation-wrapped Spanish must be detected, got {lang}"
+    )
+
+
+async def test_language_detection_handles_mixed_content_formats(env):
+    """P2 fix-r5: some history items may be strings, others list-form blocks.
+    The detector must handle a mix of both in the same conversation."""
+    from agents.extensions.memory import SQLAlchemySession
+    from agentg.forget import detect_conversation_language
+
+    member = await populate(env)
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+
+    # Mix of string and list-form content.
+    await session.add_items([
+        {"role": "user", "content": "hey coach, what's my routine?"},
+        {"role": "assistant", "content": [{"type": "text", "text": "Here's your plan for today!"}]},
+        {"role": "user", "content": [{"type": "text", "text": "thanks, that looks great"}]},
+    ])
+
+    lang = await detect_conversation_language(session)
+    assert lang == "en", (
+        f"mixed-format English content must be detected, got {lang}"
+    )
+
+
+# -- P2: true database-level atomic upsert across processes (fix-r5) ------
+
+
+async def test_concurrent_initial_requests_across_sessions_no_error(env):
+    """P2 fix-r5: two initial forget-me requests from independent sessions
+    (simulating separate processes) must both succeed without IntegrityError.
+    The atomic upsert (INSERT … ON CONFLICT DO UPDATE) replaces the old
+    select-then-insert pattern that could race across runtimes."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    from agentg.forget import STATUS_PENDING
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase_a = "DELETE-ME-AAAAAA"
+    phrase_b = "DELETE-ME-BBBBBB"
+    expires = now + timedelta(seconds=300)
+
+    # Session A (process A) inserts first.
+    async with async_sessionmaker(env.engine)() as db_a:
+        stmt_a = sqlite_insert(ForgetMeRequest).values(
+            member_id=member.id,
+            gym_id=env.gym_id,
+            confirmation_phrase=phrase_a,
+            expires_at=expires,
+            created_at=now,
+            language="en",
+            status=STATUS_PENDING,
+        )
+        await db_a.execute(stmt_a)
+        await db_a.commit()
+
+    # Session B (process B) tries to insert — must succeed via upsert,
+    # not raise IntegrityError.
+    async with async_sessionmaker(env.engine)() as db_b:
+        stmt_b = sqlite_insert(ForgetMeRequest).values(
+            member_id=member.id,
+            gym_id=env.gym_id,
+            confirmation_phrase=phrase_b,
+            expires_at=expires,
+            created_at=now,
+            language="es",
+            status=STATUS_PENDING,
+        ).on_conflict_do_update(
+            index_elements=["member_id"],
+            set_=dict(
+                gym_id=env.gym_id,
+                confirmation_phrase=phrase_b,
+                expires_at=expires,
+                created_at=now,
+                language="es",
+                status=STATUS_PENDING,
+            ),
+        )
+        await db_b.execute(stmt_b)
+        await db_b.commit()
+
+    # Exactly one row exists; the last write won.
+    assert await _pending_count(env, member.id) == 1
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.status == STATUS_PENDING
+
+
+async def test_upsert_preserves_pending_for_second_write(env):
+    """P2 fix-r5: the upsert on a pending row preserves status as pending.
+    When process A created a pending request and process B's upsert lands,
+    the row must still be in pending state (not consumed)."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # First request creates pending (via upsert).
+    phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+    pending1 = await env.forget.get_pending_request(member.id)
+    assert pending1 is not None
+    assert pending1.status == "pending"
+    assert pending1.language == "en"
+
+    # Second request (via upsert) overwrites pending → still pending.
+    phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
+    pending2 = await env.forget.get_pending_request(member.id)
+    assert pending2 is not None
+    assert pending2.status == "pending"
+    assert pending2.language == "es"
+    assert pending2.confirmation_phrase == phrase2
+    assert pending2.confirmation_phrase != phrase1

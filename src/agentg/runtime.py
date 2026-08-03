@@ -476,6 +476,19 @@ class AgentRuntime:
 
         now = datetime.now(timezone.utc)
 
+        # P1: Check for a consumed (in-progress or interrupted) deletion
+        # FIRST — before the group early return, before anything else.  A
+        # consumed row is the durable signal that deletion was already
+        # confirmed; it must gate ALL paths including group messages so a
+        # group message can never reach the model while deletion is in
+        # progress (issue #212, fix-r5).
+        consumed_req = await self.stores.forget.get_consumed_request(
+            linked.member.id
+        )
+        if consumed_req is not None:
+            await self.stores.forget.forget_member(linked.member.id)
+            return Reply(_FORGET_GOODBYE[consumed_req.language or "es"])
+
         # Group messages never trigger or confirm forget-me, but a
         # group/different message from a Member with a pending request
         # must clear the pending intent without deletion.
@@ -486,16 +499,6 @@ class AgentRuntime:
             if pending is not None:
                 await self.stores.forget.cancel_forget_me(linked.member.id)
             return None
-
-        # P1: Check for a consumed (in-progress or interrupted) deletion
-        # first — if a previous confirmation won but deletion was
-        # interrupted, complete it now before any other processing.
-        consumed_req = await self.stores.forget.get_consumed_request(
-            linked.member.id
-        )
-        if consumed_req is not None:
-            await self.stores.forget.forget_member(linked.member.id)
-            return Reply(_FORGET_GOODBYE[consumed_req.language or "es"])
 
         pending = await self.stores.forget.get_pending_request(
             linked.member.id
