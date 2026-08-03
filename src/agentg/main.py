@@ -64,7 +64,9 @@ async def run() -> None:
     # Tracing exports to the OpenAI platform; we may not be running OpenAI models.
     set_tracing_disabled(True)
     engine = create_engine(settings.database_url)
-    stores = Stores.from_engine(engine)
+    stores = Stores.from_engine(
+        engine, stale_lease_seconds=settings.stale_lease_seconds
+    )
 
     bot = build_bot(settings.telegram_bot_token)
     notifier = TelegramNotifier(bot)
@@ -80,6 +82,7 @@ async def run() -> None:
         demo_sender=demo_sender,
         notifier=notifier,
         dashboard=DashboardDoor(stores.dashboard, settings.dashboard_base_url),
+        forget_me_confirmation_seconds=settings.forget_me_confirmation_seconds,
     )
     await runtime.ensure_schema()
     await runtime.start_background_tasks()

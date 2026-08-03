@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from collections import defaultdict
 from collections.abc import AsyncIterator
@@ -23,6 +24,7 @@ from openai.types.responses import ResponseTextDeltaEvent
 from agents.extensions.memory import SQLAlchemySession
 from agents.run_config import CallModelData, ModelInputData
 from sqlalchemy.ext.asyncio import AsyncEngine
+from agentg.forget import ForgetStore
 
 from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
@@ -100,6 +102,365 @@ async def _inject_snapshot(data: CallModelData[MemberContext]) -> ModelInputData
 _SNAPSHOT_RUN_CONFIG = RunConfig(call_model_input_filter=_inject_snapshot)
 
 
+# Per-language forget-me response templates (issue #212).  The language is
+# detected from the triggering raw text and persisted with the pending
+# intent so the goodbye mirrors the Member (ADR-0002: mirror, default
+# Spanish when no signal).
+_FORGET_GOODBYE: dict[str, str] = {
+    "en": "Your data has been permanently deleted. Goodbye!",
+    "es": (
+        "Tus datos han sido eliminados permanentemente. \u00a1Adi\u00f3s!"
+    ),
+}
+
+_FORGET_WARNING: dict[str, str] = {
+    "en": (
+        "\u26a0\ufe0f This will PERMANENTLY DELETE ALL your data \u2014 "
+        "every session, routine, note, and all chat history. "
+        "This cannot be undone.\n\n"
+        "To confirm, reply with this exact phrase:\n\n"
+        "{phrase}\n\n"
+        "Any other response will cancel the request. "
+        "This confirmation expires in {minutes} minute{s}."
+    ),
+    "es": (
+        "\u26a0\ufe0f Esto borrar\u00e1 PERMANENTEMENTE TODOS tus datos \u2014 "
+        "cada sesi\u00f3n, rutina, nota y todo el historial de chat. "
+        "No se puede deshacer.\n\n"
+        "Para confirmar, responde con esta frase exacta:\n\n"
+        "{phrase}\n\n"
+        "Cualquier otra respuesta cancelar\u00e1 la solicitud. "
+        "Esta confirmaci\u00f3n expira en {minutes} minuto{s}."
+    ),
+}
+
+# Gate-failure reply when a deleting row exists but the message does NOT
+# carry the exact confirmation phrase — deletion was already confirmed
+# but is not yet complete (e.g. a crash interrupted it).  Only the exact
+# phrase resumes deletion; any other message gets this reply (issue #212,
+# fix-r10).
+_FORGET_DELETING_IN_PROGRESS: dict[str, str] = {
+    "en": (
+        "Your data deletion is in progress. "
+        "To complete it, please send the confirmation phrase again."
+    ),
+    "es": (
+        "La eliminaci\u00f3n de tus datos est\u00e1 en curso. "
+        "Para completarla, env\u00eda de nuevo la frase de confirmaci\u00f3n."
+    ),
+}
+
+# Neutral fallback when the model-turn gate is held by a concurrent turn
+# and NO deleting row exists — the Member never asked for deletion, so a
+# "deletion in progress" reply would be false and alarming.
+_TURN_BUSY: dict[str, str] = {
+    "en": "I'm still finishing your previous message — try again in a moment.",
+    "es": "Todavía estoy terminando tu mensaje anterior; inténtalo de nuevo en un momento.",
+}
+
+# fix-r22 P1 #1: reply when a pending confirmation cannot claim because
+# a live model-turn lease exists (a concurrent Runner is active, possibly
+# from a dropped after_send).  The pending request is kept intact — the
+# Member can retry the exact phrase on the next turn.
+_FORGET_RETRY_BLOCKED: dict[str, str] = {
+    "en": (
+        "Your deletion confirmation was received but cannot be processed "
+        "right now — a previous request is still being handled. "
+        "Please send the confirmation phrase again in a moment."
+    ),
+    "es": (
+        "Tu confirmaci\u00f3n de eliminaci\u00f3n se recibi\u00f3 pero no puede "
+        "procesarse ahora — una solicitud anterior a\u00fan est\u00e1 en curso. "
+        "Env\u00eda de nuevo la frase de confirmaci\u00f3n en un momento."
+    ),
+}
+
+
+class FencedSession:
+    """Wraps a ``SQLAlchemySession`` with owner-token fencing so SDK
+    chat-history writes (add_items) from a stale/reclaimed Runner are
+    rejected as no-ops — a concurrent deletion or reclaim cannot leave
+    residue behind (fix-r22 P1 #2).
+
+    Read-only operations (get_items) pass through unmodified.
+    Any attribute not explicitly defined here delegates to the inner
+    session so the compaction engine and other internal callers can
+    access ``.engine``, ``._messages``, ``._sessions``, etc.
+
+    fix-r23 P1 #1: ``add_items`` now locks the ModelTurnLease row,
+    validates the owner_token, and writes the SDK items in a single DB
+    transaction — no TOCTOU gap between check and insert.
+    """
+
+    def __init__(
+        self,
+        inner: SQLAlchemySession,
+        forget_store: ForgetStore,
+        member_id: int,
+        owner_token: str | None,
+    ) -> None:
+        self._inner = inner
+        self._forget = forget_store
+        self._member_id = member_id
+        self._owner_token = owner_token
+
+    @property
+    def session_id(self) -> str:
+        return self._inner.session_id
+
+    def __getattr__(self, name: str):
+        """Delegate any attribute not defined on FencedSession to the
+        inner SQLAlchemySession — compaction and other internals access
+        ``.engine``, ``._messages``, etc. through us."""
+        if name.startswith("_FencedSession__") or name in (
+            "_inner", "_forget", "_member_id", "_owner_token",
+        ):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+    async def get_items(self, *args, **kwargs):
+        return await self._inner.get_items(*args, **kwargs)
+
+    async def add_items(self, items):
+        """Write items only when our owner_token is still the current
+        lease owner — checked inside the SAME transaction that writes,
+        with the ModelTurnLease row locked so a concurrent deletion or
+        reclaim serialises before or after us, never in between
+        (fix-r23 P1 #1)."""
+        if not items:
+            return
+        if self._owner_token is None:
+            return
+
+        from sqlalchemy import insert, select as sa_select, update as sa_update
+        from sqlalchemy import text as sql_text
+        from sqlalchemy.exc import IntegrityError, OperationalError
+        from agentg.models import Member, ModelTurnLease
+
+        import json as _json
+
+        engine = self._inner.engine
+        messages = self._inner._messages
+        sessions = self._inner._sessions
+        ensure_ascii = getattr(self._inner, "_ensure_ascii", True)
+        session_id = self._inner.session_id
+        member_id = self._member_id
+        owner_token = self._owner_token
+
+        serialized = [
+            _json.dumps(item, ensure_ascii=ensure_ascii, separators=(",", ":"))
+            for item in items
+        ]
+
+        async def _write() -> None:
+            async with engine.begin() as conn:
+                # Lock the Member row to serialize with acquire/claim
+                # (same protocol as acquire_model_turn_lease / claim_forget_me_request).
+                await conn.execute(
+                    sa_select(Member.id)
+                    .where(Member.id == member_id)
+                    .with_for_update()
+                )
+                # SQLite: take the real write lock via noop UPDATE so
+                # concurrent deletions are serialised before business logic.
+                await conn.execute(
+                    sa_update(Member)
+                    .where(Member.id == member_id)
+                    .values(id=member_id)
+                )
+
+                # Lock and validate the lease row — a concurrent
+                # forget_member (step 0: delete ModelTurnLease) or
+                # stale reclaim will be serialised by this lock.
+                lease_result = await conn.execute(
+                    sa_select(ModelTurnLease.owner_token)
+                    .where(ModelTurnLease.member_id == member_id)
+                    .with_for_update()
+                )
+                current_token = lease_result.scalar_one_or_none()
+                if current_token != owner_token:
+                    return  # Token no longer current — no-op, rollback
+
+                # Write SDK items in the same transaction.
+                existing = await conn.execute(
+                    sa_select(sessions.c.session_id).where(
+                        sessions.c.session_id == session_id
+                    )
+                )
+                if not existing.scalar_one_or_none():
+                    try:
+                        async with conn.begin_nested():
+                            await conn.execute(
+                                insert(sessions).values({"session_id": session_id})
+                            )
+                    except IntegrityError:
+                        pass
+
+                payload = [
+                    {"session_id": session_id, "message_data": item}
+                    for item in serialized
+                ]
+                await conn.execute(insert(messages), payload)
+                await conn.execute(
+                    sa_update(sessions)
+                    .where(sessions.c.session_id == session_id)
+                    .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
+                )
+
+        # Retry transient SQLite lock errors with bounded backoff (same
+        # pattern as the SDK's add_items and _replace_items_atomically).
+        if engine.dialect.name == "sqlite":
+            for attempt, delay in enumerate((0.0, 0.05, 0.1, 0.2, 0.4, 0.8)):
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    await _write()
+                    return
+                except OperationalError as exc:
+                    if "database is locked" not in str(exc).lower():
+                        raise
+                    if attempt == 5:
+                        raise
+        else:
+            await _write()
+
+    async def clear_session(self):
+        """Always allowed: the caller (forget_member) owns the deletion and
+        has already revoked the fence before calling this."""
+        return await self._inner.clear_session()
+
+    async def _verify_fence_on_conn(self, conn) -> bool:
+        """Check the fence using an active DB *conn* inside an already-open
+        transaction — for use by ``replace_items`` so the compaction write
+        is fenced atomically with the lease check (fix-r23 P1 #2)."""
+        if self._owner_token is None:
+            return False
+        from sqlalchemy import select as sa_select
+        from agentg.models import ModelTurnLease
+
+        result = await conn.execute(
+            sa_select(ModelTurnLease.owner_token).where(
+                ModelTurnLease.member_id == self._member_id
+            )
+        )
+        current = result.scalar_one_or_none()
+        return current == self._owner_token
+
+    async def replace_items(self, new_items: list) -> None:
+        """Replace all SDK session items atomically with *new_items*.
+
+        Locks the Member row, validates the owner token, deletes every
+        existing SDK message for this session, inserts *new_items*, and
+        commits — all in a single database transaction.  A concurrent
+        deletion or reclaim that changes the lease token causes the
+        entire operation to be a no-op (fix-r24 #1).
+
+        This is the fenced equivalent of ``_replace_items_atomically``
+        and is the single write path compaction must use.
+        """
+        import asyncio
+        import json as _json
+
+        from sqlalchemy import delete, insert, select as sa_select, update as sa_update
+        from sqlalchemy import text as sql_text
+        from sqlalchemy.exc import IntegrityError, OperationalError
+        from agentg.models import Member, ModelTurnLease
+
+        if not new_items:
+            return
+        if self._owner_token is None:
+            return
+
+        engine = self._inner.engine
+        messages = self._inner._messages
+        sessions = self._inner._sessions
+        ensure_ascii = getattr(self._inner, "_ensure_ascii", True)
+        session_id = self._inner.session_id
+        member_id = self._member_id
+        owner_token = self._owner_token
+
+        serialized = [
+            _json.dumps(item, ensure_ascii=ensure_ascii, separators=(",", ":"))
+            for item in new_items
+        ]
+
+        _SQLITE_LOCK_DELAYS = (0.0, 0.05, 0.1, 0.2, 0.4, 0.8)
+
+        async def _replace() -> None:
+            async with engine.begin() as conn:
+                # Lock the Member row to serialize with acquire/claim.
+                await conn.execute(
+                    sa_select(Member.id)
+                    .where(Member.id == member_id)
+                    .with_for_update()
+                )
+                await conn.execute(
+                    sa_update(Member)
+                    .where(Member.id == member_id)
+                    .values(id=member_id)
+                )
+
+                # Validate owner token inside the SAME transaction.
+                lease_result = await conn.execute(
+                    sa_select(ModelTurnLease.owner_token)
+                    .where(ModelTurnLease.member_id == member_id)
+                    .with_for_update()
+                )
+                current_token = lease_result.scalar_one_or_none()
+                if current_token != owner_token:
+                    return  # Token lost — no-op, rollback
+
+                # Idempotent session-row upsert.
+                existing = await conn.execute(
+                    sa_select(sessions.c.session_id).where(
+                        sessions.c.session_id == session_id
+                    )
+                )
+                if not existing.scalar_one_or_none():
+                    try:
+                        async with conn.begin_nested():
+                            await conn.execute(
+                                insert(sessions).values({"session_id": session_id})
+                            )
+                    except IntegrityError:
+                        pass
+
+                await conn.execute(
+                    sa_update(sessions)
+                    .where(sessions.c.session_id == session_id)
+                    .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
+                )
+
+                # Delete every existing message …
+                await conn.execute(
+                    delete(messages).where(
+                        messages.c.session_id == session_id
+                    )
+                )
+                # … and write the replacement set.
+                if serialized:
+                    payload = [
+                        {"session_id": session_id, "message_data": item}
+                        for item in serialized
+                    ]
+                    await conn.execute(insert(messages), payload)
+
+        if engine.dialect.name == "sqlite":
+            for attempt, delay in enumerate(_SQLITE_LOCK_DELAYS):
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    await _replace()
+                    return
+                except OperationalError as exc:
+                    if "database is locked" not in str(exc).lower():
+                        raise
+                    if attempt == len(_SQLITE_LOCK_DELAYS) - 1:
+                        raise
+        else:
+            await _replace()
+
+
 @dataclass
 class AgentRuntime:
     agent: Agent
@@ -121,6 +482,8 @@ class AgentRuntime:
     # Stream replies by default; set False when no live model backs the Agent
     # (tests that mock Runner).  Kept deliberately per #176.
     stream_replies: bool = True
+    # How long a forget-me confirmation phrase stays valid (issue #212).
+    forget_me_confirmation_seconds: int = 300
     # Fast path (#177): log pure set shorthand without a model call.
     # Disabled in behavioral tests that script the Agent's turn.
     fast_path_enabled: bool = True
@@ -143,6 +506,10 @@ class AgentRuntime:
     # Durable safety-outbox worker — started after ensure_schema, stopped on
     # shutdown.  None when no dashboard is wired (tests, headless runs).
     _outbox_worker: OutboxWorker | None = None
+    # Per-Member lease tokens for this runtime so the pre-acquire cleanup
+    # can release a lease leaked by a dropped after_send without weakening
+    # the token-based fencing (fix-r21).  Keyed by member_id → owner_token.
+    _lease_tokens: dict[int, str] = field(default_factory=dict)
 
     async def ensure_schema(self) -> None:
         """Create the domain and SDK session tables once at startup."""
@@ -187,6 +554,15 @@ class AgentRuntime:
 
     def session_for_member(self, member_id: int) -> SQLAlchemySession:
         return SQLAlchemySession(f"member:{member_id}", engine=self.engine)
+
+    def fenced_session_for_member(
+        self, member_id: int, owner_token: str | None
+    ) -> FencedSession:
+        """Return a session whose add_items verifies the lease fence before
+        every write — a stale/reclaimed Runner's writes become no-ops
+        (fix-r22 P1 #2)."""
+        inner = SQLAlchemySession(f"member:{member_id}", engine=self.engine)
+        return FencedSession(inner, self.stores.forget, member_id, owner_token)
 
     async def member_context(self, linked: LinkedIdentity) -> MemberContext:
         """Build the per-turn context with conversation-stable gating flags
@@ -334,25 +710,186 @@ class AgentRuntime:
             turn = TurnContext()
             with turn:
                 linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
+
+                # P1 (fix-r10): A durable deleting request must gate
+                # linking/switch BEFORE identity repointing.  Only the
+                # exact confirmation phrase resumes deletion — an
+                # arbitrary message (e.g. "hello") must NOT trigger
+                # deletion (issue #212, fix-r10).
+                #
+                # Only private turns reach this point (shared chats are
+                # rejected by the channel adapter and the is_private gate
+                # above, #211); the exact phrase recovers deletion.
+                now = datetime.now(timezone.utc)
+                if linked is not None:
+                    from agentg.forget import normalize_confirmation
+
+                    deleting_before_link = (
+                        await self.stores.forget.get_deleting_by_phrase(
+                            linked.member.id,
+                            normalize_confirmation(msg.text),
+                            now,
+                        )
+                    )
+                    if deleting_before_link is not None:
+                        await self.stores.forget.forget_member(linked.member.id)
+                        return Reply(
+                            _FORGET_GOODBYE[
+                                deleting_before_link.language or "es"
+                            ]
+                        )
+
+                # P1 (fix-r16): Any durable deleting state must gate before
+                # all Linking.handle early returns, regardless of whether the
+                # incoming message matches the phrase.  Exact phrase may retry
+                # deletion (already checked above via deleting_before_link);
+                # any other private message (including affirmative Gym-switch
+                # replies) must not link/repoint identity and receives truthful
+                # deletion-in-progress guidance.
+                if linked is not None:
+                    deleting_gate = await self.stores.forget.get_deleting_request(
+                        linked.member.id
+                    )
+                    if deleting_gate is not None:
+                        return Reply(
+                            _FORGET_DELETING_IN_PROGRESS[
+                                deleting_gate.language or "es"
+                            ]
+                        )
+
                 reply = await self.linking.handle(msg, linked)
                 if reply is not None:
+                    # P1 (fix-r8): Cancel pending Forget-me intent before linking
+                    # early return so a /start code or linking/switch reply can't
+                    # leave a pending request active.  Only linked Members can have
+                    # a pending Forget-me request — unlinked identities have no row.
+                    if linked is not None:
+                        pending_fm = await self.stores.forget.get_pending_request(
+                            linked.member.id
+                        )
+                        if pending_fm is not None:
+                            await self.stores.forget.cancel_forget_me(
+                                linked.member.id,
+                                confirmation_phrase=pending_fm.confirmation_phrase,
+                                expires_at=pending_fm.expires_at,
+                            )
+                        # Defense-in-depth: the fix-r16 gate above already blocks
+                        # linking when a deleting row exists; this second check
+                        # catches a row that appeared during linking.handle itself
+                        # (a concurrent claim while _confirm_switch ran).
+                        deleting_fm = (
+                            await self.stores.forget.get_deleting_request(
+                                linked.member.id
+                            )
+                        )
+                        if deleting_fm is not None:
+                            return Reply(
+                                _FORGET_DELETING_IN_PROGRESS[
+                                    deleting_fm.language or "es"
+                                ]
+                            )
                     return Reply(reply)
                 if linked is None:  # linking always replies for unlinked identities
                     raise RuntimeError("unlinked message reached the agent loop")
+                # Pre-model forget-me check (issue #212): handles both
+                # initiating the two-turn flow and confirming deletion.
+                # Must run before `/dashboard` dispatch so an ordinary
+                # message (including /dashboard) cancels a pending intent.
+                forget_reply = await self._handle_forget_me(msg, linked)
+                if forget_reply is not None:
+                    return forget_reply
                 # `/dashboard` is a deterministic door, not Agent chat: it never
                 # touches the check-in rhythm, compaction, or history.
                 if self.dashboard is not None and is_dashboard_command(msg.text):
                     return await self.dashboard.handle(linked)
-                session = self.session_for_member(linked.member.id)
-                # Awaited: the tool set is scoped to the caller's role, which
-                # needs a Routine lookup (issue #174).
-                context = await self.member_context(linked)
+                # P1 (fix-r12): Cross-runtime atomic model-turn lease —
+                # checks for a deleting request and acquires an exclusive
+                # lease, serialised with claim_forget_me_request via a
+                # shared Member-row lock so both cannot succeed
+                # concurrently.  The acquire itself handles stale-lease
+                # recovery for crashed runtimes.
+                #
+                # Before acquiring, release any lease WE created from a
+                # previous turn whose after_send was dropped.  Uses the
+                # per-member token tracked locally on this runtime so the
+                # token-based fencing is never weakened (fix-r21).
+                last_token = self._lease_tokens.pop(linked.member.id, None)
+                if last_token is not None:
+                    await self.stores.forget.release_model_turn_lease(
+                        linked.member.id, last_token
+                    )
+                turn_lease_token = await self.stores.forget.acquire_model_turn_lease(
+                    linked.member.id, linked.gym.id
+                )
+                if turn_lease_token is not None:
+                    # Track the token so a dropped after_send on this turn
+                    # can be cleaned up by the next turn (fix-r21).
+                    self._lease_tokens[linked.member.id] = turn_lease_token
+                else:
+                    # A deleting row exists — deletion was confirmed.
+                    # Only the exact confirmation phrase can resume
+                    # deletion (already checked above via
+                    # deleting_before_link).  Any other message in a
+                    # deleting state gets a "deletion in progress"
+                    # reply — the model must never run, and deletion
+                    # must NOT auto-complete for non-matching messages
+                    # (issue #212, fix-r10).
+                    deleting_after_gate = (
+                        await self.stores.forget.get_deleting_request(
+                            linked.member.id
+                        )
+                    )
+                    if deleting_after_gate is not None:
+                        return Reply(
+                            _FORGET_DELETING_IN_PROGRESS[
+                                deleting_after_gate.language or "es"
+                            ]
+                        )
+                    # Gate held by a concurrent model turn (rare, even
+                    # across runtimes) with NO deleting row — the Member
+                    # never requested deletion, so reply with a neutral
+                    # busy message; the model must not proceed.
+                    identity = await self.stores.linking.identity_for(
+                        msg.channel, msg.channel_user_id
+                    )
+                    if identity is None:
+                        return Reply(_FORGET_GOODBYE["es"])
+                    return Reply(_TURN_BUSY["es"])
+
+                # fix-r22 P1 #2: fenced session so a stale/reclaimed
+                # Runner's SDK writes are no-ops — no chat-history
+                # residue survives deletion or reclaim.
+                session = self.fenced_session_for_member(
+                    linked.member.id, turn_lease_token
+                )
                 member_id = linked.member.id
-                # Fast path: pure set shorthand that resolves to a catalog
-                # Exercise with an open Session and no suspect weight jump
-                # can be logged deterministically — no model call needed
-                # (#177).  Anything ambiguous falls through to the Agent.
-                fast = await self._try_fast_log(msg.text, context, member_id, session)
+                try:
+                    # Awaited: the tool set is scoped to the caller's role,
+                    # which needs a Routine lookup (issue #174).
+                    context = await self.member_context(linked)
+                    # Fast path: pure set shorthand that resolves to a catalog
+                    # Exercise with an open Session and no suspect weight jump
+                    # can be logged deterministically — no model call needed
+                    # (#177).  Anything ambiguous falls through to the Agent.
+                    fast = await self._try_fast_log(
+                        msg.text, context, member_id, session
+                    )
+                except BaseException:
+                    # A failure between lease acquire and the model-path
+                    # release guards below would otherwise leak the lease
+                    # (heartbeat renews it forever) and permanently block
+                    # forget-me confirmation (issue #212).
+                    self._lease_tokens.pop(member_id, None)
+                    try:
+                        await self.stores.forget.release_model_turn_lease(
+                            member_id, turn_lease_token
+                        )
+                    except Exception:
+                        logger.exception(
+                            "release_model_turn_lease failed for %d (pre-model)",
+                            member_id,
+                        )
+                    raise
                 if fast is not None:
                     # The fast path still resets the check-in rhythm — any
                     # reply from a linked Member counts as activity (#169).
@@ -366,6 +903,25 @@ class AgentRuntime:
                                 "reset_rhythm failed for %d (fast path)", member_id
                             )
 
+                    # Release the model-turn lease before returning — the
+                    # fast path never reaches the model-path release in
+                    # _blocking_reply/_streamed_reply, and the lease
+                    # heartbeat renews forever, so a leaked lease would
+                    # permanently block claim_forget_me_request and every
+                    # forget-me confirmation after a fast-path turn
+                    # (issue #212, AC 4).  Released before the reset task
+                    # is spawned so the two writes never race on the
+                    # SQLite writer lock.
+                    self._lease_tokens.pop(member_id, None)
+                    try:
+                        await self.stores.forget.release_model_turn_lease(
+                            member_id, turn_lease_token
+                        )
+                    except Exception:
+                        logger.exception(
+                            "release_model_turn_lease failed for %d (fast path)",
+                            member_id,
+                        )
                     asyncio.create_task(_fast_reset())
                     return fast
                 # Any reply resets the check-in rhythm and revives a lapsed
@@ -394,18 +950,32 @@ class AgentRuntime:
                         # errors, so concurrent messages from the same identity
                         # cannot race the session or interleave chunks (#176).
                         streamed = self._streamed_reply(
-                            msg, context, session, key, member_id, _await_reset,
+                            msg, context, session, key, member_id, turn_lease_token, _await_reset,
                             _lock=lock, _turn=turn,
                         )
                         lock_transferred = True
                         return streamed
                     return await self._blocking_reply(
-                        msg, context, session, key, member_id, _await_reset
+                        msg, context, session, key, member_id, turn_lease_token, _await_reset
                     )
                 except BaseException:
                     # On failure the reset must still land, or a lapsed Member
                     # is never revived (issue #169).
                     await _await_reset()
+                    # Release the model-turn gate on the failure path — a
+                    # Runner failure (model error, timeout, etc.) must not
+                    # strand deletion (issue #212, fix-r10).  The reset is
+                    # settled first so we don't race on the SQLite writer
+                    # lock (the reset task runs concurrently).
+                    try:
+                        await self.stores.forget.release_model_turn_lease(
+                            member_id, turn_lease_token
+                        )
+                    except Exception:
+                        logger.exception(
+                            "release_model_turn_lease failed for %d",
+                            member_id,
+                        )
                     if context.coach_pings:
                         pings = list(context.coach_pings)
                         asyncio.create_task(_drain_coach_pings(pings))
@@ -421,9 +991,16 @@ class AgentRuntime:
         session: SQLAlchemySession,
         key: tuple[str, str],
         member_id: int,
+        turn_lease_token: str | None,
         await_reset,
     ) -> Reply:
-        """Non-streaming path kept deliberately for tests (#176)."""
+        """Non-streaming path kept deliberately for tests (#176).
+
+        fix-r24 #3: compaction and lease release happen inline after
+        Runner.run() returns — the SDK writes are done, so the turn
+        token is released here rather than waiting for after_send.
+        A dropped after_send can no longer keep the heartbeat alive
+        or block a later confirmation."""
         try:
             result = await Runner.run(
                 self.agent,
@@ -432,18 +1009,52 @@ class AgentRuntime:
                 context=context,
                 run_config=_SNAPSHOT_RUN_CONFIG,
             )
-        finally:
-            # Issue #166: delete_my_data clears the session during the turn,
-            # but the runner persists this turn's items afterwards -- the tool
-            # call and goodbye survive the wipe.  Clear again so nothing
-            # remains.  In a finally so a mid-turn error doesn't skip the clear
-            # after the domain wipe has already committed.
-            if context.forgotten:
-                await session.clear_session()
+        except BaseException:
+            # Release the lease on failure — a Runner failure must not
+            # strand deletion (issue #212, fix-r10).
+            if turn_lease_token is not None:
+                try:
+                    await self.stores.forget.release_model_turn_lease(
+                        member_id, turn_lease_token
+                    )
+                except Exception:
+                    logger.exception(
+                        "release_model_turn_lease failed for %d", member_id
+                    )
+            raise
         text = str(result.final_output)
+        # Compaction runs inline while the turn_lease_token is still
+        # valid so the fence check passes (fix-r24 #1 + #3).
+        _fence_check = getattr(session, "_verify_fence_on_conn", None)
+        try:
+            from agentg.compaction import maybe_compact
+            await maybe_compact(
+                session,
+                self.summarizer,
+                self.stores.notes,
+                member_id,
+                context.gym_id,
+                fence_check=_fence_check,
+            )
+        except Exception:
+            logger.exception("compaction failed for member %d", member_id)
+        # Release the model-turn lease now — writes are done, compaction
+        # is done.  The after_send hook only needs to signal the next turn
+        # and handle demos/pings/reset.
+        if turn_lease_token is not None:
+            try:
+                await self.stores.forget.release_model_turn_lease(
+                    member_id, turn_lease_token
+                )
+            except Exception:
+                logger.exception(
+                    "release_model_turn_lease failed for %d", member_id
+                )
         return Reply(
             text,
-            after_send=self._post_turn(msg, context, session, key, member_id, await_reset),
+            after_send=self._post_turn_no_lease(
+                msg, context, key, member_id, await_reset
+            ),
         )
 
     def _streamed_reply(
@@ -453,6 +1064,7 @@ class AgentRuntime:
         session: SQLAlchemySession,
         key: tuple[str, str],
         member_id: int,
+        turn_lease_token: str | None,
         await_reset,
         _lock: asyncio.Lock | None = None,
         _turn: TurnContext | None = None,
@@ -467,20 +1079,82 @@ class AgentRuntime:
             run_config=_SNAPSHOT_RUN_CONFIG,
         )
         stream = _stream_text(result)
-        # Innermost first: wipe on forget (#166), release the lock (#176), then
-        # close the turn's instrument last so its duration and counts cover the
-        # whole generation, not just setup (#161).
-        stream = _clear_if_forgotten(stream, context, session)
+        # Innermost first: release the lock (#176), then close the turn's
+        # instrument last so its duration and counts cover the whole
+        # generation, not just setup (#161).
         if _lock is not None:
             stream = _hold_lock(stream, _lock)
         if _turn is not None:
             _turn.defer_logging = True
             stream = _finish_turn(stream, _turn)
+        # fix-r24 #3: stop the heartbeat when the stream is exhausted
+        # so a dropped after_send cannot keep the lease alive
+        # indefinitely.  The lease row stays so compaction in
+        # after_send is still fenced; after_send releases the lease
+        # after compaction (idempotent heartbeat stop there).
+        if turn_lease_token is not None:
+            stream = _stop_heartbeat_on_close(
+                stream, self.stores.forget, member_id, turn_lease_token, logger
+            )
         return Reply(
             "",
             stream=stream,
-            after_send=self._post_turn(msg, context, session, key, member_id, await_reset),
+            after_send=self._post_turn(msg, context, session, key, member_id, turn_lease_token, await_reset),
         )
+
+    def _post_turn_no_lease(
+        self,
+        msg: IncomingMessage,
+        context: MemberContext,
+        key: tuple[str, str],
+        member_id: int,
+        await_reset,
+    ):
+        """Build the ``after_send`` hook for the non-streaming path.
+
+        Compaction and lease release already happened inline in
+        ``_blocking_reply`` (fix-r24 #3) — this hook only signals the
+        next turn, settles the rhythm reset, and fires demos/pings.
+        """
+        compaction_done = asyncio.Event()
+        self._compaction_done[key] = compaction_done
+        sender = self.demo_sender
+        lock = self._locks[key]
+        channel, user_id = msg.channel, msg.channel_user_id
+
+        async def after_send(*, deliver_media: bool = True) -> None:
+            try:
+                await await_reset()
+                deliver_demos = sender is not None and deliver_media
+                demo_refs = list(context.demo_requests) if deliver_demos else []
+                coach_pings = list(context.coach_pings)
+
+                async def _send_demo(ref) -> None:
+                    try:
+                        assert sender is not None
+                        await _send_resolved_demo(
+                            self.stores.demos, sender, ref, channel, user_id
+                        )
+                    except Exception:
+                        logger.exception(
+                            "failed to serve demo %r to %s", ref.exercise_name, user_id
+                        )
+
+                async def _run_ping(ping):
+                    try:
+                        await ping()
+                    except Exception:
+                        logger.exception("deferred coach ping failed")
+
+                tasks = [_send_demo(ref) for ref in demo_refs] + [
+                    _run_ping(p) for p in coach_pings
+                ]
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                compaction_done.set()
+
+        return after_send
 
     def _post_turn(
         self,
@@ -489,15 +1163,20 @@ class AgentRuntime:
         session: SQLAlchemySession,
         key: tuple[str, str],
         member_id: int,
+        turn_lease_token: str | None,
         await_reset,
     ):
-        """Build the ``after_send`` hook both reply paths share.
+        """Build the ``after_send`` hook for the streaming path.
 
         Everything deferred past the reply lives here: the rhythm reset
         (#169), demo animations (#179), coach pings (#172) and compaction
         (#173).  The context lists are read when the hook *runs*, not when it
         is built, because on the streaming path the tools populate them after
         this returns.
+
+        *turn_lease_token* is the per-turn immutable owner token from
+        ``acquire_model_turn_lease`` — the after_send release uses it so
+        only the real owner can release the lease (fix-r21).
         """
         # Compaction only affects the *next* turn's prompt, so it runs here
         # instead of in front of the reply -- that takes a model call off the
@@ -511,6 +1190,11 @@ class AgentRuntime:
         lock = self._locks[key]
         gym_id = context.gym_id
         channel, user_id = msg.channel, msg.channel_user_id
+        # fix-r23 P1 #2: build a fence check so compaction verifies the
+        # lease inside its atomic write transaction — a concurrent
+        # confirmation cannot clear then allow compaction to recreate
+        # history.
+        _fence_check = getattr(session, "_verify_fence_on_conn", None)
 
         async def after_send(*, deliver_media: bool = True) -> None:
             """``deliver_media=False`` suppresses only the demo animations.
@@ -557,17 +1241,241 @@ class AgentRuntime:
                 ]
                 if tasks:
                     await asyncio.gather(*tasks, return_exceptions=True)
+                # fix-r23 P1 #2: lease is released AFTER compaction so
+                # the fence survives through the write — a concurrent
+                # confirmation cannot clear then allow compaction to
+                # recreate history.  Compaction uses the fence_check to
+                # verify the token inside its atomic transaction.
                 async with lock:
                     try:
                         await maybe_compact(
-                            session, summarizer, notes_store, member_id, gym_id
+                            session,
+                            summarizer,
+                            notes_store,
+                            member_id,
+                            gym_id,
+                            fence_check=_fence_check,
                         )
                     except Exception:
                         logger.exception("compaction failed for member %d", member_id)
+                # Release the model-turn lease AFTER compaction — the
+                # fence must survive through every SDK write including
+                # compaction (fix-r23 P1 #2).
+                try:
+                    await self.stores.forget.release_model_turn_lease(
+                        member_id, turn_lease_token
+                    )
+                except Exception:
+                    logger.exception(
+                        "release_model_turn_lease failed for %d", member_id
+                    )
             finally:
                 compaction_done.set()
 
         return after_send
+
+    # -- Pre-model forget-me (issue #212) ---------------------------------
+
+    async def _handle_forget_me(
+        self, msg: IncomingMessage, linked: LinkedIdentity
+    ) -> Reply | None:
+        """Handle the two-turn forget-me flow before the model ever runs.
+
+        Returns a Reply when the message was fully handled (request or
+        confirmation), or None to let normal processing continue.
+        """
+        from agentg.forget import (
+            detect_conversation_language,
+            detect_forget_me_language,
+            is_forget_me_request,
+            normalize_confirmation,
+        )
+
+        now = datetime.now(timezone.utc)
+
+        # Shared chats never reach this point: the channel adapter rejects
+        # them and handle_message refuses non-private messages outright
+        # (#211), so every turn here is private.
+
+        # P1 (fix-r12): Check for a deleting (in-progress or interrupted)
+        # deletion FIRST — before anything else.  A deleting row is the
+        # durable signal that deletion was already confirmed.
+        #
+        # Only the exact stored confirmation phrase may retry deletion
+        # (partial-failure recovery, issue #212, fix-3).  Any other
+        # message — including a new generic "forget me" request — must
+        # NOT trigger deletion (fix-r12).
+        deleting_req = await self.stores.forget.get_deleting_by_phrase(
+            linked.member.id, normalize_confirmation(msg.text), now
+        )
+        if deleting_req is not None:
+            await self.stores.forget.forget_member(linked.member.id)
+            return Reply(_FORGET_GOODBYE[deleting_req.language or "es"])
+
+        # P1 (fix-r12): Before handling any new forget-me request or
+        # ordinary message, check for a deleting row.  If deletion was
+        # already confirmed (status=deleting), only the exact phrase
+        # can resume it (already checked above).  A new generic
+        # "forget me" or ordinary message gets "deletion in progress"
+        # — never auto-complete deletion (fix-r12).
+        deleting_now = await self.stores.forget.get_deleting_request(
+            linked.member.id
+        )
+        if deleting_now is not None:
+            return Reply(
+                _FORGET_DELETING_IN_PROGRESS[
+                    deleting_now.language or "es"
+                ]
+            )
+
+        pending = await self.stores.forget.get_pending_request(
+            linked.member.id
+        )
+
+        if pending is not None:
+            # Expired — cancel silently and fall through (P2: <= not <).
+            if pending.expires_at <= now:
+                await self.stores.forget.cancel_forget_me(
+                    linked.member.id,
+                    confirmation_phrase=pending.confirmation_phrase,
+                    expires_at=pending.expires_at,
+                )
+            else:
+                normalized = normalize_confirmation(msg.text)
+                if normalized == pending.confirmation_phrase:
+                    # P1: atomic compare-and-claim so concurrent
+                    # confirmations across runtimes have exactly one
+                    # winner and a stale confirmation cannot delete.
+                    claimed = await self.stores.forget.claim_forget_me_request(
+                        linked.member.id, normalized, now
+                    )
+                    if claimed is not None:
+                        await self.stores.forget.forget_member(
+                            linked.member.id
+                        )
+                        lang = claimed.language or "es"
+                        return Reply(_FORGET_GOODBYE[lang])
+                    # P2 (fix-r13): Lost the race — another runtime already
+                    # claimed this request and may still fail.  The row now
+                    # has status "deleting" (not necessarily deleted), so
+                    # we must NOT claim permanent deletion completed.  Return
+                    # a truthful "deletion in progress" message; only the
+                    # exact phrase resumes/completes deletion.
+                    deleting_req = await self.stores.forget.get_deleting_request(
+                        linked.member.id
+                    )
+                    if deleting_req is not None:
+                        return Reply(
+                            _FORGET_DELETING_IN_PROGRESS[
+                                deleting_req.language or "es"
+                            ]
+                        )
+                    # P1 (fix-r22 #1): The claim lost but the pending
+                    # row is still "pending" (NOT "deleting") — a live
+                    # model-turn lease blocked the claim, likely from a
+                    # dropped after_send on a previous turn.  Return
+                    # deterministic retry guidance, keep the pending
+                    # request, and never fall through to the model.
+                    #
+                    # Only check when our claim-loser path finds no
+                    # deleting row — the live lease is the remaining
+                    # reason the claim could have lost.
+                    if await self.stores.forget.is_lease_held_by_other(
+                        linked.member.id, None
+                    ):
+                        return Reply(
+                            _FORGET_RETRY_BLOCKED[
+                                pending.language or "es"
+                            ]
+                        )
+                    # The pending was cancelled (not claimed) — fall
+                    # through to normal processing.
+                else:
+                    # Wrong phrase — cancel the pending request.  A new
+                    # forget-me trigger below will create a fresh one.
+                    await self.stores.forget.cancel_forget_me(
+                        linked.member.id,
+                        confirmation_phrase=pending.confirmation_phrase,
+                        expires_at=pending.expires_at,
+                    )
+
+        # Check if this message looks like a new forget-me request
+        # (handles both "no pending" and "wrong phrase, re-asking").
+        if is_forget_me_request(msg.text):
+            # ADR-0002: language from the whole conversation, not just the
+            # trigger text.  A Spanish-conversation Member typing "forget me"
+            # in English must still receive Spanish warning and goodbye.
+            session = self.session_for_member(linked.member.id)
+            conv_lang = await detect_conversation_language(session)
+            lang = conv_lang or detect_forget_me_language(msg.text) or "es"
+            phrase = await self.stores.forget.request_forget_me(
+                linked.member.id,
+                linked.gym.id,
+                now,
+                self.forget_me_confirmation_seconds,
+                lang,
+            )
+            # Empty string is the sentinel: a deleting row was
+            # detected between the fast-path read and the conditional
+            # upsert — another runtime claimed this Member's deletion.
+            # We must NEVER call forget_member here: only a private
+            # message matching the stored exact confirmation phrase may
+            # execute/retry deletion.  Return truthful in-progress
+            # guidance and let the winner/retry phrase complete it
+            # (issue #212, fix-r15).
+            if not phrase:
+                deleting_req = await self.stores.forget.get_deleting_request(
+                    linked.member.id
+                )
+                if deleting_req is not None:
+                    return Reply(
+                        _FORGET_DELETING_IN_PROGRESS[
+                            deleting_req.language or "es"
+                        ]
+                    )
+                # Fallback if the deleting row disappeared.
+                return Reply(_FORGET_DELETING_IN_PROGRESS["es"])
+            minutes = max(1, self.forget_me_confirmation_seconds // 60)
+            warning = _FORGET_WARNING[lang].format(
+                phrase=phrase,
+                minutes=minutes,
+                s="s" if minutes != 1 else "",
+            )
+            # P2 (fix-r8): A forget-me warning is an actual Member reply
+            # so reset the proactive check-in rhythm here — the normal
+            # Agent path fires reset_rhythm but the pre-model forget-me
+            # path does not, leaving the cadence to degrade across the
+            # two-turn flow.  This is the inline equivalent.
+            await self.stores.checkins.reset_rhythm(linked.member.id)
+            return Reply(warning)
+
+        # P1 safety net: before falling through to the model, re-verify
+        # the Member still exists AND that no deleting request appeared
+        # since our initial check.  A concurrent runtime may have claimed
+        # the pending request and begun deletion while we processed this
+        # ordinary message — the deleting row is the durable signal that
+        # the model must never see this message.
+        #
+        # Only the exact confirmation phrase can resume deletion
+        # (already checked above via get_deleting_by_phrase).  For a
+        # non-matching message in a deleting state, return "deletion in
+        # progress" — never auto-complete deletion (issue #212, fix-r10).
+        deleting_now = await self.stores.forget.get_deleting_request(
+            linked.member.id
+        )
+        if deleting_now is not None:
+            return Reply(
+                _FORGET_DELETING_IN_PROGRESS[
+                    deleting_now.language or "es"
+                ]
+            )
+        identity = await self.stores.linking.identity_for(
+            msg.channel, msg.channel_user_id
+        )
+        if identity is None:
+            return Reply(_FORGET_GOODBYE["es"])
+
+        return None
 
 
 
@@ -595,36 +1503,6 @@ def _is_sentence_boundary(text: str, last_sent: str) -> bool:
             continue  # first chunk too short; keep scanning
         return True
     return False
-
-
-async def _clear_if_forgotten(
-    inner: AsyncIterator[str], context: MemberContext, session: SQLAlchemySession,
-) -> AsyncIterator[str]:
-    """Yield every chunk from ``inner``, then wipe the session if the turn
-    forgot the Member.
-
-    The streaming path is the production default, so issue #166 has to hold
-    here too: ``delete_my_data`` clears the session mid-turn, but the runner
-    persists this turn's items afterwards.  The clear runs in a ``finally``
-    so a stream that errors part-way still leaves no residue behind a
-    committed domain wipe."""
-    # Known limitation (#161): the wipe below runs during stream teardown, in
-    # the channel's task, which never entered ``with turn:``.  The SQL counter
-    # reads the contextvar, so these statements are not attributed to the turn
-    # -- a small undercount on forget-me turns only.  Duration and model-call
-    # count are unaffected: the run-loop task inherits the contextvar because
-    # ``run_streamed`` creates it inside the with-block.
-    try:
-        async for chunk in inner:
-            yield chunk
-    finally:
-        # Propagate the close inward before wiping (see _finish_turn), in a
-        # try/finally so a failure down the chain cannot skip the wipe (#166).
-        try:
-            await inner.aclose()
-        finally:
-            if context.forgotten:
-                await session.clear_session()
 
 
 async def _finish_turn(
@@ -694,6 +1572,39 @@ async def _hold_lock(
         if not released:
             lock.release()
         raise
+
+
+async def _stop_heartbeat_on_close(
+    inner: AsyncIterator[str],
+    forget_store,
+    member_id: int,
+    owner_token: str | None,
+    logger: logging.Logger,
+) -> AsyncIterator[str]:
+    """Stop the lease heartbeat when the stream is exhausted or errors
+    so a dropped ``after_send`` cannot keep the lease alive indefinitely
+    (fix-r24 #3).  The lease row stays — ``after_send`` still compacts
+    (fenced) and releases the lease fully later.  If ``after_send`` is
+    dropped the lease becomes stale without heartbeat renewal and is
+    reclaimed by the next turn's stale-lease recovery.
+
+    When *owner_token* is ``None`` the call is a no-op.
+    """
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        try:
+            await inner.aclose()
+        except Exception:
+            pass
+        if owner_token is not None:
+            try:
+                await forget_store.stop_lease_heartbeat(member_id, owner_token)
+            except Exception:
+                logger.exception(
+                    "stop_lease_heartbeat failed for %d", member_id
+                )
 
 
 async def _stream_text(result: "RunResultStreaming") -> AsyncIterator[str]:

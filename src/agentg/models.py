@@ -166,6 +166,66 @@ class DemoFileId(Base):
     file_unique_id: Mapped[str | None] = mapped_column(String(64), default=None)
 
 
+class ForgetMeRequest(Base):
+    """A pending two-turn Forget-me confirmation (issue #212).
+
+    One Member can hold at most one pending request; a new request replaces
+    any old one.  The confirmation phrase is checked from normalized raw
+    text before the model runs — the model never sees or acts on it.
+
+    ``status`` is ``"pending"`` until the winner atomically claims it
+    (``"deleting"``).  The deleting row stays until ``forget_member``
+    completes so a concurrent loser sees a durable in-progress signal,
+    and the exact confirmation phrase can retry deletion if the wipe
+    fails partway through (issue #212, fix-3).
+
+    Model-turn exclusivity is handled by the separate ``ModelTurnLease``
+    table — it is never mixed into the forget-me request row, so a
+    model-turn gate can never overwrite or clear a real forget-me
+    intent (issue #212, fix-r11).
+    """
+
+    __tablename__ = "forget_me_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    member_id: Mapped[int] = mapped_column(
+        ForeignKey("members.id"), unique=True, index=True
+    )
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    confirmation_phrase: Mapped[str] = mapped_column(String(64))
+    language: Mapped[str | None] = mapped_column(String(2), default=None)
+    status: Mapped[str] = mapped_column(String(10), default="pending")
+    expires_at: Mapped[datetime] = mapped_column(TZDateTime())
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+class ModelTurnLease(Base):
+    """Exclusive model-turn gate keyed by Member — separate from
+    ``ForgetMeRequest`` so a model-turn lease never collides with or
+    overwrites a real forget-me intent (issue #212, fix-r11).
+
+    One row per Member at most.  A runtime acquires the lease before
+    calling ``Runner.run()`` and releases it in a ``finally`` block.
+    A stale lease (``acquired_at`` older than a bounded threshold) is
+    reclaimed by another runtime so a crash cannot strand deletion.
+
+    ``owner_token`` is a per-turn immutable token (UUID) assigned at
+    acquisition.  Heartbeat and release must present the matching token
+    so a stale/reclaimed runtime can never overwrite or delete the new
+    owner's lease — the token acts as a fencing guard (fix-r21).
+    """
+
+    __tablename__ = "model_turn_leases"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    member_id: Mapped[int] = mapped_column(
+        ForeignKey("members.id"), unique=True, index=True
+    )
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    acquired_at: Mapped[datetime] = mapped_column(TZDateTime())
+    owner_token: Mapped[str | None] = mapped_column(String(36), default=None)
+
+
 class DashboardLoginToken(Base):
     """A one-time magic link the bot hands a Coach for `/dashboard`.
 

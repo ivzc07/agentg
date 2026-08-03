@@ -619,3 +619,830 @@ async def test_typing_a_real_invite_code_still_does_the_lookup(runtime):
     reply = await runtime.handle_message(incoming(f"{gym.coach_invite_code}"))
     assert "Iron Temple" in reply
     assert calls == ["invite", "coach"]  # both lookups — invite miss, coach hit
+
+
+# --- P1 (fix-r8): pending Forget-me cancelled before linking early return ---
+
+
+async def test_linked_member_pending_forget_me_cancelled_by_start_code(runtime):
+    """A linked Member with a pending Forget-me who taps /start CODE for their
+    own gym must have the pending cancelled, not left active behind the linking
+    reply."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    # Seed a pending Forget-me request.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, gym.id, now, 300, "en"
+    )
+    assert phrase != ""
+    pending = await runtime.stores.forget.get_pending_request(linked.member.id)
+    assert pending is not None
+
+    # Tap the gym's invite code — linking handles it, but first the pending
+    # Forget-me must be cancelled.
+    reply = await runtime.handle_message(
+        incoming("/start x", link_code=gym.invite_code)
+    )
+    assert "Iron Temple" in reply
+
+    # The pending is gone.
+    pending_after = await runtime.stores.forget.get_pending_request(
+        linked.member.id
+    )
+    assert pending_after is None, (
+        "pending Forget-me must be cancelled before linking early return"
+    )
+    # Data still intact — no deletion.
+    assert await member_count(runtime.stores.linking) == 1
+
+
+async def test_linked_member_pending_forget_me_cancelled_by_switch_code(runtime):
+    """A linked Member with a pending Forget-me who taps another gym's invite
+    code must have the pending cancelled before the switch-confirm reply."""
+    from datetime import datetime, timezone
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    await runtime.stores.linking.link_member(old_gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    # Seed a pending Forget-me request.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, old_gym.id, now, 300, "en"
+    )
+    assert phrase != ""
+    pending = await runtime.stores.forget.get_pending_request(linked.member.id)
+    assert pending is not None
+
+    # Tap a different gym's invite code — the switch confirm is returned,
+    # but not before the pending is cancelled.
+    reply = await runtime.handle_message(
+        incoming("/start x", link_code=new_gym.invite_code)
+    )
+    assert "Steel Yard" in reply and "Iron Temple" in reply
+
+    # The pending is gone.
+    pending_after = await runtime.stores.forget.get_pending_request(
+        linked.member.id
+    )
+    assert pending_after is None, (
+        "pending Forget-me must be cancelled before linking early return"
+    )
+    # Data still intact — no deletion, no new Member yet.
+    assert await member_count(runtime.stores.linking) == 1
+
+
+async def test_linked_member_pending_forget_me_cancelled_by_typing_invite_code(runtime):
+    """A linked Member with a pending Forget-me who types their gym's invite
+    code as plain text must have the pending cancelled before the SAME_GYM
+    reply."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    # Seed a pending Forget-me request.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, gym.id, now, 300, "en"
+    )
+    assert phrase != ""
+    pending = await runtime.stores.forget.get_pending_request(linked.member.id)
+    assert pending is not None
+
+    # Type the gym's invite code as plain text — linking handles it
+    # (SAME_GYM reply), but first the pending must be cancelled.
+    reply = await runtime.handle_message(incoming(gym.invite_code))
+    assert "Ana" in reply and "Iron Temple" in reply
+
+    # The pending is gone.
+    pending_after = await runtime.stores.forget.get_pending_request(
+        linked.member.id
+    )
+    assert pending_after is None, (
+        "pending Forget-me must be cancelled before linking early return"
+    )
+    # Data still intact — no deletion.
+    assert await member_count(runtime.stores.linking) == 1
+
+
+# --- P1 (fix-r9): durable deleting request gates linking/switch ----------
+
+
+async def test_deleting_request_gates_linking_private_exact_phrase_recovers(runtime):
+    """fix-r10: Only the exact confirmation phrase resumes deletion.
+    A linked Member with a deleting request who sends the exact phrase
+    on a private turn must have the deletion completed BEFORE linking can
+    repoint identity."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    # Seed a deleting request (confirmed deletion, not yet completed).
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, gym.id, now, 300, "en"
+    )
+    claimed = await runtime.stores.forget.claim_forget_me_request(
+        linked.member.id, phrase, now
+    )
+    assert claimed is not None
+    assert claimed.status == "deleting"
+
+    # Send the exact confirmation phrase on a PRIVATE turn — must
+    # complete deletion and return goodbye.
+    reply = await runtime.handle_message(
+        incoming(phrase, link_code=None)
+    )
+    assert "deleted" in str(reply).lower() or "eliminados" in str(reply).lower()
+
+    # The Member must be deleted.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is None, "exact phrase must recover deletion"
+    assert await member_count(runtime.stores.linking) == 0
+
+
+async def test_deleting_request_non_matching_message_does_not_delete(runtime):
+    """fix-r10: A linked Member with a deleting request who sends a
+    non-matching message (like an invite code) on a private turn must
+    NOT have the deletion auto-completed.  Only the exact confirmation
+    phrase resumes deletion — any other message returns 'deletion in
+    progress' and the Member is NOT deleted."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    # Seed a deleting request (confirmed deletion, not yet completed).
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, gym.id, now, 300, "en"
+    )
+    claimed = await runtime.stores.forget.claim_forget_me_request(
+        linked.member.id, phrase, now
+    )
+    assert claimed is not None
+    assert claimed.status == "deleting"
+
+    # Tap the gym's invite code on a PRIVATE turn — NOT the exact phrase.
+    # The deleting gate must NOT auto-complete deletion.
+    reply = await runtime.handle_message(
+        incoming("/start x", link_code=gym.invite_code)
+    )
+    # Must be a 'deletion in progress' message, NOT a goodbye.
+    assert "progress" in str(reply).lower() or "curso" in str(reply).lower()
+
+    # The Member must NOT be deleted.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None, (
+        "non-matching message must NOT trigger deletion"
+    )
+    assert await member_count(runtime.stores.linking) == 1
+
+
+async def test_deleting_request_survives_refused_non_private_message(runtime):
+    """A linked Member with a deleting request whose message arrives from a
+    shared chat must not lose state: the runtime refuses non-private
+    messages outright (#211), so no deletion and no identity repointing
+    can occur — the durable deleting row survives untouched."""
+    from datetime import datetime, timezone
+
+    import pytest
+
+    from agentg.messages import IncomingMessage
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, gym.id, now, 300, "en"
+    )
+    claimed = await runtime.stores.forget.claim_forget_me_request(
+        linked.member.id, phrase, now
+    )
+    assert claimed is not None
+
+    with pytest.raises(RuntimeError, match="non-private"):
+        await runtime.handle_message(
+            IncomingMessage(
+                channel="telegram", channel_user_id="42",
+                text="hello", display_name="Ana", is_private=False,
+            )
+        )
+
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None, "refused turn must NOT delete the Member"
+    assert await member_count(runtime.stores.linking) == 1
+
+    deleting_req = await runtime.stores.forget.get_deleting_request(
+        linked.member.id
+    )
+    assert deleting_req is not None, "deleting row must survive a refused turn"
+
+
+async def test_deleting_request_prevents_gym_switch_without_exact_phrase(runtime):
+    """fix-r10: A linked Member with a deleting request who taps another
+    gym's invite code must NOT have the deletion auto-completed — only the
+    exact confirmation phrase resumes deletion.  The gym switch is blocked
+    by the model gate, which returns 'deletion in progress'."""
+    from datetime import datetime, timezone
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    await runtime.stores.linking.link_member(old_gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, old_gym.id, now, 300, "en"
+    )
+    claimed = await runtime.stores.forget.claim_forget_me_request(
+        linked.member.id, phrase, now
+    )
+    assert claimed is not None
+
+    # Tap ANOTHER gym's invite code — NOT the exact phrase.
+    reply = await runtime.handle_message(
+        incoming("/start x", link_code=new_gym.invite_code)
+    )
+    # Must be 'deletion in progress' — NOT a goodbye, NOT a gym switch.
+    assert "progress" in str(reply).lower() or "curso" in str(reply).lower()
+    assert "Steel Yard" not in str(reply)
+
+    # Identity must still be at the OLD gym — no switch, no deletion.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None, (
+        "non-matching message must NOT trigger deletion or gym switch"
+    )
+    assert identity.gym.id == old_gym.id
+    assert await member_count(runtime.stores.linking) == 1
+
+
+# --- P1 (fix-r18): shared Member-row lock between Linking and Forget-me ---
+
+
+async def test_link_member_aborts_when_pending_forget_me_request_exists(runtime):
+    """fix-r18: A linked Member with a pending ForgetMeRequest cannot
+    switch gyms — link_member returns None because the Member-row lock
+    sees the pending ForgetMeRequest, serializing with
+    claim_forget_me_request."""
+    from datetime import datetime, timezone
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    old_member = await runtime.stores.linking.link_member(
+        old_gym.id, "Ana", "telegram", "42"
+    )
+
+    # Create a pending ForgetMeRequest on the existing Member.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        old_member.id, old_gym.id, now, 300, "en"
+    )
+    assert phrase != ""
+    pending = await runtime.stores.forget.get_pending_request(old_member.id)
+    assert pending is not None
+
+    # Try to switch gyms via link_member — must abort because a pending
+    # ForgetMeRequest exists for the old Member.
+    result = await runtime.stores.linking.link_member(
+        new_gym.id, "Ana", "telegram", "42"
+    )
+    assert result is None, (
+        "link_member must abort when pending ForgetMeRequest exists"
+    )
+
+    # Identity must still be at the old gym — no new Member, no repoint.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.member.id == old_member.id
+    assert identity.gym.id == old_gym.id
+    assert identity.member.name == "Ana"
+    assert await member_count(runtime.stores.linking) == 1
+
+    # The pending request is still intact.
+    pending_after = await runtime.stores.forget.get_pending_request(
+        old_member.id
+    )
+    assert pending_after is not None
+    assert pending_after.status == "pending"
+
+
+async def test_link_member_aborts_when_deleting_forget_me_request_exists(runtime):
+    """fix-r18: A linked Member with a deleting ForgetMeRequest cannot
+    switch gyms — the Member-row lock sees the deleting tombstone and
+    aborts, preventing a new profile from surviving deletion."""
+    from datetime import datetime, timezone
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    old_member = await runtime.stores.linking.link_member(
+        old_gym.id, "Ana", "telegram", "42"
+    )
+
+    # Create and claim a ForgetMeRequest (deletion confirmed, not completed).
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        old_member.id, old_gym.id, now, 300, "en"
+    )
+    claimed = await runtime.stores.forget.claim_forget_me_request(
+        old_member.id, phrase, now
+    )
+    assert claimed is not None
+    assert claimed.status == "deleting"
+
+    # Try to switch gyms — must abort because the old Member has a
+    # deleting ForgetMeRequest.
+    result = await runtime.stores.linking.link_member(
+        new_gym.id, "Ana", "telegram", "42"
+    )
+    assert result is None, (
+        "link_member must abort when deleting ForgetMeRequest exists"
+    )
+
+    # Identity still at old gym.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.member.id == old_member.id
+    assert identity.gym.id == old_gym.id
+    assert await member_count(runtime.stores.linking) == 1
+
+    # Complete deletion — must delete everything cleanly.
+    deleting = await runtime.stores.forget.get_deleting_request(old_member.id)
+    assert deleting is not None
+    await runtime.stores.forget.forget_member(old_member.id)
+    assert await member_count(runtime.stores.linking) == 0
+    assert await runtime.stores.linking.identity_for("telegram", "42") is None
+
+
+async def test_new_link_no_prior_identity_still_works_with_forget_me_on_another_member(runtime):
+    """fix-r18: A cold-start link (no prior MemberChannel) must still
+    succeed because there is no existing Member row to lock or check.
+    The ForgetMeRequest guard only applies to the switch path."""
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+
+    # A different identity has a pending ForgetMeRequest — irrelevant
+    # to this new link.
+    other = await runtime.stores.linking.link_member(gym.id, "Ben", "telegram", "99")
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    await runtime.stores.forget.request_forget_me(other.id, gym.id, now, 300, "en")
+
+    # This identity is brand new — no prior MemberChannel.
+    member = await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    assert member is not None
+    assert member.name == "Ana"
+    assert await member_count(runtime.stores.linking) == 2
+
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.member.id == member.id
+
+
+# --- P1 (fix-r20): forced switch-vs-claim SQLite write-lock interleaving ---
+
+
+async def test_switch_vs_claim_interleaved_no_survivor_profile(runtime):
+    """P1 fix-r20: two concurrent transactions — a gym switch
+    (link_member) and a forget-me claim (claim_forget_me_request) —
+    race on the same Member row.  The noop UPDATE write lock in
+    _link_member_in_session serialises them: exactly one wins, and
+    the loser sees the winner's durable state.
+
+    If the claim wins, the Member row carries a deleting
+    ForgetMeRequest and the switch must abort (return None).  If the
+    switch wins, the MemberChannel is repointed and the claim must
+    find no pending ForgetMeRequest on the OLD Member.
+
+    Neither outcome produces a 'survivor profile' — a new Member at
+    the target gym while the old Member's deletion is in progress."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    old_member = await runtime.stores.linking.link_member(
+        old_gym.id, "Ana", "telegram", "42"
+    )
+
+    # Create a pending ForgetMeRequest on the old Member.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        old_member.id, old_gym.id, now, 300, "en"
+    )
+    assert phrase != ""
+
+    # Use barrier hooks to force true interleaving: both the switch
+    # (link_member) and the claim race for the Member-row write lock.
+    read_done = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def pre_write_lock_hook(member_id: int) -> None:
+        """After SELECT FOR UPDATE, before the noop UPDATE write lock.
+        Both tasks reach this point; release them simultaneously."""
+        read_done.set()
+        await proceed.wait()
+
+    runtime.stores.forget._pre_write_lock_hook = pre_write_lock_hook
+
+    switch_result: object = None
+    claim_result: object = None
+
+    async def do_switch():
+        nonlocal switch_result
+        switch_result = await runtime.stores.linking.link_member(
+            new_gym.id, "Ana", "telegram", "42"
+        )
+
+    async def do_claim():
+        nonlocal claim_result
+        claim_result = await runtime.stores.forget.claim_forget_me_request(
+            old_member.id, phrase, datetime.now(timezone.utc)
+        )
+
+    # Start both tasks — each will hit the barrier after SELECT FOR UPDATE.
+    task_switch = asyncio.create_task(do_switch())
+    task_claim = asyncio.create_task(do_claim())
+
+    # Wait for both to reach the barrier.
+    await read_done.wait()
+    # Small delay so the second task also has time to reach the barrier.
+    await asyncio.sleep(0.1)
+
+    # Release both simultaneously — they race for the noop UPDATE.
+    # SQLite serialises the write lock: one wins, one blocks.
+    proceed.set()
+    await asyncio.gather(task_switch, task_claim)
+
+    # Clean up the hook.
+    runtime.stores.forget._pre_write_lock_hook = None
+
+    # Exactly one wins — the other sees the winner's state.
+    if switch_result is not None:
+        # Switch won — MemberChannel was repointed to a new Member at
+        # new_gym.  The claim must have lost.
+        assert claim_result is None, (
+            "claim must lose when switch wins the write lock"
+        )
+        identity = await runtime.stores.linking.identity_for("telegram", "42")
+        assert identity is not None
+        assert identity.gym.id == new_gym.id
+        # The old Member still exists (untouched by the switch).
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+        async with async_sessionmaker(runtime.engine)() as db:
+            old_row = await db.get(Member, old_member.id)
+            assert old_row is not None
+        # The pending ForgetMeRequest on the old Member is still there.
+        pending = await runtime.stores.forget.get_pending_request(
+            old_member.id
+        )
+        assert pending is not None, (
+            "pending ForgetMeRequest must survive when switch wins"
+        )
+        assert pending.status == "pending"
+    else:
+        # Switch lost — link_member returned None because it found
+        # a pending/deleting ForgetMeRequest.  The claim won.
+        assert claim_result is not None, (
+            "claim must win when switch loses the write lock"
+        )
+        identity = await runtime.stores.linking.identity_for("telegram", "42")
+        assert identity is not None
+        # Identity still at old gym — no repoint happened.
+        assert identity.gym.id == old_gym.id
+        assert identity.member.id == old_member.id
+        # The claim turned the pending request to deleting.
+        assert claim_result.status == "deleting"
+
+    # Regardless of winner: exactly ONE outcome, no survivor profile.
+    # Count Members: old_member + any new switch winner.
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from sqlalchemy import func, select
+    async with async_sessionmaker(runtime.engine)() as db:
+        member_count_val = await db.scalar(
+            select(func.count()).select_from(Member)
+        )
+    # If switch won: 2 Members (old + new). If claim won: 1 Member (old only).
+    assert member_count_val in (1, 2), (
+        f"expected 1 or 2 Members, got {member_count_val}"
+    )
+    if member_count_val == 2:
+        # Switch won — verify the OLD Member is untouched and not deleting.
+        async with async_sessionmaker(runtime.engine)() as db:
+            old_row = await db.get(Member, old_member.id)
+            assert old_row is not None
+            assert old_row.gym_id == old_gym.id
+
+
+# --- P2 (fix-r20): forget-me detected before pending switch response ---
+
+
+async def test_forget_me_during_pending_switch_enters_two_turn_flow(runtime, monkeypatch):
+    """P2 fix-r20: when a Member has a pending gym-switch confirmation
+    and says "forget me", the forget-me trigger must be detected BEFORE
+    the switch-confirm answer handling — it must enter the deterministic
+    two-turn flow and never call the linking phraser."""
+    from agentg.forget import _FORGET_ME_TRIGGERS_EN
+
+    seen_phraser: list[str] = []
+
+    async def recording_phraser(instruction, member_text):
+        seen_phraser.append(instruction)
+        return instruction
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    await runtime.stores.linking.link_member(old_gym.id, "Ana", "telegram", "42")
+
+    # Tap the new gym's code to enter the switch-confirm flow.
+    await runtime.handle_message(
+        incoming("/start x", link_code=new_gym.invite_code)
+    )
+
+    # Now send "forget me" instead of yes/no.
+    runtime.linking.phraser = recording_phraser
+    reply = await runtime.handle_message(incoming("forget me"))
+
+    # Must NOT have called the phraser (the forget-me detection in
+    # _confirm_switch cleared the pending and returned None, letting
+    # _handle_forget_me handle it deterministically).
+    assert seen_phraser == [], (
+        f"linking phraser must NOT be called for forget-me during"
+        f" pending switch; saw {seen_phraser}"
+    )
+
+    # The reply must be the forget-me warning (deterministic), not a
+    # switch-cancelled message.
+    assert "DELETE-ME-" in str(reply) or "PERMANENTLY" in str(reply).upper() or "PERMANENTEMENTE" in str(reply).upper(), (
+        f"forget-me must enter two-turn flow, got: {reply!r}"
+    )
+
+    # The pending switch must be cancelled — the identity stays at the old gym.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.gym.id == old_gym.id
+
+
+async def test_forget_me_during_pending_name_replies_deterministically(runtime):
+    """P2 fix-r20: an UNLINKED user in the name-confirm flow who says
+    "forget me" must get a deterministic "nothing to delete" reply — the
+    phraser (model) never sees forget-me text, the turn does not crash,
+    and no Member row is created."""
+    seen_phraser: list[str] = []
+    real_phraser = runtime.linking.phraser
+
+    async def recording_phraser(instruction, member_text):
+        seen_phraser.append(member_text)
+        return await real_phraser(instruction, member_text)
+
+    runtime.linking.phraser = recording_phraser
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+
+    # Start the link flow (enters _AwaitingName; the identity is unlinked).
+    await runtime.handle_message(incoming("/start x", link_code=gym.invite_code))
+
+    # "forget me" mid-name-step: deterministic reply, no crash, no phraser.
+    reply = await runtime.handle_message(incoming("forget me"))
+    text = str(reply).lower()
+    assert "nothing" in text or "no data" in text or "no hay datos" in text, (
+        f"expected a deterministic nothing-to-delete reply, got: {reply!r}"
+    )
+    assert "forget me" not in seen_phraser, (
+        "the phraser must never see forget-me text (fix-r20)"
+    )
+
+    # The pending name step was cleared and no Member row was created.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is None, "an unlinked forget-me must not create a Member"
+
+    # The flow restarts cleanly on the next tap.
+    reply2 = await runtime.handle_message(
+        incoming("/start x", link_code=gym.invite_code)
+    )
+    assert reply2 is not None
+
+
+async def test_confirmation_phrase_during_pending_name_replies_deterministically(runtime):
+    """fix-r24 #2: an UNLINKED user in the name-confirm flow who types a
+    raw DELETE-ME confirmation phrase must get a deterministic reply —
+    there is no pending deletion it could confirm, the phraser never
+    sees the phrase, and the turn does not crash."""
+    seen_phraser: list[str] = []
+    real_phraser = runtime.linking.phraser
+
+    async def recording_phraser(instruction, member_text):
+        seen_phraser.append(member_text)
+        return await real_phraser(instruction, member_text)
+
+    runtime.linking.phraser = recording_phraser
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.handle_message(incoming("/start x", link_code=gym.invite_code))
+
+    phrase = "DELETE-ME-A1B2C3"
+    reply = await runtime.handle_message(incoming(phrase))
+    text = str(reply).lower()
+    assert "no hay datos" in text or "nothing" in text or "no data" in text, (
+        f"expected a deterministic nothing-to-delete reply, got: {reply!r}"
+    )
+    assert phrase not in seen_phraser, (
+        "the phraser must never see a confirmation phrase (fix-r24 #2)"
+    )
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is None
+
+
+async def test_ordinary_switch_answer_still_works_after_forget_me_detect(runtime, monkeypatch):
+    """P2 fix-r20: ordinary switch answers (yes/no) must still work
+    correctly after the forget-me detection is added — no regression."""
+    from types import SimpleNamespace
+    import agentg.runtime as runtime_module
+
+    async def fake_run(agent, text, *, session, context=None, run_config=None):
+        return SimpleNamespace(final_output="ok")
+
+    monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    await runtime.stores.linking.link_member(old_gym.id, "Ana", "telegram", "42")
+
+    # Enter switch-confirm flow.
+    confirm = await runtime.handle_message(
+        incoming("/start x", link_code=new_gym.invite_code)
+    )
+    assert "Steel Yard" in confirm and "Iron Temple" in confirm
+
+    # Send "yes" — must execute the switch (not be caught by forget-me detection).
+    done = await runtime.handle_message(incoming("yes"))
+
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.gym.id == new_gym.id, (
+        "'yes' must still execute the gym switch"
+    )
+
+    # "no" test (with a fresh old-gym membership).
+    old_gym2 = await runtime.stores.linking.create_gym("Titan Gym")
+    new_gym2 = await runtime.stores.linking.create_gym("Olympus Gym")
+    await runtime.stores.linking.link_member(old_gym2.id, "Ben", "telegram", "99")
+
+    await runtime.handle_message(
+        incoming("/start x", link_code=new_gym2.invite_code, user_id="99", display_name="Ben")
+    )
+    cancel = await runtime.handle_message(incoming("no", user_id="99", display_name="Ben"))
+
+    identity2 = await runtime.stores.linking.identity_for("telegram", "99")
+    assert identity2 is not None
+    assert identity2.gym.id == old_gym2.id, (
+        "'no' must still cancel the gym switch"
+    )
+
+
+# --- fix-r24 #2: raw DELETE-ME confirmation phrase detected before linking ---
+
+
+async def test_delete_me_confirmation_phrase_blocked_in_pending_switch(runtime, monkeypatch):
+    """fix-r24 #2: a raw DELETE-ME confirmation phrase sent during a
+    pending gym-switch state must NEVER reach the linking phraser/model.
+    The linking handler returns None, and the runtime handles the
+    confirmation phrase deterministically.
+
+    When the phrase matches a pending ForgetMeRequest, deletion
+    completes — the switch is cancelled and the Member is deleted,
+    never routing through the linking phraser."""
+    from datetime import datetime, timezone
+    from agentg.linking import _AwaitingSwitch
+
+    seen_phraser: list[str] = []
+
+    async def recording_phraser(instruction, member_text):
+        seen_phraser.append((instruction, member_text))
+        return instruction
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    await runtime.stores.linking.link_member(old_gym.id, "Ana", "telegram", "42")
+
+    # Create a pending forget-me request with a known confirmation phrase.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        1, old_gym.id, now, 300, "en"
+    )
+    assert phrase.startswith("DELETE-ME-")
+
+    # Inject a pending _AwaitingSwitch into the in-memory state —
+    # simulating a second runtime where the switch was initiated
+    # before the confirmation phrase arrived.
+    runtime.linking._pending[("telegram", "42")] = _AwaitingSwitch(
+        gym_id=new_gym.id,
+        gym_name=new_gym.name,
+        invite_code=new_gym.invite_code or "",
+        as_coach=False,
+    )
+
+    # Now send the raw confirmation phrase (not a trigger word like
+    # "forget me" — the actual DELETE-ME-XXXXXX phrase).
+    runtime.linking.phraser = recording_phraser
+    reply = await runtime.handle_message(incoming(phrase))
+
+    # Must NOT have called the phraser — the confirmation phrase was
+    # detected in _confirm_switch and cleared the pending state.
+    assert seen_phraser == [], (
+        f"linking phraser must NOT be called for DELETE-ME phrase"
+        f" during pending switch; saw {seen_phraser}"
+    )
+
+    # The reply must be the goodbye — deletion completed successfully
+    # because the phrase matched a pending request.
+    reply_str = str(reply)
+    assert "deleted" in reply_str.lower() or "eliminados" in reply_str.lower(), (
+        f"expected goodbye after matching confirmation phrase,"
+        f" got: {reply!r}"
+    )
+
+    # The pending switch must be cleared from memory.
+    assert ("telegram", "42") not in runtime.linking._pending
+
+    # Identity must be gone — deletion completed.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is None, (
+        "Member must be deleted after valid confirmation phrase"
+    )
+
+
+async def test_delete_me_confirmation_phrase_blocked_in_pending_name(runtime):
+    """fix-r24 #2: a raw DELETE-ME confirmation phrase sent during a
+    pending name-confirm state must NEVER reach the linking phraser."""
+    from datetime import datetime, timezone
+    from agentg.linking import _AwaitingName
+
+    seen_phraser: list[str] = []
+
+    async def recording_phraser(instruction, member_text):
+        seen_phraser.append(instruction)
+        return instruction
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+
+    # Create a pending forget-me request.
+    now = datetime.now(timezone.utc)
+    # First link the member so they have an identity.
+    member = await runtime.stores.linking.link_member(
+        gym.id, "Ana", "telegram", "42"
+    )
+    phrase = await runtime.stores.forget.request_forget_me(
+        member.id, gym.id, now, 300, "en"
+    )
+    assert phrase.startswith("DELETE-ME-")
+
+    # Inject a pending _AwaitingName — simulating a second runtime
+    # where the name flow started before the phrase arrived.
+    runtime.linking._pending[("telegram", "42")] = _AwaitingName(
+        gym_id=gym.id,
+        gym_name=gym.name,
+        invite_code=gym.invite_code or "",
+        prefilled="Ana",
+        as_coach=False,
+    )
+
+    # Send the raw confirmation phrase.
+    runtime.linking.phraser = recording_phraser
+    reply = await runtime.handle_message(incoming(phrase))
+
+    # Must NOT have called the phraser.
+    assert seen_phraser == [], (
+        f"linking phraser must NOT be called for DELETE-ME phrase"
+        f" during pending name; saw {seen_phraser}"
+    )
+
+    # The reply must be the goodbye — deletion completed successfully
+    # because the phrase matched a pending request.
+    reply_str = str(reply)
+    assert "deleted" in reply_str.lower() or "eliminados" in reply_str.lower(), (
+        f"expected goodbye after matching confirmation phrase,"
+        f" got: {reply!r}"
+    )
+
+    # The pending name state must be cleared.
+    assert ("telegram", "42") not in runtime.linking._pending

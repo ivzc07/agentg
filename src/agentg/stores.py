@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from agentg.checkin_store import CheckinStore
 from agentg.dashboard_store import DashboardStore
 from agentg.demos import DemoStore
-from agentg.forget import ForgetStore
+from agentg.forget import DEFAULT_STALE_LEASE_SECONDS, ForgetStore
 from agentg.notes import NotesStore
 from agentg.routines import RoutineStore
 from agentg.linking_store import LinkingStore
@@ -36,7 +36,13 @@ class Stores:
     safety_outbox: SafetyOutbox
 
     @classmethod
-    def from_engine(cls, engine: AsyncEngine, clock: Clock | None = None) -> "Stores":
+    def from_engine(
+        cls,
+        engine: AsyncEngine,
+        clock: Clock | None = None,
+        *,
+        stale_lease_seconds: int = DEFAULT_STALE_LEASE_SECONDS,
+    ) -> "Stores":
         """Build every store over one engine. ``clock`` overrides the wall
         clock the time-aware stores use (tests inject it; prod leaves it)."""
         if clock is not None:
@@ -47,7 +53,7 @@ class Stores:
                 routines=RoutineStore(engine, clock=clock),
                 checkins=CheckinStore(engine),
                 demos=DemoStore(engine),
-                forget=ForgetStore(engine),
+                forget=ForgetStore(engine, stale_lease_seconds=stale_lease_seconds),
                 dashboard=DashboardStore(engine, clock=clock),
                 safety_outbox=SafetyOutbox(engine, clock=clock),
             )
@@ -58,7 +64,7 @@ class Stores:
             routines=RoutineStore(engine),
             checkins=CheckinStore(engine),
             demos=DemoStore(engine),
-            forget=ForgetStore(engine),
+            forget=ForgetStore(engine, stale_lease_seconds=stale_lease_seconds),
             dashboard=DashboardStore(engine),
             safety_outbox=SafetyOutbox(engine),
         )
