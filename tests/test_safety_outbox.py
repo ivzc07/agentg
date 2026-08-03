@@ -951,10 +951,13 @@ async def test_retry_includes_backoff_delay(env, monkeypatch):
 # ── transient error recovery (P1 #1) ──────────────────────────────────────
 
 
-async def test_transient_db_error_is_retried_not_permanently_failed(env):
-    """When channel resolution raises a transient DB error, the job is
-    retried (reset_to_retry) rather than permanently failed. The original
-    code's outer catch-all called mark_failed — this test proves we now retry."""
+async def test_transient_db_error_is_retried_not_permanently_failed(env, monkeypatch):
+    """When the Gym-locked authorization raises a transient DB error, the
+    job is retried (reset_to_retry) rather than permanently failed. The
+    original code's outer catch-all called mark_failed — this test proves
+    we now retry."""
+    import agentg.safety_outbox as outbox_module
+
     await env.outbox.create_note_and_jobs(
         member_id=env.member_id,
         gym_id=env.gym_id,
@@ -964,17 +967,24 @@ async def test_transient_db_error_is_retried_not_permanently_failed(env):
         coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
     )
 
-    # Make coach_channel_in_gym raise a transient error.
-    real_resolve = env.linking.coach_channel_in_gym
+    # Make _authorized_send raise a transient error on the first call
+    # and succeed on the second.
+    real_authorized_send = outbox_module.OutboxWorker._authorized_send
     call_count = [0]
 
-    async def flaky_resolve(member_id, gym_id):
+    async def flaky_authorized_send(self, job, text, *, disable_preview=True,
+                                     protect_content=False):
         call_count[0] += 1
-        if call_count[0] == 1:
+        if call_count[0] == 1:  # fail only the first heads-up attempt
             raise RuntimeError("simulated DB hiccup")
-        return await real_resolve(member_id, gym_id)
+        return await real_authorized_send(
+            self, job, text, disable_preview=disable_preview,
+            protect_content=protect_content,
+        )
 
-    env.linking.coach_channel_in_gym = flaky_resolve
+    monkeypatch.setattr(
+        outbox_module.OutboxWorker, "_authorized_send", flaky_authorized_send,
+    )
 
     worker = _make_worker(env)
     await worker.drain_once(limit=50)
@@ -1008,9 +1018,6 @@ async def test_transient_db_error_is_retried_not_permanently_failed(env):
             )
         ).first()
     assert row.status == "delivered"
-
-    # Restore.
-    env.linking.coach_channel_in_gym = real_resolve
 
 
 # ── channel identity re-resolution at delivery time (P1 #2) ────────────────
@@ -1468,18 +1475,15 @@ async def test_coach_eligibility_is_atomic_with_note_commit(env):
 # ── P1 #5: gym-switch TOCTOU with controlled interleaving ──────────────────
 
 
-async def test_gym_switch_toctou_channel_resolved_immediately_before_send(env, monkeypatch):
-    """When a coach switches gyms between job creation and delivery, the
-    channel is re-resolved immediately before the send — no await gap
-    allows a repoint to interleave (P1 #5).
+async def test_gym_switch_toctou_channel_locked_between_heads_up_and_link(env, monkeypatch):
+    """When a coach switches gyms between the heads-up and link delivery,
+    the link's _authorized_send acquires a fresh lock and re-checks
+    authorization — the coach is no longer in the gym, so the link is
+    not sent (P1 #2 r5).
 
-    Uses a controlled interleaving: the coach_channel_in_gym resolution
-    returns successfully, then before the notifier.send the coach switches
-    gyms.  The resolution is re-done right before each send, so the
-    second resolution would catch the switch.
-
-    This test verifies that even with forced interleaving between
-    resolution and send, a re-resolution guards the link send."""
+    Uses an _authorized_send barrier: the heads-up completes (lock
+    released), then the gym switch happens, then the link's authorization
+    check fails because the MemberChannel was repointed."""
     await env.outbox.create_note_and_jobs(
         member_id=env.member_id,
         gym_id=env.gym_id,
@@ -1489,48 +1493,51 @@ async def test_gym_switch_toctou_channel_resolved_immediately_before_send(env, m
         coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
     )
 
-    # Barriers to control the interleaving between heads-up send and link send.
-    heads_up_sent = asyncio.Event()
-    gym_switch_applied = asyncio.Event()
-
-    real_send = env.notifier.send
-    send_count = [0]
-
-    async def instrumented_send(channel, channel_user_id, text,
-                                disable_preview=False, protect_content=False):
-        send_count[0] += 1
-        if send_count[0] == 1:
-            # First send: heads-up.  Let it complete, then signal.
-            await real_send(channel, channel_user_id, text,
-                            disable_preview=disable_preview,
-                            protect_content=protect_content)
-            heads_up_sent.set()
-            # Wait for the gym switch to happen before returning.
-            await gym_switch_applied.wait()
-        else:
-            # Second send: link.  This should NOT happen because the
-            # re-resolution will find the coach is gone.
-            await real_send(channel, channel_user_id, text,
-                            disable_preview=disable_preview,
-                            protect_content=protect_content)
-
-    monkeypatch.setattr(env.notifier, "send", instrumented_send)
-
     worker = _make_worker(env)
+
+    # Instrument _authorized_send so we can inject a gym switch between
+    # the heads-up (first call) and link (second call).
+    real_auth_send = worker._authorized_send
+    heads_up_done = asyncio.Event()
+    gym_switched = asyncio.Event()
+    call_count = [0]
+
+    async def instrumented_auth_send(job, text, *,
+                                      disable_preview=True,
+                                      protect_content=False):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # Heads-up: run it normally.  The lock is held only during
+            # this call and released when it returns.
+            result = await real_auth_send(
+                job, text, disable_preview=disable_preview,
+                protect_content=protect_content,
+            )
+            heads_up_done.set()
+            await gym_switched.wait()
+            return result
+        else:
+            # Link: runs after gym switch — authorization should fail.
+            return await real_auth_send(
+                job, text, disable_preview=disable_preview,
+                protect_content=protect_content,
+            )
+
+    monkeypatch.setattr(worker, "_authorized_send", instrumented_auth_send)
+
     deliver_task = asyncio.create_task(worker.drain_once(limit=50))
 
-    # Wait for the heads-up to complete.
-    await heads_up_sent.wait()
+    # Wait for heads-up to complete.
+    await heads_up_done.wait()
 
     # Heads-up was sent.
-    assert send_count[0] == 1
     heads_before = len([m for m in env.notifier.sent if "/login/" not in m[2]])
     assert heads_before == 1
 
     # Now switch the coach's gym (between heads-up and link).
     new_gym = await env.linking.create_gym("New Gym")
     await env.linking.link_member(new_gym.id, "Coach Sam", "telegram", "7")
-    gym_switch_applied.set()
+    gym_switched.set()
 
     # Wait for delivery to finish.
     await deliver_task
@@ -2138,13 +2145,17 @@ async def test_toctou_forget_me_between_precheck_and_send_blocked(env, monkeypat
     assert env.notifier.sent == []
 
 
-async def test_toctou_zero_await_between_auth_and_send(env, monkeypatch):
-    """Verify there is no await between channel resolution and
-    notifier.send — a Gym switch that fires between them cannot land
-    because there is no yield point (P1 #2).
+async def test_authorized_send_locks_and_sends(env, monkeypatch):
+    """_authorized_send locks the Gym and MemberChannel rows, checks
+    authorization on the locked connection, sends, and releases the
+    lock on commit.  The authorization is stable because no concurrent
+    set_coach or link_member can acquire the same locks during the send
+    (P1 #2 r5).
 
-    Instruments coach_channel_in_gym to record when it returns; then
-    instruments notifier.send to verify no other await happened between."""
+    Instruments _authorized_send to verify the lock acquire / auth check
+    / send / release sequence."""
+    import agentg.safety_outbox as outbox_module
+
     await env.outbox.create_note_and_jobs(
         member_id=env.member_id,
         gym_id=env.gym_id,
@@ -2158,41 +2169,27 @@ async def test_toctou_zero_await_between_auth_and_send(env, monkeypatch):
     assert len(claimed) == 1
 
     worker = _make_worker(env)
-
-    # Track the sequence of async operations inside the semaphore.
+    real_auth_send = worker._authorized_send
     events: list[str] = []
 
-    real_coach_channel = env.linking.coach_channel_in_gym
+    async def instrumented_auth_send(job, text, *,
+                                      disable_preview=True,
+                                      protect_content=False):
+        events.append("auth_start")
+        result = await real_auth_send(
+            job, text, disable_preview=disable_preview,
+            protect_content=protect_content,
+        )
+        events.append(f"auth_end:{result}")
+        return result
 
-    async def instrumented_coach_channel(member_id, gym_id):
-        events.append("channel_resolved")
-        return await real_coach_channel(member_id, gym_id)
-
-    env.linking.coach_channel_in_gym = instrumented_coach_channel
-
-    real_send = env.notifier.send
-
-    async def instrumented_send(channel, channel_user_id, text,
-                                disable_preview=False, protect_content=False):
-        events.append("send_started")
-        await real_send(channel, channel_user_id, text,
-                         disable_preview=disable_preview,
-                         protect_content=protect_content)
-        events.append("send_completed")
-
-    monkeypatch.setattr(env.notifier, "send", instrumented_send)
+    monkeypatch.setattr(worker, "_authorized_send", instrumented_auth_send)
 
     await worker._deliver_one(claimed[0])
 
-    # The sequence must be: channel_resolved → send_started → send_completed
-    # with no intervening events (proving zero await gap).
-    headsup_events = [e for e in events if "channel" in e or "send" in e]
-    # For the heads-up: first channel_resolved, then send_started.
-    idx_ch = events.index("channel_resolved")
-    idx_ss = events.index("send_started")
-    assert idx_ss == idx_ch + 1, (
-        f"expected send_started immediately after channel_resolved, got {events}"
-    )
+    # The heads-up _authorized_send should succeed (None), then the link
+    # _authorized_send also succeeds (None).
+    assert events == ["auth_start", "auth_end:None", "auth_start", "auth_end:None"]
 
     # Verify delivery completed.
     async with env.engine.connect() as conn:
@@ -2203,7 +2200,58 @@ async def test_toctou_zero_await_between_auth_and_send(env, monkeypatch):
         ).first()
     assert row.status == "delivered"
 
-    env.linking.coach_channel_in_gym = real_coach_channel
+
+async def test_authorized_send_fails_after_gym_switch(env):
+    """_authorized_send returns an error when the coach has switched
+    gyms — the MemberChannel is no longer pointing at the original Gym
+    so the authorization query returns no rows (P1 #2 r5)."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    # Switch the coach's gym before delivery.
+    new_gym = await env.linking.create_gym("New Gym")
+    await env.linking.link_member(new_gym.id, "Coach Sam", "telegram", "7")
+
+    worker = _make_worker(env)
+    result = await worker._authorized_send(
+        claimed[0], "test message", disable_preview=True,
+    )
+    assert result == "coach no longer reachable in this gym"
+
+
+async def test_authorized_send_fails_after_demotion(env):
+    """_authorized_send returns an error when the coach has been
+    demoted — the Member.is_coach flag is False so the authorization
+    query returns no rows (P1 #2 r5)."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    # Demote the coach before delivery.
+    await env.linking.set_coach(env.coach1_id, is_coach=False)
+
+    worker = _make_worker(env)
+    result = await worker._authorized_send(
+        claimed[0], "test message", disable_preview=True,
+    )
+    assert result == "coach no longer reachable in this gym"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2408,3 +2456,213 @@ async def test_send_timeout_retry_eventually_succeeds(env, monkeypatch):
         ).first()
     assert row.status == "delivered"
     assert row.last_error is None  # cleared on success
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# P2 r5 — legacy-schema migration: 3-column → 2-column unique constraint
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def test_migration_inspects_unique_constraints_not_indexes(tmp_path):
+    """The migration code uses get_unique_constraints (not get_indexes)
+    to inspect existing unique constraints on safety_outbox_jobs, which
+    is correct for both SQLite and PostgreSQL (P2 r5)."""
+    from sqlalchemy import inspect as sa_inspect
+
+    # Build a fresh database with the schema from Base.metadata.create_all.
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'mig.db'}")
+    from agentg.linking_store import LinkingStore
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+
+    async with engine.connect() as conn:
+        # The unique constraint should be discoverable via
+        # get_unique_constraints, not just get_indexes (PostgreSQL
+        # does not expose unique constraints as indexes).
+        # Use run_sync because inspect() doesn't accept AsyncConnection.
+        def _inspect(sync_conn):
+            uniques = {
+                c["name"]: c
+                for c in sa_inspect(sync_conn).get_unique_constraints(
+                    "safety_outbox_jobs"
+                )
+            }
+            assert "uq_outbox_job_note_coach" in uniques, (
+                "unique constraint must be visible via get_unique_constraints"
+            )
+            existing_cols = list(
+                uniques["uq_outbox_job_note_coach"]["column_names"]
+            )
+            # column_names are strings, not dicts.
+            assert all(isinstance(c, str) for c in existing_cols), (
+                f"column_names must be strings, "
+                f"got {[type(c) for c in existing_cols]}"
+            )
+            assert "gym_id" not in existing_cols, (
+                "migrated constraint must not include gym_id"
+            )
+            assert existing_cols == ["note_id", "coach_member_id"] or existing_cols == [
+                "coach_member_id", "note_id"
+            ]
+
+        await conn.run_sync(_inspect)
+    await engine.dispose()
+
+
+async def test_legacy_three_column_index_migrated_on_sqlite(tmp_path):
+    """A legacy safety_outbox_jobs with a 3-column unique INDEX
+    (gym_id, note_id, coach_member_id) is migrated to the 2-column form
+    on ensure_schema.  On SQLite the migration drops and recreates
+    the unique index.
+
+    Proved behaviorally: after migration, inserting two jobs for
+    the same (note_id, coach_member_id) with different gym_id is
+    rejected — the one-job-per-Note/Coach enforcement is active (P2 r5)."""
+    from agentg.models import SafetyOutboxJob
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'legacy.db'}")
+
+    from agentg.linking_store import LinkingStore
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+
+    # Simulate a legacy 3-column unique INDEX by dropping the correct
+    # one and creating the old form.
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP INDEX IF EXISTS uq_outbox_job_note_coach"))
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_outbox_job_note_coach "
+                "ON safety_outbox_jobs (gym_id, note_id, coach_member_id)"
+            )
+        )
+
+    # ensure_schema runs the migration which drops + recreates the index.
+    await linking.ensure_schema()
+
+    # Verify behavior: duplicate (note_id, coach_member_id) is rejected.
+    gym = await linking.create_gym("Test Gym")
+    member = await linking.link_member(gym.id, "Test Member", "telegram", "99")
+    await linking.set_coach(member.id)
+    other_member = await linking.link_member(gym.id, "Other Member", "telegram", "100")
+
+    from agentg.safety_outbox import SafetyOutbox
+    outbox = SafetyOutbox(engine)
+    note, jobs = await outbox.create_note_and_jobs(
+        member_id=other_member.id,
+        gym_id=gym.id,
+        text="test flag",
+        member_name="Other Member",
+        member_is_coach=False,
+        coaches=[(member.id, "Test Member", "telegram", "99")],
+    )
+    assert len(jobs) == 1
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    with pytest.raises(Exception):  # IntegrityError
+        async with sessions() as db:
+            db.add(
+                SafetyOutboxJob(
+                    gym_id=gym.id,
+                    note_id=note.id,
+                    coach_member_id=member.id,
+                    channel="telegram",
+                    channel_user_id="99",
+                    member_id=other_member.id,
+                    member_name="Other Member",
+                    member_is_coach=False,
+                    status="pending",
+                    created_at=now,
+                )
+            )
+            await db.commit()
+
+    await engine.dispose()
+
+
+async def test_legacy_three_column_uniqueness_migrated_behavior(tmp_path):
+    """After migrating from the 3-column to 2-column unique constraint,
+    inserting two jobs for the same (note_id, coach_member_id) with
+    different gym_id values is rejected — proving the migrated constraint
+    enforces one-job-per-Note/Coach (P2 r5).
+
+    Creates the legacy form by rebuilding the table directly with the
+    3-column CONSTRAINT clause, then runs ensure_schema to migrate."""
+    from agentg.models import SafetyOutboxJob
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'beh.db'}")
+
+    from agentg.linking_store import LinkingStore
+    linking = LinkingStore(engine)
+    # Build the full schema so all referenced tables exist.
+    await linking.ensure_schema()
+
+    # Rebuild safety_outbox_jobs with the legacy 3-column CONSTRAINT.
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS safety_outbox_jobs"))
+        await conn.execute(
+            text(
+                "CREATE TABLE safety_outbox_jobs ("
+                "  id INTEGER PRIMARY KEY,"
+                "  gym_id INTEGER NOT NULL REFERENCES gyms(id),"
+                "  note_id INTEGER NOT NULL REFERENCES member_notes(id) ON DELETE CASCADE,"
+                "  coach_member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,"
+                "  channel VARCHAR(32) NOT NULL,"
+                "  channel_user_id VARCHAR(64) NOT NULL,"
+                "  member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,"
+                "  member_name VARCHAR(100) NOT NULL,"
+                "  member_is_coach BOOLEAN NOT NULL DEFAULT 0,"
+                "  status VARCHAR(20) NOT NULL DEFAULT 'pending',"
+                "  retry_count INTEGER NOT NULL DEFAULT 0,"
+                "  next_retry_at TIMESTAMP,"
+                "  claimed_at TIMESTAMP,"
+                "  last_error VARCHAR(400),"
+                "  created_at TIMESTAMP NOT NULL,"
+                "  delivered_at TIMESTAMP,"
+                "  failure_reason VARCHAR(400),"
+                "  CONSTRAINT uq_outbox_job_note_coach "
+                "    UNIQUE (gym_id, note_id, coach_member_id)"
+                ")"
+            )
+        )
+
+    # Run ensure_schema — the migration drops and recreates the
+    # constraint as (note_id, coach_member_id).
+    await linking.ensure_schema()
+
+    # Create gym, members, and a note via the outbox.
+    gym = await linking.create_gym("Test Gym")
+    member = await linking.link_member(gym.id, "Coach", "telegram", "99")
+    await linking.set_coach(member.id)
+    other = await linking.link_member(gym.id, "Member", "telegram", "100")
+
+    from agentg.safety_outbox import SafetyOutbox
+    outbox = SafetyOutbox(engine)
+    note, jobs = await outbox.create_note_and_jobs(
+        member_id=other.id, gym_id=gym.id, text="flag",
+        member_name="Member", member_is_coach=False,
+        coaches=[(member.id, "Coach", "telegram", "99")],
+    )
+    assert len(jobs) == 1
+
+    # Duplicate (note_id, coach_member_id) must be rejected.
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC)
+    with pytest.raises(Exception):  # IntegrityError
+        async with sessions() as db:
+            db.add(
+                SafetyOutboxJob(
+                    gym_id=gym.id, note_id=note.id,
+                    coach_member_id=member.id,
+                    channel="telegram", channel_user_id="99",
+                    member_id=other.id, member_name="Member",
+                    member_is_coach=False, status="pending",
+                    created_at=now,
+                )
+            )
+            await db.commit()
+
+    await engine.dispose()

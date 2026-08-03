@@ -92,6 +92,7 @@ class SafetyOutbox:
     def __init__(self, engine, clock: Clock = _utcnow) -> None:
         from sqlalchemy.ext.asyncio import async_sessionmaker
 
+        self._engine = engine
         self._sessions = async_sessionmaker(engine, expire_on_commit=False)
         self._clock = clock
 
@@ -405,11 +406,12 @@ class OutboxWorker:
     async def _deliver_one(self, job: SafetyOutboxJob) -> None:
         """Send one outbox job: heads-up + (optionally) magic link.
 
-        Channel identity is resolved immediately before each send so a coach
-        who switched gyms after job creation never receives a cross-gym
-        notification.  The final authorization (coach_channel_in_gym) and
-        send have zero await between them — no Gym switch, demotion, or
-        Forget-me can authorize stale delivery across an await gap (P1 #2).
+        The Gym row is locked (SELECT ... FOR UPDATE) before authorization
+        so no Gym switch, demotion, or Forget-me can repoint authorization
+        between the final check and the actual send.  ``set_coach`` and
+        ``link_member`` (gym switch) also lock the Gym row, so they
+        serialize with delivery — the authorization is stable through the
+        entire send (P1 #2 r5).
 
         The job and note are re-verified before sending: if the Note was
         deleted by forget-me between claim and delivery the job is failed
@@ -461,42 +463,18 @@ class OutboxWorker:
                         job.coach_member_id,
                     )
 
-            # Send heads-up — final authorization and send with zero await
-            # gap so no Gym switch/demotion/Forget-me can interleave (P1 #2).
+            # Send heads-up with Gym row locking — the lock serializes
+            # with set_coach and link_member so authorization is stable
+            # through the entire send (P1 #2 r5).
             headsup_failed: str | None = None
             async with self._semaphore:
                 # Pre-verify the job is still sending before authorizing.
                 if not await self._job_still_sending(job.id):
                     headsup_failed = "job_gone"
                 else:
-                    channel_info = await self._linking.coach_channel_in_gym(
-                        job.coach_member_id, job.gym_id,
+                    headsup_failed = await self._authorized_send(
+                        job, text, disable_preview=True, protect_content=False,
                     )
-                    if channel_info is None:
-                        headsup_failed = "coach no longer reachable in this gym"
-                    else:
-                        # Zero await gap: no DB or I/O between authorization
-                        # and send — a Gym switch or demotion cannot interleave.
-                        try:
-                            await asyncio.wait_for(
-                                self._notifier.send(
-                                    channel_info[0], channel_info[1],
-                                    text, disable_preview=True,
-                                ),
-                                timeout=SEND_TIMEOUT_SECONDS,
-                            )
-                        except asyncio.TimeoutError:
-                            headsup_failed = "notifier send timed out"
-                            logger.error(
-                                "send timeout for coach %s on heads-up",
-                                channel_info[1],
-                            )
-                        except Exception:
-                            headsup_failed = "notifier send failed"
-                            logger.exception(
-                                "failed to send heads-up to coach %s",
-                                channel_info[1],
-                            )
 
             if headsup_failed == "coach no longer reachable in this gym":
                 return await self._outbox.mark_failed(
@@ -510,42 +488,24 @@ class OutboxWorker:
                 )
 
             if link is not None:
-                # Re-resolve channel identity inside the semaphore with
-                # zero await gap between authorization and link send (P1 #2).
+                # Re-authorize with Gym lock for the link send too — the
+                # lock serializes with set_coach so a demotion cannot land
+                # between authorization and link send (P1 #2 r5).
                 link_failed: str | None = None
                 async with self._semaphore:
                     if not await self._job_still_sending(job.id):
                         link_failed = "job_gone"
                     else:
-                        link_channel_info = await self._linking.coach_channel_in_gym(
-                            job.coach_member_id, job.gym_id,
+                        link_failed = await self._authorized_send(
+                            job, link, disable_preview=True, protect_content=True,
                         )
-                        if link_channel_info is None:
+                        # Map the heads-up error codes to link variants.
+                        if link_failed == "coach no longer reachable in this gym":
                             link_failed = "unauthorized"
-                        else:
-                            try:
-                                await asyncio.wait_for(
-                                    self._notifier.send(
-                                        link_channel_info[0],
-                                        link_channel_info[1],
-                                        link,
-                                        disable_preview=True,
-                                        protect_content=True,
-                                    ),
-                                    timeout=SEND_TIMEOUT_SECONDS,
-                                )
-                            except asyncio.TimeoutError:
-                                link_failed = "notifier"
-                                logger.error(
-                                    "send timeout for coach %s on link",
-                                    link_channel_info[1],
-                                )
-                            except Exception:
-                                link_failed = "notifier"
-                                logger.exception(
-                                    "failed to send dashboard link to coach %s",
-                                    link_channel_info[1],
-                                )
+                        elif link_failed in (
+                            "notifier send failed", "notifier send timed out"
+                        ):
+                            link_failed = "notifier"
 
                 if link_failed == "unauthorized":
                     # Heads-up already landed; link can't be delivered.
@@ -568,6 +528,98 @@ class OutboxWorker:
                 )
             except Exception:
                 logger.exception("failed to reset job %s for retry", job.id)
+
+    async def _authorized_send(
+        self, job: SafetyOutboxJob, text: str, *,
+        disable_preview: bool = True, protect_content: bool = False,
+    ) -> str | None:
+        """Lock the Gym and MemberChannel rows, check authorization, and send.
+
+        The Gym row lock serializes with ``set_coach`` (which also locks
+        the Gym row via ``SELECT ... FOR UPDATE``).  The MemberChannel row
+        lock serializes with ``link_member`` (gym switch), which repoints
+        the same MemberChannel row.  Together they ensure authorization is
+        stable through the entire send — no demotion or gym-switch can
+        interleave between the check and the notifier call (P1 #2 r5).
+
+        Returns ``None`` on success, or an error code string on failure.
+        """
+        from sqlalchemy import select as sa_select
+
+        conn = await self._outbox._engine.connect()
+        try:
+            await conn.begin()
+            # Lock the Gym row — serializes with set_coach's
+            # ``SELECT ... FOR UPDATE`` on the same row.
+            result = await conn.execute(
+                sa_select(Gym).where(Gym.id == job.gym_id).with_for_update()
+            )
+            if result.first() is None:
+                await conn.rollback()
+                return "coach no longer reachable in this gym"
+
+            # Lock the MemberChannel row — serializes with link_member's
+            # repoint of the channel identity (gym switch).
+            await conn.execute(
+                sa_select(MemberChannel)
+                .where(
+                    MemberChannel.member_id == job.coach_member_id,
+                    MemberChannel.gym_id == job.gym_id,
+                )
+                .with_for_update()
+            )
+
+            # Check authorization on the locked connection: the Member
+            # must still be flagged Coach with a channel pointing at the
+            # correct Gym.
+            result = await conn.execute(
+                sa_select(
+                    MemberChannel.channel, MemberChannel.channel_user_id,
+                )
+                .join(Member, Member.id == MemberChannel.member_id)
+                .where(
+                    MemberChannel.member_id == job.coach_member_id,
+                    MemberChannel.gym_id == job.gym_id,
+                    Member.is_coach.is_(True),
+                )
+            )
+            row = result.first()
+            if row is None:
+                await conn.rollback()
+                return "coach no longer reachable in this gym"
+
+            channel, channel_user_id = row.channel, row.channel_user_id
+
+            # Send while holding both locks — they prevent concurrent
+            # set_coach / link_member from repointing authorization
+            # (P1 #2 r5).
+            try:
+                await asyncio.wait_for(
+                    self._notifier.send(
+                        channel, channel_user_id, text,
+                        disable_preview=disable_preview,
+                        protect_content=protect_content,
+                    ),
+                    timeout=SEND_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "send timeout for coach %s", channel_user_id,
+                )
+                await conn.rollback()
+                return "notifier send timed out"
+            except Exception:
+                logger.exception(
+                    "failed to send to coach %s", channel_user_id,
+                )
+                await conn.rollback()
+                return "notifier send failed"
+
+            await conn.commit()
+            return None
+        finally:
+            if not conn.closed:
+                await conn.close()
 
     async def _note_text(self, note_id: int) -> str | None:
         async with self._outbox._sessions() as db:

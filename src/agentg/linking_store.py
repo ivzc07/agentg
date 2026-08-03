@@ -237,11 +237,18 @@ def _add_missing_columns(conn: Connection) -> None:
     # to (note_id, coach_member_id) — one job per Note/Coach regardless of
     # gym_id (the Note already owns the Gym scope; the gym_id column is
     # denormalised for convenience and must match the Note's gym_id).
-    outbox_indexes = {i["name"]: i for i in inspect(conn).get_indexes("safety_outbox_jobs")}
-    if "uq_outbox_job_note_coach" in outbox_indexes:
-        existing_cols = [
-            c["name"] for c in outbox_indexes["uq_outbox_job_note_coach"]["column_names"]
-        ]
+    #
+    # Use get_unique_constraints (not get_indexes) so the inspection works
+    # on PostgreSQL (where unique constraints are not regular indexes) and
+    # column_names are strings — iterate them directly (P1 #5 r5).
+    outbox_uniques = {
+        c["name"]: c
+        for c in inspect(conn).get_unique_constraints("safety_outbox_jobs")
+    }
+    if "uq_outbox_job_note_coach" in outbox_uniques:
+        existing_cols = list(
+            outbox_uniques["uq_outbox_job_note_coach"]["column_names"]
+        )
         # Recreate if the old three-column form is still present.
         if "gym_id" in existing_cols:
             if conn.dialect.name == "postgresql":
