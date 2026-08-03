@@ -190,6 +190,11 @@ class ForgetMeRequest(Base):
     confirmation_phrase: Mapped[str] = mapped_column(String(64))
     language: Mapped[str | None] = mapped_column(String(2), default=None)
     status: Mapped[str] = mapped_column(String(10), default="pending")
+    # Cross-runtime model-turn gate: set to True while a model turn is
+    # active for this Member so a concurrent claim_forget_me_request
+    # cannot proceed — closes the TOCTOU between the end-of-method
+    # deleting check and Runner.run() (issue #212, fix-r9).
+    model_turn_active: Mapped[bool] = mapped_column(default=False)
     expires_at: Mapped[datetime] = mapped_column(TZDateTime())
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
 

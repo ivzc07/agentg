@@ -313,6 +313,68 @@ class ForgetStore:
             )
             await db.commit()
 
+    async def acquire_model_turn_gate(self, member_id: int) -> bool:
+        """Atomically check that no deletion is in progress and mark the
+        Member's forget-me row as having an active model turn.
+
+        Returns ``True`` when the model may proceed safely.  Returns
+        ``False`` when a ``deleting`` row exists or when the conditional
+        UPDATE lost a race with a concurrent claim (the row is no longer
+        ``pending``).
+
+        When no forget-me row exists at all, there is nothing to gate —
+        returns ``True`` (no deletion is in flight).
+
+        This is the cross-runtime TOCTOU fix (issue #212, fix-r9): a
+        ``claim_forget_me_request`` that arrives after this call commits
+        will see ``model_turn_active = True`` and fail, preventing
+        deletion from proceeding while the model turn is in flight.
+        """
+        async with self._sessions() as db:
+            # Fast path: no forget-me row at all → no conflict possible.
+            existing = await db.scalar(
+                select(ForgetMeRequest).where(
+                    ForgetMeRequest.member_id == member_id
+                )
+            )
+            if existing is None:
+                return True
+            if existing.status == STATUS_DELETING:
+                return False
+            # Atomically mark this row as having an active model turn
+            # only when it is still pending and not already locked by
+            # another concurrent model turn.
+            result = await db.execute(
+                update(ForgetMeRequest)
+                .where(
+                    ForgetMeRequest.member_id == member_id,
+                    ForgetMeRequest.status == STATUS_PENDING,
+                    ForgetMeRequest.model_turn_active == False,
+                )
+                .values(model_turn_active=True)
+            )
+            await db.commit()
+            return result.rowcount > 0
+
+    async def release_model_turn_gate(self, member_id: int) -> None:
+        """Release the model-turn gate so a pending forget-me request can
+        be claimed again (issue #212, fix-r9).
+
+        Only touches rows with ``model_turn_active = True``; a row that
+        transitioned to ``deleting`` while the model ran is NOT reset.
+        """
+        async with self._sessions() as db:
+            await db.execute(
+                update(ForgetMeRequest)
+                .where(
+                    ForgetMeRequest.member_id == member_id,
+                    ForgetMeRequest.model_turn_active == True,
+                    ForgetMeRequest.status == STATUS_PENDING,
+                )
+                .values(model_turn_active=False)
+            )
+            await db.commit()
+
     async def claim_forget_me_request(
         self, member_id: int, confirmation_phrase: str, now: datetime
     ) -> ForgetMeRequest | None:
@@ -330,6 +392,10 @@ class ForgetStore:
         phrase can retry deletion if ``forget_member`` fails partway
         through (issue #212, fix-3).  ``forget_member`` deletes the row
         when it completes.
+
+        The WHERE clause also requires ``model_turn_active = False`` so a
+        concurrent model turn holding the gate prevents the claim — the
+        cross-runtime TOCTOU fix (issue #212, fix-r9).
         """
         async with self._sessions() as db:
             result = await db.execute(
@@ -339,8 +405,9 @@ class ForgetStore:
                     ForgetMeRequest.confirmation_phrase == confirmation_phrase,
                     ForgetMeRequest.expires_at > now,
                     ForgetMeRequest.status == STATUS_PENDING,
+                    ForgetMeRequest.model_turn_active == False,
                 )
-                .values(status=STATUS_DELETING)
+                .values(status=STATUS_DELETING, model_turn_active=False)
             )
             if result.rowcount == 0:
                 await db.commit()

@@ -221,6 +221,15 @@ def _add_missing_columns(conn: Connection) -> None:
                     "VARCHAR(10) NOT NULL DEFAULT 'pending'"
                 )
             )
+        # issue #212 fix-r9: cross-runtime model-turn gate — prevents
+        # Runner from persisting history after a concurrent deletion.
+        if "model_turn_active" not in fme_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE forget_me_requests ADD COLUMN "
+                    "model_turn_active BOOLEAN NOT NULL DEFAULT false"
+                )
+            )
     # FK indexes for Gym-scoped reads (issue #178): Coach lookup, roster,
     # and the check-in sweep join on these columns.
     members_indexes = {i["name"] for i in inspect(conn).get_indexes("members")}

@@ -258,6 +258,32 @@ class AgentRuntime:
             turn = TurnContext()
             with turn:
                 linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
+
+                # P1 (fix-r9): A durable deleting request must gate linking/switch
+                # BEFORE identity repointing.  If a confirmed deletion exists,
+                # recover it first — otherwise a Gym switch could repoint the
+                # channel identity and orphan the deleting row.
+                #
+                # Private turns recover deletion; group turns redirect privately
+                # without revealing the deletion in public.
+                if linked is not None:
+                    deleting_before_link = await self.stores.forget.get_deleting_request(
+                        linked.member.id
+                    )
+                    if deleting_before_link is not None:
+                        if msg.is_group:
+                            return Reply(
+                                _FORGET_PRIVATE_REDIRECT[
+                                    deleting_before_link.language or "es"
+                                ]
+                            )
+                        await self.stores.forget.forget_member(linked.member.id)
+                        return Reply(
+                            _FORGET_GOODBYE[
+                                deleting_before_link.language or "es"
+                            ]
+                        )
+
                 reply = await self.linking.handle(msg, linked)
                 if reply is not None:
                     # P1 (fix-r8): Cancel pending Forget-me intent before linking
@@ -286,6 +312,42 @@ class AgentRuntime:
                 # touches the check-in rhythm, compaction, or history.
                 if self.dashboard is not None and is_dashboard_command(msg.text):
                     return await self.dashboard.handle(linked, is_group=msg.is_group)
+                # P1 (fix-r9): Cross-runtime TOCTOU gate — atomically mark the
+                # Member's forget-me row as having an active model turn before
+                # the model ever sees input.  If a concurrent runtime claimed
+                # the request between _handle_forget_me and now, this gate
+                # returns False and we return a goodbye instead of running the
+                # model.  The gate is released in after_send.
+                model_turn_gated = await self.stores.forget.acquire_model_turn_gate(
+                    linked.member.id
+                )
+                if not model_turn_gated:
+                    # Deletion was claimed during the window — the Member
+                    # may still exist (forget_member hasn't run yet), so
+                    # complete the deletion now.  If no deleting row exists,
+                    # another model turn holds the gate or the Member was
+                    # already deleted — return a safe goodbye in all cases.
+                    deleting_after_gate = await self.stores.forget.get_deleting_request(
+                        linked.member.id
+                    )
+                    if deleting_after_gate is not None:
+                        await self.stores.forget.forget_member(linked.member.id)
+                        return Reply(
+                            _FORGET_GOODBYE[
+                                deleting_after_gate.language or "es"
+                            ]
+                        )
+                    # The Member may already be deleted — identity check.
+                    identity = await self.stores.linking.identity_for(
+                        msg.channel, msg.channel_user_id
+                    )
+                    if identity is None:
+                        return Reply(_FORGET_GOODBYE["es"])
+                    # Gate held by a concurrent model turn (rare: the
+                    # per-identity lock makes this near-impossible in a
+                    # single process).  Fail safe — return goodbye.
+                    return Reply(_FORGET_GOODBYE["es"])
+
                 session = self.session_for_member(linked.member.id)
                 # Awaited: the tool set is scoped to the caller's role, which
                 # needs a Routine lookup (issue #174).
@@ -458,6 +520,16 @@ class AgentRuntime:
                 # The rhythm reset is settled here too, isolated from the
                 # demo/ping fan-out so one failure cannot block it.
                 await await_reset()
+                # Release the cross-runtime model-turn gate so a pending
+                # forget-me confirmation can be claimed again (issue #212,
+                # fix-r9).  Best-effort: a failure here must not block
+                # compaction or the next turn.
+                try:
+                    await self.stores.forget.release_model_turn_gate(member_id)
+                except Exception:
+                    logger.exception(
+                        "release_model_turn_gate failed for %d", member_id
+                    )
                 # Read now, not at build time: on the streaming path the tools
                 # populate these while the stream is being consumed.
                 deliver_demos = sender is not None and deliver_media
