@@ -317,11 +317,68 @@ async def test_cancel_forget_me_removes_request(env):
     member = await populate(env)
     now = datetime.now(UTC)
 
-    await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
-    await env.forget.cancel_forget_me(member.id)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+    pending = await env.forget.get_pending_request(member.id)
+    await env.forget.cancel_forget_me(
+        member.id,
+        confirmation_phrase=pending.confirmation_phrase,
+        expires_at=pending.expires_at,
+    )
 
     assert await _pending_count(env, member.id) == 0
     assert await count(env, Member, id=member.id) == 1
+
+
+async def test_cancel_forget_me_wrong_phrase_does_not_delete_new_request(env):
+    """fix-r19 P2: a stale wrong-message handler holding an old phrase
+    must not delete a newer pending request created concurrently.
+
+    Interleaving: request A is created, observed by handler H1.  Before
+    H1 cancels, A is claimed by a concurrent confirmation and deletion
+    completes, then a fresh request B is created.  H1 calls cancel with
+    A's phrase and expiry — those don't match B, so B survives."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # Request A — the one the stale handler observed.
+    phrase_a = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
+    pending_a = await env.forget.get_pending_request(member.id)
+    assert pending_a is not None
+    assert pending_a.confirmation_phrase == phrase_a
+    expires_a = pending_a.expires_at
+
+    # Concurrently: A is claimed (confirmation arrives) and deleted.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase_a, datetime.now(UTC)
+    )
+    assert claimed is not None
+    # Complete the deletion (cleans the DELETING row).
+    await env.forget.forget_member(member.id)
+
+    # Re-populate: a new Member identity (same channel user id) re-links
+    # and another "forget me" re-request creates request B.
+    member_b = await env.linking.link_member(
+        env.gym_id, "Dani", "telegram", "42"
+    )
+    phrase_b = await env.forget.request_forget_me(
+        member_b.id, env.gym_id, now, 300
+    )
+    assert phrase_b != ""
+    assert phrase_b != phrase_a
+
+    # Stale handler H1 cancels with A's phrase and expiry.
+    # B has a different phrase and expiry — it must survive.
+    await env.forget.cancel_forget_me(
+        member_b.id,
+        confirmation_phrase=phrase_a,
+        expires_at=expires_a,
+    )
+
+    # Request B must still be there.
+    pending_b = await env.forget.get_pending_request(member_b.id)
+    assert pending_b is not None, "request B must survive stale cancel"
+    assert pending_b.confirmation_phrase == phrase_b
+    assert pending_b.status == STATUS_PENDING
 
 
 async def test_get_pending_request_returns_none_when_empty(env):
@@ -2933,27 +2990,25 @@ async def test_barrier_two_model_turns_exactly_one_wins(env):
         f"exactly one turn must win: A={result_a}, B={result_b}"
 
 
-async def test_barrier_two_acquire_simultaneous_sqlite_no_integrity_error(env):
-    """P2 fix-r17: two genuinely simultaneous acquire_model_turn_lease
+async def test_barrier_two_acquire_simultaneous_sqlite_real_write_lock(env):
+    """fix-r19: two genuinely simultaneous acquire_model_turn_lease
     calls on SQLite WAL must produce exactly one winner and one loser
-    with no IntegrityError.
+    with no IntegrityError and no residue.
 
-    SQLite ignores SELECT FOR UPDATE, so two concurrent IMMEDIATE
-    transactions can both read the Member row, both see no existing
-    lease, and both race to insert the ModelTurnLease row.  Without
-    ON CONFLICT DO NOTHING, the loser hits a unique-constraint
-    IntegrityError.  With it, the loser gets rowcount=0 and the
-    method returns False cleanly.
+    SQLite ignores SELECT FOR UPDATE, so a noop UPDATE on the Member
+    row acquires the real SQLite write lock.  Only one connection can
+    proceed past that point; the loser blocks on the UPDATE and, when
+    it unblocks, sees the winner's lease and returns False cleanly.
 
-    Uses _post_acquire_lock_hook with asyncio.Event barriers to
-    pause both tasks inside the transaction (after the Member-row
-    lock / read, before the deleting and lease checks) and then
-    release them simultaneously so both try the fresh-insert path."""
+    Uses _pre_write_lock_hook with asyncio.Event barriers to pause
+    both tasks after the SELECT FOR UPDATE but before the noop UPDATE
+    so they race for the write lock simultaneously."""
     import asyncio
 
     member = await populate(env)
 
-    # Barriers: both tasks enter the transaction and hit the hook.
+    # Barriers: both tasks enter the transaction, do SELECT FOR UPDATE,
+    # then hit the pre-write-lock hook.
     both_at_barrier = asyncio.Event()
     release = asyncio.Event()
     arrived = 0
@@ -2966,7 +3021,7 @@ async def test_barrier_two_acquire_simultaneous_sqlite_no_integrity_error(env):
             both_at_barrier.set()  # Signal test: both tasks are inside
         await release.wait()       # Wait for test to release both
 
-    env.forget._post_acquire_lock_hook = hook
+    env.forget._pre_write_lock_hook = hook
 
     async def run_a():
         results["a"] = await env.forget.acquire_model_turn_lease(
@@ -2978,21 +3033,22 @@ async def test_barrier_two_acquire_simultaneous_sqlite_no_integrity_error(env):
             member.id, env.gym_id
         )
 
-    # Start both tasks; they will both hit the hook and pause.
+    # Start both tasks; they will both hit the pre-write-lock hook and pause.
     task_a = asyncio.create_task(run_a())
     task_b = asyncio.create_task(run_b())
 
     # Wait for both to reach the barrier (inside their transactions,
-    # past the SELECT FOR UPDATE which SQLite ignores).
+    # past the SELECT FOR UPDATE, before the noop UPDATE).
     await asyncio.wait_for(both_at_barrier.wait(), timeout=5.0)
 
-    # Release both simultaneously.
+    # Release both simultaneously — they race for the noop UPDATE.
+    # SQLite serialises the write lock: one wins, one blocks.
     release.set()
 
     await asyncio.gather(task_a, task_b)
-    env.forget._post_acquire_lock_hook = None
+    env.forget._pre_write_lock_hook = None
 
-    # Exactly one winner, one loser — no IntegrityError.
+    # Exactly one winner, one loser — no IntegrityError, no residue.
     assert results.get("a") is True or results.get("b") is True, (
         f"at least one must win: {results}"
     )
@@ -3003,7 +3059,7 @@ async def test_barrier_two_acquire_simultaneous_sqlite_no_integrity_error(env):
     # The winner's lease must exist.
     assert await env.forget.model_turn_lease_exists(member.id) is True
 
-    # The winner can release normally.
+    # The winner can release normally — no residue after release.
     await env.forget.release_model_turn_lease(member.id)
     assert await env.forget.model_turn_lease_exists(member.id) is False
 

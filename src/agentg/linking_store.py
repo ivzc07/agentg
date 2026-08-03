@@ -221,28 +221,11 @@ def _add_missing_columns(conn: Connection) -> None:
                     "VARCHAR(10) NOT NULL DEFAULT 'pending'"
                 )
             )
-        # issue #212 fix-r9: cross-runtime model-turn gate — prevents
-        # Runner from persisting history after a concurrent deletion.
-        if "model_turn_active" not in fme_columns:
-            conn.execute(
-                text(
-                    "ALTER TABLE forget_me_requests ADD COLUMN "
-                    "model_turn_active BOOLEAN NOT NULL DEFAULT false"
-                )
-            )
-        # issue #212 fix-r10: stale-lease recovery timestamp — a lease
-        # older than the bounded threshold is cleared so a crashed
-        # runtime cannot strand deletion forever.
-        if "turn_lease_at" not in fme_columns:
-            conn.execute(
-                text(
-                    "ALTER TABLE forget_me_requests ADD COLUMN "
-                    "turn_lease_at TIMESTAMP"
-                )
-            )
-    # ModelTurnLease DDL is now handled by the ORM class in models.py
-    # (Base.metadata.create_all); the raw-SQL migration below was never
-    # reached after the ORM class landed (issue #212, fix-r14).
+    # ModelTurnLease DDL is handled by the ORM class in models.py
+    # (Base.metadata.create_all).  The legacy model_turn_active and
+    # turn_lease_at columns on forget_me_requests (fix-r9, fix-r10)
+    # were superseded by the standalone ModelTurnLease table (fix-r11)
+    # and their migration code removed in fix-r19.
     # FK indexes for Gym-scoped reads (issue #178): Coach lookup, roster,
     # and the check-in sweep join on these columns.
     members_indexes = {i["name"] for i in inspect(conn).get_indexes("members")}

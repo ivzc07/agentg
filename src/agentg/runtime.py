@@ -345,7 +345,9 @@ class AgentRuntime:
                         )
                         if pending_fm is not None:
                             await self.stores.forget.cancel_forget_me(
-                                linked.member.id
+                                linked.member.id,
+                                confirmation_phrase=pending_fm.confirmation_phrase,
+                                expires_at=pending_fm.expires_at,
                             )
                         # Defense-in-depth: the fix-r16 gate above already blocks
                         # linking when a deleting row exists; this second check
@@ -693,7 +695,11 @@ class AgentRuntime:
                 linked.member.id
             )
             if pending is not None:
-                await self.stores.forget.cancel_forget_me(linked.member.id)
+                await self.stores.forget.cancel_forget_me(
+                    linked.member.id,
+                    confirmation_phrase=pending.confirmation_phrase,
+                    expires_at=pending.expires_at,
+                )
             return None
 
         # P1 (fix-r12): Check for a deleting (in-progress or interrupted)
@@ -734,7 +740,11 @@ class AgentRuntime:
         if pending is not None:
             # Expired — cancel silently and fall through (P2: <= not <).
             if pending.expires_at <= now:
-                await self.stores.forget.cancel_forget_me(linked.member.id)
+                await self.stores.forget.cancel_forget_me(
+                    linked.member.id,
+                    confirmation_phrase=pending.confirmation_phrase,
+                    expires_at=pending.expires_at,
+                )
             else:
                 normalized = normalize_confirmation(msg.text)
                 if normalized == pending.confirmation_phrase:
@@ -771,7 +781,9 @@ class AgentRuntime:
                     # Wrong phrase — cancel the pending request.  A new
                     # forget-me trigger below will create a fresh one.
                     await self.stores.forget.cancel_forget_me(
-                        linked.member.id
+                        linked.member.id,
+                        confirmation_phrase=pending.confirmation_phrase,
+                        expires_at=pending.expires_at,
                     )
 
         # Check if this message looks like a new forget-me request

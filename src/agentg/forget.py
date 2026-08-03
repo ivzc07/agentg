@@ -85,9 +85,13 @@ class ForgetStore:
         # Per-Member lease tokens so release_model_turn_lease only deletes
         # a lease WE created — never another runtime's live lease (fix-r12).
         self._lease_tokens: dict[int, datetime] = {}
-        # Test-only hooks for barrier tests (fix-r12 R3).  Called inside
-        # the engine.begin() transaction, after the Member-row lock is
-        # acquired, before business logic.
+        # Test-only hooks for barrier tests (fix-r12 R3, fix-r19).
+        # _pre_write_lock_hook: after SELECT FOR UPDATE but before the
+        #   noop UPDATE that acquires the real SQLite write lock.  Both
+        #   acquire_model_turn_lease and claim_forget_me_request call it.
+        # _post_acquire_lock_hook / _post_claim_lock_hook: after the real
+        #   write lock, before business logic.
+        self._pre_write_lock_hook: Callable[[int], Awaitable[None]] | None = None  # type: ignore[assignment]
         self._post_acquire_lock_hook: Callable[[int], Awaitable[None]] | None = None  # type: ignore[assignment]
         self._post_claim_lock_hook: Callable[[int], Awaitable[None]] | None = None  # type: ignore[assignment]
 
@@ -345,20 +349,38 @@ class ForgetStore:
                 )
             )
 
-    async def cancel_forget_me(self, member_id: int) -> None:
+    async def cancel_forget_me(
+        self,
+        member_id: int,
+        *,
+        confirmation_phrase: str | None = None,
+        expires_at: datetime | None = None,
+    ) -> None:
         """Remove any pending confirmation without deleting Member data.
 
         Only cancels rows still in ``pending`` status — a ``deleting``
         (or legacy ``consumed``) row means deletion is in progress and
         must not be disturbed.
+
+        When ``confirmation_phrase`` and ``expires_at`` are supplied,
+        only the EXACT pending request observed by the caller is deleted
+        — a stale wrong-message handler cannot delete a newer request
+        created concurrently (fix-r19).
         """
         async with self._sessions() as db:
-            await db.execute(
-                delete(ForgetMeRequest).where(
+            stmt = (
+                delete(ForgetMeRequest)
+                .where(
                     ForgetMeRequest.member_id == member_id,
                     ForgetMeRequest.status == STATUS_PENDING,
                 )
             )
+            if confirmation_phrase is not None and expires_at is not None:
+                stmt = stmt.where(
+                    ForgetMeRequest.confirmation_phrase == confirmation_phrase,
+                    ForgetMeRequest.expires_at == expires_at,
+                )
+            await db.execute(stmt)
             await db.commit()
 
     # -- Model-turn lease (issue #212, fix-r11) ------------------------------
@@ -370,9 +392,11 @@ class ForgetStore:
         exclusive model-turn lease, serialised with
         ``claim_forget_me_request`` via a shared Member-row lock (fix-r12).
 
-        Uses ``engine.begin()`` for an explicit transaction (SQLite
-        IMMEDIATE + Postgres ``SELECT … FOR UPDATE``) so a concurrent claim
-        cannot interleave between our delete-check and the lease insert.
+        Uses ``engine.begin()`` for an explicit transaction.  Postgres
+        serialises via ``SELECT … FOR UPDATE`` row-level locks; SQLite
+        ignores ``FOR UPDATE`` so a noop UPDATE on the Member row after
+        the SELECT forces a real write lock — only one connection can
+        proceed past this point (fix-r19).
 
         Only reclaims a lease that is explicitly stale; a live lease owned
         by another runtime is never touched (fix-r12).
@@ -385,15 +409,31 @@ class ForgetStore:
         async with self.engine.begin() as conn:
             # Lock the Member row to serialize with claim_forget_me_request.
             # On Postgres this is a row-level lock; on SQLite WAL the
-            # IMMEDIATE transaction provides the write lock.
+            # FOR UPDATE is a no-op so we follow with a noop UPDATE that
+            # takes the real SQLite write lock (fix-r19).
             member_row = await conn.execute(
                 select(Member.id).where(Member.id == member_id).with_for_update()
             )
             if member_row.first() is None:
                 return False  # Member doesn't exist
 
-            # Test-only barrier hook — fires after the Member-row lock is
-            # held so a concurrent claim is serialised (fix-r12 R3).
+            # Test-only barrier hook — fires after SELECT FOR UPDATE but
+            # before the real write lock so both tasks can be paused at
+            # this point for simultaneous-race tests (fix-r19).
+            if self._pre_write_lock_hook is not None:
+                await self._pre_write_lock_hook(member_id)
+
+            # Take the real SQLite write lock via a noop UPDATE — on
+            # Postgres the row is already locked by FOR UPDATE so this
+            # is a harmless no-op.  Only one connection can hold the
+            # SQLite write lock, so concurrent acquire / claim calls
+            # are now serialised before the business-logic checks.
+            await conn.execute(
+                update(Member).where(Member.id == member_id).values(id=member_id)
+            )
+
+            # Test-only barrier hook — fires after the real write lock is
+            # held so a concurrent claim is serialised (fix-r12 R3, fix-r19).
             if self._post_acquire_lock_hook is not None:
                 await self._post_acquire_lock_hook(member_id)
 
@@ -418,11 +458,10 @@ class ForgetStore:
             ).first()
 
             if lease_row is None:
-                # Dialect-safe insert: on PostgreSQL SELECT FOR UPDATE
-                # serialises, but SQLite ignores it so two concurrent
-                # transactions can both reach here.  ON CONFLICT DO
-                # NOTHING ensures exactly one wins without an unhandled
-                # IntegrityError on the unique member_id constraint.
+                # The noop UPDATE above serialises access on SQLite, so
+                # only one transaction can reach this insert.  ON CONFLICT
+                # DO NOTHING is defense-in-depth for the stale-recovery
+                # path (two concurrent reclaimers racing below).
                 dialect_name = self.engine.sync_engine.dialect.name
                 if dialect_name == "postgresql":
                     from sqlalchemy.dialects.postgresql import insert as _dialect_insert
@@ -439,9 +478,8 @@ class ForgetStore:
                 )
                 result = await conn.execute(stmt)
                 if getattr(result, "rowcount", 0) == 0:
-                    # Another runtime won the race — the member_id
-                    # unique constraint fired.  Return False so the
-                    # caller handles the loss cleanly.
+                    # Defense-in-depth: the unique constraint fired.
+                    # Return False so the caller handles the loss.
                     return False
                 self._lease_tokens[member_id] = now
                 return True
@@ -510,9 +548,11 @@ class ForgetStore:
         lease exists — serialised with ``acquire_model_turn_lease`` via a
         shared Member-row lock so both cannot succeed concurrently (fix-r12).
 
-        Uses ``engine.begin()`` for an explicit transaction: the shared
-        ``SELECT … FOR UPDATE`` on the Member row ensures that a claim and
-        a model-turn admission never interleave across runtimes.
+        Uses ``engine.begin()`` for an explicit transaction.  Postgres
+        serialises via ``SELECT … FOR UPDATE`` row-level locks; SQLite
+        ignores ``FOR UPDATE`` so a noop UPDATE on the Member row after
+        the SELECT forces a real write lock — only one connection can
+        proceed past this point (fix-r19).
 
         Returns the claimed request (for language mirroring) or None if the
         claim lost.
@@ -521,14 +561,32 @@ class ForgetStore:
 
         async with self.engine.begin() as conn:
             # Lock the Member row to serialize with acquire_model_turn_lease.
+            # On Postgres this is a row-level lock; on SQLite WAL the
+            # FOR UPDATE is a no-op so we follow with a noop UPDATE that
+            # takes the real SQLite write lock (fix-r19).
             member_row = await conn.execute(
                 select(Member.id).where(Member.id == member_id).with_for_update()
             )
             if member_row.first() is None:
                 return None  # Member doesn't exist
 
-            # Test-only barrier hook — fires after the Member-row lock is
-            # held so a concurrent acquire is serialised (fix-r12 R3).
+            # Test-only barrier hook — fires after SELECT FOR UPDATE but
+            # before the real write lock so both tasks can be paused at
+            # this point for simultaneous-race tests (fix-r19).
+            if self._pre_write_lock_hook is not None:
+                await self._pre_write_lock_hook(member_id)
+
+            # Take the real SQLite write lock via a noop UPDATE — on
+            # Postgres the row is already locked by FOR UPDATE so this
+            # is a harmless no-op.  Only one connection can hold the
+            # SQLite write lock, so concurrent claim / acquire calls
+            # are now serialised before the business-logic checks.
+            await conn.execute(
+                update(Member).where(Member.id == member_id).values(id=member_id)
+            )
+
+            # Test-only barrier hook — fires after the real write lock is
+            # held so a concurrent acquire is serialised (fix-r12 R3, fix-r19).
             if self._post_claim_lock_hook is not None:
                 await self._post_claim_lock_hook(member_id)
 
