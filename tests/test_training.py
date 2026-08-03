@@ -4,14 +4,17 @@ Facts flow only through these methods (the Agent's tools are thin wrappers);
 the clock is injected so gaps and the auto-close timeout are testable.
 """
 
+import asyncio
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from sqlalchemy import func, select
 
 from conftest import FakeClock
 
 from agentg.db import create_engine
 from agentg.linking_store import LinkingStore
+from agentg.models import Session as SessionModel
 from agentg.training import SESSION_AUTO_CLOSE, SEED_EXERCISES, TrainingStore
 
 
@@ -520,3 +523,657 @@ async def test_exercise_history_batch_respects_limit(env):
     result = await env.training.exercise_history_batch(env.member_id, ["bench"], limit=2)
 
     assert len(result["bench"]) == 2  # only the 2 most recent sessions
+
+
+# --- issue #213: one open Session per Member ---
+
+
+class TestSchemaOpenSessionUniqueness:
+    """The DB enforces at most one Session without a close time per Member."""
+
+    async def test_fresh_schema_has_the_partial_unique_index(self, tmp_path):
+        """A brand-new database gets the index from create_all."""
+        from sqlalchemy import text
+
+        engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'fresh.db'}")
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+
+        async with engine.begin() as conn:
+            indexes = {
+                row[1]
+                for row in await conn.execute(
+                    text("SELECT type, name FROM sqlite_master WHERE type = 'index'")
+                )
+            }
+        assert "uq_sessions_one_open_per_member" in indexes
+        await engine.dispose()
+
+    async def test_migration_adds_index_to_a_legacy_db(self, tmp_path):
+        """A database that predates issue #213 gets the index at startup."""
+        import sqlite3
+        from sqlalchemy import text
+
+        db_path = tmp_path / "legacy-sessions.db"
+        engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+        store = LinkingStore(engine)
+        await store.ensure_schema()
+        await engine.dispose()
+
+        # Simulate a pre-#213 database: drop the index.
+        raw = sqlite3.connect(str(db_path))
+        raw.execute("DROP INDEX uq_sessions_one_open_per_member")
+        raw.commit()
+        raw.close()
+
+        engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+        store = LinkingStore(engine)
+        await store.ensure_schema()
+
+        async with engine.begin() as conn:
+            indexes = {
+                row[1]
+                for row in await conn.execute(
+                    text("SELECT type, name FROM sqlite_master WHERE type = 'index'")
+                )
+            }
+        assert "uq_sessions_one_open_per_member" in indexes
+        await engine.dispose()
+
+    async def test_duplicate_open_sessions_detected_with_actionable_member_ids(
+        self, tmp_path
+    ):
+        """Schema setup detects historical duplicates and fails with Member IDs."""
+        import sqlite3
+
+        db_path = tmp_path / "dup-sessions.db"
+        engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+        store = LinkingStore(engine)
+        await store.ensure_schema()
+        await engine.dispose()
+
+        # Create a pre-#213 state with two open Sessions for one Member.
+        raw = sqlite3.connect(str(db_path))
+        raw.execute("PRAGMA foreign_keys=OFF")
+        raw.execute("DROP INDEX uq_sessions_one_open_per_member")
+        # Insert two open sessions for member_id=1, gym_id=1.
+        raw.execute(
+            "INSERT INTO sessions (id, gym_id, member_id, started_at, closed_at) "
+            "VALUES (1, 1, 1, '2026-07-01 10:00:00', NULL)"
+        )
+        raw.execute(
+            "INSERT INTO sessions (id, gym_id, member_id, started_at, closed_at) "
+            "VALUES (2, 1, 1, '2026-07-01 11:00:00', NULL)"
+        )
+        raw.commit()
+        raw.close()
+
+        engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+        store = LinkingStore(engine)
+        with pytest.raises(RuntimeError, match="Historical duplicate open Sessions"):
+            await store.ensure_schema()
+        await engine.dispose()
+
+    def test_partial_unique_index_ddl_compiles_on_postgres(self):
+        """The partial unique index must compile on PostgreSQL (no DATETIME)."""
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.schema import CreateIndex
+
+        from agentg.models import Session
+
+        dialect = postgresql.dialect()
+        for index in Session.__table_args__:
+            if hasattr(index, "name") and index.name == "uq_sessions_one_open_per_member":
+                ddl = str(
+                    CreateIndex(index).compile(dialect=dialect)
+                )
+                assert "DATETIME" not in ddl.upper()
+                assert "closed_at IS NULL" in ddl
+                assert "UNIQUE" in ddl.upper()
+                break
+        else:
+            pytest.fail("uq_sessions_one_open_per_member index not found on Session")
+
+
+class TestStoreConcurrency:
+    """Race-safe Session open: concurrent callers reuse one Session."""
+
+    @pytest.fixture
+    async def two_members(self, tmp_path):
+        """Two Members at the same Gym for concurrency tests."""
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'concurrent.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        clock = FakeClock()
+        training = TrainingStore(engine, clock=clock)
+        await training.ensure_seeded()
+        gym = await linking.create_gym("Iron Temple")
+        a = await linking.link_member(gym.id, "Ana", "telegram", "1")
+        b = await linking.link_member(gym.id, "Bob", "telegram", "2")
+        yield SimpleEnv(
+            training=training,
+            clock=clock,
+            member_id=a.id,
+            gym_id=gym.id,
+        ), SimpleEnv(
+            training=training,
+            clock=clock,
+            member_id=b.id,
+            gym_id=gym.id,
+        )
+        await engine.dispose()
+
+    async def test_concurrent_open_session_shares_one_session(self, tmp_path):
+        """Two concurrent public open_session calls reuse one Session."""
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'race1.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        clock = FakeClock()
+        training = TrainingStore(engine, clock=clock)
+        await training.ensure_seeded()
+        gym = await linking.create_gym("Iron Temple")
+        member = await linking.link_member(gym.id, "Ana", "telegram", "1")
+
+        barrier = asyncio.Barrier(2)
+
+        async def opener():
+            await barrier.wait()
+            return await training.open_session(member.id, gym.id)
+
+        r1, r2 = await asyncio.gather(opener(), opener())
+
+        # Both callers got the same Session.
+        assert r1.session_id == r2.session_id
+        # One created it, the other found it pre-existing.
+        assert {r1.reopened, r2.reopened} == {True, False}
+
+        # Exactly one open Session in the database.
+        async with training._sessions() as db:
+            count = await db.scalar(
+                select(func.count())
+                .select_from(SessionModel)
+                .where(SessionModel.member_id == member.id, SessionModel.closed_at.is_(None))
+            )
+            assert count == 1
+
+        await engine.dispose()
+
+    async def test_concurrent_log_sets_one_session(self, tmp_path):
+        """Concurrent log_sets calls (with an existing open Session) all
+        attach their Sets to the same Session — no work is dropped."""
+        from agentg.models import Set as SetModel
+
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'race2.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        clock = FakeClock()
+        training = TrainingStore(engine, clock=clock)
+        await training.ensure_seeded()
+        gym = await linking.create_gym("Iron Temple")
+        member = await linking.link_member(gym.id, "Ana", "telegram", "1")
+
+        # Open a Session first so both log_sets find it.
+        await training.open_session(member.id, gym.id)
+
+        async def log(line):
+            return await training.log_sets(member.id, gym.id, line)
+
+        r1, r2 = await asyncio.gather(
+            log("bench 60 8,8,8"),
+            log("squat 100 5,5,5"),
+        )
+        assert r1.exercise == "bench press"
+        assert r2.exercise == "squat"
+
+        # All 6 Sets in one Session, not split across two.
+        async with training._sessions() as db:
+            session = await db.scalar(
+                select(SessionModel).where(
+                    SessionModel.member_id == member.id,
+                    SessionModel.closed_at.is_(None),
+                )
+            )
+            assert session is not None
+            set_rows = (
+                await db.execute(
+                    select(SetModel).where(SetModel.session_id == session.id)
+                )
+            ).scalars().all()
+            assert len(set_rows) == 6  # 3 bench + 3 squat
+
+        await engine.dispose()
+
+    async def test_concurrent_implicit_open_no_dropped_work(self, tmp_path):
+        """Concurrent log_sets calls with no open Session all land Sets in
+        one implicitly-opened Session — no work is dropped or split."""
+        from agentg.models import Set as SetModel
+
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'race3.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        clock = FakeClock()
+        training = TrainingStore(engine, clock=clock)
+        await training.ensure_seeded()
+        gym = await linking.create_gym("Iron Temple")
+        member = await linking.link_member(gym.id, "Ana", "telegram", "1")
+
+        barrier = asyncio.Barrier(3)
+
+        async def log(line):
+            await barrier.wait()
+            return await training.log_sets(member.id, gym.id, line)
+
+        results = await asyncio.gather(
+            log("bench 60 8,8,8"),
+            log("squat 100 5,5,5"),
+            log("deadlift 120 3,3,3"),
+        )
+        assert len(results) == 3
+
+        # All 9 Sets in one Session.
+        async with training._sessions() as db:
+            session = await db.scalar(
+                select(SessionModel).where(
+                    SessionModel.member_id == member.id,
+                    SessionModel.closed_at.is_(None),
+                )
+            )
+            assert session is not None
+            set_rows = (
+                await db.execute(
+                    select(SetModel).where(SetModel.session_id == session.id)
+                )
+            ).scalars().all()
+            assert len(set_rows) == 9  # 3+3+3, all in one session
+
+        await engine.dispose()
+
+    async def test_concurrent_open_with_stale_session(self, tmp_path):
+        """Two concurrent open_session calls with a stale open Session both
+        get the same new Session — the stale one is closed, and exactly one
+        open Session remains."""
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'race4.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        clock = FakeClock()
+        training = TrainingStore(engine, clock=clock)
+        await training.ensure_seeded()
+        gym = await linking.create_gym("Iron Temple")
+        member = await linking.link_member(gym.id, "Ana", "telegram", "1")
+
+        # Create a stale open Session.
+        first = await training.open_session(member.id, gym.id)
+        clock.advance(SESSION_AUTO_CLOSE + timedelta(minutes=1))
+
+        barrier = asyncio.Barrier(2)
+
+        async def opener():
+            await barrier.wait()
+            return await training.open_session(member.id, gym.id)
+
+        r1, r2 = await asyncio.gather(opener(), opener())
+
+        # Both got the same new Session, not the stale one.
+        assert r1.session_id == r2.session_id
+        assert r1.session_id != first.session_id
+
+        # The first (stale) Session is closed.
+        closed = await training.get_session(first.session_id)
+        assert closed.closed_at is not None
+
+        # Exactly one open Session.
+        async with training._sessions() as db:
+            count = await db.scalar(
+                select(func.count())
+                .select_from(SessionModel)
+                .where(
+                    SessionModel.member_id == member.id,
+                    SessionModel.closed_at.is_(None),
+                )
+            )
+            assert count == 1
+
+        await engine.dispose()
+
+    async def test_concurrent_log_sets_new_exercise_no_dropped_work(self, tmp_path):
+        """Concurrent log_sets calls for the same unknown Exercise both
+        succeed — the catalog INSERT race is handled gracefully and no
+        valid Sets are dropped (issue #213)."""
+        from agentg.models import Exercise as ExerciseModel
+        from agentg.models import Set as SetModel
+
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'race5.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        clock = FakeClock()
+        training = TrainingStore(engine, clock=clock)
+        # Do NOT seed — the tested exercise ("cable fly") is unknown.
+        gym = await linking.create_gym("Iron Temple")
+        member = await linking.link_member(gym.id, "Ana", "telegram", "1")
+
+        # Open a Session so the race only exercises the catalog path.
+        await training.open_session(member.id, gym.id)
+
+        barrier = asyncio.Barrier(2)
+
+        async def log(line):
+            await barrier.wait()
+            return await training.log_sets(member.id, gym.id, line)
+
+        r1, r2 = await asyncio.gather(
+            log("cable fly 20 10,10,10"),
+            log("cable fly 20 10,10,10"),
+        )
+        assert r1.exercise == "cable fly"
+        assert r2.exercise == "cable fly"
+        assert r1.reps == [10, 10, 10]
+        assert r2.reps == [10, 10, 10]
+
+        # All 6 Sets in one Session — none dropped.
+        async with training._sessions() as db:
+            session = await db.scalar(
+                select(SessionModel).where(
+                    SessionModel.member_id == member.id,
+                    SessionModel.closed_at.is_(None),
+                )
+            )
+            assert session is not None
+            set_rows = (
+                await db.execute(
+                    select(SetModel).where(SetModel.session_id == session.id)
+                )
+            ).scalars().all()
+            assert len(set_rows) == 6  # 3+3, all in one session
+
+            # Exactly one Exercise was created.
+            ex_count = await db.scalar(
+                select(func.count()).where(ExerciseModel.name == "cable fly")
+            )
+            assert ex_count == 1
+
+        await engine.dispose()
+
+
+class TestSessionLifecycleUnderConstraint:
+    """Normal lifecycle operations work with the unique constraint in place."""
+
+    async def test_open_log_close_reopen_cycle(self, env):
+        """A full cycle: open, log, close, reopen — all behave correctly."""
+        # Open, log, close.
+        opened = await env.training.open_session(env.member_id, env.gym_id)
+        assert opened.reopened is False
+
+        await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+        summary = await env.training.close_session(env.member_id)
+        assert summary.total_sets == 3
+
+        # Move forward and reopen.
+        env.clock.advance(days(2))
+        reopened = await env.training.open_session(env.member_id, env.gym_id)
+        assert reopened.reopened is False  # new session, not the old one
+        assert reopened.days_since_last == 2
+
+        await env.training.log_sets(env.member_id, env.gym_id, "bench 62.5 8,8,8")
+        summary2 = await env.training.close_session(env.member_id)
+        assert summary2.total_sets == 3
+
+    async def test_two_members_each_have_independent_open_sessions(
+        self, tmp_path
+    ):
+        """The unique constraint is per-member: two Members can each have
+        an open Session."""
+        engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'two.db'}")
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        clock = FakeClock()
+        training = TrainingStore(engine, clock=clock)
+        await training.ensure_seeded()
+        gym = await linking.create_gym("Iron Temple")
+        a = await linking.link_member(gym.id, "Ana", "telegram", "1")
+        b = await linking.link_member(gym.id, "Bob", "telegram", "2")
+
+        # Both members open a session.
+        opened_a = await training.open_session(a.id, gym.id)
+        opened_b = await training.open_session(b.id, gym.id)
+
+        assert opened_a.session_id != opened_b.session_id
+
+        # Each logs sets independently.
+        await training.log_sets(a.id, gym.id, "bench 60 8,8,8")
+        await training.log_sets(b.id, gym.id, "squat 100 5,5,5")
+
+        sets_a = await training.current_session_sets(a.id)
+        sets_b = await training.current_session_sets(b.id)
+        assert len(sets_a) == 3
+        assert len(sets_b) == 3
+
+        await engine.dispose()
+
+    async def test_implicit_open_via_log_sets_then_explicit_open_reuses(self, env):
+        """Implicit open (log_sets) + explicit open reuse the same Session."""
+        # Implicit open via log_sets.
+        await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+
+        # Explicit open reuses that Session.
+        opened = await env.training.open_session(env.member_id, env.gym_id)
+        assert opened.reopened is True
+
+        # Sets from the implicit open are still there.
+        sets = await env.training.current_session_sets(env.member_id)
+        assert len(sets) == 3
+
+    async def test_close_then_implicit_open_creates_new_session(self, env):
+        """After closing, an implicit open (log_sets) creates a new Session."""
+        await env.training.log_sets(env.member_id, env.gym_id, "bench 60 8,8,8")
+        await env.training.close_session(env.member_id)
+
+        env.clock.advance(days(1))
+        await env.training.log_sets(env.member_id, env.gym_id, "squat 100 5,5,5")
+
+        sets = await env.training.current_session_sets(env.member_id)
+        assert len(sets) == 3
+        assert sets[0].weight == 100.0  # the new session's sets
+
+
+class TestPostgresDdlSafety:
+    """The DDL must compile on both SQLite and PostgreSQL."""
+
+    def test_sessions_model_compiles_on_postgres(self):
+        """The Session model's __table_args__ compile on the PostgreSQL
+        dialect without DATETIME or other SQLite-only types."""
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.schema import CreateTable
+
+        from agentg.models import Session
+
+        dialect = postgresql.dialect()
+        ddl = str(CreateTable(Session.__table__).compile(dialect=dialect))
+        assert "DATETIME" not in ddl.upper()
+        # The partial unique index isn't in CREATE TABLE; it's a separate
+        # Index object in __table_args__. Verify it compiled above in
+        # test_partial_unique_index_ddl_compiles_on_postgres.
+
+    def test_duplicate_detection_sql_compiles_on_postgres(self):
+        """The duplicate-detection SQL (both the SQLite and PostgreSQL
+        branches) compiles on the PostgreSQL dialect without syntax errors."""
+        from sqlalchemy import text
+        from sqlalchemy.dialects import postgresql
+
+        dialect = postgresql.dialect()
+        # SQLite branch: HAVING cnt > 1 (column alias in HAVING).
+        sql_sqlite = text(
+            "SELECT member_id, COUNT(*) as cnt FROM sessions "
+            "WHERE closed_at IS NULL GROUP BY member_id HAVING cnt > 1"
+        )
+        compiled_sqlite = str(sql_sqlite.compile(dialect=dialect))
+        assert "sessions" in compiled_sqlite
+        assert "closed_at IS NULL" in compiled_sqlite
+        # PostgreSQL branch: HAVING COUNT(*) > 1 (no column alias in HAVING).
+        sql_pg = text(
+            "SELECT member_id, COUNT(*) as cnt FROM sessions "
+            "WHERE closed_at IS NULL GROUP BY member_id HAVING COUNT(*) > 1"
+        )
+        compiled_pg = str(sql_pg.compile(dialect=dialect))
+        assert "sessions" in compiled_pg
+        assert "closed_at IS NULL" in compiled_pg
+
+
+class TestRaceSafeIntegrityErrorDiscrimination:
+    """The race-safe Session INSERT only recovers from the open-Session
+    unique-constraint violation — foreign-key, not-null, and other integrity
+    failures must propagate to the caller (issue #213)."""
+
+    # -- _is_unique_violation unit tests -----------------------------------
+
+    def test_is_unique_violation_detects_unique_on_expected_table(self):
+        """A UNIQUE violation on the expected table returns True."""
+        import sqlite3
+
+        from sqlalchemy.exc import IntegrityError
+
+        from agentg.training import _is_unique_violation
+
+        exc = IntegrityError(
+            "stmt", {}, sqlite3.IntegrityError(
+                "UNIQUE constraint failed: sessions.member_id"
+            ),
+        )
+        assert _is_unique_violation(exc, "sessions") is True
+
+    def test_is_unique_violation_rejects_foreign_key(self):
+        """A FOREIGN KEY violation on the expected table returns False."""
+        import sqlite3
+
+        from sqlalchemy.exc import IntegrityError
+
+        from agentg.training import _is_unique_violation
+
+        exc = IntegrityError(
+            "stmt", {}, sqlite3.IntegrityError(
+                "FOREIGN KEY constraint failed"
+            ),
+        )
+        assert _is_unique_violation(exc, "sessions") is False
+
+    def test_is_unique_violation_rejects_not_null(self):
+        """A NOT NULL violation on the expected table returns False."""
+        import sqlite3
+
+        from sqlalchemy.exc import IntegrityError
+
+        from agentg.training import _is_unique_violation
+
+        exc = IntegrityError(
+            "stmt", {}, sqlite3.IntegrityError(
+                "NOT NULL constraint failed: sessions.gym_id"
+            ),
+        )
+        assert _is_unique_violation(exc, "sessions") is False
+
+    def test_is_unique_violation_rejects_wrong_table(self):
+        """A UNIQUE violation on a different table returns False."""
+        import sqlite3
+
+        from sqlalchemy.exc import IntegrityError
+
+        from agentg.training import _is_unique_violation
+
+        exc = IntegrityError(
+            "stmt", {}, sqlite3.IntegrityError(
+                "UNIQUE constraint failed: exercises.name"
+            ),
+        )
+        assert _is_unique_violation(exc, "sessions") is False
+
+    def test_is_unique_violation_rejects_none_orig(self):
+        """An IntegrityError with no wrapped DBAPI exception returns False."""
+        from sqlalchemy.exc import IntegrityError
+
+        from agentg.training import _is_unique_violation
+
+        exc = IntegrityError("stmt", {}, None)
+        assert _is_unique_violation(exc, "sessions") is False
+
+    # -- integration: FK violation propagates -----------------------------------
+
+    async def test_foreign_key_violation_propagates(self, tmp_path):
+        """An IntegrityError from a FK violation (bad gym_id) is not
+        swallowed as a race condition."""
+        from sqlalchemy.exc import IntegrityError
+
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'fk.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        training = TrainingStore(engine, clock=FakeClock())
+        await training.ensure_seeded()
+        gym = await linking.create_gym("Iron Temple")
+        member = await linking.link_member(gym.id, "Ana", "telegram", "1")
+
+        # Use a gym_id that does not exist — must surface a FK error, not
+        # silently recover as if it were an open-Session race.
+        bad_gym_id = gym.id + 999
+        with pytest.raises(IntegrityError) as exc_info:
+            await training.open_session(member.id, bad_gym_id)
+        # The error must be a FK violation, not a unique constraint one.
+        assert "FOREIGN KEY" in str(exc_info.value.orig).upper()
+
+        await engine.dispose()
+
+    # -- sanity: unique violation still recovered -----------------------------
+
+    async def test_unique_violation_still_recovered(self, tmp_path):
+        """Sanity check: the expected unique-constraint race condition is
+        still recovered correctly after the discrimination check."""
+        import asyncio
+
+        from agentg.models import Session as SessionModel
+
+        engine = create_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'race_still_works.db'}"
+        )
+        linking = LinkingStore(engine)
+        await linking.ensure_schema()
+        training = TrainingStore(engine, clock=FakeClock())
+        await training.ensure_seeded()
+        gym = await linking.create_gym("Iron Temple")
+        member = await linking.link_member(gym.id, "Ana", "telegram", "1")
+
+        barrier = asyncio.Barrier(2)
+
+        async def opener():
+            await barrier.wait()
+            return await training.open_session(member.id, gym.id)
+
+        r1, r2 = await asyncio.gather(opener(), opener())
+
+        # Both callers got the same Session.
+        assert r1.session_id == r2.session_id
+        assert {r1.reopened, r2.reopened} == {True, False}
+
+        # Exactly one open Session.
+        async with training._sessions() as db:
+            count = await db.scalar(
+                select(func.count())
+                .select_from(SessionModel)
+                .where(
+                    SessionModel.member_id == member.id,
+                    SessionModel.closed_at.is_(None),
+                )
+            )
+            assert count == 1
+
+        await engine.dispose()

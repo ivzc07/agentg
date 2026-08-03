@@ -6,6 +6,7 @@ delegate to (coaching.py) — neither imports the other's internals through it.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -77,3 +78,7 @@ class MemberContext:
     # clears the SDK session again after the run to remove the turn's own
     # residue (issue #166).
     forgotten: bool = False
+    # Serializes mutating Session tools within one turn so concurrent tool
+    # calls from the same Agent run cannot race on session open/close/log
+    # (issue #213 — defense in depth behind the DB constraint).
+    _session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

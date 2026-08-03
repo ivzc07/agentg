@@ -14,6 +14,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from agentg.catalog import (
@@ -31,6 +32,21 @@ from agentg.timezones import local_date
 SESSION_AUTO_CLOSE = timedelta(hours=3)
 
 KG_PER_LB = 0.45359237
+
+
+def _is_unique_violation(error: IntegrityError, table: str) -> bool:
+    """True when *error* is a unique-constraint violation on *table*.
+
+    Portable across SQLite (``sqlite3.IntegrityError``) and PostgreSQL
+    (``asyncpg.exceptions.UniqueViolationError``) — the message for a
+    unique-constraint violation always contains "UNIQUE" and the table name,
+    while foreign-key, not-null, and check violations have distinct wording.
+    """
+    orig = error.orig
+    if orig is None:
+        return False
+    msg = str(orig)
+    return "UNIQUE" in msg.upper() and table.lower() in msg.lower()
 
 # A logged weight beyond this multiple of the Member's own last top set is
 # still stored (the Member is right once they confirm) but flagged so the
@@ -119,16 +135,14 @@ class TrainingStore:
     async def open_session(self, member_id: int, gym_id: int) -> OpenedSession:
         async with self._sessions() as db:
             now = self._clock()
-            existing = await self._open_session_row(db, member_id)
-            if existing is not None:
-                await db.commit()
-                days, last = await self._previous_session_info(db, member_id, existing.id, now)
-                return OpenedSession(existing.id, True, days, last)
-            days, last = await self._previous_session_info(db, member_id, None, now)
-            session = Session(gym_id=gym_id, member_id=member_id, started_at=now)
-            db.add(session)
+            session, pre_existing = await self._race_safe_ensure_session(
+                db, member_id, gym_id, now
+            )
+            days, last = await self._previous_session_info(
+                db, member_id, session.id, now
+            )
             await db.commit()
-            return OpenedSession(session.id, False, days, last)
+            return OpenedSession(session.id, pre_existing, days, last)
 
     async def close_session(self, member_id: int) -> SessionSummary:
         async with self._sessions() as db:
@@ -549,14 +563,54 @@ class TrainingStore:
             return None
         return session
 
+    async def _race_safe_ensure_session(
+        self, db: AsyncSession, member_id: int, gym_id: int, now: datetime
+    ) -> tuple[Session, bool]:
+        """Ensure an open Session exists, creating one race-safely if needed.
+
+        Returns ``(session, pre_existing)`` where *pre_existing* is ``True``
+        when the Session already existed (or was won by a concurrent caller).
+
+        A savepoint isolates the INSERT so a unique-constraint loser can
+        recover without trashing the outer transaction (issue #213).
+        """
+        existing = await self._open_session_row(db, member_id)
+        if existing is not None:
+            return existing, True
+
+        nested = await db.begin_nested()
+        try:
+            session = Session(gym_id=gym_id, member_id=member_id, started_at=now)
+            db.add(session)
+            await db.flush()
+            await nested.commit()
+            return session, False
+        except IntegrityError as exc:
+            await nested.rollback()
+            # Only recover from the open-session unique-index race.
+            # Re-raise foreign-key, not-null, or unrelated integrity failures
+            # so the caller gets the real error instead of a masked one (issue #213).
+            if not _is_unique_violation(exc, "sessions"):
+                raise
+            # Another caller won the race — use their Session.
+            winner = await db.scalar(
+                select(Session)
+                .where(Session.member_id == member_id, Session.closed_at.is_(None))
+                .order_by(Session.started_at.desc())
+                .limit(1)
+            )
+            if winner is None:
+                raise RuntimeError(
+                    f"Failed to create or find open session for member {member_id}: "
+                    "unique constraint violation but no open session exists"
+                )
+            return winner, True
+
     async def _require_open_session(
         self, db: AsyncSession, member_id: int, gym_id: int
     ) -> Session:
-        session = await self._open_session_row(db, member_id)
-        if session is None:  # logging sets implies being at the gym
-            session = Session(gym_id=gym_id, member_id=member_id, started_at=self._clock())
-            db.add(session)
-            await db.flush()
+        now = self._clock()
+        session, _ = await self._race_safe_ensure_session(db, member_id, gym_id, now)
         return session
 
     async def _last_activity(self, db: AsyncSession, session: Session) -> datetime:

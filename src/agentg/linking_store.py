@@ -213,6 +213,40 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text("CREATE INDEX ix_member_channels_gym_id ON member_channels (gym_id)")
         )
+    # One open Session per Member, DB-enforced (issue #213).
+    sessions_indexes = {i["name"] for i in inspect(conn).get_indexes("sessions")}
+    if "uq_sessions_one_open_per_member" not in sessions_indexes:
+        # Detect historical duplicate open Sessions: a legacy database may
+        # hold Members with two open Sessions (pre-constraint writes could
+        # interleave and leave two rows with closed_at=NULL). Fail with
+        # actionable Member IDs — silently choosing one would drop Sets.
+        if conn.dialect.name == "sqlite":
+            dups = conn.execute(
+                text(
+                    "SELECT member_id, COUNT(*) as cnt FROM sessions "
+                    "WHERE closed_at IS NULL GROUP BY member_id HAVING cnt > 1"
+                )
+            ).fetchall()
+        else:
+            dups = conn.execute(
+                text(
+                    "SELECT member_id, COUNT(*) as cnt FROM sessions "
+                    "WHERE closed_at IS NULL GROUP BY member_id HAVING COUNT(*) > 1"
+                )
+            ).fetchall()
+        if dups:
+            ids = ", ".join(str(row[0]) for row in dups)
+            raise RuntimeError(
+                f"Historical duplicate open Sessions detected for Member(s): {ids}. "
+                "Manually close the duplicates (set closed_at) before restarting — "
+                "the constraint cannot be created over them."
+            )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_sessions_one_open_per_member "
+                "ON sessions (member_id) WHERE closed_at IS NULL"
+            )
+        )
 
 
 @dataclass(frozen=True)
