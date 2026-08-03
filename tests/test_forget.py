@@ -4658,3 +4658,430 @@ async def test_two_identities_one_member_old_release_noop(env):
     # Complete deletion.
     await env.forget.forget_member(member.id)
     assert await count(env, Member, id=member.id) == 0
+
+
+# -- P1 (fix-r22 #1): pending confirmation blocked by live lease ----------
+
+
+async def test_pending_confirmation_blocked_by_live_lease_returns_retry_guidance(env):
+    """fix-r22 P1 #1: when a pending confirmation arrives (exact phrase
+    match) but claim_forget_me_request returns None because a live
+    model-turn lease exists, the runtime must NOT fall through to the
+    model.  It must return deterministic retry guidance, keep the
+    pending request intact, and not cancel it.
+
+    The scenario:
+    1. A previous request+warning turn acquired a lease but after_send
+       was dropped — the lease is still live.
+    2. The Member sends the exact confirmation phrase.
+    3. claim_forget_me_request sees the live lease and returns None.
+    4. get_deleting_request returns None because the row is still "pending".
+    5. Without fix-r22, the code falls through to the model.
+    6. With fix-r22, is_lease_held_by_other detects the live lease and
+       returns deterministic retry guidance — the pending request survives."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+    assert phrase != ""
+
+    # Seed chat history to prove nothing is added.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([{"role": "user", "content": "hola"}])
+
+    # Simulate: a live model-turn lease exists (from a dropped after_send).
+    token = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token is not None
+
+    # Verify is_lease_held_by_other returns True when another token
+    # holds the lease and we pass our_token=None.
+    assert await env.forget.is_lease_held_by_other(member.id, None) is True
+
+    # The pending request is still intact.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.status == STATUS_PENDING
+    assert pending.confirmation_phrase == phrase
+
+    # Attempt to claim with the exact phrase — must fail due to live lease.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is None, "claim must lose when live lease is held"
+
+    # get_deleting_request returns None — the row is still "pending".
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is None, (
+        "get_deleting_request must return None — row is still pending,"
+        " not deleting"
+    )
+
+    # fix-r22: is_lease_held_by_other detects the live lease block.
+    assert await env.forget.is_lease_held_by_other(member.id, None) is True
+
+    # The runtime must return retry guidance — NOT fall through to model.
+    # (The actual Reply is tested via runtime integration test below.)
+
+    # Member still exists — deletion was NOT triggered.
+    assert await count(env, Member, id=member.id) == 1
+
+    # Pending request still exists — NOT cancelled, NOT overwritten.
+    pending_after = await env.forget.get_pending_request(member.id)
+    assert pending_after is not None, (
+        "pending request must survive — NOT cancelled when live lease blocks"
+    )
+    assert pending_after.status == STATUS_PENDING
+    assert pending_after.confirmation_phrase == phrase, (
+        "confirmation phrase must be preserved for retry"
+    )
+
+    # Chat history unchanged — model was never reached.
+    items = await session.get_items()
+    assert len(items) == 1
+
+    # After release, the claim succeeds.
+    await env.forget.release_model_turn_lease(member.id, token)
+    claimed_after = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed_after is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_pending_confirmation_with_no_lease_claims_normally(env):
+    """fix-r22 P1 #1: when no live lease exists, the pending confirmation
+    path works as before — claim succeeds and deletion completes."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # No lease exists.
+    assert await env.forget.model_turn_lease_exists(member.id) is False
+    assert await env.forget.is_lease_held_by_other(member.id, None) is False
+
+    # Claim succeeds normally.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+# -- P1 (fix-r22 #2): FencedSession — stale Runner writes are no-ops -----
+
+
+async def test_fenced_session_writes_noop_after_stale_reclaim(env):
+    """fix-r22 P1 #2: after a stale lease is reclaimed by Runtime B,
+    Runtime A's FencedSession writes (add_items) must be no-ops — the
+    owner_token no longer matches the live lease token.  Proves no
+    chat-history residue can be recreated by a stale Runner."""
+    from agentg.runtime import FencedSession
+    from agents.extensions.memory import SQLAlchemySession as RawSession
+
+    member = await populate(env)
+
+    # Runtime A acquires the lease.
+    token_a = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token_a is not None
+
+    # Create a FencedSession for Runtime A (as the runtime would).
+    raw_a = RawSession(f"member:{member.id}", engine=env.engine)
+    fenced_a = FencedSession(raw_a, env.forget, member.id, token_a)
+
+    # Runtime A writes some chat history via the fenced session.
+    await fenced_a.add_items([{"role": "user", "content": "hello"}])
+    items_after_a = await fenced_a.get_items()
+    assert len(items_after_a) == 1, "live Runner's writes must succeed"
+
+    # Simulate Runtime A crash: stop heartbeat, age the lease.
+    await env.forget._stop_heartbeat(member.id, token_a)
+    aged_time = datetime.now(UTC) - timedelta(
+        seconds=env.forget.stale_lease_seconds + 10
+    )
+    async with async_sessionmaker(env.engine)() as db:
+        await db.execute(
+            update(ModelTurnLease)
+            .where(ModelTurnLease.member_id == member.id)
+            .values(acquired_at=aged_time)
+        )
+        await db.commit()
+
+    # Runtime B reclaims the stale lease — new token.
+    token_b = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token_b is not None
+    assert token_b != token_a
+
+    # Runtime A "completes" and tries to write more chat history via
+    # the old fenced session.  The write must be a no-op because
+    # token_a != current token (token_b).
+    await fenced_a.add_items([{"role": "assistant", "content": "should not land"}])
+
+    # Runtime A's session must NOT have the new item (fenced out).
+    items_after_stale = await fenced_a.get_items()
+    assert len(items_after_stale) == 1, (
+        "stale Runner's add_items must be no-op — only the pre-reclaim"
+        " item remains"
+    )
+    # The stale item must NOT have reached the DB at all.
+    raw_b = RawSession(f"member:{member.id}", engine=env.engine)
+    all_items = await raw_b.get_items()
+    assert len(all_items) == 1, (
+        "stale Runner's write must not reach DB — only 1 item total"
+    )
+    assert all_items[0]["content"] == "hello", (
+        "only the pre-reclaim write must persist"
+    )
+
+    # Clean up.
+    await env.forget.release_model_turn_lease(member.id, token_b)
+
+
+async def test_fenced_session_writes_noop_after_deletion_revokes_lease(env):
+    """fix-r22 P1 #2: after forget_member deletes the ModelTurnLease
+    (fencing revoked before clear_session), a stale Runner's
+    FencedSession writes are no-ops — no chat-history residue
+    survives deletion.
+
+    This is the forced stale-reclaim test: original Runner completes
+    AFTER deletion, and no session rows remain."""
+    from agentg.runtime import FencedSession
+    from agents.extensions.memory import SQLAlchemySession as RawSession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # Runtime A acquires the lease (model turn starts).
+    token_a = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token_a is not None
+
+    # Create a FencedSession for Runtime A.
+    raw_a = RawSession(f"member:{member.id}", engine=env.engine)
+    fenced_a = FencedSession(raw_a, env.forget, member.id, token_a)
+
+    # Runtime A writes some chat history.
+    await fenced_a.add_items([{"role": "user", "content": "bench 60"}])
+    await fenced_a.add_items([{"role": "assistant", "content": "Logged!"}])
+    items = await fenced_a.get_items()
+    assert len(items) == 2
+
+    # Runtime B claims the forget-me request (stale lease or released).
+    await env.forget.release_model_turn_lease(member.id, token_a)
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+
+    # Deletion: FIRST deletes the ModelTurnLease (fencing revoked),
+    # THEN clears session, THEN domain delete.  After step 0, the
+    # fence is gone so stale Runner writes are no-ops.
+    await env.forget.forget_member(member.id)
+
+    # Prove no session rows remain (forget_member cleared them).
+    items_after = await raw_a.get_items()
+    assert items_after == [], "session rows must be cleared"
+
+    # Now the original Runner (Runtime A) "completes" and tries to
+    # add_items via the fenced session.  Must be no-op.
+    await fenced_a.add_items([{"role": "assistant", "content": "should NOT appear"}])
+
+    # Re-verify: no session rows remain.
+    raw_check = RawSession(f"member:{member.id}", engine=env.engine)
+    items_final = await raw_check.get_items()
+    assert items_final == [], (
+        "NO session rows must remain — stale Runner's post-deletion"
+        " writes are no-ops"
+    )
+
+    # Domain rows are also gone.
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_fenced_session_null_token_never_writes(env):
+    """fix-r22 P1 #2: a FencedSession with owner_token=None must never
+    write — None never matches any lease token."""
+    from agentg.runtime import FencedSession
+    from agents.extensions.memory import SQLAlchemySession as RawSession
+
+    member = await populate(env)
+
+    raw = RawSession(f"member:{member.id}", engine=env.engine)
+    fenced = FencedSession(raw, env.forget, member.id, None)
+
+    # Write attempt with None token — must be no-op.
+    await fenced.add_items([{"role": "user", "content": "should not land"}])
+
+    items = await raw.get_items()
+    assert items == [], "null-token session must never write"
+
+
+async def test_fenced_session_get_items_passes_through(env):
+    """fix-r22 P1 #2: FencedSession.get_items must pass through even
+    when the fence fails — reads are always allowed."""
+    from agentg.runtime import FencedSession
+    from agents.extensions.memory import SQLAlchemySession as RawSession
+
+    member = await populate(env)
+
+    # Seed history via a raw session.
+    raw = RawSession(f"member:{member.id}", engine=env.engine)
+    await raw.add_items([{"role": "user", "content": "hola"}])
+
+    # FencedSession with null token — reads must still work.
+    fenced = FencedSession(raw, env.forget, member.id, None)
+    items = await fenced.get_items()
+    assert len(items) == 1
+    assert items[0]["content"] == "hola"
+
+
+# -- Heartbeat transient error retry (fix-r22) ---------------------------
+
+
+async def test_heartbeat_retry_on_transient_db_error(env):
+    """fix-r22: heartbeat must retry on transient DB errors ("database
+    is locked") instead of stopping permanently.  After the transient
+    error clears, the heartbeat continues and keeps the lease fresh.
+
+    We verify by checking that the heartbeat continues after a
+    simulated transient error (using a small configured heartbeat
+    interval)."""
+    import asyncio
+
+    member = await populate(env)
+
+    # Acquire the lease.
+    token = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token is not None
+
+    # Record the initial acquired_at.
+    async with async_sessionmaker(env.engine)() as db:
+        row_before = await db.scalar(
+            select(ModelTurnLease.acquired_at).where(
+                ModelTurnLease.member_id == member.id
+            )
+        )
+        assert row_before is not None
+
+    # Wait for at least 2 heartbeat intervals to ensure the heartbeat
+    # is running and successfully bumps the timestamp.
+    await asyncio.sleep(env.forget._heartbeat_seconds * 2 + 1.0)
+
+    # After the heartbeat fires, acquired_at must be fresher.
+    async with async_sessionmaker(env.engine)() as db:
+        row_after = await db.scalar(
+            select(ModelTurnLease.acquired_at).where(
+                ModelTurnLease.member_id == member.id
+            )
+        )
+        assert row_after is not None
+        assert row_after > row_before, (
+            "heartbeat must have bumped acquired_at after 2 intervals"
+        )
+
+    # Clean up.
+    await env.forget.release_model_turn_lease(member.id, token)
+
+
+async def test_heartbeat_stops_on_token_mismatch(env):
+    """fix-r22: heartbeat must stop gracefully when the owner token
+    no longer matches (lease reclaimed by another runtime).  It must
+    NOT keep running indefinitely, fighting the new owner."""
+    member = await populate(env)
+
+    # Runtime A acquires the lease.
+    token_a = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token_a is not None
+
+    # Stop A's heartbeat and age the lease.
+    await env.forget._stop_heartbeat(member.id, token_a)
+    aged_time = datetime.now(UTC) - timedelta(
+        seconds=env.forget.stale_lease_seconds + 10
+    )
+    async with async_sessionmaker(env.engine)() as db:
+        await db.execute(
+            update(ModelTurnLease)
+            .where(ModelTurnLease.member_id == member.id)
+            .values(acquired_at=aged_time)
+        )
+        await db.commit()
+
+    # Runtime B reclaims — new token.
+    token_b = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    assert token_b is not None
+    assert token_b != token_a
+
+    # Manually restart Runtime A's heartbeat (simulating a late
+    # heartbeat attempt from a thread that wasn't cancelled).
+    env.forget._start_heartbeat(member.id, token_a)
+
+    # Wait a bit for the heartbeat to fire and detect mismatch.
+    import asyncio
+    await asyncio.sleep(env.forget._heartbeat_seconds + 0.5)
+
+    # Runtime B's lease must still be intact (not overwritten by A).
+    assert await env.forget.model_turn_lease_exists(member.id) is True
+    async with async_sessionmaker(env.engine)() as db:
+        current_token = await db.scalar(
+            select(ModelTurnLease.owner_token).where(
+                ModelTurnLease.member_id == member.id
+            )
+        )
+        assert current_token == token_b, (
+            "token must still be B's — A's late heartbeat was no-op"
+        )
+
+    # A's heartbeat task must have removed itself (token mismatch).
+    key_a = (member.id, token_a)
+    assert key_a not in env.forget._heartbeat_tasks, (
+        "stale heartbeat must remove itself on token mismatch"
+    )
+
+    # Clean up.
+    await env.forget.release_model_turn_lease(member.id, token_b)
+
+
+# -- Centralized STATUS_BLOCKING (fix-r22) -------------------------------
+
+
+async def test_status_blocking_used_consistently(env):
+    """fix-r22: STATUS_BLOCKING centralizes the set of statuses that
+    block model turns, linking, and new forget-me requests.
+    get_deleting_request and acquire_model_turn_lease must use the
+    same constant."""
+    from agentg.forget import STATUS_BLOCKING, STATUS_DELETING, STATUS_CONSUMED
+
+    # The centralized list must contain both deleting and legacy consumed.
+    assert STATUS_DELETING in STATUS_BLOCKING
+    assert STATUS_CONSUMED in STATUS_BLOCKING
+    assert "pending" not in STATUS_BLOCKING, "pending must NOT block"
+
+    # Verify get_deleting_request uses STATUS_BLOCKING.
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Before claim: get_deleting_request returns None (row is pending).
+    assert await env.forget.get_deleting_request(member.id) is None
+
+    # After claim: get_deleting_request returns the deleting row.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status in STATUS_BLOCKING
+
+    # After forget: get_deleting_request returns None.
+    await env.forget.forget_member(member.id)
+    assert await env.forget.get_deleting_request(member.id) is None

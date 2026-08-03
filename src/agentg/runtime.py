@@ -23,6 +23,7 @@ from openai.types.responses import ResponseTextDeltaEvent
 from agents.extensions.memory import SQLAlchemySession
 from agents.run_config import CallModelData, ModelInputData
 from sqlalchemy.ext.asyncio import AsyncEngine
+from agentg.forget import ForgetStore
 
 from agentg.checkin_sweep import Notifier
 from agentg.compaction import Summarizer, maybe_compact
@@ -157,6 +158,82 @@ _FORGET_DELETING_IN_PROGRESS: dict[str, str] = {
     ),
 }
 
+# fix-r22 P1 #1: reply when a pending confirmation cannot claim because
+# a live model-turn lease exists (a concurrent Runner is active, possibly
+# from a dropped after_send).  The pending request is kept intact — the
+# Member can retry the exact phrase on the next turn.
+_FORGET_RETRY_BLOCKED: dict[str, str] = {
+    "en": (
+        "Your deletion confirmation was received but cannot be processed "
+        "right now — a previous request is still being handled. "
+        "Please send the confirmation phrase again in a moment."
+    ),
+    "es": (
+        "Tu confirmaci\u00f3n de eliminaci\u00f3n se recibi\u00f3 pero no puede "
+        "procesarse ahora — una solicitud anterior a\u00fan est\u00e1 en curso. "
+        "Env\u00eda de nuevo la frase de confirmaci\u00f3n en un momento."
+    ),
+}
+
+
+class FencedSession:
+    """Wraps a ``SQLAlchemySession`` with owner-token fencing so SDK
+    chat-history writes (add_items) from a stale/reclaimed Runner are
+    rejected as no-ops — a concurrent deletion or reclaim cannot leave
+    residue behind (fix-r22 P1 #2).
+
+    Read-only operations (get_items) pass through unmodified.
+    Any attribute not explicitly defined here delegates to the inner
+    session so the compaction engine and other internal callers can
+    access ``.engine``, ``._messages``, ``._sessions``, etc.
+    """
+
+    def __init__(
+        self,
+        inner: SQLAlchemySession,
+        forget_store: ForgetStore,
+        member_id: int,
+        owner_token: str | None,
+    ) -> None:
+        self._inner = inner
+        self._forget = forget_store
+        self._member_id = member_id
+        self._owner_token = owner_token
+
+    @property
+    def session_id(self) -> str:
+        return self._inner.session_id
+
+    def __getattr__(self, name: str):
+        """Delegate any attribute not defined on FencedSession to the
+        inner SQLAlchemySession — compaction and other internals access
+        ``.engine``, ``._messages``, etc. through us."""
+        if name.startswith("_FencedSession__") or name in (
+            "_inner", "_forget", "_member_id", "_owner_token",
+        ):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+    async def get_items(self, *args, **kwargs):
+        return await self._inner.get_items(*args, **kwargs)
+
+    async def add_items(self, items):
+        if not await self._check_fence():
+            return  # No-op: token no longer current (stale reclaim / deletion)
+        return await self._inner.add_items(items)
+
+    async def clear_session(self):
+        """Always allowed: the caller (forget_member) owns the deletion and
+        has already revoked the fence before calling this."""
+        return await self._inner.clear_session()
+
+    async def _check_fence(self) -> bool:
+        """Return True when our owner_token is still the live lease owner."""
+        if self._owner_token is None:
+            return False
+        current = await self._forget.get_lease_owner_token(self._member_id)
+        return current == self._owner_token
+
 
 @dataclass
 class AgentRuntime:
@@ -211,6 +288,15 @@ class AgentRuntime:
 
     def session_for_member(self, member_id: int) -> SQLAlchemySession:
         return SQLAlchemySession(f"member:{member_id}", engine=self.engine)
+
+    def fenced_session_for_member(
+        self, member_id: int, owner_token: str | None
+    ) -> FencedSession:
+        """Return a session whose add_items verifies the lease fence before
+        every write — a stale/reclaimed Runner's writes become no-ops
+        (fix-r22 P1 #2)."""
+        inner = SQLAlchemySession(f"member:{member_id}", engine=self.engine)
+        return FencedSession(inner, self.stores.forget, member_id, owner_token)
 
     async def member_context(self, linked: LinkedIdentity) -> MemberContext:
         """Build the per-turn context with conversation-stable gating flags
@@ -435,7 +521,12 @@ class AgentRuntime:
                         return Reply(_FORGET_GOODBYE["es"])
                     return Reply(_FORGET_DELETING_IN_PROGRESS["es"])
 
-                session = self.session_for_member(linked.member.id)
+                # fix-r22 P1 #2: fenced session so a stale/reclaimed
+                # Runner's SDK writes are no-ops — no chat-history
+                # residue survives deletion or reclaim.
+                session = self.fenced_session_for_member(
+                    linked.member.id, turn_lease_token
+                )
                 # Awaited: the tool set is scoped to the caller's role, which
                 # needs a Routine lookup (issue #174).
                 context = await self.member_context(linked)
@@ -790,6 +881,24 @@ class AgentRuntime:
                         return Reply(
                             _FORGET_DELETING_IN_PROGRESS[
                                 deleting_req.language or "es"
+                            ]
+                        )
+                    # P1 (fix-r22 #1): The claim lost but the pending
+                    # row is still "pending" (NOT "deleting") — a live
+                    # model-turn lease blocked the claim, likely from a
+                    # dropped after_send on a previous turn.  Return
+                    # deterministic retry guidance, keep the pending
+                    # request, and never fall through to the model.
+                    #
+                    # Only check when our claim-loser path finds no
+                    # deleting row — the live lease is the remaining
+                    # reason the claim could have lost.
+                    if await self.stores.forget.is_lease_held_by_other(
+                        linked.member.id, None
+                    ):
+                        return Reply(
+                            _FORGET_RETRY_BLOCKED[
+                                pending.language or "es"
                             ]
                         )
                     # The pending was cancelled (not claimed) — fall

@@ -67,6 +67,11 @@ STATUS_PENDING = "pending"
 STATUS_DELETING = "deleting"
 STATUS_CONSUMED = "consumed"  # legacy — no longer written; kept for migration compat
 
+# Centralized predicate: statuses that block model turns, linking, and
+# new forget-me requests.  Used by Linking and runtime so they never
+# diverge (fix-r22).
+STATUS_BLOCKING = [STATUS_DELETING, STATUS_CONSUMED]
+
 # Default stale-lease recovery threshold: a turn lease older than this
 # is reclaimed so a crashed runtime cannot strand deletion forever.
 # With heartbeat renewal every THIRD of this interval, a live Runner
@@ -121,8 +126,20 @@ class ForgetStore:
         nothing else has run and the still-linked Member can simply retry; the
         Member's channel identity is only removed once the domain delete
         commits, so we never strand orphaned history behind a cold-started id.
+
+        fix-r22: The ModelTurnLease is deleted BEFORE the session clear so a
+        concurrent stale Runner's FencedSession writes (add_items) see the
+        missing/incremented fence and become no-ops — no chat-history residue
+        from a reclaimed Runner survives deletion.
         """
-        # 1. Conversation history — the most sensitive residue — goes first.
+        # 0. Revoke fence FIRST so a concurrent stale Runner's SDK writes
+        #    become no-ops before we clear history (fix-r22).
+        async with self._sessions() as db:
+            await db.execute(
+                delete(ModelTurnLease).where(ModelTurnLease.member_id == member_id)
+            )
+            await db.commit()
+        # 1. Conversation history — the most sensitive residue — goes next.
         await SQLAlchemySession(f"member:{member_id}", engine=self.engine).clear_session()
 
         # 2. Domain rows, atomically. Child rows before parents so foreign keys
@@ -221,8 +238,8 @@ class ForgetStore:
                     ForgetMeRequest.member_id == member_id
                 )
             )
-            if existing is not None and existing.status not in (
-                STATUS_PENDING,
+            if existing is not None and existing.status in (
+                STATUS_BLOCKING
             ):
                 # Deletion is already in progress; the caller must
                 # complete it, not overwrite the row.
@@ -282,8 +299,8 @@ class ForgetStore:
                     ForgetMeRequest.member_id == member_id
                 )
             )
-            if existing_after is not None and existing_after.status not in (
-                STATUS_PENDING,
+            if existing_after is not None and existing_after.status in (
+                STATUS_BLOCKING
             ):
                 # Row became deleting/consumed between our operations
                 # (a concurrent claim won).  Return the sentinel so
@@ -337,7 +354,7 @@ class ForgetStore:
             return await db.scalar(
                 select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == member_id,
-                    ForgetMeRequest.status.in_([STATUS_DELETING, STATUS_CONSUMED]),
+                    ForgetMeRequest.status.in_(STATUS_BLOCKING),
                 )
             )
 
@@ -458,11 +475,11 @@ class ForgetStore:
             if self._post_acquire_lock_hook is not None:
                 await self._post_acquire_lock_hook(member_id)
 
-            # 1. Reject when a deleting request exists.
+            # 1. Reject when a blocking (deleting/consumed) request exists.
             del_result = await conn.execute(
                 select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == member_id,
-                    ForgetMeRequest.status.in_([STATUS_DELETING, STATUS_CONSUMED]),
+                    ForgetMeRequest.status.in_(STATUS_BLOCKING),
                 )
             )
             if del_result.first() is not None:
@@ -580,31 +597,52 @@ class ForgetStore:
         if existing is not None:
             existing.cancel()
 
+        _TRANSIENT_DB_ERRORS = (
+            "database is locked",
+            "OperationalError",
+            "TimeoutError",
+        )
+
         async def _beat() -> None:
             interval = self._heartbeat_seconds
-            while True:
-                await asyncio.sleep(interval)
-                try:
-                    now = datetime.now(UTC)
-                    async with self._sessions() as db:
-                        result = await db.execute(
-                            update(ModelTurnLease)
-                            .where(
-                                ModelTurnLease.member_id == member_id,
-                                ModelTurnLease.owner_token == owner_token,
+            consecutive_failures = 0
+            max_consecutive = 3
+            try:
+                while True:
+                    await asyncio.sleep(interval)
+                    try:
+                        now = datetime.now(UTC)
+                        async with self._sessions() as db:
+                            result = await db.execute(
+                                update(ModelTurnLease)
+                                .where(
+                                    ModelTurnLease.member_id == member_id,
+                                    ModelTurnLease.owner_token == owner_token,
+                                )
+                                .values(acquired_at=now)
                             )
-                            .values(acquired_at=now)
-                        )
-                        await db.commit()
-                        if getattr(result, "rowcount", 0) == 0:
-                            # Token mismatch — our lease was reclaimed by
-                            # another runtime.  Stop beating gracefully.
-                            break
-                except Exception:
-                    # If the row was deleted (release beat us to it) or
-                    # the database is unreachable, stop beating — the
-                    # lease is gone or the process is dying.
-                    break
+                            await db.commit()
+                            if getattr(result, "rowcount", 0) == 0:
+                                # Token mismatch — our lease was reclaimed by
+                                # another runtime.  Stop beating gracefully.
+                                break
+                        consecutive_failures = 0  # reset on success
+                    except Exception as exc:
+                        exc_str = str(exc)
+                        if any(
+                            transient in exc_str
+                            for transient in _TRANSIENT_DB_ERRORS
+                        ):
+                            consecutive_failures += 1
+                            if consecutive_failures >= max_consecutive:
+                                break  # too many transient failures
+                            continue  # retry next interval
+                        # Non-transient error — stop beating permanently.
+                        break
+            finally:
+                # Self-cleanup: remove our key so a stale heartbeat task
+                # can never linger in the dict (fix-r22).
+                self._heartbeat_tasks.pop(key, None)
 
         self._heartbeat_tasks[key] = asyncio.create_task(_beat())
 
@@ -731,6 +769,53 @@ class ForgetStore:
             if claimed is not None:
                 db.expunge(claimed)
             return claimed
+
+    async def get_lease_owner_token(self, member_id: int) -> str | None:
+        """Return the current lease owner_token for *member_id*, or None
+        when no lease exists.  Used by FencedSession for SDK write fencing
+        (fix-r22).
+        """
+        async with self._sessions() as db:
+            row = await db.scalar(
+                select(ModelTurnLease.owner_token).where(
+                    ModelTurnLease.member_id == member_id
+                )
+            )
+            return row
+
+    async def is_lease_held_by_other(
+        self, member_id: int, our_token: str | None
+    ) -> bool:
+        """Return True when a non-stale lease exists owned by someone
+        other than *our_token* — the owning runtime is active and our
+        operation must not race through.
+
+        When *our_token* is ``None``, any non-stale lease is "held by
+        other" because we have no token at all.
+
+        Used by the runtime to detect a dropped-after_send lease on a
+        pending confirmation (fix-r22 P1 #1).
+        """
+        now = datetime.now(UTC)
+        stale_cutoff = now - timedelta(seconds=self.stale_lease_seconds)
+        async with self._sessions() as db:
+            if our_token is None:
+                # Any non-stale lease is "other" — we have no token.
+                row = await db.scalar(
+                    select(ModelTurnLease.owner_token).where(
+                        ModelTurnLease.member_id == member_id,
+                        ModelTurnLease.acquired_at >= stale_cutoff,
+                    )
+                )
+                return row is not None
+            row = await db.scalar(
+                select(ModelTurnLease.owner_token).where(
+                    ModelTurnLease.member_id == member_id,
+                    ModelTurnLease.acquired_at >= stale_cutoff,
+                    ModelTurnLease.owner_token != our_token,
+                )
+            )
+            return row is not None
 
 
 # -- Module-level helpers --------------------------------------------------

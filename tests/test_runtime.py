@@ -464,3 +464,69 @@ async def test_switch_affirmative_blocked_by_deleting_gate_before_linking(tmp_pa
     finally:
         await engine.dispose()
 
+
+# --- P1 (fix-r22 #1): pending confirmation blocked by live lease ----------
+
+
+async def test_exact_phrase_blocked_by_live_lease_returns_retry_not_falls_through(runtime):
+    """fix-r22 P1 #1: when a pending confirmation phrase arrives but a
+    live model-turn lease exists (e.g. from a dropped after_send on the
+    warning turn), claim_forget_me_request returns None.  The runtime must
+    NOT fall through to the model — it must return deterministic retry
+    guidance and keep the pending request intact.
+
+    Without fix-r22, this path falls through to is_forget_me_request
+    check and either: (a) creates a new pending request overwriting the
+    old one, or (b) falls all the way to the model.  With fix-r22, the
+    runtime detects the live lease via is_lease_held_by_other and returns
+    _FORGET_RETRY_BLOCKED without cancelling the pending request."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(1, gym.id, now, 300, "en")
+    assert phrase != ""
+
+    # Acquire a live model-turn lease — simulating a dropped after_send
+    # from the warning turn (the lease was never released).
+    token = await runtime.stores.forget.acquire_model_turn_lease(1, gym.id)
+    assert token is not None
+
+    # Send the exact confirmation phrase while the lease is held.
+    reply = await runtime.handle_message(incoming(phrase, "42"))
+
+    # Must return retry guidance — NOT deletion in progress (row is
+    # pending, not deleting), NOT goodbye, NOT a new warning, and
+    # NOT fall through to the model.
+    reply_str = str(reply)
+    assert "cannot be processed" in reply_str.lower() or (
+        "no puede procesarse" in reply_str.lower()
+    ), f"expected retry guidance, got: {reply!r}"
+
+    # The pending request must still exist — NOT cancelled.
+    pending = await runtime.stores.forget.get_pending_request(1)
+    assert pending is not None, (
+        "pending request must survive — not cancelled when live lease blocks"
+    )
+    assert pending.status == "pending"
+    assert pending.confirmation_phrase == phrase, (
+        "confirmation phrase must be preserved for retry"
+    )
+
+    # Member still exists — deletion was NOT triggered.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None, "Member must still exist"
+
+    # After release, the exact phrase works normally.
+    await runtime.stores.forget.release_model_turn_lease(1, token)
+    reply_retry = await runtime.handle_message(incoming(phrase, "42"))
+    retry_str = str(reply_retry)
+    assert "permanently" in retry_str.lower() or (
+        "eliminados" in retry_str.lower()
+    ), f"expected goodbye on retry after lease release, got: {reply_retry!r}"
+
+    identity_after = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity_after is None, "deletion must complete after lease release"
+

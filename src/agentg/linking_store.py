@@ -301,10 +301,12 @@ async def _link_member_in_session(
             await db.execute(
                 update(Member).where(Member.id == existing).values(id=existing)
             )
+            from agentg.forget import STATUS_BLOCKING, STATUS_PENDING
+
             fme = await db.scalar(
                 select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == existing,
-                    ForgetMeRequest.status.in_(["pending", "deleting"]),
+                    ForgetMeRequest.status.in_([STATUS_PENDING] + STATUS_BLOCKING),
                 )
             )
             if fme is not None:
