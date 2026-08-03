@@ -23,3 +23,7 @@ exercises-dataset/
 frontend/dist/
 frontend/node_modules/
 frontend/tsconfig.tsbuildinfo
+
+# Local review/agent working artifacts (never commit)
+.scratch/
+.keytest
