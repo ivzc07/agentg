@@ -149,6 +149,14 @@ _FORGET_DELETING_IN_PROGRESS: dict[str, str] = {
     ),
 }
 
+# Neutral fallback when the model-turn gate is held by a concurrent turn
+# and NO deleting row exists — the Member never asked for deletion, so a
+# "deletion in progress" reply would be false and alarming.
+_TURN_BUSY: dict[str, str] = {
+    "en": "I'm still finishing your previous message — try again in a moment.",
+    "es": "Todavía estoy terminando tu mensaje anterior; inténtalo de nuevo en un momento.",
+}
+
 # fix-r22 P1 #1: reply when a pending confirmation cannot claim because
 # a live model-turn lease exists (a concurrent Runner is active, possibly
 # from a dropped after_send).  The pending request is kept intact — the
@@ -800,14 +808,15 @@ class AgentRuntime:
                             ]
                         )
                     # Gate held by a concurrent model turn (rare, even
-                    # across runtimes).  Return a safe fallback — the
-                    # model must not proceed.
+                    # across runtimes) with NO deleting row — the Member
+                    # never requested deletion, so reply with a neutral
+                    # busy message; the model must not proceed.
                     identity = await self.stores.linking.identity_for(
                         msg.channel, msg.channel_user_id
                     )
                     if identity is None:
                         return Reply(_FORGET_GOODBYE["es"])
-                    return Reply(_FORGET_DELETING_IN_PROGRESS["es"])
+                    return Reply(_TURN_BUSY["es"])
 
                 # fix-r22 P1 #2: fenced session so a stale/reclaimed
                 # Runner's SDK writes are no-ops — no chat-history
@@ -815,15 +824,34 @@ class AgentRuntime:
                 session = self.fenced_session_for_member(
                     linked.member.id, turn_lease_token
                 )
-                # Awaited: the tool set is scoped to the caller's role, which
-                # needs a Routine lookup (issue #174).
-                context = await self.member_context(linked)
                 member_id = linked.member.id
-                # Fast path: pure set shorthand that resolves to a catalog
-                # Exercise with an open Session and no suspect weight jump
-                # can be logged deterministically — no model call needed
-                # (#177).  Anything ambiguous falls through to the Agent.
-                fast = await self._try_fast_log(msg.text, context, member_id, session)
+                try:
+                    # Awaited: the tool set is scoped to the caller's role,
+                    # which needs a Routine lookup (issue #174).
+                    context = await self.member_context(linked)
+                    # Fast path: pure set shorthand that resolves to a catalog
+                    # Exercise with an open Session and no suspect weight jump
+                    # can be logged deterministically — no model call needed
+                    # (#177).  Anything ambiguous falls through to the Agent.
+                    fast = await self._try_fast_log(
+                        msg.text, context, member_id, session
+                    )
+                except BaseException:
+                    # A failure between lease acquire and the model-path
+                    # release guards below would otherwise leak the lease
+                    # (heartbeat renews it forever) and permanently block
+                    # forget-me confirmation (issue #212).
+                    self._lease_tokens.pop(member_id, None)
+                    try:
+                        await self.stores.forget.release_model_turn_lease(
+                            member_id, turn_lease_token
+                        )
+                    except Exception:
+                        logger.exception(
+                            "release_model_turn_lease failed for %d (pre-model)",
+                            member_id,
+                        )
+                    raise
                 if fast is not None:
                     # The fast path still resets the check-in rhythm — any
                     # reply from a linked Member counts as activity (#169).
@@ -838,6 +866,23 @@ class AgentRuntime:
                             )
 
                     asyncio.create_task(_fast_reset())
+                    # Release the model-turn lease before returning — the
+                    # fast path never reaches the model-path release in
+                    # _blocking_reply/_streamed_reply, and the lease
+                    # heartbeat renews forever, so a leaked lease would
+                    # permanently block claim_forget_me_request and every
+                    # forget-me confirmation after a fast-path turn
+                    # (issue #212, AC 4).
+                    self._lease_tokens.pop(member_id, None)
+                    try:
+                        await self.stores.forget.release_model_turn_lease(
+                            member_id, turn_lease_token
+                        )
+                    except Exception:
+                        logger.exception(
+                            "release_model_turn_lease failed for %d (fast path)",
+                            member_id,
+                        )
                     return fast
                 # Any reply resets the check-in rhythm and revives a lapsed
                 # Member.  Fired concurrently with the model call rather than
@@ -1487,42 +1532,6 @@ async def _hold_lock(
         if not released:
             lock.release()
         raise
-
-
-async def _release_lease_on_close(
-    inner: AsyncIterator[str],
-    forget_store,
-    member_id: int,
-    owner_token: str | None,
-    logger: logging.Logger,
-) -> AsyncIterator[str]:
-    """Release the forget-me model-turn lease when the stream is exhausted
-    or errors, guaranteeing the lease is cleared even when ``after_send``
-    is never called (issue #212, fix-r11).
-
-    When *owner_token* is ``None`` the release is a no-op (no lease was
-    ever acquired).  Otherwise it presents the per-turn immutable token
-    so only the real owner can delete the lease row (fix-r21).
-
-    Placed outermost so it runs after lock release, instrument close,
-    and all other cleanup.
-    """
-    try:
-        async for chunk in inner:
-            yield chunk
-    finally:
-        # Propagate close inward first, but never at the cost of the
-        # lease release — a leaked lease strands deletion forever.
-        try:
-            await inner.aclose()
-        except Exception:
-            pass
-        try:
-            await forget_store.release_model_turn_lease(member_id, owner_token)
-        except Exception:
-            logger.exception(
-                "release_model_turn_lease failed for %d", member_id
-            )
 
 
 async def _stop_heartbeat_on_close(

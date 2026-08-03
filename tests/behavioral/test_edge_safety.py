@@ -557,3 +557,32 @@ async def test_resume_checkins_turns_state_on(tmp_path):
         )
         state, _ = await h.stores.checkins.get_state(h.member_id)
         assert state == "on"
+
+
+async def test_forget_me_completes_after_fast_path_turn(tmp_path):
+    """AC 4 + AC 8 (#212): a fast-path set-log turn must not leak the
+    model-turn lease — a later forget-me request and exact-phrase
+    confirmation must still complete deletion.  Regression test for the
+    fast path returning without releasing the lease, whose heartbeat
+    would otherwise renew forever and block claim_forget_me_request."""
+    async with ConversationHarness.create(tmp_path) as h:
+        await h.linked_member()
+        h.runtime.fast_path_enabled = True
+        await h.stores.training.open_session(h.member_id, h.gym_id)
+        member_id = h.member_id
+
+        # A fast-path turn: pure shorthand, no model steps enqueued.
+        reply = await h.say("bench 60 8,8,8")
+        assert "8/8/8" in reply, f"expected a fast-path log reply, got: {reply!r}"
+
+        # Forget-me must still enter the two-turn flow and complete.
+        warning = await h.say("forget me")
+        phrase = _extract_confirmation_phrase(warning)
+        assert phrase is not None, (
+            f"expected a confirmation phrase after a fast-path turn, got: {warning!r}"
+        )
+        confirm_reply = await h.say(phrase)
+        assert "deleted" in confirm_reply.lower() or (
+            "eliminados" in confirm_reply.lower()
+        ), f"expected goodbye, got: {confirm_reply!r}"
+        assert await _count(h._engine, Member, id=member_id) == 0

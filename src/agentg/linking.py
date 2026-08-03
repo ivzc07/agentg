@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from agentg.config import Settings
-from agentg.forget import is_forget_me_request
+from agentg.forget import detect_forget_me_language, is_forget_me_request
 from agentg.messages import IncomingMessage
 from agentg.models import Gym
 from agentg.linking_store import (
@@ -29,6 +29,21 @@ from agentg.linking_store import (
     LinkingStore,
     normalize_invite_code,
 )
+
+# Deterministic reply when an UNLINKED identity mid-linking says "forget me"
+# or types a confirmation phrase: there is no Member row, so there is nothing
+# to delete.  Sent verbatim — the phraser (model) must never see forget-me or
+# confirmation-phrase text (issue #212, fix-r24 #2).
+UNLINKED_NOTHING_TO_FORGET: dict[str, str] = {
+    "en": (
+        "You're not registered, so there is no data to delete. "
+        "If you'd like to join, send your Gym's invite code."
+    ),
+    "es": (
+        "No estás registrado, así que no hay datos que borrar. "
+        "Si quieres unirte, envíame el código de invitación de tu gimnasio."
+    ),
+}
 
 DEAD_END_INSTRUCTION = (
     "They aren't linked to any gym yet and just sent something that isn't a "
@@ -252,7 +267,7 @@ class Linking:
 
         pending = self._pending.get(identity)
         if isinstance(pending, _AwaitingName):
-            return await self._confirm_name(identity, msg, pending)
+            return await self._confirm_name(identity, msg, linked, pending)
         if isinstance(pending, _AwaitingSwitch):
             return await self._confirm_switch(identity, msg, linked, pending)
 
@@ -366,13 +381,24 @@ class Linking:
         return await self.phraser(instruction, msg.text)
 
     async def _confirm_name(
-        self, identity: _Identity, msg: IncomingMessage, pending: _AwaitingName
+        self,
+        identity: _Identity,
+        msg: IncomingMessage,
+        linked: LinkedIdentity | None,
+        pending: _AwaitingName,
     ) -> str | None:
         # P2 (fix-r20): detect a fresh forget-me request before processing
         # the name answer — "forget me" always enters the deterministic
         # two-turn flow and never calls the linking phraser.
         if is_forget_me_request(msg.text):
             del self._pending[identity]
+            if linked is None:
+                # Nothing to forget: no Member row exists yet.  Reply
+                # deterministically — returning None would strand the
+                # runtime, which cannot run the agent loop for an
+                # unlinked identity.
+                lang = detect_forget_me_language(msg.text) or "es"
+                return UNLINKED_NOTHING_TO_FORGET[lang]
             return None  # let runtime handle forget-me
         # fix-r24 #2: detect raw DELETE-ME confirmation phrases before
         # any name processing — the runtime must handle these
@@ -380,6 +406,10 @@ class Linking:
         # phrase text.
         if _looks_like_confirmation_phrase(msg.text):
             del self._pending[identity]
+            if linked is None:
+                # No Member row → no pending deletion this phrase could
+                # confirm.  Deterministic reply for the same reason as above.
+                return UNLINKED_NOTHING_TO_FORGET["es"]
             return None  # let runtime handle forget-me confirmation
         # A pasted Invite or coach code mid-flow restarts linking, not a
         # name change. Short-circuit: skip DB lookups when it can't be a code (#169).

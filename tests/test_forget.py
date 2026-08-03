@@ -1247,10 +1247,12 @@ async def test_deleting_row_recovered_by_runtime_not_overwritten(env):
 # -- P1: group messages must not bypass the deleting gate (fix-r5) --------
 
 
-async def test_group_message_cannot_bypass_deleting_gate(env):
-    """P1 fix-r5: a group message from a Member with a deleting (deletion
-    in progress) request must NOT reach the model.  The deleting check gates
-    ALL paths, including group messages."""
+async def test_deleting_row_survives_claim_until_forget_completes(env):
+    """Store-level recovery: after ``claim_forget_me_request`` the durable
+    deleting row persists until ``forget_member`` completes the wipe —
+    Member row and chat history both gone.  (Shared-chat messages never
+    reach this flow: the adapter rejects them and the runtime refuses
+    non-private messages, #211.)"""
     from agents.extensions.memory import SQLAlchemySession
 
     member = await populate(env)
@@ -1271,14 +1273,12 @@ async def test_group_message_cannot_bypass_deleting_gate(env):
     )
     assert claimed is not None
 
-    # Simulate what _handle_forget_me does: deleting check FIRST,
-    # BEFORE the group early return.  A group message should still trigger
-    # completion of the deletion, not fall through to the model.
+    # The durable deleting row is visible for recovery.
     deleting = await env.forget.get_deleting_request(member.id)
     assert deleting is not None
     assert deleting.status == "deleting"
 
-    # The runtime completes deletion and returns goodbye.
+    # Completing the deletion wipes everything.
     await env.forget.forget_member(member.id)
     assert await count(env, Member, id=member.id) == 0
 
@@ -1287,10 +1287,11 @@ async def test_group_message_cannot_bypass_deleting_gate(env):
     assert items_after == []
 
 
-async def test_group_message_recovers_interrupted_deleting_deletion(env):
-    """P1 fix-r5: a group message after a crashed deletion (deleting row
-    exists, Member still exists) must complete the deletion rather than
-    cancelling or falling through."""
+async def test_interrupted_deleting_deletion_can_be_completed(env):
+    """Store-level recovery: after a crashed deletion (deleting row exists,
+    Member still exists), ``forget_member`` completes the wipe — the
+    deleting row is durable, not cancelled.  The runtime resumes this on
+    a later private turn carrying the exact phrase (issue #212)."""
     from agents.extensions.memory import SQLAlchemySession
 
     member = await populate(env)
@@ -1315,10 +1316,9 @@ async def test_group_message_recovers_interrupted_deleting_deletion(env):
     assert deleting.status == "deleting"
     assert await count(env, Member, id=member.id) == 1
 
-    # A group message now arrives.  With the fix-r5 reorder, the deleting
-    # check runs FIRST and completes the deletion.
-    if deleting is not None:
-        await env.forget.forget_member(member.id)
+    # Recovery: completing the interrupted deletion is idempotent and
+    # final.
+    await env.forget.forget_member(member.id)
 
     # Deletion completed, no model residue.
     assert await count(env, Member, id=member.id) == 0

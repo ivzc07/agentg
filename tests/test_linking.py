@@ -1202,31 +1202,74 @@ async def test_forget_me_during_pending_switch_enters_two_turn_flow(runtime, mon
     assert identity.gym.id == old_gym.id
 
 
-async def test_forget_me_during_pending_name_enters_two_turn_flow(runtime):
-    """P2 fix-r20: when a Member is in the name-confirm flow
-    (awaiting name) and says "forget me", the forget-me trigger must
-    be detected BEFORE the name answer handling."""
+async def test_forget_me_during_pending_name_replies_deterministically(runtime):
+    """P2 fix-r20: an UNLINKED user in the name-confirm flow who says
+    "forget me" must get a deterministic "nothing to delete" reply — the
+    phraser (model) never sees forget-me text, the turn does not crash,
+    and no Member row is created."""
+    seen_phraser: list[str] = []
+    real_phraser = runtime.linking.phraser
+
+    async def recording_phraser(instruction, member_text):
+        seen_phraser.append(member_text)
+        return await real_phraser(instruction, member_text)
+
+    runtime.linking.phraser = recording_phraser
+
     gym = await runtime.stores.linking.create_gym("Iron Temple")
 
-    # Start the link flow (enters _AwaitingName).
-    await runtime.handle_message(
-        incoming("/start x", link_code=gym.invite_code)
+    # Start the link flow (enters _AwaitingName; the identity is unlinked).
+    await runtime.handle_message(incoming("/start x", link_code=gym.invite_code))
+
+    # "forget me" mid-name-step: deterministic reply, no crash, no phraser.
+    reply = await runtime.handle_message(incoming("forget me"))
+    text = str(reply).lower()
+    assert "nothing" in text or "no data" in text or "no hay datos" in text, (
+        f"expected a deterministic nothing-to-delete reply, got: {reply!r}"
+    )
+    assert "forget me" not in seen_phraser, (
+        "the phraser must never see forget-me text (fix-r20)"
     )
 
-    # A linked Member can't be in _AwaitingName — this is a cold link.
-    # Instead, test: an unlinked user entering code, then saying "forget me"
-    # should be handled via _confirm_name (which now detects forget-me).
-    # But an unlinked user can't use forget-me.  Let's test the linked case
-    # after switching gyms (which uses _AwaitingSwitch already tested above).
+    # The pending name step was cleared and no Member row was created.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is None, "an unlinked forget-me must not create a Member"
 
-    # For cold-start linking: the "forget me" text doesn't look like a name
-    # or code, so the flow asks again for the name.  The runtime already
-    # handles forget-me for unlinked users via the linking dead-end,
-    # not via _handle_forget_me.
+    # The flow restarts cleanly on the next tap.
+    reply2 = await runtime.handle_message(
+        incoming("/start x", link_code=gym.invite_code)
+    )
+    assert reply2 is not None
 
-    # The P2 fix is about linked Members with pending state — covered above.
-    # This test ensures no regression for the cold-start case.
-    pass
+
+async def test_confirmation_phrase_during_pending_name_replies_deterministically(runtime):
+    """fix-r24 #2: an UNLINKED user in the name-confirm flow who types a
+    raw DELETE-ME confirmation phrase must get a deterministic reply —
+    there is no pending deletion it could confirm, the phraser never
+    sees the phrase, and the turn does not crash."""
+    seen_phraser: list[str] = []
+    real_phraser = runtime.linking.phraser
+
+    async def recording_phraser(instruction, member_text):
+        seen_phraser.append(member_text)
+        return await real_phraser(instruction, member_text)
+
+    runtime.linking.phraser = recording_phraser
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.handle_message(incoming("/start x", link_code=gym.invite_code))
+
+    phrase = "DELETE-ME-A1B2C3"
+    reply = await runtime.handle_message(incoming(phrase))
+    text = str(reply).lower()
+    assert "no hay datos" in text or "nothing" in text or "no data" in text, (
+        f"expected a deterministic nothing-to-delete reply, got: {reply!r}"
+    )
+    assert phrase not in seen_phraser, (
+        "the phraser must never see a confirmation phrase (fix-r24 #2)"
+    )
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is None
 
 
 async def test_ordinary_switch_answer_still_works_after_forget_me_detect(runtime, monkeypatch):
