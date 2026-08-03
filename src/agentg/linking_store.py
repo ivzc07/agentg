@@ -308,11 +308,24 @@ async def _link_member_in_session(
             )
         )
     else:
-        # Gym switch: lock the old Member row FIRST, then the
-        # MemberChannel.  Global lock order is
+        # Gym switch: lock the affected Gym row FIRST, then the old
+        # Member, then the MemberChannel.  Global lock order is
         #   Gym → Member → MemberChannel → SafetyOutboxJob → MemberNote
         # so _authorized_send (Member → MemberChannel) and gym-switch
         # cannot deadlock (P1 r9).
+        #
+        # Locking the old Gym serializes this switch with
+        # _coaches_for_gym_in_session which locks Gym to select
+        # eligible Coaches — a selected Coach cannot have their
+        # channel repointed between eligibility resolution and job
+        # creation (P2 r10).
+        old_gym_id = pointer.gym_id
+        if old_gym_id is not None:
+            await db.execute(
+                select(Gym)
+                .where(Gym.id == old_gym_id)
+                .with_for_update()
+            )
         old_member_id = pointer.member_id
         if old_member_id is not None:
             await db.execute(

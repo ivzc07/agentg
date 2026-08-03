@@ -3452,3 +3452,131 @@ async def test_delivery_retries_on_db_abort(env, monkeypatch):
             )
         ).first()
     assert row.status == "delivered"
+
+
+# ── P2 r10: gym-switch serialization with eligibility resolution ──────────
+
+
+async def test_switched_coach_excluded_from_eligibility(env):
+    """When a Coach switches gyms before create_note_and_jobs runs
+    eligibility, the switched Coach is excluded from outbox jobs.
+
+    The gym switch locks the old Gym row, serializing with
+    _coaches_for_gym_in_session so a Coach who switched away from the
+    Gym before the lock is acquired is no longer an eligible Coach for
+    that Gym."""
+    # Coach Sam (coach1) switches to a new gym BEFORE the safety flag.
+    new_gym = await env.linking.create_gym("New Gym")
+    await env.linking.link_member(
+        new_gym.id, "Coach Sam", "telegram", "7",
+    )
+
+    # Now create a safety Note using the linking_store path so
+    # _coaches_for_gym_in_session runs inside the transaction.
+    note, jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        linking_store=env.linking,
+        exclude_member_id=env.member_id,
+    )
+
+    # Only Coach Jo (coach2) should get a job — Coach Sam switched away.
+    assert len(jobs) == 1
+    assert jobs[0].coach_member_id == env.coach2_id
+
+    # Verify the job is deliverable.
+    worker = _make_worker(env)
+    await worker.drain_once(limit=50)
+    # Coach Jo gets heads-up + link.
+    assert len(env.notifier.sent) == 2
+    coach_jo_sends = [m for m in env.notifier.sent if m[1] == "8"]
+    assert len(coach_jo_sends) == 2
+
+
+async def test_switch_after_eligibility_job_still_reachable(env):
+    """When a Coach switches gyms AFTER the Note and jobs commit,
+    the existing job is handled correctly at delivery time — the
+    Coach is no longer reachable in the original Gym, so the job
+    is marked failed rather than delivering to the wrong Gym.
+
+    This is the sequential version of the P2 r10 race: the critical
+    property is that a switch that beats eligibility excludes the
+    Coach (tested above), while a switch that arrives after commit
+    still fails safely at delivery (tested here)."""
+    # Create the Note and jobs first (Coach Sam is still in the old gym).
+    note, jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        linking_store=env.linking,
+        exclude_member_id=env.member_id,
+    )
+    assert len(jobs) == 2  # Both coaches get jobs
+
+    # Now Coach Sam switches gyms.
+    new_gym = await env.linking.create_gym("New Gym")
+    await env.linking.link_member(
+        new_gym.id, "Coach Sam", "telegram", "7",
+    )
+
+    # Deliver — Coach Sam's job should fail (no longer reachable),
+    # Coach Jo's job should succeed.
+    worker = _make_worker(env)
+    await worker.drain_once(limit=50)
+
+    # Only Coach Jo got messages.
+    assert env.notifier.sent  # at least Coach Jo's messages
+    coach_sam_sends = [m for m in env.notifier.sent if m[1] == "7"]
+    assert len(coach_sam_sends) == 0
+
+    # Verify Coach Sam's job is marked failed, Coach Jo's delivered.
+    async with env.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT coach_member_id, status, failure_reason "
+                    "FROM safety_outbox_jobs ORDER BY coach_member_id"
+                )
+            )
+        ).all()
+    assert rows[0].status == "failed"  # Coach Sam
+    assert "no longer reachable" in (rows[0].failure_reason or "")
+    assert rows[1].status == "delivered"  # Coach Jo
+
+
+async def test_eligibility_count_matches_coaches_in_gym(env):
+    """After a Coach switches gyms, the linking_store coaches_for_gym
+    and the transactional _coaches_for_gym_in_session both report the
+    correct count — excluding the departed Coach."""
+    # Baseline: 2 coaches in the gym.
+    coaches_before = await env.linking.coaches_for_gym(env.gym_id)
+    assert len(coaches_before) == 2
+
+    # Coach Sam switches to a new gym.
+    new_gym = await env.linking.create_gym("New Gym")
+    await env.linking.link_member(
+        new_gym.id, "Coach Sam", "telegram", "7",
+    )
+
+    # After switch: only 1 coach remains in the old gym.
+    coaches_after = await env.linking.coaches_for_gym(env.gym_id)
+    assert len(coaches_after) == 1
+    assert coaches_after[0][0] == env.coach2_id  # Coach Jo
+
+    # The transactional path also sees only 1 coach.
+    note, jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="post-switch flag",
+        member_name=env.member_name,
+        member_is_coach=False,
+        linking_store=env.linking,
+        exclude_member_id=env.member_id,
+    )
+    assert len(jobs) == 1
+    assert jobs[0].coach_member_id == env.coach2_id

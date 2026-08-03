@@ -311,7 +311,7 @@ class SafetyOutbox:
                 .values(status="pending", claimed_at=None)
             )
             await db.commit()
-            return result.rowcount
+            return result.rowcount  # type: ignore[attr-defined]
 
     async def reset_stale_claims(
         self, max_age_seconds: int = LEASE_TIMEOUT_SECONDS
