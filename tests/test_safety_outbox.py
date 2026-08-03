@@ -3765,3 +3765,70 @@ async def test_stale_owner_cannot_clobber_reclaimed_job(env):
     # The current owner's transition works normally.
     await env.outbox.mark_delivered(new_jobs[0])
     assert (await _status()).status == "delivered"
+
+
+# ── AC 5 wiring: startup recovery and shutdown drain glue ───────────────────
+
+
+async def test_start_background_tasks_wires_recovery_and_shutdown_drains(env):
+    """The application glue (start_background_tasks / shutdown) must
+    actually run recovery and the final drain: a job orphaned in
+    'sending' by a prior crash is reset on start and delivered by the
+    time shutdown returns — even with no dashboard wired."""
+    from agentg.linking import Linking
+    from agentg.runtime import AgentRuntime
+    from agentg.stores import Stores
+
+    async def _phraser(instruction, member_text):
+        return instruction
+
+    async def _summarizer(old_items, existing_notes):  # pragma: no cover
+        raise AssertionError("summarizer must not run")
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+    # Orphan the job in 'sending' as a prior crash would.
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    stores = Stores.from_engine(env.engine)
+    runtime = AgentRuntime(
+        agent=object(),
+        engine=env.engine,
+        stores=stores,
+        linking=Linking(stores.linking, _phraser),
+        summarizer=_summarizer,
+        notifier=env.notifier,
+        dashboard=None,
+        stream_replies=False,
+    )
+    await runtime.start_background_tasks()
+    assert runtime._outbox_worker is not None, (
+        "a wired notifier must start the outbox worker"
+    )
+    # Recovery reset the orphaned claim; the final drain delivers it.
+    await runtime.shutdown()
+    assert runtime._outbox_worker is None
+
+    sent = [m for m in env.notifier.sent if "sharp knee pain" in m[2]]
+    assert sent, "the orphaned job must be delivered by startup recovery + drain"
+
+    # No notifier → no worker; both calls stay safe no-ops.
+    runtime2 = AgentRuntime(
+        agent=object(),
+        engine=env.engine,
+        stores=stores,
+        linking=Linking(stores.linking, _phraser),
+        summarizer=_summarizer,
+        notifier=None,
+        stream_replies=False,
+    )
+    await runtime2.start_background_tasks()
+    assert runtime2._outbox_worker is None
+    await runtime2.shutdown()
