@@ -17,7 +17,7 @@ from sqlalchemy import inspect, select, text, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from agentg.models import Base, Gym, Member, MemberChannel
+from agentg.models import Base, ForgetMeRequest, Gym, Member, MemberChannel
 
 INVITE_CODE_ALPHABET = string.ascii_lowercase + string.digits
 INVITE_CODE_LENGTH = 8
@@ -269,17 +269,44 @@ class LinkedIdentity:
 
 async def _link_member_in_session(
     db, gym_id: int, name: str, channel: str, channel_user_id: str, *, is_coach: bool = False
-) -> Member:
-    """The writes of ``link_member`` inside an already-open transaction."""
-    member = Member(gym_id=gym_id, name=name, is_coach=is_coach)
-    db.add(member)
-    await db.flush()
+) -> Member | None:
+    """The writes of ``link_member`` inside an already-open transaction.
+
+    When an existing MemberChannel is re-pointed (the gym switch), the
+    existing Member row is locked with ``SELECT … FOR UPDATE`` and its
+    ``ForgetMeRequest`` is rechecked inside the lock so a concurrent
+    ``claim_forget_me_request`` cannot race through between check and
+    repoint — the two operations serialize on the Member row lock.
+    Returns ``None`` when a pending or deleting ForgetMeRequest
+    blocks the link (the caller must abort safely without repointing).
+    """
     pointer = await db.scalar(
         select(MemberChannel).where(
             MemberChannel.channel == channel,
             MemberChannel.channel_user_id == channel_user_id,
         )
     )
+    if pointer is not None:
+        # Lock the existing Member row to serialize with
+        # claim_forget_me_request (fix-r18).  On Postgres this is a
+        # row-level lock; on SQLite WAL the IMMEDIATE transaction
+        # provides the write lock.
+        existing = await db.scalar(
+            select(Member.id).where(Member.id == pointer.member_id).with_for_update()
+        )
+        if existing is not None:
+            fme = await db.scalar(
+                select(ForgetMeRequest).where(
+                    ForgetMeRequest.member_id == existing,
+                    ForgetMeRequest.status.in_(["pending", "deleting"]),
+                )
+            )
+            if fme is not None:
+                return None  # Abort: deletion intent or in-progress deletion
+
+    member = Member(gym_id=gym_id, name=name, is_coach=is_coach)
+    db.add(member)
+    await db.flush()
     if pointer is None:
         db.add(
             MemberChannel(
@@ -385,16 +412,21 @@ class LinkingStore:
 
     async def link_member(
         self, gym_id: int, name: str, channel: str, channel_user_id: str
-    ) -> Member:
+    ) -> Member | None:
         """Create a Member and point the channel identity at them.
 
         An identity that already points somewhere is re-pointed (the gym
-        switch), leaving the old Member row untouched. The read-then-write on
-        the pointer is race-free only because exactly one replica runs (spec
-        §Hosting) and the runtime serializes turns per identity.
+        switch), leaving the old Member row untouched.  When the existing
+        Member has a pending or deleting ``ForgetMeRequest`` (checked under
+        a ``SELECT … FOR UPDATE`` lock to serialize with
+        ``claim_forget_me_request``), the link is aborted and ``None`` is
+        returned — the caller must not proceed to greet the Member.
         """
         async with self._sessions() as db:
             member = await _link_member_in_session(db, gym_id, name, channel, channel_user_id)
+            if member is None:
+                await db.rollback()
+                return None
             await db.commit()
             return member
 
@@ -406,8 +438,10 @@ class LinkingStore:
         One transaction: the Member row is born coach-flagged (no partial
         plain-member state a retry could duplicate), and the grant is
         conditional on the code still being active — a code regenerated
-        mid-flow revokes the whole link. Returns ``None`` when the code is
-        no longer active; nothing is written then.
+        mid-flow revokes the whole link.  Returns ``None`` when the code is
+        no longer active OR when the existing Member has a pending/deleting
+        ``ForgetMeRequest`` (checked under a ``SELECT … FOR UPDATE`` lock);
+        nothing is written then.
         """
         async with self._sessions() as db:
             if not await _redeem_coach_code(db, gym_id, coach_code):
@@ -416,6 +450,9 @@ class LinkingStore:
             member = await _link_member_in_session(
                 db, gym_id, name, channel, channel_user_id, is_coach=True
             )
+            if member is None:
+                await db.rollback()
+                return None
             await db.commit()
             return member
 

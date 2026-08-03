@@ -887,3 +887,124 @@ async def test_deleting_request_prevents_gym_switch_without_exact_phrase(runtime
     )
     assert identity.gym.id == old_gym.id
     assert await member_count(runtime.stores.linking) == 1
+
+
+# --- P1 (fix-r18): shared Member-row lock between Linking and Forget-me ---
+
+
+async def test_link_member_aborts_when_pending_forget_me_request_exists(runtime):
+    """fix-r18: A linked Member with a pending ForgetMeRequest cannot
+    switch gyms — link_member returns None because the Member-row lock
+    sees the pending ForgetMeRequest, serializing with
+    claim_forget_me_request."""
+    from datetime import datetime, timezone
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    old_member = await runtime.stores.linking.link_member(
+        old_gym.id, "Ana", "telegram", "42"
+    )
+
+    # Create a pending ForgetMeRequest on the existing Member.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        old_member.id, old_gym.id, now, 300, "en"
+    )
+    assert phrase != ""
+    pending = await runtime.stores.forget.get_pending_request(old_member.id)
+    assert pending is not None
+
+    # Try to switch gyms via link_member — must abort because a pending
+    # ForgetMeRequest exists for the old Member.
+    result = await runtime.stores.linking.link_member(
+        new_gym.id, "Ana", "telegram", "42"
+    )
+    assert result is None, (
+        "link_member must abort when pending ForgetMeRequest exists"
+    )
+
+    # Identity must still be at the old gym — no new Member, no repoint.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.member.id == old_member.id
+    assert identity.gym.id == old_gym.id
+    assert identity.member.name == "Ana"
+    assert await member_count(runtime.stores.linking) == 1
+
+    # The pending request is still intact.
+    pending_after = await runtime.stores.forget.get_pending_request(
+        old_member.id
+    )
+    assert pending_after is not None
+    assert pending_after.status == "pending"
+
+
+async def test_link_member_aborts_when_deleting_forget_me_request_exists(runtime):
+    """fix-r18: A linked Member with a deleting ForgetMeRequest cannot
+    switch gyms — the Member-row lock sees the deleting tombstone and
+    aborts, preventing a new profile from surviving deletion."""
+    from datetime import datetime, timezone
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    old_member = await runtime.stores.linking.link_member(
+        old_gym.id, "Ana", "telegram", "42"
+    )
+
+    # Create and claim a ForgetMeRequest (deletion confirmed, not completed).
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        old_member.id, old_gym.id, now, 300, "en"
+    )
+    claimed = await runtime.stores.forget.claim_forget_me_request(
+        old_member.id, phrase, now
+    )
+    assert claimed is not None
+    assert claimed.status == "deleting"
+
+    # Try to switch gyms — must abort because the old Member has a
+    # deleting ForgetMeRequest.
+    result = await runtime.stores.linking.link_member(
+        new_gym.id, "Ana", "telegram", "42"
+    )
+    assert result is None, (
+        "link_member must abort when deleting ForgetMeRequest exists"
+    )
+
+    # Identity still at old gym.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.member.id == old_member.id
+    assert identity.gym.id == old_gym.id
+    assert await member_count(runtime.stores.linking) == 1
+
+    # Complete deletion — must delete everything cleanly.
+    deleting = await runtime.stores.forget.get_deleting_request(old_member.id)
+    assert deleting is not None
+    await runtime.stores.forget.forget_member(old_member.id)
+    assert await member_count(runtime.stores.linking) == 0
+    assert await runtime.stores.linking.identity_for("telegram", "42") is None
+
+
+async def test_new_link_no_prior_identity_still_works_with_forget_me_on_another_member(runtime):
+    """fix-r18: A cold-start link (no prior MemberChannel) must still
+    succeed because there is no existing Member row to lock or check.
+    The ForgetMeRequest guard only applies to the switch path."""
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+
+    # A different identity has a pending ForgetMeRequest — irrelevant
+    # to this new link.
+    other = await runtime.stores.linking.link_member(gym.id, "Ben", "telegram", "99")
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    await runtime.stores.forget.request_forget_me(other.id, gym.id, now, 300, "en")
+
+    # This identity is brand new — no prior MemberChannel.
+    member = await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    assert member is not None
+    assert member.name == "Ana"
+    assert await member_count(runtime.stores.linking) == 2
+
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.member.id == member.id

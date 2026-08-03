@@ -4011,3 +4011,224 @@ async def test_concurrent_request_with_expired_row(env):
     assert claimed is not None
     await env.forget.forget_member(member.id)
     assert await count(env, Member, id=member.id) == 0
+
+
+# -- P1 (fix-r18): shared Member-row lock between Linking and Forget-me ---
+
+
+async def test_barrier_claim_wins_link_aborts_deletion_completes(env):
+    """fix-r18: True barrier interleaving — forget-me claim commits first
+    (status → deleting), THEN a linking gym switch tries.  The shared
+    Member-row lock serializes the two: the link sees the deleting
+    ForgetMeRequest and aborts safely.  Deletion then completes cleanly
+    — no new or repointed profile survives.
+
+    Uses monkey-patching so claim signals AFTER its transaction commits,
+    then link_member runs and must return None."""
+    import asyncio
+
+    member = await populate(env)
+    new_gym = await env.linking.create_gym("Steel Yard")
+
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+    assert phrase != ""
+
+    # Barrier: claim commits fully, THEN linking tries.
+    claim_done = asyncio.Event()
+    link_result: object = None
+
+    _original_claim = env.forget.claim_forget_me_request
+
+    async def _claim_wrapper(member_id, confirmation_phrase, now_dt):
+        result = await _original_claim(member_id, confirmation_phrase, now_dt)
+        claim_done.set()  # Signal AFTER commit
+        return result
+
+    env.forget.claim_forget_me_request = _claim_wrapper  # type: ignore[assignment]
+
+    async def run_claim():
+        claimed = await env.forget.claim_forget_me_request(
+            member.id, phrase, datetime.now(UTC)
+        )
+        assert claimed is not None
+
+    async def run_link():
+        nonlocal link_result
+        await claim_done.wait()  # Wait for claim to fully commit
+        link_result = await env.linking.link_member(
+            new_gym.id, member.name, "telegram", "42"
+        )
+
+    claim_task = asyncio.create_task(run_claim())
+    link_task = asyncio.create_task(run_link())
+
+    await asyncio.gather(claim_task, link_task)
+
+    env.forget.claim_forget_me_request = _original_claim  # type: ignore[assignment]
+
+    # LINKING MUST HAVE ABORTED — the deleting ForgetMeRequest blocks the
+    # switch under the shared Member-row lock.
+    assert link_result is None, (
+        "link_member must abort (return None) when a deleting"
+        " ForgetMeRequest exists on the existing Member"
+    )
+
+    # Identity must still point to the OLD member at the OLD gym.
+    identity = await env.linking.identity_for("telegram", "42")
+    assert identity is not None, "identity must still resolve"
+    assert identity.member.id == member.id, (
+        "must still point to the old Member — no repointing"
+    )
+    assert identity.gym.id == env.gym_id, (
+        "must still be at the old Gym — no switch"
+    )
+
+    # Only the original Member exists — no new Member row was created.
+    assert await count(env, Member, id=member.id) == 1
+    # Count total Members — must be exactly 1.
+    from sqlalchemy import func as sa_func
+    async with async_sessionmaker(env.engine)() as db:
+        total = await db.scalar(
+            select(sa_func.count()).select_from(Member)
+        )
+    assert total == 1, f"no new Member row must have been created, got {total}"
+
+    # Complete deletion — must clean up everything.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == STATUS_DELETING
+    await env.forget.forget_member(member.id)
+
+    # No profile survives.
+    assert await count(env, Member, id=member.id) == 0
+    assert await env.linking.identity_for("telegram", "42") is None
+
+
+async def test_barrier_link_wins_first_then_deletion_cleans_old_profile(env):
+    """fix-r18 counterpart: when link_member locks the Member row first
+    and finds NO pending/deleting ForgetMeRequest, the switch completes.
+    The claim then marks the OLD member deleting, and forget_member
+    deletes only the old Member — the new profile at the new Gym survives.
+
+    This is the legitimate-switch scenario: the ForgetMeRequest was
+    created for the OLD member, then the switch happened (and runtime
+    cancels pending before the switch), then a NEW forget-me for the
+    old member is claimed and deletes only the old profile."""
+    import asyncio
+
+    member = await populate(env)
+    new_gym = await env.linking.create_gym("Steel Yard")
+
+    # No ForgetMeRequest when the switch happens — the runtime would have
+    # cancelled any pending before the switch (fix-r8).  This tests that
+    # link_member succeeds when the lock finds no pending/deleting row.
+    new_member = await env.linking.link_member(
+        new_gym.id, member.name, "telegram", "42"
+    )
+    assert new_member is not None, (
+        "link_member must succeed — no ForgetMeRequest exists"
+    )
+    assert new_member.id != member.id, "new Member row must be created"
+    assert new_member.gym_id == new_gym.id
+
+    # Identity now points to the NEW member at the NEW gym.
+    identity = await env.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.member.id == new_member.id
+    assert identity.gym.id == new_gym.id
+
+    # Now create and claim a forget-me for the OLD member.
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+    assert phrase != ""
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+    assert claimed.status == STATUS_DELETING
+
+    # Delete the OLD member.
+    await env.forget.forget_member(member.id)
+
+    # The OLD member is gone.
+    assert await count(env, Member, id=member.id) == 0
+
+    # But the NEW member at the NEW gym survives — the switch was
+    # legitimate (no pending/deleting row at check time under lock).
+    identity_after = await env.linking.identity_for("telegram", "42")
+    assert identity_after is not None, (
+        "new profile must survive — switch was legitimate"
+    )
+    assert identity_after.member.id == new_member.id
+    assert identity_after.gym.id == new_gym.id
+    assert identity_after.member.name == member.name
+
+    # Only one Member row remains (the new one).
+    from sqlalchemy import func as sa_func
+    async with async_sessionmaker(env.engine)() as db:
+        total = await db.scalar(
+            select(sa_func.count()).select_from(Member)
+        )
+    assert total == 1, f"only the new Member must remain, got {total}"
+
+
+async def test_link_member_as_coach_also_aborts_on_pending_forget_me(env):
+    """fix-r18: link_member_as_coach must also abort when the existing
+    Member has a pending ForgetMeRequest — the Member-row lock check
+    applies to both link paths."""
+    gym = await env.linking.create_gym("Iron Temple")
+    new_gym = await env.linking.create_gym("Steel Yard")
+    member = await env.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, gym.id, now, 300, "en"
+    )
+    assert phrase != ""
+
+    # Try coach-link to a new gym — must abort due to pending ForgetMeRequest.
+    result = await env.linking.link_member_as_coach(
+        new_gym.id, "Ana", "telegram", "42", new_gym.coach_invite_code or ""
+    )
+    assert result is None, (
+        "link_member_as_coach must abort when pending ForgetMeRequest exists"
+    )
+
+    # Identity still at old gym.
+    identity = await env.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.member.id == member.id
+    assert identity.gym.id == gym.id
+
+    # Only one Member.
+    assert await count(env, Member, id=member.id) == 1
+
+
+async def test_new_link_no_prior_memberchannel_succeeds_even_with_forget_me_on_other(env):
+    """fix-r18: A cold-start link (no prior MemberChannel for this identity)
+    must succeed because there is no existing Member row to lock or check.
+    The ForgetMeRequest guard only applies to the switch path."""
+    gym = await env.linking.create_gym("Iron Temple")
+
+    # Another identity has a pending ForgetMeRequest — irrelevant.
+    other = await env.linking.link_member(gym.id, "Ben", "telegram", "99")
+    now = datetime.now(UTC)
+    await env.forget.request_forget_me(other.id, gym.id, now, 300, "en")
+
+    # This identity is brand new (no prior MemberChannel).
+    member = await env.linking.link_member(gym.id, "Ana", "telegram", "42")
+    assert member is not None
+    assert member.name == "Ana"
+
+    identity = await env.linking.identity_for("telegram", "42")
+    assert identity is not None
+    assert identity.member.id == member.id
+
+    # Both Members exist.
+    assert await count(env, Member, id=other.id) == 1
+    assert await count(env, Member, id=member.id) == 1

@@ -388,7 +388,14 @@ class Linking:
             if not await self._code_still_active(pending.gym_id, pending.invite_code):
                 del self._pending[identity]
                 return await self.phraser(LINK_EXPIRED_INSTRUCTION, msg.text)
-            await self.store.link_member(pending.gym_id, name, *identity)
+            member = await self.store.link_member(pending.gym_id, name, *identity)
+            if member is None:
+                # A pending or deleting ForgetMeRequest blocked the link
+                # (checked under the Member-row lock — fix-r18).  Abort
+                # safely: the pending step is cleared so a retry on the
+                # next tap restarts cleanly.
+                del self._pending[identity]
+                return await self.phraser(LINK_EXPIRED_INSTRUCTION, msg.text)
         # Cleared only after the write: a store error keeps the step retryable.
         del self._pending[identity]
         template = COACH_WELCOME_INSTRUCTION if pending.as_coach else WELCOME_INSTRUCTION
@@ -412,6 +419,9 @@ class Linking:
         # Fresh start at the new Gym: new Member row (same person, same name),
         # old row untouched, channel identity re-pointed. The coach path
         # redeems atomically — a code regenerated mid-flow revokes the switch.
+        # The Member-row lock inside _link_member_in_session serializes with
+        # claim_forget_me_request so a concurrent deletion cannot race through
+        # (fix-r18).
         if pending.as_coach:
             member = await self.store.link_member_as_coach(
                 pending.gym_id, linked.member.name, *identity, pending.invite_code
@@ -427,7 +437,15 @@ class Linking:
                 return await self.phraser(
                     LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name), msg.text
                 )
-            await self.store.link_member(pending.gym_id, linked.member.name, *identity)
+            member = await self.store.link_member(pending.gym_id, linked.member.name, *identity)
+            if member is None:
+                # A pending or deleting ForgetMeRequest blocked the switch
+                # (checked under the Member-row lock — fix-r18).  The pending
+                # step is cleared; the Member stays at the old Gym.
+                del self._pending[identity]
+                return await self.phraser(
+                    LINK_INACTIVE_INSTRUCTION.format(gym=linked.gym.name), msg.text
+                )
         # Cleared only after the write: a store error keeps the step retryable.
         del self._pending[identity]
         template = COACH_SWITCHED_INSTRUCTION if pending.as_coach else SWITCHED_INSTRUCTION
