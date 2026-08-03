@@ -208,6 +208,11 @@ class ModelTurnLease(Base):
     calling ``Runner.run()`` and releases it in a ``finally`` block.
     A stale lease (``acquired_at`` older than a bounded threshold) is
     reclaimed by another runtime so a crash cannot strand deletion.
+
+    ``owner_token`` is a per-turn immutable token (UUID) assigned at
+    acquisition.  Heartbeat and release must present the matching token
+    so a stale/reclaimed runtime can never overwrite or delete the new
+    owner's lease — the token acts as a fencing guard (fix-r21).
     """
 
     __tablename__ = "model_turn_leases"
@@ -218,6 +223,7 @@ class ModelTurnLease(Base):
     )
     gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
     acquired_at: Mapped[datetime] = mapped_column(TZDateTime())
+    owner_token: Mapped[str | None] = mapped_column(String(36), default=None)
 
 
 class DashboardLoginToken(Base):

@@ -226,6 +226,18 @@ def _add_missing_columns(conn: Connection) -> None:
     # turn_lease_at columns on forget_me_requests (fix-r9, fix-r10)
     # were superseded by the standalone ModelTurnLease table (fix-r11)
     # and their migration code removed in fix-r19.
+    # fix-r21: per-turn immutable owner_token fences stale owners.
+    if "model_turn_leases" in set(inspect(conn).get_table_names()):
+        mtl_columns = {
+            c["name"]
+            for c in inspect(conn).get_columns("model_turn_leases")
+        }
+        if "owner_token" not in mtl_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE model_turn_leases ADD COLUMN owner_token VARCHAR(36)"
+                )
+            )
     # FK indexes for Gym-scoped reads (issue #178): Coach lookup, roster,
     # and the check-in sweep join on these columns.
     members_indexes = {i["name"] for i in inspect(conn).get_indexes("members")}

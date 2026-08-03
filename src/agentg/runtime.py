@@ -197,6 +197,10 @@ class AgentRuntime:
     # wedge that Member, so the wait is bounded and the entry is consumed on
     # read — ordering is a nicety, liveness is not negotiable.
     _compaction_done: dict[tuple[str, str], asyncio.Event] = field(default_factory=dict)
+    # Per-Member lease tokens for this runtime so the pre-acquire cleanup
+    # can release a lease leaked by a dropped after_send without weakening
+    # the token-based fencing (fix-r21).  Keyed by member_id → owner_token.
+    _lease_tokens: dict[int, str] = field(default_factory=dict)
 
     async def ensure_schema(self) -> None:
         """Create the domain and SDK session tables once at startup."""
@@ -386,16 +390,22 @@ class AgentRuntime:
                 # recovery for crashed runtimes.
                 #
                 # Before acquiring, release any lease WE created from a
-                # previous turn whose after_send was dropped.  The
-                # token-based release never touches another runtime's
-                # live lease (fix-r12).
-                await self.stores.forget.release_model_turn_lease(
-                    linked.member.id
-                )
-                model_turn_gated = await self.stores.forget.acquire_model_turn_lease(
+                # previous turn whose after_send was dropped.  Uses the
+                # per-member token tracked locally on this runtime so the
+                # token-based fencing is never weakened (fix-r21).
+                last_token = self._lease_tokens.pop(linked.member.id, None)
+                if last_token is not None:
+                    await self.stores.forget.release_model_turn_lease(
+                        linked.member.id, last_token
+                    )
+                turn_lease_token = await self.stores.forget.acquire_model_turn_lease(
                     linked.member.id, linked.gym.id
                 )
-                if not model_turn_gated:
+                if turn_lease_token is not None:
+                    # Track the token so a dropped after_send on this turn
+                    # can be cleaned up by the next turn (fix-r21).
+                    self._lease_tokens[linked.member.id] = turn_lease_token
+                else:
                     # A deleting row exists — deletion was confirmed.
                     # Only the exact confirmation phrase can resume
                     # deletion (already checked above via
@@ -456,13 +466,13 @@ class AgentRuntime:
                         # errors, so concurrent messages from the same identity
                         # cannot race the session or interleave chunks (#176).
                         streamed = self._streamed_reply(
-                            msg, context, session, key, member_id, _await_reset,
+                            msg, context, session, key, member_id, turn_lease_token, _await_reset,
                             _lock=lock, _turn=turn,
                         )
                         lock_transferred = True
                         return streamed
                     return await self._blocking_reply(
-                        msg, context, session, key, member_id, _await_reset
+                        msg, context, session, key, member_id, turn_lease_token, _await_reset
                     )
                 except BaseException:
                     # On failure the reset must still land, or a lapsed Member
@@ -475,7 +485,7 @@ class AgentRuntime:
                     # lock (the reset task runs concurrently).
                     try:
                         await self.stores.forget.release_model_turn_lease(
-                            member_id
+                            member_id, turn_lease_token
                         )
                     except Exception:
                         logger.exception(
@@ -497,6 +507,7 @@ class AgentRuntime:
         session: SQLAlchemySession,
         key: tuple[str, str],
         member_id: int,
+        turn_lease_token: str | None,
         await_reset,
     ) -> Reply:
         """Non-streaming path kept deliberately for tests (#176)."""
@@ -510,7 +521,7 @@ class AgentRuntime:
         text = str(result.final_output)
         return Reply(
             text,
-            after_send=self._post_turn(msg, context, session, key, member_id, await_reset),
+            after_send=self._post_turn(msg, context, session, key, member_id, turn_lease_token, await_reset),
         )
 
     def _streamed_reply(
@@ -520,6 +531,7 @@ class AgentRuntime:
         session: SQLAlchemySession,
         key: tuple[str, str],
         member_id: int,
+        turn_lease_token: str | None,
         await_reset,
         _lock: asyncio.Lock | None = None,
         _turn: TurnContext | None = None,
@@ -546,12 +558,12 @@ class AgentRuntime:
         # stream failure, GeneratorExit, or dropped after_send must
         # not strand deletion (issue #212, fix-r11).
         stream = _release_lease_on_close(
-            stream, self.stores.forget, member_id, logger
+            stream, self.stores.forget, member_id, turn_lease_token, logger
         )
         return Reply(
             "",
             stream=stream,
-            after_send=self._post_turn(msg, context, session, key, member_id, await_reset),
+            after_send=self._post_turn(msg, context, session, key, member_id, turn_lease_token, await_reset),
         )
 
     def _post_turn(
@@ -561,6 +573,7 @@ class AgentRuntime:
         session: SQLAlchemySession,
         key: tuple[str, str],
         member_id: int,
+        turn_lease_token: str | None,
         await_reset,
     ):
         """Build the ``after_send`` hook both reply paths share.
@@ -570,6 +583,10 @@ class AgentRuntime:
         (#173).  The context lists are read when the hook *runs*, not when it
         is built, because on the streaming path the tools populate them after
         this returns.
+
+        *turn_lease_token* is the per-turn immutable owner token from
+        ``acquire_model_turn_lease`` — the after_send release uses it so
+        only the real owner can release the lease (fix-r21).
         """
         # Compaction only affects the *next* turn's prompt, so it runs here
         # instead of in front of the reply -- that takes a model call off the
@@ -625,7 +642,7 @@ class AgentRuntime:
                 # it here (issue #212, fix-r11).
                 try:
                     await self.stores.forget.release_model_turn_lease(
-                        member_id
+                        member_id, turn_lease_token
                     )
                 except Exception:
                     logger.exception(
@@ -965,11 +982,16 @@ async def _release_lease_on_close(
     inner: AsyncIterator[str],
     forget_store,
     member_id: int,
+    owner_token: str | None,
     logger: logging.Logger,
 ) -> AsyncIterator[str]:
     """Release the forget-me model-turn lease when the stream is exhausted
     or errors, guaranteeing the lease is cleared even when ``after_send``
     is never called (issue #212, fix-r11).
+
+    When *owner_token* is ``None`` the release is a no-op (no lease was
+    ever acquired).  Otherwise it presents the per-turn immutable token
+    so only the real owner can delete the lease row (fix-r21).
 
     Placed outermost so it runs after lock release, instrument close,
     and all other cleanup.
@@ -985,7 +1007,7 @@ async def _release_lease_on_close(
         except Exception:
             pass
         try:
-            await forget_store.release_model_turn_lease(member_id)
+            await forget_store.release_model_turn_lease(member_id, owner_token)
         except Exception:
             logger.exception(
                 "release_model_turn_lease failed for %d", member_id

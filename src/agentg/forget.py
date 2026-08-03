@@ -97,11 +97,10 @@ class ForgetStore:
         # Test-only hook: called between the read and upsert in
         # request_forget_me (issue #212, fix-r6 barrier test).
         self._pre_upsert_hook: Callable[[], Awaitable[None]] | None = None  # type: ignore[assignment]
-        # Per-Member lease tokens so release_model_turn_lease only deletes
-        # a lease WE created — never another runtime's live lease (fix-r12).
-        self._lease_tokens: dict[int, datetime] = {}
-        # Per-Member heartbeat tasks — cancelled on release.
-        self._heartbeat_tasks: dict[int, asyncio.Task[None]] = {}
+        # Per-Member heartbeat tasks — cancelled on release.  Keyed by
+        # (member_id, owner_token) so a stale owner's heartbeat can't
+        # fight the new owner's lease (fix-r21).
+        self._heartbeat_tasks: dict[tuple[int, str], asyncio.Task[None]] = {}
         # Test-only hooks for barrier tests (fix-r12 R3, fix-r19).
         # _pre_write_lock_hook: after SELECT FOR UPDATE but before the
         #   noop UPDATE that acquires the real SQLite write lock.  Both
@@ -404,7 +403,7 @@ class ForgetStore:
 
     async def acquire_model_turn_lease(
         self, member_id: int, gym_id: int
-    ) -> bool:
+    ) -> str | None:
         """Atomically check that no deletion is in progress and acquire an
         exclusive model-turn lease, serialised with
         ``claim_forget_me_request`` via a shared Member-row lock (fix-r12).
@@ -418,10 +417,15 @@ class ForgetStore:
         Only reclaims a lease that is explicitly stale; a live lease owned
         by another runtime is never touched (fix-r12).
 
-        Returns ``True`` when the model may proceed safely.
+        Returns the per-turn immutable owner_token (UUID string) when the
+        model may proceed safely, or ``None`` when the gate is closed.
+        The caller captures this token in a local turn scope and passes it
+        to heartbeat/release — a stale/reclaimed runtime can never
+        overwrite or delete the new owner's lease (fix-r21).
         """
         now = datetime.now(UTC)
         stale_cutoff = now - timedelta(seconds=self.stale_lease_seconds)
+        owner_token = secrets.token_hex(16)  # 32-char hex = 128-bit random
 
         async with self.engine.begin() as conn:
             # Lock the Member row to serialize with claim_forget_me_request.
@@ -432,7 +436,7 @@ class ForgetStore:
                 select(Member.id).where(Member.id == member_id).with_for_update()
             )
             if member_row.first() is None:
-                return False  # Member doesn't exist
+                return None  # Member doesn't exist
 
             # Test-only barrier hook — fires after SELECT FOR UPDATE but
             # before the real write lock so both tasks can be paused at
@@ -462,7 +466,7 @@ class ForgetStore:
                 )
             )
             if del_result.first() is not None:
-                return False
+                return None
 
             # 2. Check existing lease — use table columns for Core connection.
             lease_row = (
@@ -489,6 +493,7 @@ class ForgetStore:
                     member_id=member_id,
                     gym_id=gym_id,
                     acquired_at=now,
+                    owner_token=owner_token,
                 )
                 stmt = stmt.on_conflict_do_nothing(
                     index_elements=["member_id"]
@@ -496,15 +501,17 @@ class ForgetStore:
                 result = await conn.execute(stmt)
                 if getattr(result, "rowcount", 0) == 0:
                     # Defense-in-depth: the unique constraint fired.
-                    # Return False so the caller handles the loss.
-                    return False
-                self._lease_tokens[member_id] = now
-                self._start_heartbeat(member_id)
-                return True
+                    # Return None so the caller handles the loss.
+                    return None
+                self._start_heartbeat(member_id, owner_token)
+                return owner_token
 
             # 3. Stale-lease recovery: only reclaim if explicitly stale.
             #    Use rowcount to verify OUR update won — two concurrent
             #    reclaimers cannot both succeed (fix-r12).
+            #    The new owner_token fences the old owner: heartbeat and
+            #    release from the stale runtime become no-ops after the
+            #    reclaim because their token no longer matches (fix-r21).
             if lease_row.acquired_at < stale_cutoff:
                 result = await conn.execute(
                     update(ModelTurnLease)
@@ -512,54 +519,64 @@ class ForgetStore:
                         ModelTurnLease.member_id == member_id,
                         ModelTurnLease.acquired_at < stale_cutoff,
                     )
-                    .values(acquired_at=now, gym_id=gym_id)
+                    .values(acquired_at=now, gym_id=gym_id, owner_token=owner_token)
                 )
                 if getattr(result, "rowcount", 0) > 0:
-                    self._lease_tokens[member_id] = now
-                    self._start_heartbeat(member_id)
-                    return True
+                    self._start_heartbeat(member_id, owner_token)
+                    return owner_token
 
-            return False
+            return None
 
-    async def release_model_turn_lease(self, member_id: int) -> None:
+    async def release_model_turn_lease(
+        self, member_id: int, owner_token: str | None = None
+    ) -> None:
         """Release our model-turn lease so another runtime (or a claim)
         can proceed.  Must be called in a ``finally`` block so a crash
         during ``Runner.run()`` cannot strand deletion (issue #212, fix-r11).
 
-        Only deletes a lease WE created (matched by ``acquired_at`` token).
-        A lease created by another runtime is never touched (fix-r12).
+        When *owner_token* is provided (the per-turn immutable token returned
+        by ``acquire_model_turn_lease``), only a lease row matching BOTH
+        ``member_id`` AND ``owner_token`` is deleted — a stale/reclaimed
+        runtime can never delete the new owner's lease (fix-r21).
 
-        Idempotent: releasing when no lease exists, or when we never
-        acquired one, is a no-op.
+        When *owner_token* is ``None`` (legacy caller or no lease was ever
+        acquired), the call is a no-op — no blanket delete is performed.
+
+        Idempotent: releasing when no lease exists, or when the token
+        doesn't match, is a no-op.
         """
-        # Cancel the heartbeat first so it doesn't bump the row while
-        # we're trying to delete it (fix-r20).
-        await self._stop_heartbeat(member_id)
-        token = self._lease_tokens.pop(member_id, None)
-        if token is None:
-            return  # We never acquired a lease for this Member — no-op
+        if owner_token is None:
+            return  # No token → we never acquired a lease — no-op
+        # Cancel the heartbeat for this (member_id, owner_token) key so it
+        # doesn't bump the row while we're trying to delete it (fix-r20).
+        await self._stop_heartbeat(member_id, owner_token)
         async with self._sessions() as db:
-            await db.execute(
+            result = await db.execute(
                 delete(ModelTurnLease).where(
                     ModelTurnLease.member_id == member_id,
-                    ModelTurnLease.acquired_at == token,
+                    ModelTurnLease.owner_token == owner_token,
                 )
             )
             await db.commit()
 
     # -- Heartbeat renewal (issue #212, fix-r20) ---------------------------
 
-    def _start_heartbeat(self, member_id: int) -> None:
+    def _start_heartbeat(self, member_id: int, owner_token: str) -> None:
         """Start a background task that periodically bumps
         ``acquired_at`` on our lease row so a live Runner is never
         reclaimed by a concurrent runtime.
+
+        The heartbeat UPDATE is guarded by BOTH ``member_id`` AND
+        ``owner_token`` — after a stale reclaim replaces the token,
+        the old owner's heartbeat becomes a no-op (fix-r21).
 
         The heartbeat interval is at most a third of the stale-lease
         bound, so two consecutive heartbeats can be lost (GC pause,
         scheduler load) before the lease looks stale.
         """
-        # Cancel any prior heartbeat for this Member (defense-in-depth).
-        existing = self._heartbeat_tasks.pop(member_id, None)
+        key = (member_id, owner_token)
+        # Cancel any prior heartbeat for this key (defense-in-depth).
+        existing = self._heartbeat_tasks.pop(key, None)
         if existing is not None:
             existing.cancel()
 
@@ -570,26 +587,33 @@ class ForgetStore:
                 try:
                     now = datetime.now(UTC)
                     async with self._sessions() as db:
-                        await db.execute(
+                        result = await db.execute(
                             update(ModelTurnLease)
-                            .where(ModelTurnLease.member_id == member_id)
+                            .where(
+                                ModelTurnLease.member_id == member_id,
+                                ModelTurnLease.owner_token == owner_token,
+                            )
                             .values(acquired_at=now)
                         )
                         await db.commit()
-                    # Sync the in-memory token so release_model_turn_lease
-                    # can still match the row at delete time (fix-r20).
-                    self._lease_tokens[member_id] = now
+                        if getattr(result, "rowcount", 0) == 0:
+                            # Token mismatch — our lease was reclaimed by
+                            # another runtime.  Stop beating gracefully.
+                            break
                 except Exception:
                     # If the row was deleted (release beat us to it) or
                     # the database is unreachable, stop beating — the
                     # lease is gone or the process is dying.
                     break
 
-        self._heartbeat_tasks[member_id] = asyncio.create_task(_beat())
+        self._heartbeat_tasks[key] = asyncio.create_task(_beat())
 
-    async def _stop_heartbeat(self, member_id: int) -> None:
-        """Cancel and await the heartbeat task for *member_id*."""
-        task = self._heartbeat_tasks.pop(member_id, None)
+    async def _stop_heartbeat(
+        self, member_id: int, owner_token: str
+    ) -> None:
+        """Cancel and await the heartbeat task for *(member_id, owner_token)*."""
+        key = (member_id, owner_token)
+        task = self._heartbeat_tasks.pop(key, None)
         if task is None:
             return
         task.cancel()
