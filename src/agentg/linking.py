@@ -32,8 +32,10 @@ from agentg.linking_store import (
 
 # Deterministic reply when an UNLINKED identity mid-linking says "forget me"
 # or types a confirmation phrase: there is no Member row, so there is nothing
-# to delete.  Sent verbatim — the phraser (model) must never see forget-me or
-# confirmation-phrase text (issue #212, fix-r24 #2).
+# to delete.  Sent verbatim — inside a pending linking step the phraser
+# (model) never sees forget-me or confirmation-phrase text (issue #212,
+# fix-r24 #2).  Outside pending steps an unlinked "forget me" still takes
+# the ordinary dead-end path, where no Member data exists either.
 UNLINKED_NOTHING_TO_FORGET: dict[str, str] = {
     "en": (
         "You're not registered, so there is no data to delete. "

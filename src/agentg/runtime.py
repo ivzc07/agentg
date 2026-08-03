@@ -865,14 +865,15 @@ class AgentRuntime:
                                 "reset_rhythm failed for %d (fast path)", member_id
                             )
 
-                    asyncio.create_task(_fast_reset())
                     # Release the model-turn lease before returning — the
                     # fast path never reaches the model-path release in
                     # _blocking_reply/_streamed_reply, and the lease
                     # heartbeat renews forever, so a leaked lease would
                     # permanently block claim_forget_me_request and every
                     # forget-me confirmation after a fast-path turn
-                    # (issue #212, AC 4).
+                    # (issue #212, AC 4).  Released before the reset task
+                    # is spawned so the two writes never race on the
+                    # SQLite writer lock.
                     self._lease_tokens.pop(member_id, None)
                     try:
                         await self.stores.forget.release_model_turn_lease(
@@ -883,6 +884,7 @@ class AgentRuntime:
                             "release_model_turn_lease failed for %d (fast path)",
                             member_id,
                         )
+                    asyncio.create_task(_fast_reset())
                     return fast
                 # Any reply resets the check-in rhythm and revives a lapsed
                 # Member.  Fired concurrently with the model call rather than
