@@ -2933,6 +2933,81 @@ async def test_barrier_two_model_turns_exactly_one_wins(env):
         f"exactly one turn must win: A={result_a}, B={result_b}"
 
 
+async def test_barrier_two_acquire_simultaneous_sqlite_no_integrity_error(env):
+    """P2 fix-r17: two genuinely simultaneous acquire_model_turn_lease
+    calls on SQLite WAL must produce exactly one winner and one loser
+    with no IntegrityError.
+
+    SQLite ignores SELECT FOR UPDATE, so two concurrent IMMEDIATE
+    transactions can both read the Member row, both see no existing
+    lease, and both race to insert the ModelTurnLease row.  Without
+    ON CONFLICT DO NOTHING, the loser hits a unique-constraint
+    IntegrityError.  With it, the loser gets rowcount=0 and the
+    method returns False cleanly.
+
+    Uses _post_acquire_lock_hook with asyncio.Event barriers to
+    pause both tasks inside the transaction (after the Member-row
+    lock / read, before the deleting and lease checks) and then
+    release them simultaneously so both try the fresh-insert path."""
+    import asyncio
+
+    member = await populate(env)
+
+    # Barriers: both tasks enter the transaction and hit the hook.
+    both_at_barrier = asyncio.Event()
+    release = asyncio.Event()
+    arrived = 0
+    results: dict[str, bool] = {}
+
+    async def hook(mid: int):
+        nonlocal arrived
+        arrived += 1
+        if arrived >= 2:
+            both_at_barrier.set()  # Signal test: both tasks are inside
+        await release.wait()       # Wait for test to release both
+
+    env.forget._post_acquire_lock_hook = hook
+
+    async def run_a():
+        results["a"] = await env.forget.acquire_model_turn_lease(
+            member.id, env.gym_id
+        )
+
+    async def run_b():
+        results["b"] = await env.forget.acquire_model_turn_lease(
+            member.id, env.gym_id
+        )
+
+    # Start both tasks; they will both hit the hook and pause.
+    task_a = asyncio.create_task(run_a())
+    task_b = asyncio.create_task(run_b())
+
+    # Wait for both to reach the barrier (inside their transactions,
+    # past the SELECT FOR UPDATE which SQLite ignores).
+    await asyncio.wait_for(both_at_barrier.wait(), timeout=5.0)
+
+    # Release both simultaneously.
+    release.set()
+
+    await asyncio.gather(task_a, task_b)
+    env.forget._post_acquire_lock_hook = None
+
+    # Exactly one winner, one loser — no IntegrityError.
+    assert results.get("a") is True or results.get("b") is True, (
+        f"at least one must win: {results}"
+    )
+    assert results.get("a") is not results.get("b"), (
+        f"exactly one winner, one loser; both cannot be same: {results}"
+    )
+
+    # The winner's lease must exist.
+    assert await env.forget.model_turn_lease_exists(member.id) is True
+
+    # The winner can release normally.
+    await env.forget.release_model_turn_lease(member.id)
+    assert await env.forget.model_turn_lease_exists(member.id) is False
+
+
 async def test_barrier_confirmation_vs_model_admission(env):
     """True concurrent interleaving: a deletion confirmation (claim) arrives
     while the model-turn lease is being acquired.  The claim checks the

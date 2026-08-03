@@ -418,13 +418,31 @@ class ForgetStore:
             ).first()
 
             if lease_row is None:
-                await conn.execute(
-                    insert(ModelTurnLease).values(
-                        member_id=member_id,
-                        gym_id=gym_id,
-                        acquired_at=now,
-                    )
+                # Dialect-safe insert: on PostgreSQL SELECT FOR UPDATE
+                # serialises, but SQLite ignores it so two concurrent
+                # transactions can both reach here.  ON CONFLICT DO
+                # NOTHING ensures exactly one wins without an unhandled
+                # IntegrityError on the unique member_id constraint.
+                dialect_name = self.engine.sync_engine.dialect.name
+                if dialect_name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import insert as _dialect_insert
+                else:
+                    from sqlalchemy.dialects.sqlite import insert as _dialect_insert
+
+                stmt = _dialect_insert(ModelTurnLease).values(
+                    member_id=member_id,
+                    gym_id=gym_id,
+                    acquired_at=now,
                 )
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=["member_id"]
+                )
+                result = await conn.execute(stmt)
+                if getattr(result, "rowcount", 0) == 0:
+                    # Another runtime won the race — the member_id
+                    # unique constraint fired.  Return False so the
+                    # caller handles the loss cleanly.
+                    return False
                 self._lease_tokens[member_id] = now
                 return True
 
