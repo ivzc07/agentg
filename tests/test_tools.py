@@ -40,7 +40,6 @@ EXPECTED_TOOLS = {
     "resume_checkins",
     "show_demo",
     "flag_to_coach",
-    "delete_my_data",
 }
 
 

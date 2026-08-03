@@ -89,3 +89,25 @@ def test_spa_dist_reads_from_env():
         {**FULL_ENV, "DASHBOARD_SPA_DIST": "/app/frontend/dist"}
     )
     assert settings.dashboard_spa_dist == "/app/frontend/dist"
+
+
+# -- forget-me confirmation lifetime validation (issue #212) ---------------
+
+
+def test_forget_me_confirmation_default_is_positive():
+    """The default 300 seconds is accepted."""
+    settings = Settings.from_env(FULL_ENV)
+    assert settings.forget_me_confirmation_seconds == 300
+
+
+@pytest.mark.parametrize("bad_value", ["0", "-1", "-300", "30", "59"])
+def test_non_positive_forget_me_confirmation_seconds_raises_config_error(bad_value):
+    with pytest.raises(ConfigError, match="FORGET_ME_CONFIRMATION_SECONDS"):
+        Settings.from_env({**FULL_ENV, "FORGET_ME_CONFIRMATION_SECONDS": bad_value})
+
+
+def test_positive_forget_me_confirmation_seconds_is_accepted():
+    settings = Settings.from_env(
+        {**FULL_ENV, "FORGET_ME_CONFIRMATION_SECONDS": "600"}
+    )
+    assert settings.forget_me_confirmation_seconds == 600

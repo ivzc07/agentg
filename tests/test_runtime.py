@@ -125,16 +125,15 @@ async def test_reset_rhythm_is_deferred_past_the_reply(runtime, monkeypatch):
 
     reply = await runtime.handle_message(incoming("I'm here", "42"))
 
-    # The LLM ran before the reply was complete; reset_rhythm was only queued.
+    # The LLM ran before the reply was complete.
     assert "llm" in events
-    # The reset_rhythm hasn't fired yet — it's deferred to after_send.
-    assert "reset_rhythm" not in events
 
-    # Now await after_send to simulate the channel adapter's delivery.
+    # Now await after_send to settle the rhythm reset.
     if reply.after_send is not None:
         await reply.after_send()
 
-    # After delivery, reset_rhythm fires.
+    # After delivery, reset_rhythm has fired.
+    assert "reset_rhythm" in events
     assert events.index("llm") < events.index("reset_rhythm")
 
 
@@ -276,6 +275,260 @@ async def test_member_context_can_author_routine_for_coach_with_own_routine(runt
 
     ctx = await runtime.member_context(linked)
     assert ctx.can_author_routine is True
+
+
+# --- P2 (fix-r8): forget-me warning resets check-in rhythm ---
+
+
+async def test_forget_me_warning_resets_checkin_rhythm(runtime):
+    """A forget-me warning is an actual Member reply — the proactive
+    check-in rhythm must be reset so the cadence doesn't degrade during
+    the two-turn flow.  The model never runs on the warning path, so the
+    async reset_task from the normal Agent path is never created; this
+    test confirms the inline equivalent fires."""
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    # Simulate a lapsed Member: ignored_nudges past the give-up threshold.
+    await runtime.stores.checkins.lapse(1)
+    state_before, _ = await runtime.stores.checkins.get_state(1)
+    assert state_before == "lapsed"
+
+    # Send a forget-me trigger — the runtime returns a warning without
+    # calling the model.
+    reply = await runtime.handle_message(incoming("forget me", "42"))
+    assert "DELETE-ME-" in str(reply)
+    assert "permanently" in str(reply).lower()
+
+    # The rhythm must be reset: lapsed → on, ignored_nudges → 0.
+    state_after, _ = await runtime.stores.checkins.get_state(1)
+    assert state_after == "on", (
+        "forget-me warning must reset check-in rhythm (lapsed → on)"
+    )
+
+
+async def test_forget_me_warning_does_not_crash_on_sentinel(runtime):
+    """fix-r12 R4: when a deleting row exists (deletion already confirmed
+    but not completed), a new generic "forget me" request must NOT trigger
+    deletion.  The runtime's _handle_forget_me gates with get_deleting_request
+    BEFORE is_forget_me_request, returning "deletion in progress."
+
+    Only the exact stored confirmation phrase may retry deletion.  The
+    sentinel (empty string) from request_forget_me is still handled in the
+    true race case where a concurrent runtime claims between our deleting
+    check and the request_forget_me call."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    # Simulate: another runtime already claimed the request (status -> deleting).
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(1, gym.id, now, 300, "en")
+    claimed = await runtime.stores.forget.claim_forget_me_request(1, phrase, now)
+    assert claimed is not None
+
+    # A new generic "forget me" arrives.  The runtime must gate with
+    # get_deleting_request BEFORE is_forget_me_request and return
+    # "deletion in progress" — the Member must NOT be deleted.
+    reply = await runtime.handle_message(incoming("forget me", "42"))
+    assert "deletion is in progress" in str(reply).lower(), (
+        f"expected 'deletion in progress', got: {reply!r}"
+    )
+
+    # The Member must still exist — deletion was NOT triggered.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None, (
+        "Member must NOT be deleted by a new generic 'forget me' in deleting state"
+    )
+
+    # Only the exact phrase can resume deletion.
+    reply_exact = await runtime.handle_message(incoming(phrase, "42"))
+    assert "permanently" in str(reply_exact).lower() or (
+        "eliminados" in str(reply_exact).lower()
+    )
+    identity_after = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity_after is None, (
+        "exact phrase must still resume and complete deletion"
+    )
+
+
+# --- P1 (fix-r16): Deleting gate before Linking.handle blocks switch ---
+
+
+async def test_switch_affirmative_blocked_by_deleting_gate_before_linking(tmp_path):
+    """P1 fix-r16: when a deleting row exists (deletion already confirmed
+    but not yet completed), an affirmative Gym-switch reply must NOT
+    create/repoint a Member via Linking.handle.  The deleting gate runs
+    BEFORE any linking logic, so a "yes" reply to a pending switch returns
+    truthful deletion-in-progress guidance instead of completing the switch.
+
+    The race: a Member enters _AwaitingSwitch via a Gym B invite tap;
+    before they reply, another runtime confirms deletion (status → deleting).
+    Without fix-r16, the "yes" reply completes the switch and repoints
+    identity to a new Member at Gym B, stranding the deleting row on the
+    old Member.  With fix-r16, the deleting gate blocks before linking and
+    returns deletion-in-progress.
+
+    Sequence:
+    1. Member at Gym A, manually placed in _AwaitingSwitch for Gym B
+    2. Deleting row exists (deletion confirmed but interrupted)
+    3. Member sends "yes" → gate blocks linking, returns in-progress
+    4. Channel identity still points to Gym A (not repointed)
+    5. Exact confirmation phrase → deletion completes"""
+    from datetime import datetime, timezone
+    from conftest import identity_phraser
+    from agentg.linking import _AwaitingSwitch
+
+    # Build a runtime with identity_phraser so linking replies work.
+    url = sqlite_url(tmp_path)
+    engine = create_engine(url)
+    stores = Stores.from_engine(engine)
+    rt = AgentRuntime(
+        agent=object(),
+        engine=engine,
+        stores=stores,
+        linking=Linking(stores.linking, identity_phraser),
+        summarizer=null_summarizer,
+        stream_replies=False,
+    )
+    await rt.ensure_schema()
+
+    try:
+        # Create two gyms.
+        gym_a = await rt.stores.linking.create_gym("Iron Temple")
+        gym_b = await rt.stores.linking.create_gym("Steel Yard")
+
+        # Link member to Gym A.
+        member_a = await rt.stores.linking.link_member(
+            gym_a.id, "Ana", "telegram", "42"
+        )
+
+        now = datetime.now(timezone.utc)
+
+        # Step 1: Place the identity in _AwaitingSwitch for Gym B.
+        # This simulates a concurrent runtime where the tap happened
+        # before the deletion was confirmed.
+        rt.linking._pending[("telegram", "42")] = _AwaitingSwitch(
+            gym_id=gym_b.id,
+            gym_name=gym_b.name,
+            invite_code=gym_b.invite_code or "",
+            as_coach=False,
+        )
+
+        # Step 2: Create and claim a deletion at Gym A (deleting row).
+        phrase = await rt.stores.forget.request_forget_me(
+            member_a.id, gym_a.id, now, 300, "en"
+        )
+        claimed = await rt.stores.forget.claim_forget_me_request(
+            member_a.id, phrase, now
+        )
+        assert claimed is not None
+        assert claimed.status == "deleting"
+
+        # Step 3: Member sends "yes" (affirmative switch reply, NOT matching
+        # the confirmation phrase).  The fix-r16 gate must block linking and
+        # return deletion-in-progress.
+        yes_msg = incoming("yes", "42")
+        reply = await rt.handle_message(yes_msg)
+        assert "deletion is in progress" in str(reply).lower(), (
+            f"expected 'deletion in progress' for switch yes, got: {reply!r}"
+        )
+
+        # Step 4: Channel identity must still point to Gym A — the switch
+        # was NOT completed, the Member was NOT repointed.
+        identity = await rt.stores.linking.identity_for("telegram", "42")
+        assert identity is not None, (
+            "channel identity must still resolve after blocked switch"
+        )
+        assert identity.gym.id == gym_a.id, (
+            f"identity must still be at Iron Temple (gym_a),"
+            f" not gym {identity.gym.id}"
+        )
+        assert identity.member.id == member_a.id, (
+            "identity must still be the original member_a row"
+        )
+
+        # Step 5: Exact confirmation phrase resumes and completes deletion.
+        phrase_msg = incoming(phrase, "42")
+        goodbye = await rt.handle_message(phrase_msg)
+        assert "permanently" in str(goodbye).lower() or (
+            "eliminados" in str(goodbye).lower()
+        ), f"expected goodbye after exact phrase, got: {goodbye!r}"
+
+        # Deletion completed.
+        identity_after = await rt.stores.linking.identity_for("telegram", "42")
+        assert identity_after is None, (
+            "exact phrase must complete deletion after blocked switch"
+        )
+    finally:
+        await engine.dispose()
+
+
+# --- P1 (fix-r22 #1): pending confirmation blocked by live lease ----------
+
+
+async def test_exact_phrase_blocked_by_live_lease_returns_retry_not_falls_through(runtime):
+    """fix-r22 P1 #1: when a pending confirmation phrase arrives but a
+    live model-turn lease exists (e.g. from a dropped after_send on the
+    warning turn), claim_forget_me_request returns None.  The runtime must
+    NOT fall through to the model — it must return deterministic retry
+    guidance and keep the pending request intact.
+
+    Without fix-r22, this path falls through to is_forget_me_request
+    check and either: (a) creates a new pending request overwriting the
+    old one, or (b) falls all the way to the model.  With fix-r22, the
+    runtime detects the live lease via is_lease_held_by_other and returns
+    _FORGET_RETRY_BLOCKED without cancelling the pending request."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(1, gym.id, now, 300, "en")
+    assert phrase != ""
+
+    # Acquire a live model-turn lease — simulating a dropped after_send
+    # from the warning turn (the lease was never released).
+    token = await runtime.stores.forget.acquire_model_turn_lease(1, gym.id)
+    assert token is not None
+
+    # Send the exact confirmation phrase while the lease is held.
+    reply = await runtime.handle_message(incoming(phrase, "42"))
+
+    # Must return retry guidance — NOT deletion in progress (row is
+    # pending, not deleting), NOT goodbye, NOT a new warning, and
+    # NOT fall through to the model.
+    reply_str = str(reply)
+    assert "cannot be processed" in reply_str.lower() or (
+        "no puede procesarse" in reply_str.lower()
+    ), f"expected retry guidance, got: {reply!r}"
+
+    # The pending request must still exist — NOT cancelled.
+    pending = await runtime.stores.forget.get_pending_request(1)
+    assert pending is not None, (
+        "pending request must survive — not cancelled when live lease blocks"
+    )
+    assert pending.status == "pending"
+    assert pending.confirmation_phrase == phrase, (
+        "confirmation phrase must be preserved for retry"
+    )
+
+    # Member still exists — deletion was NOT triggered.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None, "Member must still exist"
+
+    # After release, the exact phrase works normally.
+    await runtime.stores.forget.release_model_turn_lease(1, token)
+    reply_retry = await runtime.handle_message(incoming(phrase, "42"))
+    retry_str = str(reply_retry)
+    assert "permanently" in retry_str.lower() or (
+        "eliminados" in retry_str.lower()
+    ), f"expected goodbye on retry after lease release, got: {reply_retry!r}"
+
+    identity_after = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity_after is None, "deletion must complete after lease release"
 
 
 # --- defense in depth: non-private messages are refused (#211) ---

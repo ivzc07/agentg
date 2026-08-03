@@ -284,7 +284,9 @@ class TestIntegration:
                 # At least one SQL statement must have been counted — the
                 # handle_message body issues several queries.  A regression
                 # that zeros the SQL counter must fail this assertion.
-                assert "0 SQL statements" not in line, (
+                # Use " 0 SQL" (space-prefixed) to avoid matching the "0"
+                # inside multi-digit counts like "10 SQL statements".
+                assert " 0 SQL statements" not in line, (
                     f"SQL counter appears zero in log line: {line}"
                 )
         finally:
