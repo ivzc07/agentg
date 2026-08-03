@@ -67,7 +67,7 @@ The repo has `delete_branch_on_merge` **off**, so `--delete-branch` is the only 
 
 Branches that touch the same files conflict with each other, not just with `main`, so a batch is merged **one at a time**: merge, wait for GitHub to recompute mergeability (`gh pr list --json number,mergeable,mergeStateStatus` returns `UNKNOWN` for ~20-40s), then take the next `CLEAN` one. When a PR goes `CONFLICTING`, resolve it on its branch (`resolving-merge-conflicts` skill), push, and **re-run `scripts/pi-review <N>`** - a conflict resolution is new code that has never been reviewed, and in practice this is where the P1s hide. Re-run `uv run pytest` locally before pushing; the CI check is the gate but the local run is faster feedback.
 
-Before merging such a PR, check your own resolution commit with `git show --stat` - a `git add -A` during conflict resolution happily sweeps in local junk (`.scratch/`, stray files). If you find any, strip it and force-push **the PR branch** (`git push --force origin <branch>`), before the merge.
+Before merging such a PR, check your own resolution commit with `git show --stat` - a `git add -A` during conflict resolution happily sweeps in local junk (`.scratch/`, stray files). If you find any, strip it and force-push **the PR branch** (`git push --force-with-lease origin <branch>` - it refuses to clobber commits another agent pushed since your last fetch), before the merge.
 
 **Never force-push `main`.** The `main-protection` ruleset only requires the `pytest` check - it carries no non-fast-forward rule, and classic branch protection is off - so a force-push to `main` will succeed and rewrite shared history. Nothing in this workflow ever requires rewriting `main`; fix mistakes with a new commit.
 
