@@ -263,6 +263,7 @@ class TestIntegration:
                         channel="telegram",
                         channel_user_id="42",
                         text="bench 60 8,8,8",
+                        is_private=True,
                     )
                 )
 
@@ -338,6 +339,7 @@ class TestIntegration:
                     channel="telegram",
                     channel_user_id="99",
                     text="hola",
+                    is_private=True,
                 )
             )
 
@@ -406,6 +408,7 @@ class TestIntegration:
                     channel="telegram",
                     channel_user_id="42",
                     text="/dashboard",
+                    is_private=True,
                 )
             )
 
@@ -493,7 +496,8 @@ class TestIntegration:
             with caplog.at_level(logging.INFO, logger="agentg.instrument"):
                 reply = await runtime.handle_message(
                     IncomingMessage(
-                        channel="telegram", channel_user_id="42", text="I am here"
+                        channel="telegram", channel_user_id="42", text="I am here",
+                        is_private=True,
                     )
                 )
                 # Nothing logged yet: the model has not run.

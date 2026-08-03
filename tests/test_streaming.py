@@ -207,7 +207,7 @@ async def test_streamed_reply_has_stream_set(tmp_path):
     monkeypatch.setattr(runtime_module.Runner, "run_streamed", lambda *a, **kw: FakeStreamResult())
 
     reply = await runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here", is_private=True)
     )
 
     assert reply.stream is not None
@@ -241,7 +241,7 @@ async def test_non_streamed_reply_has_no_stream(tmp_path):
     monkeypatch.setattr(runtime_module.Runner, "run", mock_run)
 
     reply = await runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="hi")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="hi", is_private=True)
     )
 
     assert reply.stream is None
@@ -649,7 +649,7 @@ async def test_concurrent_same_member_messages_are_serialized(tmp_path):
 
     async def full_turn(text):
         reply = await runtime.handle_message(
-            IncomingMessage(channel="telegram", channel_user_id="42", text=text)
+            IncomingMessage(channel="telegram", channel_user_id="42", text=text, is_private=True)
         )
         assert reply.stream is not None
         async for _ in reply.stream:
@@ -786,7 +786,7 @@ async def test_second_message_not_deadlocked_after_stream_error(tmp_path):
     # First message: get a streamed reply.  The lock is acquired in
     # handle_message and transferred to _hold_lock.
     reply1 = await runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="first")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="first", is_private=True)
     )
 
     assert reply1.stream is not None
@@ -813,7 +813,7 @@ async def test_second_message_not_deadlocked_after_stream_error(tmp_path):
     )
 
     reply2 = await runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="second")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="second", is_private=True)
     )
     assert reply2.stream is not None
     # Consume fully to release the lock cleanly.
@@ -926,7 +926,7 @@ async def test_aclose_releases_the_lock_synchronously(tmp_path):
             lambda *a, **k: FakeStreamResult(),
         )
         reply = await runtime.handle_message(
-            IncomingMessage(channel="telegram", channel_user_id="42", text="hi")
+            IncomingMessage(channel="telegram", channel_user_id="42", text="hi", is_private=True)
         )
 
         key = ("telegram", "42")
