@@ -308,6 +308,31 @@ class AgentRuntime:
                             ]
                         )
 
+                # P1 (fix-r16): Any durable deleting state must gate before
+                # all Linking.handle early returns, regardless of whether the
+                # incoming message matches the phrase.  Exact phrase may retry
+                # deletion (already checked above via deleting_before_link);
+                # any other private message (including affirmative Gym-switch
+                # replies) must not link/repoint identity and receives truthful
+                # deletion-in-progress guidance.  Group messages reveal nothing
+                # and do not delete/link.
+                if linked is not None:
+                    deleting_gate = await self.stores.forget.get_deleting_request(
+                        linked.member.id
+                    )
+                    if deleting_gate is not None:
+                        if msg.is_group:
+                            return Reply(
+                                _FORGET_PRIVATE_REDIRECT[
+                                    deleting_gate.language or "es"
+                                ]
+                            )
+                        return Reply(
+                            _FORGET_DELETING_IN_PROGRESS[
+                                deleting_gate.language or "es"
+                            ]
+                        )
+
                 reply = await self.linking.handle(msg, linked)
                 if reply is not None:
                     # P1 (fix-r8): Cancel pending Forget-me intent before linking
@@ -322,11 +347,10 @@ class AgentRuntime:
                             await self.stores.forget.cancel_forget_me(
                                 linked.member.id
                             )
-                        # P1 (fix-r10): A deleting request gates the linking
-                        # early return too — a confirmed deletion in progress
-                        # must block all normal replies, including linking.
-                        # Only the exact confirmation phrase resumes deletion
-                        # (already checked above via deleting_before_link).
+                        # Defense-in-depth: the fix-r16 gate above already blocks
+                        # linking when a deleting row exists; this second check
+                        # catches a row that appeared during linking.handle itself
+                        # (a concurrent claim while _confirm_switch ran).
                         deleting_fm = (
                             await self.stores.forget.get_deleting_request(
                                 linked.member.id

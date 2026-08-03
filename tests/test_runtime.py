@@ -352,3 +352,115 @@ async def test_forget_me_warning_does_not_crash_on_sentinel(runtime):
         "exact phrase must still resume and complete deletion"
     )
 
+
+# --- P1 (fix-r16): Deleting gate before Linking.handle blocks switch ---
+
+
+async def test_switch_affirmative_blocked_by_deleting_gate_before_linking(tmp_path):
+    """P1 fix-r16: when a deleting row exists (deletion already confirmed
+    but not yet completed), an affirmative Gym-switch reply must NOT
+    create/repoint a Member via Linking.handle.  The deleting gate runs
+    BEFORE any linking logic, so a "yes" reply to a pending switch returns
+    truthful deletion-in-progress guidance instead of completing the switch.
+
+    The race: a Member enters _AwaitingSwitch via a Gym B invite tap;
+    before they reply, another runtime confirms deletion (status → deleting).
+    Without fix-r16, the "yes" reply completes the switch and repoints
+    identity to a new Member at Gym B, stranding the deleting row on the
+    old Member.  With fix-r16, the deleting gate blocks before linking and
+    returns deletion-in-progress.
+
+    Sequence:
+    1. Member at Gym A, manually placed in _AwaitingSwitch for Gym B
+    2. Deleting row exists (deletion confirmed but interrupted)
+    3. Member sends "yes" → gate blocks linking, returns in-progress
+    4. Channel identity still points to Gym A (not repointed)
+    5. Exact confirmation phrase → deletion completes"""
+    from datetime import datetime, timezone
+    from conftest import identity_phraser
+    from agentg.linking import _AwaitingSwitch
+
+    # Build a runtime with identity_phraser so linking replies work.
+    url = sqlite_url(tmp_path)
+    engine = create_engine(url)
+    stores = Stores.from_engine(engine)
+    rt = AgentRuntime(
+        agent=object(),
+        engine=engine,
+        stores=stores,
+        linking=Linking(stores.linking, identity_phraser),
+        summarizer=null_summarizer,
+        stream_replies=False,
+    )
+    await rt.ensure_schema()
+
+    try:
+        # Create two gyms.
+        gym_a = await rt.stores.linking.create_gym("Iron Temple")
+        gym_b = await rt.stores.linking.create_gym("Steel Yard")
+
+        # Link member to Gym A.
+        member_a = await rt.stores.linking.link_member(
+            gym_a.id, "Ana", "telegram", "42"
+        )
+
+        now = datetime.now(timezone.utc)
+
+        # Step 1: Place the identity in _AwaitingSwitch for Gym B.
+        # This simulates a concurrent runtime where the tap happened
+        # before the deletion was confirmed.
+        rt.linking._pending[("telegram", "42")] = _AwaitingSwitch(
+            gym_id=gym_b.id,
+            gym_name=gym_b.name,
+            invite_code=gym_b.invite_code or "",
+            as_coach=False,
+        )
+
+        # Step 2: Create and claim a deletion at Gym A (deleting row).
+        phrase = await rt.stores.forget.request_forget_me(
+            member_a.id, gym_a.id, now, 300, "en"
+        )
+        claimed = await rt.stores.forget.claim_forget_me_request(
+            member_a.id, phrase, now
+        )
+        assert claimed is not None
+        assert claimed.status == "deleting"
+
+        # Step 3: Member sends "yes" (affirmative switch reply, NOT matching
+        # the confirmation phrase).  The fix-r16 gate must block linking and
+        # return deletion-in-progress.
+        yes_msg = incoming("yes", "42")
+        reply = await rt.handle_message(yes_msg)
+        assert "deletion is in progress" in str(reply).lower(), (
+            f"expected 'deletion in progress' for switch yes, got: {reply!r}"
+        )
+
+        # Step 4: Channel identity must still point to Gym A — the switch
+        # was NOT completed, the Member was NOT repointed.
+        identity = await rt.stores.linking.identity_for("telegram", "42")
+        assert identity is not None, (
+            "channel identity must still resolve after blocked switch"
+        )
+        assert identity.gym.id == gym_a.id, (
+            f"identity must still be at Iron Temple (gym_a),"
+            f" not gym {identity.gym.id}"
+        )
+        assert identity.member.id == member_a.id, (
+            "identity must still be the original member_a row"
+        )
+
+        # Step 5: Exact confirmation phrase resumes and completes deletion.
+        phrase_msg = incoming(phrase, "42")
+        goodbye = await rt.handle_message(phrase_msg)
+        assert "permanently" in str(goodbye).lower() or (
+            "eliminados" in str(goodbye).lower()
+        ), f"expected goodbye after exact phrase, got: {goodbye!r}"
+
+        # Deletion completed.
+        identity_after = await rt.stores.linking.identity_for("telegram", "42")
+        assert identity_after is None, (
+            "exact phrase must complete deletion after blocked switch"
+        )
+    finally:
+        await engine.dispose()
+
