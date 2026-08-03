@@ -302,6 +302,106 @@ async def test_copy_last_sets_without_history_is_rejected(env):
         await env.training.copy_last_sets(env.member_id, env.gym_id, "bench")
 
 
+async def test_copy_last_sets_preserves_mixed_weights(env):
+    """Warm-up at 40×10 followed by working sets at 60×5 must copy exactly."""
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 40 10")
+    env.clock.advance(timedelta(minutes=3))
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 5,5")
+    await env.training.close_session(env.member_id)
+    env.clock.advance(days(2))
+
+    await env.training.open_session(env.member_id, env.gym_id)
+    copied = await env.training.copy_last_sets(env.member_id, env.gym_id, "bench")
+
+    # The top-set summary still reports the working weight for progression.
+    assert copied.weight == 60.0
+    assert copied.previous is not None
+    assert copied.previous["weight"] == 60.0
+
+    # The copied sets preserve each original weight, reps, and order.
+    sets = await env.training.current_session_sets(env.member_id)
+    assert len(sets) == 3
+    assert [(s.weight, s.reps) for s in sets] == [(40.0, 10), (60.0, 5), (60.0, 5)]
+
+    # The tool-response detail has the ordered per-set data.
+    assert copied.copied_sets is not None
+    assert len(copied.copied_sets) == 3
+    assert copied.copied_sets[0] == {"weight": 40.0, "reps": 10, "rpe": None, "note": None}
+    assert copied.copied_sets[1] == {"weight": 60.0, "reps": 5, "rpe": None, "note": None}
+    assert copied.copied_sets[2] == {"weight": 60.0, "reps": 5, "rpe": None, "note": None}
+
+
+async def test_copy_last_sets_preserves_rpe_and_notes(env):
+    """Volunteered RPE and notes carry over on copy."""
+    await env.training.log_sets(
+        env.member_id, env.gym_id, "bench 40 10", rpe=6.0, note="warm-up"
+    )
+    env.clock.advance(timedelta(minutes=3))
+    await env.training.log_sets(
+        env.member_id, env.gym_id, "bench 60 5,5", rpe=8.5, note="paused"
+    )
+    await env.training.close_session(env.member_id)
+    env.clock.advance(days(2))
+
+    await env.training.open_session(env.member_id, env.gym_id)
+    copied = await env.training.copy_last_sets(env.member_id, env.gym_id, "bench")
+
+    sets = await env.training.current_session_sets(env.member_id)
+    assert len(sets) == 3
+    assert sets[0].rpe == 6.0
+    assert sets[0].note == "warm-up"
+    assert sets[1].rpe == 8.5
+    assert sets[1].note == "paused"
+    assert sets[2].rpe == 8.5
+    assert sets[2].note == "paused"
+
+    # Detail in the response matches.
+    assert copied.copied_sets is not None
+    assert copied.copied_sets[0]["rpe"] == 6.0
+    assert copied.copied_sets[0]["note"] == "warm-up"
+    assert copied.copied_sets[1]["rpe"] == 8.5
+    assert copied.copied_sets[1]["note"] == "paused"
+
+
+async def test_copy_last_sets_top_set_summary_unchanged_for_progression(env):
+    """The 'previous' field on LoggedSets stays a top-set summary for
+    comparison/progression — exact-copy detail is separate in copied_sets."""
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 40 10")
+    env.clock.advance(timedelta(minutes=3))
+    await env.training.log_sets(env.member_id, env.gym_id, "bench 60 5,5")
+    await env.training.close_session(env.member_id)
+    env.clock.advance(days(2))
+
+    await env.training.open_session(env.member_id, env.gym_id)
+    copied = await env.training.copy_last_sets(env.member_id, env.gym_id, "bench")
+
+    # The top-set summary used by progression still reports 60×5,5.
+    assert copied.previous is not None
+    assert copied.previous["weight"] == 60.0
+    assert copied.previous["reps"] == [10, 5, 5]
+    # Exact-copy detail has the real per-set weights.
+    assert copied.weight == 60.0  # top weight of the copied sets
+    assert copied.reps == [10, 5, 5]  # all reps in order
+
+
+async def test_copy_last_sets_single_weight_no_regression(env):
+    """When all sets share one weight the behaviour is identical to before."""
+    await env.training.log_sets(env.member_id, env.gym_id, "ohp 40 8,7,6")
+    await env.training.close_session(env.member_id)
+    env.clock.advance(days(7))
+
+    await env.training.open_session(env.member_id, env.gym_id)
+    copied = await env.training.copy_last_sets(env.member_id, env.gym_id, "ohp")
+
+    assert copied.exercise == "overhead press"
+    assert copied.weight == 40.0
+    assert copied.reps == [8, 7, 6]
+    sets = await env.training.current_session_sets(env.member_id)
+    assert [(s.weight, s.reps) for s in sets] == [(40.0, 8), (40.0, 7), (40.0, 6)]
+    assert copied.copied_sets is not None
+    assert len(copied.copied_sets) == 3
+
+
 # --- corrections ---
 
 
