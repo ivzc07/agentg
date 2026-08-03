@@ -260,6 +260,18 @@ class AgentRuntime:
                 linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
                 reply = await self.linking.handle(msg, linked)
                 if reply is not None:
+                    # P1 (fix-r8): Cancel pending Forget-me intent before linking
+                    # early return so a /start code or linking/switch reply can't
+                    # leave a pending request active.  Only linked Members can have
+                    # a pending Forget-me request — unlinked identities have no row.
+                    if linked is not None:
+                        pending_fm = await self.stores.forget.get_pending_request(
+                            linked.member.id
+                        )
+                        if pending_fm is not None:
+                            await self.stores.forget.cancel_forget_me(
+                                linked.member.id
+                            )
                     return Reply(reply)
                 if linked is None:  # linking always replies for unlinked identities
                     raise RuntimeError("unlinked message reached the agent loop")
@@ -601,6 +613,12 @@ class AgentRuntime:
                 minutes=minutes,
                 s="s" if minutes != 1 else "",
             )
+            # P2 (fix-r8): A forget-me warning is an actual Member reply
+            # so reset the proactive check-in rhythm here — the normal
+            # Agent path fires reset_rhythm but the pre-model forget-me
+            # path does not, leaving the cadence to degrade across the
+            # two-turn flow.  This is the inline equivalent.
+            await self.stores.checkins.reset_rhythm(linked.member.id)
             return Reply(warning)
 
         # P1 safety net: before falling through to the model, re-verify

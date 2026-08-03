@@ -276,3 +276,64 @@ async def test_member_context_can_author_routine_for_coach_with_own_routine(runt
     ctx = await runtime.member_context(linked)
     assert ctx.can_author_routine is True
 
+
+# --- P2 (fix-r8): forget-me warning resets check-in rhythm ---
+
+
+async def test_forget_me_warning_resets_checkin_rhythm(runtime):
+    """A forget-me warning is an actual Member reply — the proactive
+    check-in rhythm must be reset so the cadence doesn't degrade during
+    the two-turn flow.  The model never runs on the warning path, so the
+    async reset_task from the normal Agent path is never created; this
+    test confirms the inline equivalent fires."""
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    # Simulate a lapsed Member: ignored_nudges past the give-up threshold.
+    await runtime.stores.checkins.lapse(1)
+    state_before, _ = await runtime.stores.checkins.get_state(1)
+    assert state_before == "lapsed"
+
+    # Send a forget-me trigger — the runtime returns a warning without
+    # calling the model.
+    reply = await runtime.handle_message(incoming("forget me", "42"))
+    assert "DELETE-ME-" in str(reply)
+    assert "permanently" in str(reply).lower()
+
+    # The rhythm must be reset: lapsed → on, ignored_nudges → 0.
+    state_after, _ = await runtime.stores.checkins.get_state(1)
+    assert state_after == "on", (
+        "forget-me warning must reset check-in rhythm (lapsed → on)"
+    )
+
+
+async def test_forget_me_warning_does_not_crash_on_sentinel(runtime):
+    """Edge case: when request_forget_me returns the empty-string sentinel
+    (a concurrent runtime already claimed the deletion), the runtime completes
+    it.  The check-in reset must still be handled — the goodbye reply is
+    returned, not the warning, and reset_rhythm is benign on a deleted Member
+    (no-op)."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+
+    # Simulate: claim the request (status -> 'deleting') before
+    # re-requesting so the store returns the empty-string sentinel.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(1, gym.id, now, 300, "en")
+    claimed = await runtime.stores.forget.claim_forget_me_request(1, phrase, now)
+    assert claimed is not None
+
+    # The forget-me trigger now hits the sentinel path: request_forget_me
+    # returns "" because the row is deleting.  The runtime completes deletion.
+    reply = await runtime.handle_message(incoming("forget me", "42"))
+    # This is a goodbye (deletion completed), not a warning.
+    assert "permanently" in str(reply).lower() or "deleted" in str(reply).lower() or (
+        "eliminados" in str(reply).lower()
+    )
+
+    # The Member is gone.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is None, "Member must be deleted after sentinel goodbye"
+

@@ -616,3 +616,118 @@ async def test_typing_a_real_invite_code_still_does_the_lookup(runtime):
     reply = await runtime.handle_message(incoming(f"{gym.coach_invite_code}"))
     assert "Iron Temple" in reply
     assert calls == ["invite", "coach"]  # both lookups — invite miss, coach hit
+
+
+# --- P1 (fix-r8): pending Forget-me cancelled before linking early return ---
+
+
+async def test_linked_member_pending_forget_me_cancelled_by_start_code(runtime):
+    """A linked Member with a pending Forget-me who taps /start CODE for their
+    own gym must have the pending cancelled, not left active behind the linking
+    reply."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    # Seed a pending Forget-me request.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, gym.id, now, 300, "en"
+    )
+    assert phrase != ""
+    pending = await runtime.stores.forget.get_pending_request(linked.member.id)
+    assert pending is not None
+
+    # Tap the gym's invite code — linking handles it, but first the pending
+    # Forget-me must be cancelled.
+    reply = await runtime.handle_message(
+        incoming("/start x", link_code=gym.invite_code)
+    )
+    assert "Iron Temple" in reply
+
+    # The pending is gone.
+    pending_after = await runtime.stores.forget.get_pending_request(
+        linked.member.id
+    )
+    assert pending_after is None, (
+        "pending Forget-me must be cancelled before linking early return"
+    )
+    # Data still intact — no deletion.
+    assert await member_count(runtime.stores.linking) == 1
+
+
+async def test_linked_member_pending_forget_me_cancelled_by_switch_code(runtime):
+    """A linked Member with a pending Forget-me who taps another gym's invite
+    code must have the pending cancelled before the switch-confirm reply."""
+    from datetime import datetime, timezone
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    await runtime.stores.linking.link_member(old_gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    # Seed a pending Forget-me request.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, old_gym.id, now, 300, "en"
+    )
+    assert phrase != ""
+    pending = await runtime.stores.forget.get_pending_request(linked.member.id)
+    assert pending is not None
+
+    # Tap a different gym's invite code — the switch confirm is returned,
+    # but not before the pending is cancelled.
+    reply = await runtime.handle_message(
+        incoming("/start x", link_code=new_gym.invite_code)
+    )
+    assert "Steel Yard" in reply and "Iron Temple" in reply
+
+    # The pending is gone.
+    pending_after = await runtime.stores.forget.get_pending_request(
+        linked.member.id
+    )
+    assert pending_after is None, (
+        "pending Forget-me must be cancelled before linking early return"
+    )
+    # Data still intact — no deletion, no new Member yet.
+    assert await member_count(runtime.stores.linking) == 1
+
+
+async def test_linked_member_pending_forget_me_cancelled_by_typing_invite_code(runtime):
+    """A linked Member with a pending Forget-me who types their gym's invite
+    code as plain text must have the pending cancelled before the SAME_GYM
+    reply."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    # Seed a pending Forget-me request.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, gym.id, now, 300, "en"
+    )
+    assert phrase != ""
+    pending = await runtime.stores.forget.get_pending_request(linked.member.id)
+    assert pending is not None
+
+    # Type the gym's invite code as plain text — linking handles it
+    # (SAME_GYM reply), but first the pending must be cancelled.
+    reply = await runtime.handle_message(incoming(gym.invite_code))
+    assert "Ana" in reply and "Iron Temple" in reply
+
+    # The pending is gone.
+    pending_after = await runtime.stores.forget.get_pending_request(
+        linked.member.id
+    )
+    assert pending_after is None, (
+        "pending Forget-me must be cancelled before linking early return"
+    )
+    # Data still intact — no deletion.
+    assert await member_count(runtime.stores.linking) == 1
