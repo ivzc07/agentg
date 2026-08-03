@@ -60,3 +60,24 @@ This only applies while the account has review credits; without them Greptile po
 
 Once findings are handled and checks are green:
 `gh pr merge <N> --repo ivzc07/agentg --merge --delete-branch`, then sync local `main`.
+
+The repo has `delete_branch_on_merge` **off**, so `--delete-branch` is the only thing that removes the remote branch - dropping it (e.g. plain `gh pr merge <N> --merge`) silently leaks a branch per PR. That is how the repo accumulated its pile of merged `issue-*` refs.
+
+### Merging a batch
+
+Branches that touch the same files conflict with each other, not just with `main`, so a batch is merged **one at a time**: merge, wait for GitHub to recompute mergeability (`gh pr list --json number,mergeable,mergeStateStatus` returns `UNKNOWN` for ~20-40s), then take the next `CLEAN` one. When a PR goes `CONFLICTING`, resolve it on its branch (`resolving-merge-conflicts` skill), push, and **re-run `scripts/pi-review <N>`** - a conflict resolution is new code that has never been reviewed, and in practice this is where the P1s hide. Re-run `uv run pytest` locally before pushing; the CI check is the gate but the local run is faster feedback.
+
+Before merging such a PR, check your own resolution commit with `git show --stat` - a `git add -A` during conflict resolution happily sweeps in local junk (`.scratch/`, stray files). If you find any, strip it and force-push **the PR branch** (`git push --force-with-lease origin <branch>` - it refuses to clobber commits another agent pushed since your last fetch), before the merge.
+
+**Never force-push `main`.** The `main-protection` ruleset only requires the `pytest` check - it carries no non-fast-forward rule, and classic branch protection is off - so a force-push to `main` will succeed and rewrite shared history. Nothing in this workflow ever requires rewriting `main`; fix mistakes with a new commit.
+
+## Clean up when you are done
+
+Merging is not finished until the workspace is back to a clean state. After the last PR in a batch:
+
+1. **Branches.** `--delete-branch` handles the remote side per PR; delete the local ones with `git branch -d <branch>` (`-d`, never `-D`: it refuses anything not fully merged, which is the check you want). Then `git remote prune origin`.
+2. **Worktrees.** Agent/swarm tooling (Herdr) leaves worktrees under `~/.herdr/worktrees/agentg/`, often holding stale staged changes on a branch you just merged, and a checked-out branch cannot be deleted. Confirm the content is redundant (`git -C <worktree> diff --cached origin/main --stat` - a stale one *removes* lines `main` already has). Then back up **everything**, not just the index: plain `git worktree remove` refuses a dirty worktree, and `--force` is precisely the flag that overrides that refusal, so it deletes unstaged modifications and untracked files too. Run `git -C <worktree> status --porcelain` first and account for every line; save `git -C <worktree> diff --cached > /tmp/<name>-staged.patch` **and** `git -C <worktree> diff > /tmp/<name>-unstaged.patch`, and copy any untracked files you care about out of the tree. Only then `git worktree remove --force <path>` and `git worktree prune`. Check `git worktree list` before and after.
+3. **Local artifacts.** Review runs drop `.scratch/` (repros, per-round review notes) in the repo root. Delete them when the PR is merged. `.scratch/` and `.keytest` are gitignored - they were committed by accident twice before that was added.
+4. **Verify.** `git status --porcelain` empty, `gh pr list --state open` as expected, `git log --oneline -1 origin/main` is your merge, and the `tests` run on `main` is green (`gh run list --branch main --limit 1`).
+
+A merged PR whose issue has open siblings does not close the parent spec issue - check whether the parent is now fully satisfied and close it explicitly if so.
