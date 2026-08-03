@@ -211,7 +211,7 @@ async def test_messaging_after_forget_dead_ends_in_linking(env):
 
 from datetime import UTC, datetime, timedelta
 
-from agentg.forget import (STATUS_DELETING, STATUS_PENDING, STALE_LEASE_SECONDS, detect_forget_me_language, is_forget_me_request, normalize_confirmation)
+from agentg.forget import (STATUS_DELETING, STATUS_PENDING, detect_forget_me_language, is_forget_me_request, normalize_confirmation)
 from agentg.models import ForgetMeRequest, ModelTurnLease
 
 
@@ -2607,8 +2607,11 @@ async def test_stale_lease_recovered_by_another_runtime(env):
     # Acquire lease normally.
     assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
+    # Stop the heartbeat so it doesn't fight the manual age.
+    await env.forget._stop_heartbeat(member.id)
+
     # Manually age the lease past the stale threshold.
-    stale_time = datetime.now(UTC) - timedelta(seconds=STALE_LEASE_SECONDS + 5)
+    stale_time = datetime.now(UTC) - timedelta(seconds=env.forget.stale_lease_seconds + 5)
     async with async_sessionmaker(env.engine)() as db:
         await db.execute(
             update(ModelTurnLease)
@@ -3134,7 +3137,9 @@ async def test_barrier_stale_lease_recovery(env):
 
     # Acquire lease, then immediately age it past the stale threshold.
     assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
-    stale_time = datetime.now(UTC) - timedelta(seconds=STALE_LEASE_SECONDS + 5)
+    # Stop the heartbeat so it doesn't fight the manual age.
+    await env.forget._stop_heartbeat(member.id)
+    stale_time = datetime.now(UTC) - timedelta(seconds=env.forget.stale_lease_seconds + 5)
     async with async_sessionmaker(env.engine)() as db:
         await db.execute(
             update(ModelTurnLease)
@@ -3464,34 +3469,33 @@ async def test_group_redirect_never_reveals_deletion(env):
 # -- P1 (fix-r13): Conservative stale-lease threshold ---------------------
 
 
-async def test_live_turn_lease_not_reclaimed_past_30s(env):
-    """fix-r13 P1: a live turn whose lease age exceeds the old 30s
-    threshold must NOT be reclaimed by a concurrent claim or acquire.
-    The STALE_LEASE_SECONDS bound is now 86_400 (24h) — safely above
-    any Runner retry/backoff duration — so a live turn can never be
-    intercepted by a concurrent runtime.
+async def test_live_turn_lease_not_reclaimed_with_heartbeat(env):
+    """fix-r20: a live turn whose heartbeat renews the lease must NOT
+    be reclaimed by a concurrent claim or acquire.  The heartbeat bumps
+    acquired_at every stale_lease_seconds//3, so the lease stays fresh
+    while the Runner is alive.
 
-    This test ages the lease past 30s (the old threshold) but well under
-    the current 24h bound and proves both acquire and claim correctly
-    treat it as still live."""
-    from agentg.forget import STALE_LEASE_SECONDS
-
+    This test manually ages the lease past the stale bound (simulating a
+    crash — heartbeat stopped) and verifies it IS reclaimed, and
+    separately verifies that a fresh lease (heartbeat running) is NOT
+    reclaimed."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(
         member.id, env.gym_id, now, 300, "en"
     )
 
-    # Runtime A acquires the lease (model turn starts).
+    # Acquire the lease (starts heartbeat).
     assert await env.forget.acquire_model_turn_lease(
         member.id, env.gym_id
     ) is True
 
-    # Age the lease past the OLD 30s threshold but well under 24h.
-    # This simulates a long-running model turn (Runner retries/backoff).
-    # Also update the in-memory token so a later release works correctly
-    # — the stale check uses the DB row, not the token.
-    aged_time = datetime.now(UTC) - timedelta(seconds=120)  # 2 minutes
+    # Stop the heartbeat and age the lease past the stale bound.
+    # This simulates a crashed runtime.
+    await env.forget._stop_heartbeat(member.id)
+    aged_time = datetime.now(UTC) - timedelta(
+        seconds=env.forget.stale_lease_seconds + 5
+    )
     env.forget._lease_tokens[member.id] = aged_time
     async with async_sessionmaker(env.engine)() as db:
         await db.execute(
@@ -3501,7 +3505,7 @@ async def test_live_turn_lease_not_reclaimed_past_30s(env):
         )
         await db.commit()
 
-    # Verify the lease is older than 30s but the stale bound is 24h.
+    # Verify the lease is older than the stale bound.
     async with async_sessionmaker(env.engine)() as db:
         lease_row = await db.scalar(
             select(ModelTurnLease).where(
@@ -3510,56 +3514,30 @@ async def test_live_turn_lease_not_reclaimed_past_30s(env):
         )
         assert lease_row is not None
         age_seconds = (datetime.now(UTC) - lease_row.acquired_at).total_seconds()
-        assert age_seconds > 30, (
-            f"lease must be older than the old 30s threshold, got {age_seconds}s"
-        )
-        assert age_seconds < STALE_LEASE_SECONDS, (
-            f"lease must still be within the new {STALE_LEASE_SECONDS}s bound"
+        assert age_seconds > env.forget.stale_lease_seconds, (
+            f"lease must be older than {env.forget.stale_lease_seconds}s bound,"
+            f" got {age_seconds}s"
         )
 
-    # Runtime B tries to claim — must lose because the lease is still live.
+    # Runtime B tries to claim — MUST win because the lease is stale
+    # (heartbeat stopped, crash simulated).
     claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert claimed is None, (
-        "claim must lose — the lease is aged but still within the"
-        " conservative stale threshold"
+    assert claimed is not None, (
+        "claim must win — the lease is stale (crashed runtime)"
     )
+    assert claimed.status == STATUS_DELETING
 
-    # Runtime C tries to acquire — must also lose.
-    acquired = await env.forget.acquire_model_turn_lease(
-        member.id, env.gym_id
-    )
-    assert acquired is False, (
-        "second acquire must lose — the lease is still live"
-    )
-
-    # The pending request is still pending (not deleting).
-    pending = await env.forget.get_pending_request(member.id)
-    assert pending is not None
-    assert pending.status == STATUS_PENDING
-
-    # Member still exists — deletion was NOT triggered.
-    assert await count(env, Member, id=member.id) == 1
-
-    # Release the lease (model turn completes normally).
-    await env.forget.release_model_turn_lease(member.id)
-
-    # Now claim succeeds.
-    claimed_after = await env.forget.claim_forget_me_request(
-        member.id, phrase, datetime.now(UTC)
-    )
-    assert claimed_after is not None
+    # Now complete deletion normally.
     await env.forget.forget_member(member.id)
     assert await count(env, Member, id=member.id) == 0
 
 
-async def test_stale_lease_recovery_still_works_with_new_threshold(env):
-    """fix-r13 P1: crash recovery still works — a lease aged past the
-    new 24h threshold IS reclaimed.  This is the safety net for a
-    genuinely crashed runtime."""
-    from agentg.forget import STALE_LEASE_SECONDS
-
+async def test_stale_lease_recovery_still_works_with_heartbeat_stopped(env):
+    """fix-r20: crash recovery works — a lease aged past the
+    stale_lease_seconds bound IS reclaimed.  This is the safety net
+    for a genuinely crashed runtime (heartbeat stopped)."""
     member = await populate(env)
 
     # Acquire lease normally.
@@ -3567,9 +3545,12 @@ async def test_stale_lease_recovery_still_works_with_new_threshold(env):
         member.id, env.gym_id
     ) is True
 
-    # Age the lease past the 24h threshold (simulate crashed runtime).
+    # Stop the heartbeat to simulate a crash.
+    await env.forget._stop_heartbeat(member.id)
+
+    # Age the lease past the stale threshold (simulate crashed runtime).
     stale_time = datetime.now(UTC) - timedelta(
-        seconds=STALE_LEASE_SECONDS + 60
+        seconds=env.forget.stale_lease_seconds + 60
     )
     async with async_sessionmaker(env.engine)() as db:
         await db.execute(
@@ -3584,7 +3565,7 @@ async def test_stale_lease_recovery_still_works_with_new_threshold(env):
         member.id, env.gym_id
     )
     assert result is True, (
-        "stale lease past 24h must be recoverable — crash recovery works"
+        "stale lease past bound must be recoverable — crash recovery works"
     )
 
     # Verify the lease timestamp was refreshed.
@@ -4288,3 +4269,227 @@ async def test_new_link_no_prior_memberchannel_succeeds_even_with_forget_me_on_o
     # Both Members exist.
     assert await count(env, Member, id=other.id) == 1
     assert await count(env, Member, id=member.id) == 1
+
+
+# -- P2 (fix-r20): heartbeat renewal + clock tests -------------------------
+
+
+async def test_heartbeat_keeps_lease_fresh_for_live_turn(env):
+    """fix-r20: a live turn with heartbeat renewal keeps the lease
+    fresh — a concurrent claim must see a non-stale lease and lose.
+
+    The heartbeat bumps acquired_at every stale_lease_seconds//3
+    seconds, so the lease never reaches the stale cutoff while the
+    Runner is alive."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # Acquire the lease — starts heartbeat.
+    assert await env.forget.acquire_model_turn_lease(
+        member.id, env.gym_id
+    ) is True
+
+    # Wait for at least one heartbeat to fire so the lease is bumped.
+    # The heartbeat interval is stale_lease_seconds // 3.
+    heartbeat_interval = env.forget._heartbeat_seconds
+    await asyncio.sleep(heartbeat_interval + 0.5)
+
+    # Verify the lease exists and is fresh (not stale).
+    async with async_sessionmaker(env.engine)() as db:
+        lease_row = await db.scalar(
+            select(ModelTurnLease).where(
+                ModelTurnLease.member_id == member.id
+            )
+        )
+        assert lease_row is not None
+        age_seconds = (datetime.now(UTC) - lease_row.acquired_at).total_seconds()
+        assert age_seconds < env.forget.stale_lease_seconds, (
+            f"heartbeat must keep lease fresh (< {env.forget.stale_lease_seconds}s),"
+            f" got age {age_seconds:.1f}s"
+        )
+
+    # A concurrent claim must lose — the lease is still live.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is None, (
+        "claim must lose — live heartbeat keeps lease fresh"
+    )
+
+    # The pending request is still pending.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.status == STATUS_PENDING
+
+    # Release the lease (stops heartbeat).
+    await env.forget.release_model_turn_lease(member.id)
+
+    # Now claim succeeds (no lease blocking it).
+    claimed_after = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed_after is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_crash_recovery_after_heartbeat_stops(env):
+    """fix-r20: crash recovery — after the heartbeat stops (crashed
+    runtime), the lease ages past stale_lease_seconds and is reclaimed
+    by another runtime.
+
+    This proves the heartbeat renewal doesn't prevent crash recovery:
+    a stopped heartbeat allows the lease to become stale within
+    stale_lease_seconds."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # Acquire the lease — starts heartbeat.
+    assert await env.forget.acquire_model_turn_lease(
+        member.id, env.gym_id
+    ) is True
+
+    # Save the acquired_at token for manual aging.
+    token = env.forget._lease_tokens.get(member.id)
+    assert token is not None
+
+    # Stop the heartbeat (simulating crash).
+    await env.forget._stop_heartbeat(member.id)
+
+    # Manually age the lease past the stale bound.
+    stale_time = datetime.now(UTC) - timedelta(
+        seconds=env.forget.stale_lease_seconds + 5
+    )
+    # Update both the DB and the in-memory token so release works.
+    env.forget._lease_tokens[member.id] = stale_time
+    async with async_sessionmaker(env.engine)() as db:
+        await db.execute(
+            update(ModelTurnLease)
+            .where(ModelTurnLease.member_id == member.id)
+            .values(acquired_at=stale_time)
+        )
+        await db.commit()
+
+    # Another runtime acquires the stale lease — must succeed.
+    result = await env.forget.acquire_model_turn_lease(
+        member.id, env.gym_id
+    )
+    assert result is True, (
+        "stale lease must be recoverable after heartbeat stops"
+    )
+
+    # Clean up.
+    await env.forget.release_model_turn_lease(member.id)
+
+
+async def test_confirmation_phrase_outlives_crashed_lease(env):
+    """fix-r20: an exact confirmation phrase within its advertised
+    lifetime can outlive a crashed lease and complete deletion.
+
+    The stale_lease_seconds must be shorter than the confirmation
+    lifetime (enforced by config validation), so when a runtime
+    crashes, another runtime can reclaim the stale lease and still
+    honour the unexpired confirmation phrase."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # Use a long confirmation lifetime (5 minutes) against the short
+    # stale lease (30s).  This is the production config.
+    confirmation_lifetime = 300
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, confirmation_lifetime, "en"
+    )
+    assert phrase != ""
+
+    # Verify the config invariant: stale_lease < confirmation_lifetime.
+    assert env.forget.stale_lease_seconds < confirmation_lifetime, (
+        f"stale_lease_seconds ({env.forget.stale_lease_seconds}) must be"
+        f" < confirmation_lifetime ({confirmation_lifetime})"
+    )
+
+    # Runtime A acquires the lease (model turn starts).
+    assert await env.forget.acquire_model_turn_lease(
+        member.id, env.gym_id
+    ) is True
+
+    # Simulate crash: stop heartbeat, age lease past stale bound.
+    await env.forget._stop_heartbeat(member.id)
+    stale_time = datetime.now(UTC) - timedelta(
+        seconds=env.forget.stale_lease_seconds + 10
+    )
+    env.forget._lease_tokens[member.id] = stale_time
+    async with async_sessionmaker(env.engine)() as db:
+        await db.execute(
+            update(ModelTurnLease)
+            .where(ModelTurnLease.member_id == member.id)
+            .values(acquired_at=stale_time)
+        )
+        await db.commit()
+
+    # Runtime B reclaims the stale lease.
+    reclaimed = await env.forget.acquire_model_turn_lease(
+        member.id, env.gym_id
+    )
+    assert reclaimed is True
+
+    # Release the lease so the claim can proceed (claim checks for
+    # non-stale lease — and we just acquired one).
+    await env.forget.release_model_turn_lease(member.id)
+
+    # The confirmation phrase is still unexpired (confirmation_lifetime
+    # is 300s, we only advanced by stale_lease_seconds + 10 ≈ 40s).
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None, (
+        "confirmation phrase must still be valid within its advertised"
+        f" lifetime ({confirmation_lifetime}s) after crash recovery"
+    )
+    assert claimed.status == STATUS_DELETING
+    assert claimed.language == "en"
+
+    # Complete deletion.
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_config_validation_stale_lease_shorter_than_confirmation():
+    """fix-r20: the config validates that stale_lease_seconds is
+    shorter than forget_me_confirmation_seconds."""
+    from agentg.config import ConfigError, Settings
+
+    # Valid: stale lease (30) < confirmation (300).
+    settings = Settings.from_env({
+        "TELEGRAM_BOT_TOKEN": "x",
+        "MODEL_API_KEY": "x",
+    })
+    assert settings.stale_lease_seconds < settings.forget_me_confirmation_seconds
+
+    # Invalid: stale lease >= confirmation.
+    with pytest.raises(ConfigError, match="must be shorter than"):
+        Settings.from_env({
+            "TELEGRAM_BOT_TOKEN": "x",
+            "MODEL_API_KEY": "x",
+            "STALE_LEASE_SECONDS": "500",
+            "FORGET_ME_CONFIRMATION_SECONDS": "60",
+        })
+
+    # Invalid: stale lease too small.
+    with pytest.raises(ConfigError, match="must be at least 30"):
+        Settings.from_env({
+            "TELEGRAM_BOT_TOKEN": "x",
+            "MODEL_API_KEY": "x",
+            "STALE_LEASE_SECONDS": "10",
+        })

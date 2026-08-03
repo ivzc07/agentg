@@ -272,12 +272,23 @@ async def _link_member_in_session(
     if pointer is not None:
         # Lock the existing Member row to serialize with
         # claim_forget_me_request (fix-r18).  On Postgres this is a
-        # row-level lock; on SQLite WAL the IMMEDIATE transaction
-        # provides the write lock.
+        # row-level lock; on SQLite WAL the FOR UPDATE is a no-op
+        # so we follow with a noop UPDATE that takes the real SQLite
+        # write lock before checking ForgetMeRequest and repointing
+        # MemberChannel — only one connection can proceed past this
+        # point (fix-r20).
         existing = await db.scalar(
             select(Member.id).where(Member.id == pointer.member_id).with_for_update()
         )
         if existing is not None:
+            # Take the real SQLite write lock via a noop UPDATE — on
+            # Postgres the row is already locked by FOR UPDATE so this
+            # is a harmless no-op.  Only one connection can hold the
+            # SQLite write lock, so concurrent switch / claim calls
+            # are now serialised before the ForgetMeRequest check.
+            await db.execute(
+                update(Member).where(Member.id == existing).values(id=existing)
+            )
             fme = await db.scalar(
                 select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == existing,

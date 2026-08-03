@@ -11,6 +11,7 @@ DEFAULT_DATABASE_URL = "postgresql+asyncpg://agentg:agentg@localhost:5432/agentg
 DEFAULT_DEMO_MEDIA_ROOT = "/data/demos"  # where the canonical demo MP4s live
 DEFAULT_DASHBOARD_PORT = 8080
 DEFAULT_FORGET_ME_CONFIRMATION_SECONDS = 300  # 5 minutes
+DEFAULT_STALE_LEASE_SECONDS = 30  # 30 seconds — with heartbeat renewal, long enough
 
 REQUIRED_VARS = ("TELEGRAM_BOT_TOKEN", "MODEL_API_KEY")
 
@@ -39,6 +40,11 @@ class Settings:
     dashboard_spa_dist: str = ""
     # How long a forget-me confirmation phrase stays valid (issue #212).
     forget_me_confirmation_seconds: int = DEFAULT_FORGET_ME_CONFIRMATION_SECONDS
+    # How long a model-turn lease lives before it is considered stale and
+    # reclaimable by another runtime (issue #212, fix-r20).  Must be shorter
+    # than forget_me_confirmation_seconds so a crashed lease can be reclaimed
+    # before the confirmation phrase expires.
+    stale_lease_seconds: int = DEFAULT_STALE_LEASE_SECONDS
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -60,6 +66,19 @@ class Settings:
             raise ConfigError(
                 f"FORGET_ME_CONFIRMATION_SECONDS must be at least 60, got {forget_me!r}"
             )
+        stale_lease = _int_env(
+            env, "STALE_LEASE_SECONDS", DEFAULT_STALE_LEASE_SECONDS
+        )
+        if stale_lease < 30:
+            raise ConfigError(
+                f"STALE_LEASE_SECONDS must be at least 30, got {stale_lease!r}"
+            )
+        if stale_lease >= forget_me:
+            raise ConfigError(
+                f"STALE_LEASE_SECONDS ({stale_lease}) must be shorter than "
+                f"FORGET_ME_CONFIRMATION_SECONDS ({forget_me}) so a crashed "
+                f"lease can be reclaimed before the confirmation phrase expires"
+            )
         return cls(
             telegram_bot_token=env["TELEGRAM_BOT_TOKEN"],
             model=env.get("MODEL") or DEFAULT_MODEL,
@@ -73,6 +92,7 @@ class Settings:
             dashboard_session_secret=env.get("DASHBOARD_SESSION_SECRET") or None,
             dashboard_spa_dist=env.get("DASHBOARD_SPA_DIST") or "",
             forget_me_confirmation_seconds=forget_me,
+            stale_lease_seconds=stale_lease,
         )
 
 

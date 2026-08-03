@@ -18,6 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 from agentg.config import Settings
+from agentg.forget import is_forget_me_request
 from agentg.messages import IncomingMessage
 from agentg.models import Gym
 from agentg.linking_store import (
@@ -357,7 +358,13 @@ class Linking:
 
     async def _confirm_name(
         self, identity: _Identity, msg: IncomingMessage, pending: _AwaitingName
-    ) -> str:
+    ) -> str | None:
+        # P2 (fix-r20): detect a fresh forget-me request before processing
+        # the name answer — "forget me" always enters the deterministic
+        # two-turn flow and never calls the linking phraser.
+        if is_forget_me_request(msg.text):
+            del self._pending[identity]
+            return None  # let runtime handle forget-me
         # A pasted Invite or coach code mid-flow restarts linking, not a
         # name change. Short-circuit: skip DB lookups when it can't be a code (#169).
         resolved = await self._resolve_typed_code(msg.text)
@@ -408,10 +415,17 @@ class Linking:
         msg: IncomingMessage,
         linked: LinkedIdentity | None,
         pending: _AwaitingSwitch,
-    ) -> str:
+    ) -> str | None:
         if linked is None:  # identity vanished mid-flow; start over
             del self._pending[identity]
             return await self.phraser(DEAD_END_INSTRUCTION, msg.text)
+        # P2 (fix-r20): detect a fresh forget-me request before processing
+        # the switch answer — "forget me" always enters the deterministic
+        # two-turn flow and never calls the linking phraser.  Preserve
+        # ordinary switch answers (yes/no).
+        if is_forget_me_request(msg.text):
+            del self._pending[identity]
+            return None  # let runtime handle forget-me
         if not _is_affirmative(msg.text):  # anything but a clear yes stays put
             del self._pending[identity]
             instruction = SWITCH_CANCELLED_INSTRUCTION.format(gym=linked.gym.name)
