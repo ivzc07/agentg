@@ -8,6 +8,22 @@ import { RoutineEditor } from "../components/RoutineEditor";
 // production code without pulling node builtins into the typechecked build.
 import routineEditorSource from "../components/RoutineEditor.tsx?raw";
 
+// ---------------------------------------------------------------------------
+//  Save-button contrast helpers — strict allowlist, not a CSS-colour parser.
+//  Any text-* class beyond the known set is flagged regardless of whether it
+//  "looks like a colour", because an incomplete parser is the bug.
+// ---------------------------------------------------------------------------
+
+/** Extract every `text-*` class token from a className string.
+ *  Strips the Tailwind important prefix (`!`) so `!text-white` is found. */
+function textTokens(className: string): string[] {
+  return className
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => t.replace(/^!/, ""))
+    .filter((t) => t.startsWith("text-"));
+}
+
 const EN_BOOTSTRAP = {
   editor_title: "{name}'s routine",
   chip_agent: "Agent-managed",
@@ -484,6 +500,165 @@ describe("RoutineEditor", () => {
       // Falls back to English weekday names.
       expect(screen.getAllByText("Wednesday").length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText("Friday").length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  // WCAG AA contrast: save button must use text-bg on bg-magenta (issue #218).
+  describe("save button contrast (issue #218)", () => {
+    it("renders with text-bg on the default-state save button", async () => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(mockRoutineResponse()),
+      } as Response);
+
+      renderEditor("/members/1/routine");
+
+      await waitFor(() => {
+        expect(screen.getByText("Save Routine")).toBeDefined();
+      });
+
+      const btn = screen.getByRole("button", { name: "Save Routine" });
+
+      // --- base-background: parse exact classList tokens so variant- -----
+      //     prefixed utilities (e.g. hover:bg-magenta) are never mistaken
+      //     for the unmodified base class.
+      expect(btn.classList.contains("bg-magenta")).toBe(true);
+      expect(btn.classList.contains("text-bg")).toBe(true);
+
+      // --- foreground: strict allowlist — every text-* class on the -----
+      //     button must match the known set.  Any additional text-* token,
+      //     even arbitrary syntax like text-[--custom] or text-[red], is
+      //     caught without needing a CSS-colour parser.
+      const txts = textTokens(btn.className);
+      expect(new Set(txts)).toEqual(new Set(["text-bg", "text-[14px]"]));
+    });
+
+    it("rejects any extra text-* class on the submit button (allowlist guard)", () => {
+      const src = routineEditorSource;
+      // Locate the submit button block by its type="submit" attr.
+      const submitIdx = src.indexOf('type="submit"');
+      expect(submitIdx).not.toBe(-1);
+      const block = src.slice(submitIdx, submitIdx + 400);
+
+      // Extract every text-* token from the button's className and assert
+      // the full set matches the allowlist — no colour parser needed.
+      // [^\s"] matches one token: non-whitespace, stops before closing quote.
+      const allTokenRe = /text-[^\s"]+/g;
+      const rawTokens = [...block.matchAll(allTokenRe)].map((m) => m[0]);
+
+      // The complete set of text-* classes on the submit button.
+      expect(new Set(rawTokens)).toEqual(new Set(["text-bg", "text-[14px]"]));
+    });
+
+    it("rejects modifier-only background on the submit button", () => {
+      const src = routineEditorSource;
+      const submitIdx = src.indexOf('type="submit"');
+      expect(submitIdx).not.toBe(-1);
+      const block = src.slice(submitIdx, submitIdx + 400);
+
+      // Must have a base bg- class (bg-magenta) as a standalone class.
+      // The negative lookbehind excludes variant prefixes (hover:, focus:,
+      // etc.) so that hover:bg-magenta without a true base bg-magenta is
+      // rejected.
+      expect(block).toMatch(/(?<![\w:])bg-magenta(?![\w-])/);
+
+      // Double-check: a variant-only background (hover:bg-magenta with no
+      // base bg-magenta) must not satisfy the check above.
+      // Prove the negative: a block with only hover:bg-magenta would fail.
+      expect("hover:bg-magenta text-bg").not.toMatch(
+        /(?<![\w:])bg-magenta(?![\w-])/
+      );
+    });
+  });
+
+  // --- Allowlist unit tests: prove specific arbitrary examples are ------]
+  //     caught by the strict text-* allowlist without needing a CSS-colour
+  //     parser.  The allowlist is ["text-bg", "text-[14px]"]; any extra
+  //     text-* token is rejected.
+  describe("save button text-token allowlist (unit)", () => {
+    const ALLOWLIST = new Set(["text-bg", "text-[14px]"]);
+
+    it("accepts the known safe className", () => {
+      const tokens = textTokens(
+        "inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-magenta text-bg text-[14px] font-medium"
+      );
+      expect(new Set(tokens)).toEqual(ALLOWLIST);
+    });
+
+    it("rejects text-[--custom] (bare CSS custom property)", () => {
+      const tokens = textTokens(
+        "bg-magenta text-bg text-[14px] text-[--custom]"
+      );
+      expect(tokens).toContain("text-[--custom]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
+
+    it("rejects text-[red] (CSS named colour in arbitrary value)", () => {
+      const tokens = textTokens("bg-magenta text-bg text-[14px] text-[red]");
+      expect(tokens).toContain("text-[red]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
+
+    it("rejects text-[#fff] (bare hex in arbitrary value)", () => {
+      const tokens = textTokens("bg-magenta text-bg text-[14px] text-[#fff]");
+      expect(tokens).toContain("text-[#fff]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
+
+    it("rejects text-[#fff]/[.5] (hex with arbitrary bracket opacity)", () => {
+      const tokens = textTokens(
+        "bg-magenta text-bg text-[14px] text-[#fff]/[.5]"
+      );
+      expect(tokens).toContain("text-[#fff]/[.5]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
+
+    it("rejects text-white (standard keyword extra token)", () => {
+      const tokens = textTokens("bg-magenta text-bg text-[14px] text-white");
+      expect(tokens).toContain("text-white");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
+
+    it("rejects text-red-500/25 (palette shade with slash-opacity)", () => {
+      const tokens = textTokens(
+        "bg-magenta text-bg text-[14px] text-red-500/25"
+      );
+      expect(tokens).toContain("text-red-500/25");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
+
+    it("rejects !text-[color:inherit] (important-prefixed typed arbitrary colour)", () => {
+      // textTokens strips the ! prefix so the token is found regardless.
+      const tokens = textTokens(
+        "bg-magenta text-bg text-[14px] !text-[color:inherit]"
+      );
+      expect(tokens).toContain("text-[color:inherit]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
+
+    it("rejects !text-[theme(colors.white)] (important + theme() arbitrary)", () => {
+      // textTokens strips the ! prefix; the theme() form evaluates to a
+      // colour at build time, so it must be caught just like any other
+      // text-* colour utility outside the allowlist.
+      const tokens = textTokens(
+        "bg-magenta text-bg text-[14px] !text-[theme(colors.white)]"
+      );
+      expect(tokens).toContain("text-[theme(colors.white)]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
+
+    it("rejects modifier-only background (lookbehind guard)", () => {
+      // The lookbehind regex must only match an unmodified base utility.
+      const baseBgRe = /(?<![\w:])bg-magenta(?![\w-])/;
+
+      // Valid: standalone bg-magenta
+      expect("bg-magenta text-bg").toMatch(baseBgRe);
+
+      // Invalid: variant-prefixed without a base
+      expect("hover:bg-magenta text-bg").not.toMatch(baseBgRe);
+      expect("focus:bg-magenta").not.toMatch(baseBgRe);
+      expect("disabled:bg-magenta").not.toMatch(baseBgRe);
     });
   });
 

@@ -55,6 +55,7 @@ def incoming(text="hi", *, user_id="42", display_name="Ana García", link_code=N
         text=text,
         display_name=display_name,
         link_code=link_code,
+        is_private=True,
     )
 
 
@@ -170,7 +171,8 @@ async def test_regenerating_the_code_invalidates_a_pending_switch(runtime):
 
     reply = await runtime.handle_message(incoming("yes"))
 
-    assert "Iron Temple" in reply  # still with the old Gym
+    # Expired-code recovery response — no gym named in the expired reply.
+    assert "Iron Temple" not in reply
     linked = await runtime.stores.linking.identity_for("telegram", "42")
     assert linked is not None and linked.member.id == old_member.id
     assert await member_count(runtime.stores.linking) == 1
@@ -522,7 +524,8 @@ async def test_regenerating_the_coach_code_invalidates_a_pending_switch(runtime)
 
     reply = await runtime.handle_message(incoming("yes"))
 
-    assert "Iron Temple" in reply  # still with the old Gym
+    # Coach switch recovery: reassured they're still at their old Gym.
+    assert "Iron Temple" in reply
     linked = await runtime.stores.linking.identity_for("telegram", "42")
     assert linked is not None
     assert linked.member.id == old_member.id and linked.member.is_coach is False
@@ -812,10 +815,15 @@ async def test_deleting_request_non_matching_message_does_not_delete(runtime):
     assert await member_count(runtime.stores.linking) == 1
 
 
-async def test_deleting_request_gates_linking_group_redirects_privately(runtime):
-    """A linked Member with a deleting request who sends a group message
-    must get a private redirect — no deletion and no identity repointing."""
+async def test_deleting_request_survives_refused_non_private_message(runtime):
+    """A linked Member with a deleting request whose message arrives from a
+    shared chat must not lose state: the runtime refuses non-private
+    messages outright (#211), so no deletion and no identity repointing
+    can occur — the durable deleting row survives untouched."""
     from datetime import datetime, timezone
+
+    import pytest
+
     from agentg.messages import IncomingMessage
 
     gym = await runtime.stores.linking.create_gym("Iron Temple")
@@ -832,22 +840,22 @@ async def test_deleting_request_gates_linking_group_redirects_privately(runtime)
     )
     assert claimed is not None
 
-    reply = await runtime.handle_message(
-        IncomingMessage(
-            channel="telegram", channel_user_id="42",
-            text="hello", display_name="Ana", is_group=True,
+    with pytest.raises(RuntimeError, match="non-private"):
+        await runtime.handle_message(
+            IncomingMessage(
+                channel="telegram", channel_user_id="42",
+                text="hello", display_name="Ana", is_private=False,
+            )
         )
-    )
-    assert "private" in str(reply).lower()
 
     identity = await runtime.stores.linking.identity_for("telegram", "42")
-    assert identity is not None, "group turn must NOT delete the Member"
+    assert identity is not None, "refused turn must NOT delete the Member"
     assert await member_count(runtime.stores.linking) == 1
 
     deleting_req = await runtime.stores.forget.get_deleting_request(
         linked.member.id
     )
-    assert deleting_req is not None, "deleting row must survive group turn"
+    assert deleting_req is not None, "deleting row must survive a refused turn"
 
 
 async def test_deleting_request_prevents_gym_switch_without_exact_phrase(runtime):

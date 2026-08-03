@@ -71,7 +71,7 @@ async def test_a_queued_demo_is_sent_after_the_reply(env, monkeypatch):
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
 
     reply = await env.runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="how do I goblet squat?")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="how do I goblet squat?", is_private=True)
     )
 
     assert "way" in reply
@@ -86,7 +86,7 @@ async def test_no_send_when_nothing_was_queued(env, monkeypatch):
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
     reply = await env.runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="hi")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="hi", is_private=True)
     )
     # after_send always fires now: it carries the deferred rhythm reset (#169)
     # and compaction (#173).  Calling it is safe, and no demo should be sent

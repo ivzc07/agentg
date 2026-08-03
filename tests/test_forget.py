@@ -201,7 +201,7 @@ async def test_messaging_after_forget_dead_ends_in_linking(env):
 
     # a fresh linking sees no identity → the polite invite-code dead end
     linking = Linking(env.linking, identity_phraser)
-    msg = IncomingMessage(channel="telegram", channel_user_id="42", text="hey again")
+    msg = IncomingMessage(channel="telegram", channel_user_id="42", text="hey again", is_private=True)
     linked = await env.linking.identity_for("telegram", "42")
     reply = await linking.handle(msg, linked)
     assert reply == DEAD_END_INSTRUCTION
@@ -1972,17 +1972,13 @@ async def test_group_message_with_deleting_row_preserves_state_no_deletion(env):
     assert deleting.status == "deleting"
     assert await count(env, Member, id=member.id) == 1
 
-    # A group message now arrives.  Under the fix-r7 reorder, the
-    # group check runs FIRST and gatekeeps: no deletion, no public
-    # goodbye, redirect to private, preserve durable state.
-    #
-    # Simulate the runtime's group path:
-    # 1. msg.is_group → True
-    # 2. get_deleting_request → the row is there
-    # 3. Return private-message redirect (NOT goodbye, NOT delete)
+    # A shared-chat message now arrives.  Shared chats are rejected by the
+    # channel adapter and refused by the runtime's is_private gate (#211)
+    # before any forget-me processing, so no deletion, no public goodbye,
+    # and the durable state is preserved.
     if deleting is not None:
-        # The runtime returns a redirect — no forget_member call.
-        pass  # ← this is where the runtime would return the redirect
+        # The runtime never processes the message — no forget_member call.
+        pass  # ← the refused message never reaches the forget-me flow
 
     # Member still exists — deletion was NOT executed.
     assert await count(env, Member, id=member.id) == 1, (
@@ -2049,19 +2045,12 @@ async def test_group_message_with_exact_phrase_no_deletion_no_goodbye(env):
     assert deleting is not None
     assert deleting.status == "deleting"
 
-    # The member now sends the exact confirmation phrase — but in a
-    # group chat.  The fix-r7 group gate must prevent deletion and
-    # redirect to private.
-    #
-    # Under the old code (group check after deleting check), this
-    # would trigger forget_member + public goodbye.  Under fix-r7,
-    # the group check runs first and returns a redirect.
-
-    # Simulate verify: get_deleting_request is called (group path),
-    # finds the deleting row, returns redirect — NOT goodbye.
+    # The member now sends the exact confirmation phrase — but from a
+    # shared chat.  Shared chats never reach the forget-me flow: the
+    # channel adapter rejects them and the runtime refuses non-private
+    # messages outright (#211), so deletion cannot trigger.
     deleting_group = await env.forget.get_deleting_request(member.id)
     assert deleting_group is not None
-    # The runtime returns _FORGET_PRIVATE_REDIRECT here.
 
     # Member still exists — NO deletion from the group message.
     assert await count(env, Member, id=member.id) == 1
@@ -2106,10 +2095,9 @@ async def test_group_message_redirect_without_deletion_does_not_call_model(env):
     )
     assert claimed is not None
 
-    # The runtime's _handle_forget_me would:
-    # 1. See msg.is_group → True
-    # 2. get_deleting_request → found → return Reply(redirect)
-    # 3. Never reach the model, never call forget_member.
+    # A shared-chat message is refused before _handle_forget_me runs
+    # (#211): the model is never reached and forget_member is never
+    # called.
     deleting = await env.forget.get_deleting_request(member.id)
     assert deleting is not None
 
@@ -3447,44 +3435,6 @@ async def test_new_forget_me_in_deleting_state_does_not_delete(env):
     )
     await env.forget.forget_member(member.id)
     assert await count(env, Member, id=member.id) == 0
-
-
-async def test_group_redirect_never_reveals_deletion(env):
-    """fix-r12 R1: the private-message redirect sent to a group MUST
-    NOT mention deletion, goodbye, data, or any confirmation phrase.
-    Group visibility means anyone can read the reply — it must be a
-    generic "send this privately" message with zero deletion context."""
-    from agentg.runtime import _FORGET_PRIVATE_REDIRECT
-
-    member = await populate(env)
-    now = datetime.now(UTC)
-    phrase = await env.forget.request_forget_me(
-        member.id, env.gym_id, now, 300, "en"
-    )
-
-    # Claim → deleting state.
-    claimed = await env.forget.claim_forget_me_request(
-        member.id, phrase, datetime.now(UTC)
-    )
-    assert claimed is not None
-
-    # Verify both language strings contain no deletion-related words.
-    forbidden = ["delet", "delete", "borr", "elimin", "goodbye", "adiós",
-                 "phrase", "frase", "confirm", "data", "datos",
-                 "permanent", "history", "historial"]
-    for lang in ("en", "es"):
-        text = _FORGET_PRIVATE_REDIRECT.get(lang, "").lower()
-        for word in forbidden:
-            assert word not in text, (
-                f"_FORGET_PRIVATE_REDIRECT[{lang!r}] must NOT contain"
-                f" '{word}' (reveals deletion info in group): {text!r}"
-            )
-
-    # The message must still be non-empty and ask for private messaging.
-    for lang in ("en", "es"):
-        assert len(_FORGET_PRIVATE_REDIRECT.get(lang, "")) > 0, (
-            f"_FORGET_PRIVATE_REDIRECT[{lang!r}] must not be empty"
-        )
 
 
 # -- P1 (fix-r13): Conservative stale-lease threshold ---------------------

@@ -40,7 +40,8 @@ def make_runtime(url) -> AgentRuntime:
 
 def incoming(text, user_id):
     return IncomingMessage(
-        channel="telegram", channel_user_id=user_id, text=text, display_name="Ana"
+        channel="telegram", channel_user_id=user_id, text=text, display_name="Ana",
+        is_private=True,
     )
 
 
@@ -528,4 +529,20 @@ async def test_exact_phrase_blocked_by_live_lease_returns_retry_not_falls_throug
 
     identity_after = await runtime.stores.linking.identity_for("telegram", "42")
     assert identity_after is None, "deletion must complete after lease release"
+
+
+# --- defense in depth: non-private messages are refused (#211) ---
+
+
+async def test_runtime_refuses_non_private_messages(runtime):
+    """A message with is_private=False must raise — the channel adapter
+    is responsible for rejecting shared chats before the runtime (#211)."""
+    msg = IncomingMessage(
+        channel="telegram",
+        channel_user_id="42",
+        text="hello",
+        is_private=False,
+    )
+    with pytest.raises(RuntimeError, match="non-private"):
+        await runtime.handle_message(msg)
 

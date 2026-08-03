@@ -133,18 +133,6 @@ _FORGET_WARNING: dict[str, str] = {
     ),
 }
 
-# Generic private-message redirect when a Member sends a sensitive
-# message from a group chat.  Never reveals anything about deletion —
-# group visibility means anyone can read the reply (fix-r12 P1).
-_FORGET_PRIVATE_REDIRECT: dict[str, str] = {
-    "en": (
-        "Please send this as a private message and I'll take care of it."
-    ),
-    "es": (
-        "Env\u00edamelo como mensaje privado y me encargo."
-    ),
-}
-
 # Gate-failure reply when a deleting row exists but the message does NOT
 # carry the exact confirmation phrase — deletion was already confirmed
 # but is not yet complete (e.g. a crash interrupted it).  Only the exact
@@ -630,6 +618,15 @@ class AgentRuntime:
         return Reply(confirmation)
 
     async def handle_message(self, msg: IncomingMessage) -> Reply:
+        # Defense in depth: the channel adapter must have already filtered
+        # non-private conversations (#211).  A False value here means a
+        # future channel adapter is forwarding shared-chat messages and
+        # must be fixed.
+        if not msg.is_private:
+            raise RuntimeError(
+                f"non-private message received from {msg.channel}; "
+                "channel adapter must reject shared chats before the runtime"
+            )
         key = (msg.channel, msg.channel_user_id)
         # Await the previous turn's compaction (if any) before acquiring the
         # lock.  This is done outside the lock so that after_send (which
@@ -674,9 +671,9 @@ class AgentRuntime:
                 # arbitrary message (e.g. "hello") must NOT trigger
                 # deletion (issue #212, fix-r10).
                 #
-                # Private turns with the exact phrase recover deletion;
-                # group turns redirect privately without revealing the
-                # deletion in public.
+                # Only private turns reach this point (shared chats are
+                # rejected by the channel adapter and the is_private gate
+                # above, #211); the exact phrase recovers deletion.
                 now = datetime.now(timezone.utc)
                 if linked is not None:
                     from agentg.forget import normalize_confirmation
@@ -689,12 +686,6 @@ class AgentRuntime:
                         )
                     )
                     if deleting_before_link is not None:
-                        if msg.is_group:
-                            return Reply(
-                                _FORGET_PRIVATE_REDIRECT[
-                                    deleting_before_link.language or "es"
-                                ]
-                            )
                         await self.stores.forget.forget_member(linked.member.id)
                         return Reply(
                             _FORGET_GOODBYE[
@@ -708,19 +699,12 @@ class AgentRuntime:
                 # deletion (already checked above via deleting_before_link);
                 # any other private message (including affirmative Gym-switch
                 # replies) must not link/repoint identity and receives truthful
-                # deletion-in-progress guidance.  Group messages reveal nothing
-                # and do not delete/link.
+                # deletion-in-progress guidance.
                 if linked is not None:
                     deleting_gate = await self.stores.forget.get_deleting_request(
                         linked.member.id
                     )
                     if deleting_gate is not None:
-                        if msg.is_group:
-                            return Reply(
-                                _FORGET_PRIVATE_REDIRECT[
-                                    deleting_gate.language or "es"
-                                ]
-                            )
                         return Reply(
                             _FORGET_DELETING_IN_PROGRESS[
                                 deleting_gate.language or "es"
@@ -771,7 +755,7 @@ class AgentRuntime:
                 # `/dashboard` is a deterministic door, not Agent chat: it never
                 # touches the check-in rhythm, compaction, or history.
                 if self.dashboard is not None and is_dashboard_command(msg.text):
-                    return await self.dashboard.handle(linked, is_group=msg.is_group)
+                    return await self.dashboard.handle(linked)
                 # P1 (fix-r12): Cross-runtime atomic model-turn lease —
                 # checks for a deleting request and acquires an exclusive
                 # lease, serialised with claim_forget_me_request via a
@@ -1224,33 +1208,9 @@ class AgentRuntime:
 
         now = datetime.now(timezone.utc)
 
-        # P1: Group messages must NEVER execute Forget-me deletion or post
-        # goodbye publicly, even when a deleting/consumed row exists.
-        # Preserve durable deleting state and return only the required
-        # private-message redirect; recovery occurs on a later private
-        # turn (issue #212, fix-r7 P1).
-        if msg.is_group:
-            # Check for deleting (in-progress or interrupted) deletion
-            # first — preserve the durable state, redirect to private.
-            deleting_req = await self.stores.forget.get_deleting_request(
-                linked.member.id
-            )
-            if deleting_req is not None:
-                return Reply(
-                    _FORGET_PRIVATE_REDIRECT[deleting_req.language or "es"]
-                )
-            # Cancel any pending request — group messages never confirm
-            # deletion.
-            pending = await self.stores.forget.get_pending_request(
-                linked.member.id
-            )
-            if pending is not None:
-                await self.stores.forget.cancel_forget_me(
-                    linked.member.id,
-                    confirmation_phrase=pending.confirmation_phrase,
-                    expires_at=pending.expires_at,
-                )
-            return None
+        # Shared chats never reach this point: the channel adapter rejects
+        # them and handle_message refuses non-private messages outright
+        # (#211), so every turn here is private.
 
         # P1 (fix-r12): Check for a deleting (in-progress or interrupted)
         # deletion FIRST — before anything else.  A deleting row is the

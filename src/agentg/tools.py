@@ -66,6 +66,8 @@ def _logged(payload: LoggedSets, unit: str) -> dict[str, Any]:
     }
     if payload.suspect is not None:
         result["suspect"] = payload.suspect
+    if payload.copied_sets is not None:
+        result["copied_sets"] = payload.copied_sets
     return result
 
 
@@ -110,7 +112,8 @@ async def open_session(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]:
     never as logged sets. After a long gap the suggestions come back easier —
     open warm and guilt-free.
     """
-    return await open_session_payload(ctx.context)
+    async with ctx.context._session_lock:
+        return await open_session_payload(ctx.context)
 
 
 @function_tool
@@ -133,12 +136,13 @@ async def log_sets(
     the numbers with the Member before treating them as settled.
     """
     c = ctx.context
-    try:
-        logged = await c.stores.training.log_sets(
-            c.member_id, c.gym_id, line, exercise=exercise, rpe=rpe, note=note
-        )
-    except ValueError as error:
-        return {"error": str(error)}
+    async with c._session_lock:
+        try:
+            logged = await c.stores.training.log_sets(
+                c.member_id, c.gym_id, line, exercise=exercise, rpe=rpe, note=note
+            )
+        except ValueError as error:
+            return {"error": str(error)}
     return _logged(logged, c.weight_unit)
 
 
@@ -146,13 +150,16 @@ async def log_sets(
 async def copy_last_sets(ctx: RunContextWrapper[MemberContext], exercise: str) -> dict[str, Any]:
     """Log "same as last time": copy this exercise's Sets from the previous Session.
 
-    Always restate the returned exercise/weight/reps in your reply.
+    When ``copied_sets`` is present, restate each set with its own weight
+    from that list (e.g. "bench 40kg×10, 60kg×5, 60kg×5").  Otherwise
+    restate the summary exercise/weight/reps.
     """
     c = ctx.context
-    try:
-        logged = await c.stores.training.copy_last_sets(c.member_id, c.gym_id, exercise)
-    except ValueError as error:
-        return {"error": str(error)}
+    async with c._session_lock:
+        try:
+            logged = await c.stores.training.copy_last_sets(c.member_id, c.gym_id, exercise)
+        except ValueError as error:
+            return {"error": str(error)}
     return _logged(logged, c.weight_unit)
 
 
@@ -173,10 +180,11 @@ async def edit_logged_sets(
     numbers with the Member before treating them as settled.
     """
     c = ctx.context
-    try:
-        edited = await c.stores.training.edit_logged_sets(c.member_id, exercise, weight=weight, reps=reps)
-    except ValueError as error:
-        return {"error": str(error)}
+    async with c._session_lock:
+        try:
+            edited = await c.stores.training.edit_logged_sets(c.member_id, exercise, weight=weight, reps=reps)
+        except ValueError as error:
+            return {"error": str(error)}
     return _logged(edited, c.weight_unit)
 
 
@@ -184,15 +192,16 @@ async def edit_logged_sets(
 async def get_last_sets(ctx: RunContextWrapper[MemberContext], exercise: str) -> dict[str, Any]:
     """Read an exercise's numbers from the previous Session (never from memory)."""
     c = ctx.context
-    info = await c.stores.training.last_sets(c.member_id, exercise)
-    if info is None:
-        return {
-            "error": (
-                f"no logged sets of {exercise} yet — ask the Member for the weight "
-                "and reps, or try a different exercise name"
-            )
-        }
-    return {**info, "weight_unit": c.weight_unit}
+    async with c._session_lock:
+        info = await c.stores.training.last_sets(c.member_id, exercise)
+        if info is None:
+            return {
+                "error": (
+                    f"no logged sets of {exercise} yet — ask the Member for the weight "
+                    "and reps, or try a different exercise name"
+                )
+            }
+        return {**info, "weight_unit": c.weight_unit}
 
 
 @function_tool
@@ -203,10 +212,11 @@ async def close_session(ctx: RunContextWrapper[MemberContext]) -> dict[str, Any]
     the change vs the previous Session (weight_change / reps_change).
     """
     c = ctx.context
-    try:
-        summary = await c.stores.training.close_session(c.member_id)
-    except ValueError as error:
-        return {"error": str(error)}
+    async with c._session_lock:
+        try:
+            summary = await c.stores.training.close_session(c.member_id)
+        except ValueError as error:
+            return {"error": str(error)}
     return {
         "session_id": summary.session_id,
         "total_sets": summary.total_sets,

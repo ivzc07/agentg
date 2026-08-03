@@ -138,18 +138,29 @@ async def test_forget_me_wrong_phrase_cancels_and_leaves_data(tmp_path):
 
 
 async def test_forget_me_group_message_ignored(tmp_path):
-    """Group messages must not trigger or confirm forget-me (issue #212)."""
+    """Shared-chat messages must not trigger or confirm forget-me: the
+    runtime refuses non-private messages outright (#211), so "forget me"
+    from a group can neither create a pending request nor delete data
+    (issue #212)."""
+    import pytest
+
+    from agentg.messages import IncomingMessage
+
     async with ConversationHarness.create(tmp_path) as h:
         await h.linked_member()
         await h.seed_closed_session("bench 60 8,8,8")
         member_id = h.member_id
 
-        # "forget me" in a group must pass through to the model.
-        await h.say(
-            "forget me",
-            is_group=True,
-            steps=[message("I can help with your training — what's on today?")],
-        )
+        # "forget me" from a shared chat is refused before any processing.
+        with pytest.raises(RuntimeError, match="non-private"):
+            await h.runtime.handle_message(
+                IncomingMessage(
+                    channel=h.channel,
+                    channel_user_id=h.channel_user_id,
+                    text="forget me",
+                    is_private=False,
+                )
+            )
         # No pending request was created.
         pending = await h.stores.forget.get_pending_request(member_id)
         assert pending is None
@@ -215,9 +226,14 @@ async def test_forget_me_phrase_from_old_request_does_not_delete(tmp_path):
         assert pending is None
 
 
-async def test_forget_me_group_message_clears_pending_without_deletion(tmp_path):
-    """A group message when a forget-me request is pending must clear the
-    pending intent without deleting data (issue #212)."""
+async def test_forget_me_group_message_cannot_confirm_pending(tmp_path):
+    """A shared-chat message while a forget-me request is pending is refused
+    before the runtime (#211): it can neither confirm the deletion nor
+    touch any data (issue #212)."""
+    import pytest
+
+    from agentg.messages import IncomingMessage
+
     async with ConversationHarness.create(tmp_path) as h:
         await h.linked_member()
         await h.seed_closed_session("bench 60 8,8,8")
@@ -233,17 +249,18 @@ async def test_forget_me_group_message_clears_pending_without_deletion(tmp_path)
         pending = await h.stores.forget.get_pending_request(member_id)
         assert pending is not None
 
-        # A group message must clear the pending request without deletion.
-        await h.say(
-            "hey group",
-            is_group=True,
-            steps=[message("Group training — what's everyone working on today?")],
-        )
+        # Even the exact phrase from a shared chat is refused outright.
+        with pytest.raises(RuntimeError, match="non-private"):
+            await h.runtime.handle_message(
+                IncomingMessage(
+                    channel=h.channel,
+                    channel_user_id=h.channel_user_id,
+                    text=phrase,
+                    is_private=False,
+                )
+            )
 
-        # Pending request is cancelled.
-        pending = await h.stores.forget.get_pending_request(member_id)
-        assert pending is None
-        # Data still intact.
+        # Nothing was confirmed and no data was deleted.
         assert await _count(h._engine, Member, id=member_id) == 1
         assert await h.stores.training.last_sets(member_id, "bench press") is not None
 

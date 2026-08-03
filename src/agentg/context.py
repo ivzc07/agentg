@@ -6,6 +6,7 @@ delegate to (coaching.py) — neither imports the other's internals through it.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -73,3 +74,7 @@ class MemberContext:
     # Per-turn cache so the active Routine is loaded once and reused
     # across the snapshot, session opener, and weight suggestions (#162).
     turn_cache: TurnCache = field(default_factory=TurnCache)
+    # Serializes mutating Session tools within one turn so concurrent tool
+    # calls from the same Agent run cannot race on session open/close/log
+    # (issue #213 — defense in depth behind the DB constraint).
+    _session_lock: asyncio.Lock = field(default_factory=asyncio.Lock)

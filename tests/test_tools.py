@@ -99,7 +99,7 @@ async def test_the_runtime_hands_tools_the_members_context(tmp_path, monkeypatch
     member = await stores.linking.link_member(gym.id, "Dani", "telegram", "42")
 
     await runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here", is_private=True)
     )
 
     context = seen["context"]

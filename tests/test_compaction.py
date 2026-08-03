@@ -224,7 +224,7 @@ async def test_handle_message_defers_compaction_until_after_the_reply(env, monke
     await env.session.add_items(over_budget_items(total))
 
     reply = await env.runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here", is_private=True)
     )
 
     # The Agent saw uncompacted history — compaction didn't block the reply.
@@ -293,7 +293,7 @@ async def test_failing_summarizer_in_handle_message_does_not_block_reply(env, mo
     env.runtime.summarizer = FailingSummarizer()
 
     reply = await env.runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here", is_private=True)
     )
 
     # The reply still arrived — compaction failure didn't block it.
@@ -502,7 +502,9 @@ async def test_compaction_in_after_send_serializes_with_next_turn(env, monkeypat
     # then calls maybe_compact which blocks on the gate.
     first_task = asyncio.create_task(
         env.runtime.handle_message(
-            IncomingMessage(channel="telegram", channel_user_id="42", text="first")
+            IncomingMessage(
+                channel="telegram", channel_user_id="42", text="first", is_private=True
+            )
         )
     )
     # Wait until compaction is definitely inside the lock.
@@ -512,7 +514,7 @@ async def test_compaction_in_after_send_serializes_with_next_turn(env, monkeypat
     # per-identity lock that the first turn still holds (during compaction).
     second_task = asyncio.create_task(
         env.runtime.handle_message(
-            IncomingMessage(channel="telegram", channel_user_id="42", text="second")
+            IncomingMessage(channel="telegram", channel_user_id="42", text="second", is_private=True)
         )
     )
     # Let the second task reach the lock-acquisition point.
@@ -559,7 +561,7 @@ async def test_compaction_completes_before_next_turn_even_when_after_send_is_del
     # First turn: compaction runs inline in _blocking_reply after
     # Runner.run, before the reply is returned.
     reply1 = await env.runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="first")
+        IncomingMessage(channel="telegram", channel_user_id="42", text="first", is_private=True)
     )
     assert reply1.after_send is not None
 
@@ -569,7 +571,7 @@ async def test_compaction_completes_before_next_turn_even_when_after_send_is_del
     # Second turn arrives while after_send hasn't run yet.
     second_task = asyncio.create_task(
         env.runtime.handle_message(
-            IncomingMessage(channel="telegram", channel_user_id="42", text="second")
+            IncomingMessage(channel="telegram", channel_user_id="42", text="second", is_private=True)
         )
     )
     # Delay then call after_send to set the compaction_done signal.
@@ -662,7 +664,7 @@ async def test_a_channel_that_never_runs_after_send_does_not_wedge_the_member(
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
     env.runtime.compaction_grace_seconds = 0.05
 
-    msg = IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
+    msg = IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here", is_private=True)
     # First turn: the reply comes back with an after_send the channel drops.
     first = await env.runtime.handle_message(msg)
     assert first.after_send is not None
@@ -690,7 +692,7 @@ async def test_a_failing_after_send_does_not_wedge_the_member(env, monkeypatch):
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
 
-    msg = IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here")
+    msg = IncomingMessage(channel="telegram", channel_user_id="42", text="I'm here", is_private=True)
     first = await env.runtime.handle_message(msg)
 
     class Boom(Exception):
