@@ -120,6 +120,7 @@ class ConversationHarness:
             notifier=notifier,
             dashboard=dashboard,
             stream_replies=False,
+            fast_path_enabled=False,
         )
         await runtime.ensure_schema()
         harness = cls(
