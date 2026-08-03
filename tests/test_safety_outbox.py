@@ -3580,3 +3580,116 @@ async def test_eligibility_count_matches_coaches_in_gym(env):
     )
     assert len(jobs) == 1
     assert jobs[0].coach_member_id == env.coach2_id
+
+
+# ── P2 r11: mark_failed sets failed_at, not delivered_at ──────────────────
+
+
+async def test_mark_failed_sets_failed_at_not_delivered_at(env):
+    """mark_failed records the failure timestamp in failed_at and leaves
+    delivered_at NULL — no delivery occurred (P2 r11)."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Claim the job and mark it failed.
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 1
+    await env.outbox.mark_failed(jobs[0], "coach no longer reachable")
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, failure_reason, delivered_at, failed_at "
+                    "FROM safety_outbox_jobs WHERE id = :id"
+                ),
+                {"id": jobs[0].id},
+            )
+        ).first()
+    assert row.status == "failed"
+    assert row.failure_reason == "coach no longer reachable"
+    assert row.delivered_at is None, (
+        "delivered_at must be NULL — no delivery occurred"
+    )
+    assert row.failed_at is not None, (
+        "failed_at must record the failure timestamp"
+    )
+
+
+async def test_reset_for_retry_sets_neither_delivered_at_nor_failed_at(env):
+    """reset_for_retry resets a job to 'pending' for another attempt.
+    It must not set delivered_at (no delivery) or failed_at (not a
+    permanent failure) — the audit columns stay NULL (P2 r11)."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Claim the job and simulate a transient failure.
+    claimed = await env.outbox.claim_pending(limit=1)
+    assert len(claimed) == 1
+    await env.outbox.reset_for_retry(claimed[0], "notifier send failed")
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count, delivered_at, failed_at "
+                    "FROM safety_outbox_jobs WHERE id = :id"
+                ),
+                {"id": claimed[0].id},
+            )
+        ).first()
+    assert row.status == "pending"
+    assert row.retry_count == 1
+    assert row.delivered_at is None, (
+        "reset_for_retry must not set delivered_at — nothing was delivered"
+    )
+    assert row.failed_at is None, (
+        "reset_for_retry must not set failed_at — this is not a permanent failure"
+    )
+
+
+async def test_mark_delivered_still_sets_delivered_at(env):
+    """mark_delivered continues to set delivered_at — only mark_failed
+    was changed (P2 r11 regression check)."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 1
+    await env.outbox.mark_delivered(jobs[0])
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, delivered_at, failed_at "
+                    "FROM safety_outbox_jobs WHERE id = :id"
+                ),
+                {"id": jobs[0].id},
+            )
+        ).first()
+    assert row.status == "delivered"
+    assert row.delivered_at is not None, (
+        "mark_delivered must still set delivered_at"
+    )
+    assert row.failed_at is None, (
+        "mark_delivered must not set failed_at"
+    )

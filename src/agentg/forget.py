@@ -7,6 +7,9 @@ session. No grace period, no anonymized residue. Member-initiated only.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime
+
 from agents.extensions.memory import SQLAlchemySession
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -25,10 +28,17 @@ from agentg.models import (
 )
 
 
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+Clock = Callable[[], datetime]
+
+
 class ForgetStore:
-    def __init__(self, engine: AsyncEngine) -> None:
+    def __init__(self, engine: AsyncEngine, clock: Clock = _utcnow) -> None:
         self.engine = engine
         self._sessions = async_sessionmaker(engine)
+        self._clock = clock
 
     async def forget_member(self, member_id: int) -> None:
         """Hard-delete every trace of a Member. Idempotent: a second call on an
@@ -95,6 +105,7 @@ class ForgetStore:
                     status="failed",
                     failure_reason="member data deleted (forget-me)",
                     last_error="member data deleted (forget-me)",
+                    failed_at=self._clock(),
                 )
             )
             await db.execute(delete(MemberNote).where(MemberNote.member_id == member_id))
@@ -116,8 +127,20 @@ class ForgetStore:
                 .where(MemberNote.acknowledged_by_member_id == member_id)
                 .values(acknowledged_by_member_id=None)
             )
+            # Delete tokens owned by this Member (they logged in once).
             await db.execute(
                 delete(DashboardLoginToken).where(DashboardLoginToken.member_id == member_id)
+            )
+            # Also delete tokens whose next_path targets this Member —
+            # a delivered safety link mints a Coach-owned token with
+            # next_path=/members/{member_id}.  Forget-me must remove
+            # every durable reference to the forgotten Member, regardless
+            # of token owner, without deleting unrelated Coach tokens
+            # (P1 r11).
+            await db.execute(
+                delete(DashboardLoginToken).where(
+                    DashboardLoginToken.next_path == f"/members/{member_id}"
+                )
             )
             await db.execute(delete(MemberChannel).where(MemberChannel.member_id == member_id))
             await db.execute(delete(Member).where(Member.id == member_id))

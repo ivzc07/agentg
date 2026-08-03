@@ -233,6 +233,10 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text("ALTER TABLE safety_outbox_jobs ADD COLUMN next_retry_at TIMESTAMP")
         )
+    if "failed_at" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN failed_at TIMESTAMP")
+        )
     # P1 #1: tighten unique constraint from (gym_id, note_id, coach_member_id)
     # to (note_id, coach_member_id) — one job per Note/Coach regardless of
     # gym_id (the Note already owns the Gym scope; the gym_id column is

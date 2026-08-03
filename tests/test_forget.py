@@ -205,3 +205,127 @@ async def test_messaging_after_forget_dead_ends_in_linking(env):
     linked = await env.linking.identity_for("telegram", "42")
     reply = await linking.handle(msg, linked)
     assert reply == DEAD_END_INSTRUCTION
+
+
+# ── P1 r11: DashboardLoginToken residue after delivered outbox links ──────
+
+
+async def test_forget_removes_coach_owned_tokens_pointing_at_member(env):
+    """A delivered safety link creates a Coach-owned DashboardLoginToken
+    whose next_path=/members/{member_id}.  Forget-me on that Member must
+    remove every durable token/credential/reference whose next_path targets
+    the forgotten Member, regardless of token owner (P1 r11)."""
+    member = await populate(env, channel_user_id="42", name="Ana")
+    coach = await env.linking.link_member(env.gym_id, "Coach Sam", "telegram", "7")
+    await env.linking.set_coach(coach.id)
+    store = DashboardStore(env.engine)
+
+    # Simulate what a delivered safety link mints: a Coach-owned token
+    # with next_path pointing at the flagged Member.
+    await store.create_login_token(coach.id, env.gym_id, next_path=f"/members/{member.id}")
+
+    assert await count(env, DashboardLoginToken, member_id=coach.id) == 1
+
+    await env.forget.forget_member(member.id)
+
+    # The Coach token targeting the forgotten Member must be gone.
+    assert await count(
+        env, DashboardLoginToken,
+        member_id=coach.id, next_path=f"/members/{member.id}",
+    ) == 0
+
+
+async def test_forget_does_not_delete_unrelated_coach_tokens(env):
+    """A Coach may hold tokens with other next_path values (e.g. "/" for the
+    roster, or "/members/999" for a different Member).  Forget-me must NOT
+    delete those unrelated tokens — only tokens whose next_path targets
+    the forgotten Member are cleaned up (P1 r11)."""
+    member = await populate(env, channel_user_id="42", name="Ana")
+    coach = await env.linking.link_member(env.gym_id, "Coach Sam", "telegram", "7")
+    await env.linking.set_coach(coach.id)
+    store = DashboardStore(env.engine)
+
+    # A token targeting the Member-to-be-forgotten.
+    await store.create_login_token(coach.id, env.gym_id, next_path=f"/members/{member.id}")
+    # An unrelated token (roster entry).
+    await store.create_login_token(coach.id, env.gym_id, next_path="/")
+    # A token targeting a different Member entirely.
+    await store.create_login_token(coach.id, env.gym_id, next_path="/members/999")
+
+    assert await count(env, DashboardLoginToken, member_id=coach.id) == 3
+
+    await env.forget.forget_member(member.id)
+
+    # The targeted token is gone.
+    assert await count(
+        env, DashboardLoginToken,
+        member_id=coach.id, next_path=f"/members/{member.id}",
+    ) == 0
+    # Unrelated tokens survive.
+    assert await count(
+        env, DashboardLoginToken, member_id=coach.id, next_path="/",
+    ) == 1
+    assert await count(
+        env, DashboardLoginToken, member_id=coach.id, next_path="/members/999",
+    ) == 1
+
+
+async def test_delivered_outbox_link_residue_cleaned_by_forget(env):
+    """End-to-end: deliver a safety outbox job (minting a Coach-owned token
+    targeting the flagged Member), then forget the Member.  No token
+    residue pointing at the forgotten Member survives (P1 r11)."""
+    from agentg.safety_outbox import SafetyOutbox, OutboxWorker
+
+    member = await env.linking.link_member(env.gym_id, "Ana", "telegram", "42")
+    coach = await env.linking.link_member(env.gym_id, "Coach Sam", "telegram", "7")
+    await env.linking.set_coach(coach.id)
+
+    coaches = [(coach.id, "Coach Sam", "telegram", "7")]
+    outbox = SafetyOutbox(env.engine)
+
+    # Create a safety note + outbox job.
+    note, jobs = await outbox.create_note_and_jobs(
+        member_id=member.id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name="Ana",
+        member_is_coach=False,
+        coaches=coaches,
+    )
+    assert len(jobs) == 1
+
+    # Deliver the job — this mints a Coach-owned DashboardLoginToken
+    # with next_path=/members/{member.id}.
+    class FakeNotifier:
+        sent: list = []
+
+        async def send(self, channel, channel_user_id, text, **kw):
+            self.sent.append((channel, channel_user_id, text))
+
+    notifier = FakeNotifier()
+    dashboard = DashboardStore(env.engine)
+    worker = OutboxWorker(
+        outbox=outbox,
+        notifier=notifier,
+        dashboard_store=dashboard,
+        dashboard_base_url="https://dash.example.com",
+        linking_store=env.linking,
+    )
+    await worker.drain_once(limit=50)
+
+    # A Coach-owned token pointing at the Member now exists.
+    assert await count(
+        env, DashboardLoginToken,
+        member_id=coach.id, next_path=f"/members/{member.id}",
+    ) == 1
+
+    # Forget the Member.
+    await env.forget.forget_member(member.id)
+
+    # The Coach-owned token targeting the forgotten Member must be gone.
+    assert await count(
+        env, DashboardLoginToken,
+        member_id=coach.id, next_path=f"/members/{member.id}",
+    ) == 0
+    # The Coach still exists (only their token is gone).
+    assert await count(env, Member, id=coach.id) == 1

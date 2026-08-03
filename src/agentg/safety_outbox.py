@@ -249,7 +249,10 @@ class SafetyOutbox:
             await db.commit()
 
     async def mark_failed(self, job: SafetyOutboxJob, reason: str) -> None:
-        """Mark a single job as permanently failed — only if still ``sending``."""
+        """Mark a single job as permanently failed — only if still ``sending``.
+
+        ``delivered_at`` stays ``None`` — no delivery occurred.
+        ``failed_at`` records the failure timestamp for audit."""
         async with self._sessions() as db:
             await db.execute(
                 update(SafetyOutboxJob)
@@ -261,7 +264,7 @@ class SafetyOutbox:
                     status="failed",
                     failure_reason=reason[:400],
                     last_error=reason[:400],
-                    delivered_at=self._clock(),
+                    failed_at=self._clock(),
                 )
             )
             await db.commit()

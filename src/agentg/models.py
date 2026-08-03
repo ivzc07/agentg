@@ -372,6 +372,7 @@ class SafetyOutboxJob(Base):
     last_error: Mapped[str | None] = mapped_column(String(400), default=None)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     delivered_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    failed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     failure_reason: Mapped[str | None] = mapped_column(String(400), default=None)
 
 
