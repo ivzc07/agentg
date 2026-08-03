@@ -252,9 +252,10 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text("CREATE INDEX ix_member_channels_gym_id ON member_channels (gym_id)")
         )
-    # Safety-outbox columns (issue #216): transient failures are retried
-    # before a job is permanently failed; claimed_at enables lease detection;
-    # last_error captures the most recent transient failure reason.
+    # Safety-outbox columns (issue #216): transient failures are retried on a
+    # bounded schedule before a job is retired; claimed_at enables lease
+    # detection; last_error captures the most recent transient failure reason
+    # (sanitized since #217).
     outbox_columns = {c["name"] for c in inspect(conn).get_columns("safety_outbox_jobs")}
     if "retry_count" not in outbox_columns:
         conn.execute(
@@ -275,6 +276,20 @@ def _add_missing_columns(conn: Connection) -> None:
     if "failed_at" not in outbox_columns:
         conn.execute(
             text("ALTER TABLE safety_outbox_jobs ADD COLUMN failed_at TIMESTAMP")
+        )
+    # Retry hardening (issue #217): failure_kind classifies a terminal
+    # failure so operators can query *why* jobs died; login_token_hash
+    # bounds the dashboard credentials retries can mint by remembering the
+    # one outstanding token per job so the next attempt revokes it first.
+    if "failure_kind" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN failure_kind VARCHAR(32)")
+        )
+    if "login_token_hash" not in outbox_columns:
+        conn.execute(
+            text(
+                "ALTER TABLE safety_outbox_jobs ADD COLUMN login_token_hash VARCHAR(64)"
+            )
         )
     # P1 #1: tighten unique constraint from (gym_id, note_id, coach_member_id)
     # to (note_id, coach_member_id) — one job per Note/Coach regardless of

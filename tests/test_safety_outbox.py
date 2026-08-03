@@ -2,6 +2,9 @@
 channel resolution, and atomic claiming (issue #216)."""
 
 import asyncio
+import json
+import logging
+import random
 import time
 from datetime import datetime, timedelta, UTC
 
@@ -13,12 +16,29 @@ from agentg.dashboard_store import DashboardStore
 from agentg.linking_store import LinkingStore
 from agentg.notes import NotesStore
 from agentg.models import SafetyOutboxJob
+from agentg.dashboard_store import hash_token
 from agentg.safety_outbox import (
     BASE_BACKOFF_SECONDS,
     MAX_BACKOFF_SECONDS,
+    MAX_DELIVERY_ATTEMPTS,
+    FailureKind,
     OutboxWorker,
     SafetyOutbox,
+    sanitize_error,
 )
+
+
+def _parse_dt(value):
+    """Normalise a datetime read back through a raw ``text()`` query.
+
+    TZDateTime stores UTC-aware datetimes, which SQLite hands back as naive
+    ISO strings when the query bypasses the ORM type.
+    """
+    if isinstance(value, str):
+        return datetime.fromisoformat(value).replace(tzinfo=UTC)
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -576,9 +596,10 @@ async def test_notifier_failure_retries_not_immediately_fails(env):
     assert not any(uid == "7" for _ch, uid, _t, _dp, _pc in failing_notifier.sent)
 
 
-async def test_notifier_failure_always_retries_never_permanently_fails(env, monkeypatch):
-    """Transient failures never permanently fail a job — the backoff
-    is bounded but jobs remain retryable indefinitely (P1 #4)."""
+async def test_transient_failures_retry_until_the_terminal_policy(env, monkeypatch):
+    """Transient failures are retried — but only up to the named terminal
+    policy, after which the job is retired as failed and stops consuming
+    background attempts (issue #217, superseding #216's retry-forever)."""
     # Skip asyncio.sleep so backoff doesn't slow the test.
     import agentg.safety_outbox as outbox_module
 
@@ -606,12 +627,13 @@ async def test_notifier_failure_always_retries_never_permanently_fails(env, monk
     )
 
     # Each drain_once increments retry_count and resets to pending.
-    # The job is never permanently failed.
     # Mutable clock so claim_pending always sees next_retry_at in the past.
     clock_val = [datetime.now(UTC)]
     env.outbox._clock = lambda: clock_val[0]
 
-    for attempt in range(1, 6):  # go well past the old MAX_RETRIES=3
+    # Every attempt before the last one reschedules rather than failing —
+    # a single transient blip must never retire a safety ping.
+    for attempt in range(1, MAX_DELIVERY_ATTEMPTS):
         # Keep clock ahead of next_retry_at so claim_pending gates pass.
         clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
         await worker.drain_once(limit=50)
@@ -630,28 +652,46 @@ async def test_notifier_failure_always_retries_never_permanently_fails(env, monk
             f"attempt {attempt}: expected pending, got {row.status}"
         )
         assert row.retry_count == attempt
-        assert row.failure_reason is None  # never permanently failed
+        assert row.failure_reason is None  # not retired yet
         # next_retry_at should be set for backoff gating.
         assert row.next_retry_at is not None
 
-    # After many retries the backoff should be capped at MAX_BACKOFF_SECONDS.
-    # retry_count keeps growing for audit, but the delay is bounded.
-    for _ in range(10):
-        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
-        await worker.drain_once(limit=50)
+    # The MAX_DELIVERY_ATTEMPTS'th failure trips the terminal policy.
+    clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
+    await worker.drain_once(limit=50)
     async with env.engine.connect() as conn:
         row = (
             await conn.execute(
                 text(
-                    "SELECT status, retry_count, failure_reason FROM safety_outbox_jobs "
+                    "SELECT status, retry_count, failure_kind, failure_reason, "
+                    "failed_at FROM safety_outbox_jobs "
                     "WHERE coach_member_id = :cid"
                 ),
                 {"cid": env.coach1_id},
             )
         ).first()
-    assert row.status == "pending"  # still retryable
-    assert row.retry_count >= 10
-    assert row.failure_reason is None  # never permanently failed
+    assert row.status == "failed"
+    assert row.retry_count == MAX_DELIVERY_ATTEMPTS
+    assert row.failure_kind == FailureKind.RETRY_EXHAUSTED
+    assert "terminal" in row.failure_reason
+    assert row.failed_at is not None
+
+    # And it stays retired: further poll cycles must not re-claim it.
+    for _ in range(3):
+        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
+        assert await worker.drain_once(limit=50) == 0
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.status == "failed"
+    assert row.retry_count == MAX_DELIVERY_ATTEMPTS
 
 
 async def test_deleted_note_marks_job_failed(env):
@@ -885,8 +925,11 @@ async def test_last_error_cleared_after_successful_retry(env):
 async def test_retry_includes_backoff_delay(env, monkeypatch):
     """Backoff is enforced by next_retry_at (set in reset_for_retry,
     checked by claim_pending), not a sleep.  Verifies the next_retry_at
-    formula: retry_count * BASE_BACKOFF_SECONDS, capped at
-    MAX_BACKOFF_SECONDS (P2 r6)."""
+    formula: BASE_BACKOFF_SECONDS * 2**(attempt-1), capped at
+    MAX_BACKOFF_SECONDS (P2 r6, exponential since issue #217).
+
+    Jitter is pinned to its midpoint (rng() == 0.5) so the schedule is
+    exact; the spread itself is covered by test_backoff_jitter_*."""
     failing_notifier = FakeNotifier(failing_id="7")
     await env.outbox.create_note_and_jobs(
         member_id=env.member_id,
@@ -908,93 +951,154 @@ async def test_retry_includes_backoff_delay(env, monkeypatch):
     # Mutable clock: fixed so we can observe next_retry_at values.
     clock_val = [datetime.now(UTC)]
     env.outbox._clock = lambda: clock_val[0]
+    # Pin jitter to its midpoint so the delay is exactly the exponential.
+    env.outbox._rng = lambda: 0.5
 
-    # Helper: parse ISO string from SQLite text() query (TZDateTime
-    # stores UTC-aware datetimes as ISO strings in SQLite).
-    def _next_retry(row):
-        val = row.next_retry_at
-        if isinstance(val, str):
-            return datetime.fromisoformat(val).replace(tzinfo=UTC)
-        return val
+    # The exponential schedule, capped: 5, 10, 20, 40, 80, 160, 300 — the
+    # 8th failure is terminal, so only MAX_DELIVERY_ATTEMPTS-1 are scheduled.
+    for attempt in range(1, MAX_DELIVERY_ATTEMPTS):
+        await worker.drain_once(limit=50)
+        async with env.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT retry_count, next_retry_at FROM safety_outbox_jobs "
+                        "WHERE coach_member_id = :cid"
+                    ),
+                    {"cid": env.coach1_id},
+                )
+            ).first()
+        assert row.retry_count == attempt
+        assert row.next_retry_at is not None
+        nra = _parse_dt(row.next_retry_at)
+        delay = min(BASE_BACKOFF_SECONDS * 2 ** (attempt - 1), MAX_BACKOFF_SECONDS)
+        expected = clock_val[0] + timedelta(seconds=delay)
+        assert abs((nra - expected).total_seconds()) < 0.1, (
+            f"attempt {attempt}: expected a {delay}s backoff"
+        )
+        # Advance clock past next_retry_at so claim_pending can re-claim.
+        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
 
-    # First attempt: retry_count=0 → no backoff, claim_pending claims it.
+
+async def test_backoff_is_exponential_not_linear(env):
+    """The delay doubles per attempt until it hits the cap (issue #217 AC #1).
+    A linear schedule would give 5, 10, 15 — this pins 5, 10, 20."""
+    env.outbox._rng = lambda: 0.5  # no jitter
+    delays = [env.outbox.backoff_delay(n) for n in range(1, 9)]
+    assert delays == [5, 10, 20, 40, 80, 160, 300, 300]
+
+
+async def test_backoff_carries_bounded_jitter(env):
+    """Jitter spreads the delay by ±BACKOFF_JITTER_RATIO and never escapes
+    [MIN_BACKOFF_SECONDS, MAX_BACKOFF_SECONDS] (issue #217 AC #1)."""
+    from agentg.safety_outbox import BACKOFF_JITTER_RATIO, MIN_BACKOFF_SECONDS
+
+    # Deterministic extremes of the jitter source.
+    env.outbox._rng = lambda: 0.0  # lower edge
+    assert env.outbox.backoff_delay(3) == pytest.approx(20 * (1 - BACKOFF_JITTER_RATIO))
+    env.outbox._rng = lambda: 1.0  # upper edge (rng is [0, 1) in reality)
+    assert env.outbox.backoff_delay(3) == pytest.approx(20 * (1 + BACKOFF_JITTER_RATIO))
+
+    # The cap is hard: jitter cannot push a capped delay past it.
+    env.outbox._rng = lambda: 1.0
+    assert env.outbox.backoff_delay(20) == MAX_BACKOFF_SECONDS
+    # And the floor is hard: jitter never schedules a retry for "now".
+    env.outbox._rng = lambda: 0.0
+    assert env.outbox.backoff_delay(1) >= MIN_BACKOFF_SECONDS
+
+    # Over the real random source the spread is genuine (not a constant)
+    # and stays inside the band.
+    env.outbox._rng = random.Random(1234).random
+    samples = [env.outbox.backoff_delay(3) for _ in range(50)]
+    assert len(set(samples)) > 1, "jitter must actually vary the delay"
+    assert all(
+        20 * (1 - BACKOFF_JITTER_RATIO) <= s <= 20 * (1 + BACKOFF_JITTER_RATIO)
+        for s in samples
+    )
+
+
+async def test_backoff_survives_restart(env):
+    """next_retry_at is durable, so a process restart does not reset the
+    backoff and let a failing job retry immediately (issue #217 AC #2)."""
+    failing_notifier = FakeNotifier(failing_id="7")
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+    env.outbox._rng = lambda: 0.5
+
+    worker = _make_worker(env, notifier=failing_notifier)
     await worker.drain_once(limit=50)
+
     async with env.engine.connect() as conn:
         row = (
             await conn.execute(
                 text(
-                    "SELECT retry_count, next_retry_at FROM safety_outbox_jobs "
-                    "WHERE coach_member_id = :cid"
-                ),
-                {"cid": env.coach1_id},
+                    "SELECT retry_count, next_retry_at, last_error "
+                    "FROM safety_outbox_jobs"
+                )
             )
         ).first()
     assert row.retry_count == 1
-    assert row.next_retry_at is not None
-    nra = _next_retry(row)
-    expected = clock_val[0] + timedelta(seconds=BASE_BACKOFF_SECONDS * 1)
-    assert abs((nra - expected).total_seconds()) < 0.1
+    assert row.last_error == "notifier send failed"
+    scheduled = _parse_dt(row.next_retry_at)
 
-    # Advance clock past next_retry_at so claim_pending can re-claim.
-    clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
+    # "Restart": a brand-new outbox + worker over the same database, as the
+    # runtime does on boot (reset_claimed then poll).
+    restarted = SafetyOutbox(env.engine, clock=lambda: clock_val[0])
+    restarted._rng = lambda: 0.5
+    await restarted.reset_claimed()
+    fresh_worker = OutboxWorker(
+        outbox=restarted,
+        notifier=env.notifier,  # would succeed if it ever got claimed
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
 
-    # Second attempt: retry_count goes to 2.
-    await worker.drain_once(limit=50)
+    # Still inside the backoff window: the restart must not claim it.
+    clock_val[0] = scheduled - timedelta(seconds=1)
+    assert await fresh_worker.drain_once(limit=50) == 0
+    assert env.notifier.sent == []
+
+    # The durable attempt metadata survived the restart untouched.
     async with env.engine.connect() as conn:
         row = (
             await conn.execute(
                 text(
-                    "SELECT retry_count, next_retry_at FROM safety_outbox_jobs "
-                    "WHERE coach_member_id = :cid"
-                ),
-                {"cid": env.coach1_id},
+                    "SELECT status, retry_count, last_error, next_retry_at "
+                    "FROM safety_outbox_jobs"
+                )
             )
         ).first()
-    assert row.retry_count == 2
-    nra = _next_retry(row)
-    expected = clock_val[0] + timedelta(seconds=BASE_BACKOFF_SECONDS * 2)
-    assert abs((nra - expected).total_seconds()) < 0.1
+    assert row.status == "pending"
+    assert row.retry_count == 1
+    assert row.last_error == "notifier send failed"
+    assert abs((_parse_dt(row.next_retry_at) - scheduled).total_seconds()) < 0.1
 
-    # Advance clock.
-    clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
-
-    # Third attempt: retry_count goes to 3.
-    await worker.drain_once(limit=50)
+    # Past the window, the restarted worker delivers — success after retry.
+    clock_val[0] = scheduled + timedelta(seconds=1)
+    assert await fresh_worker.drain_once(limit=50) == 1
     async with env.engine.connect() as conn:
         row = (
             await conn.execute(
                 text(
-                    "SELECT retry_count, next_retry_at FROM safety_outbox_jobs "
-                    "WHERE coach_member_id = :cid"
-                ),
-                {"cid": env.coach1_id},
+                    "SELECT status, retry_count, last_error, failure_kind "
+                    "FROM safety_outbox_jobs"
+                )
             )
         ).first()
-    assert row.retry_count == 3
-    nra = _next_retry(row)
-    expected = clock_val[0] + timedelta(seconds=BASE_BACKOFF_SECONDS * 3)
-    assert abs((nra - expected).total_seconds()) < 0.1
-
-    # Run enough attempts that the backoff reaches and stays at the cap.
-    for _ in range(60):
-        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
-        await worker.drain_once(limit=50)
-    async with env.engine.connect() as conn:
-        row = (
-            await conn.execute(
-                text(
-                    "SELECT retry_count, next_retry_at FROM safety_outbox_jobs "
-                    "WHERE coach_member_id = :cid"
-                ),
-                {"cid": env.coach1_id},
-            )
-        ).first()
-    # next_retry_at should be capped at clock + MAX_BACKOFF_SECONDS.
-    nra = _next_retry(row)
-    expected = clock_val[0] + timedelta(seconds=MAX_BACKOFF_SECONDS)
-    assert abs((nra - expected).total_seconds()) < 0.1
-    # retry_count keeps growing for audit even though delay is capped.
-    assert row.retry_count >= 60
+    assert row.status == "delivered"
+    assert row.retry_count == 1  # preserved for audit
+    assert row.last_error is None
+    assert row.failure_kind is None
 
 
 # ── transient error recovery (P1 #1) ──────────────────────────────────────
@@ -2891,9 +2995,11 @@ async def test_no_double_delay_on_retry_through_restart(env):
         coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
     )
 
-    # Freeze the clock so we control exactly when next_retry_at passes.
+    # Freeze the clock so we control exactly when next_retry_at passes,
+    # and pin the jitter to its midpoint so the delay is exactly the base.
     clock_val = [datetime.now(UTC)]
     env.outbox._clock = lambda: clock_val[0]
+    env.outbox._rng = lambda: 0.5
 
     # 1. Claim and fail.
     jobs = await env.outbox.claim_pending(limit=50)
@@ -3832,3 +3938,476 @@ async def test_start_background_tasks_wires_recovery_and_shutdown_drains(env):
     await runtime2.start_background_tasks()
     assert runtime2._outbox_worker is None
     await runtime2.shutdown()
+
+
+# ── issue #217: terminal policy is queryable ──────────────────────────────
+
+
+async def test_failed_jobs_query_surfaces_terminal_failures(env):
+    """Terminal failures stay queryable by cause, so an operator can ask
+    "which safety pings died, and why" (issue #217 AC #4)."""
+    failing_notifier = FakeNotifier(failing_id="7")
+    note, _jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+    env.outbox._rng = lambda: 0.5
+
+    worker = _make_worker(env, notifier=failing_notifier)
+    for _ in range(MAX_DELIVERY_ATTEMPTS):
+        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
+        await worker.drain_once(limit=50)
+
+    # Coach 8 delivered on the first pass; Coach 7 exhausted its attempts.
+    failed = await env.outbox.failed_jobs()
+    assert [j.coach_member_id for j in failed] == [env.coach1_id]
+    assert failed[0].failure_kind == FailureKind.RETRY_EXHAUSTED
+    assert failed[0].note_id == note.id
+    assert failed[0].retry_count == MAX_DELIVERY_ATTEMPTS
+    assert failed[0].failed_at is not None
+    assert failed[0].delivered_at is None
+
+    # Narrowing by kind and gym works; a mismatched filter returns nothing.
+    assert len(await env.outbox.failed_jobs(kind=FailureKind.RETRY_EXHAUSTED)) == 1
+    assert await env.outbox.failed_jobs(kind=FailureKind.NOTE_DELETED) == []
+    assert len(await env.outbox.failed_jobs(gym_id=env.gym_id)) == 1
+    assert await env.outbox.failed_jobs(gym_id=env.gym_id + 999) == []
+
+
+async def test_terminal_state_survives_restart(env):
+    """A retired job stays retired across a restart — reset_claimed must
+    not resurrect it (issue #217 AC #2)."""
+    failing_notifier = FakeNotifier(failing_id="7")
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+    env.outbox._rng = lambda: 0.5
+    worker = _make_worker(env, notifier=failing_notifier)
+    for _ in range(MAX_DELIVERY_ATTEMPTS):
+        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
+        await worker.drain_once(limit=50)
+
+    restarted = SafetyOutbox(env.engine, clock=lambda: clock_val[0])
+    assert await restarted.reset_claimed() == 0
+    clock_val[0] += timedelta(days=7)
+    assert await restarted.claim_pending(limit=50) == []
+
+    failed = await restarted.failed_jobs()
+    assert len(failed) == 1
+    assert failed[0].status == "failed"
+    assert failed[0].failure_kind == FailureKind.RETRY_EXHAUSTED
+    assert failed[0].retry_count == MAX_DELIVERY_ATTEMPTS
+
+
+async def test_unauthorized_failure_carries_its_own_kind(env):
+    """"Coach is gone" is classified distinctly from "retry exhausted", so
+    the terminal policy never hides a permissions problem."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+    # Demote the coach: authorization fails at delivery time.
+    await env.linking.set_coach(env.coach1_id, False)
+    await _make_worker(env).drain_once(limit=50)
+
+    failed = await env.outbox.failed_jobs()
+    assert len(failed) == 1
+    assert failed[0].failure_kind == FailureKind.UNAUTHORIZED
+    assert failed[0].retry_count == 0  # not an attempt-count failure
+    assert await env.outbox.failed_jobs(kind=FailureKind.RETRY_EXHAUSTED) == []
+
+
+async def test_deleted_note_failure_carries_note_deleted_kind(env):
+    """A forget-me that removes the Note before delivery retires the job as
+    note_deleted, not as an authorization or retry failure."""
+    note, _jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="dizzy after sets",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+    # Delete only the note row, leaving the job (the cascade is exercised
+    # elsewhere); this is the "note gone, job still queued" window.
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text("PRAGMA foreign_keys=OFF")
+        )
+        await conn.execute(
+            text("DELETE FROM member_notes WHERE id = :id"), {"id": note.id}
+        )
+
+    await _make_worker(env).drain_once(limit=50)
+
+    failed = await env.outbox.failed_jobs(kind=FailureKind.NOTE_DELETED)
+    assert len(failed) == 1
+    assert failed[0].delivered_at is None
+    assert env.notifier.sent == [], "nothing may be sent for a deleted Note"
+
+
+# ── issue #217: sanitized structured telemetry ────────────────────────────
+
+
+def test_sanitize_error_redacts_credentials():
+    """Bearer tokens, provider keys, magic links and key=value secrets are
+    redacted before anything is stored or logged (issue #217 AC #4)."""
+    cases = [
+        (
+            "401 from provider: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9abcdef",
+            "eyJhbGciOiJIUzI1NiJ9abcdef",
+        ),
+        (
+            "GET https://dash.example.com/login/kR8sV1nQe7wZ failed",
+            "kR8sV1nQe7wZ",
+        ),
+        (
+            "telegram rejected bot 123456789:AAHrandomlookingsecretvalue012345",
+            "AAHrandomlookingsecretvalue012345",
+        ),
+        (
+            'response {"api_key": "sk-abcdefghijklmnopqrstuvwx"}',
+            "sk-abcdefghijklmnopqrstuvwx",
+        ),
+        (
+            "connect failed token=aVeryLongOpaqueSessionTokenValue123456",
+            "aVeryLongOpaqueSessionTokenValue123456",
+        ),
+    ]
+    for raw, secret in cases:
+        cleaned = sanitize_error(raw)
+        assert secret not in cleaned, f"{secret!r} survived sanitisation of {raw!r}"
+        assert "[redacted]" in cleaned
+
+    # Ordinary error codes pass through untouched, collapsed and bounded.
+    assert sanitize_error("notifier send failed") == "notifier send failed"
+    assert sanitize_error("a\n  b") == "a b"
+    assert len(sanitize_error("notifier failed " * 500)) == 200
+    assert sanitize_error(None) == ""
+    assert sanitize_error("") == ""
+
+
+async def test_failure_telemetry_is_structured_and_sanitized(env, caplog):
+    """A failed attempt emits a structured record carrying the ids and the
+    attempt schedule, and carrying neither the Member's Note text nor the
+    dashboard credential (issue #217 AC #4)."""
+    private = "sharp knee pain after heavy squats"
+
+    class LeakyNotifier:
+        """An adapter whose error text echoes the request body and a token —
+        exactly the shape that leaks secrets into logs."""
+
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, channel, channel_user_id, text_, **kw):
+            raise RuntimeError(
+                "POST /sendMessage?token=123456789:AAHsecretbottokenvalue0123456 "
+                f'body={{"text": "{text_}"}} -> 500'
+            )
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text=private,
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    worker = _make_worker(env, notifier=LeakyNotifier())
+    with caplog.at_level(logging.DEBUG, logger="agentg.safety_outbox"):
+        await worker.drain_once(limit=50)
+
+    records = [r for r in caplog.records if hasattr(r, "outbox")]
+    assert records, "a failed attempt must emit structured telemetry"
+    payload = records[-1].outbox
+    assert payload["event"] == "safety_outbox.delivery_failed"
+    assert payload["outcome"] == "retry"
+    assert payload["terminal"] is False
+    assert payload["attempt"] == 1
+    assert payload["max_attempts"] == MAX_DELIVERY_ATTEMPTS
+    assert payload["gym_id"] == env.gym_id
+    assert payload["coach_member_id"] == env.coach1_id
+    assert payload["channel"] == "telegram"
+    assert payload["next_retry_at"] is not None
+    # It must be serialisable — telemetry that cannot be shipped is useless.
+    json.dumps(payload, default=str)
+
+    # Nothing in the whole captured log stream carries the private Note text,
+    # the provider-side account id, or the bot token.
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert private not in blob
+    assert "knee pain" not in blob
+    assert "AAHsecretbottokenvalue0123456" not in blob
+
+    # Nor does the durable failure metadata.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT last_error, failure_reason FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert "knee pain" not in (row.last_error or "")
+    assert "knee pain" not in (row.failure_reason or "")
+    assert "AAHsecretbottokenvalue0123456" not in (row.last_error or "")
+
+
+async def test_terminal_telemetry_marks_itself_terminal(env):
+    """The last attempt's telemetry says terminal, not retry, and names the
+    failure kind (issue #217 AC #4)."""
+    emitted = []
+    handler = logging.Handler()
+    handler.emit = lambda record: (
+        emitted.append(record.outbox) if hasattr(record, "outbox") else None
+    )
+    logging.getLogger("agentg.safety_outbox").addHandler(handler)
+    try:
+        await env.outbox.create_note_and_jobs(
+            member_id=env.member_id,
+            gym_id=env.gym_id,
+            text="sharp knee pain",
+            member_name=env.member_name,
+            member_is_coach=False,
+            coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+        )
+        clock_val = [datetime.now(UTC)]
+        env.outbox._clock = lambda: clock_val[0]
+        env.outbox._rng = lambda: 0.5
+        worker = _make_worker(env, notifier=FakeNotifier(failing_id="7"))
+        for _ in range(MAX_DELIVERY_ATTEMPTS):
+            clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
+            await worker.drain_once(limit=50)
+    finally:
+        logging.getLogger("agentg.safety_outbox").removeHandler(handler)
+
+    assert len(emitted) == MAX_DELIVERY_ATTEMPTS
+    assert [p["outcome"] for p in emitted[:-1]] == ["retry"] * (
+        MAX_DELIVERY_ATTEMPTS - 1
+    )
+    last = emitted[-1]
+    assert last["outcome"] == "terminal"
+    assert last["terminal"] is True
+    assert last["failure_kind"] == FailureKind.RETRY_EXHAUSTED
+    assert last["attempt"] == MAX_DELIVERY_ATTEMPTS
+    assert last["next_retry_at"] is None
+
+
+# ── issue #217: bounded duplicate + credential control ────────────────────
+
+
+async def test_one_note_coach_pair_cannot_create_more_jobs(env):
+    """Retries reuse the one job row per (Note, Coach) — a retry loop never
+    fans out into extra jobs (issue #217 AC #5)."""
+    note, jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=_coaches(env),
+    )
+    assert len(jobs) == 2
+
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+    env.outbox._rng = lambda: 0.5
+    worker = _make_worker(env, notifier=FakeNotifier(failing_id="7"))
+    for _ in range(MAX_DELIVERY_ATTEMPTS + 3):
+        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
+        await worker.drain_once(limit=50)
+
+    async with env.engine.connect() as conn:
+        count = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) AS n FROM safety_outbox_jobs "
+                    "WHERE note_id = :nid"
+                ),
+                {"nid": note.id},
+            )
+        ).first()
+    assert count.n == 2, "retries must not create additional jobs"
+
+    # And the DB refuses a second job for the same (Note, Coach) outright.
+    from sqlalchemy.exc import IntegrityError
+
+    with pytest.raises(IntegrityError):
+        async with env.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO safety_outbox_jobs "
+                    "(gym_id, note_id, coach_member_id, channel, "
+                    "channel_user_id, member_id, member_name, member_is_coach, "
+                    "status, retry_count, created_at) VALUES "
+                    "(:g, :n, :c, 'telegram', '7', :m, 'Ana', 0, 'pending', 0, :ts)"
+                ),
+                {
+                    "g": env.gym_id,
+                    "n": note.id,
+                    "c": env.coach1_id,
+                    "m": env.member_id,
+                    "ts": datetime.now(UTC),
+                },
+            )
+
+
+async def test_retries_do_not_mint_unbounded_dashboard_credentials(env):
+    """A crash-looping job holds at most one *live* dashboard credential,
+    however many times it is retried (issue #217 AC #5).
+
+    Before #217 every attempt minted a fresh DashboardLoginToken up front
+    and left it redeemable for the full 10-minute TTL.
+    """
+
+    async def live_token_count():
+        async with env.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT COUNT(*) AS n FROM dashboard_login_tokens "
+                        "WHERE used_at IS NULL"
+                    )
+                )
+            ).first()
+        return row.n
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+    env.outbox._rng = lambda: 0.5
+    env.dashboard._clock = lambda: clock_val[0]
+
+    class CrashOnLink:
+        """Heads-up lands, then the link send explodes — the shape that
+        leaves a freshly-minted credential outstanding."""
+
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, channel, channel_user_id, text_, **kw):
+            if "/login/" in text_:
+                raise RuntimeError("link send exploded")
+            self.sent.append(text_)
+
+    worker = _make_worker(env, notifier=CrashOnLink())
+
+    for _ in range(4):
+        await worker.drain_once(limit=50)
+        # Simulate a crash before the outcome was recorded: startup recovery
+        # puts the job straight back to pending, as reset_claimed does.
+        async with env.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE safety_outbox_jobs SET status='pending', "
+                    "claimed_at=NULL, next_retry_at=NULL"
+                )
+            )
+        assert await live_token_count() <= 1, (
+            "a retry must revoke the credential the previous attempt left live"
+        )
+
+    # Several tokens were minted over the loop, but only the newest is live.
+    async with env.engine.connect() as conn:
+        total = (
+            await conn.execute(
+                text("SELECT COUNT(*) AS n FROM dashboard_login_tokens")
+            )
+        ).first()
+    assert total.n >= 4, "the loop really did re-attempt delivery"
+    assert await live_token_count() == 1
+
+
+async def test_no_credential_is_minted_before_authorization(env):
+    """A job whose Coach is no longer authorized never mints a dashboard
+    credential at all (issue #217 AC #5) — the mint now happens after the
+    authorized heads-up send, not before it."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+    await env.linking.set_coach(env.coach1_id, False)  # demoted
+
+    await _make_worker(env).drain_once(limit=50)
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT COUNT(*) AS n FROM dashboard_login_tokens")
+            )
+        ).first()
+    assert row.n == 0, "an unauthorized job must not mint a credential"
+    failed = await env.outbox.failed_jobs()
+    assert failed and failed[0].failure_kind == FailureKind.UNAUTHORIZED
+
+
+async def test_delivered_link_stays_redeemable(env):
+    """The credential bound must not break the feature: the link that
+    actually reached the Coach is still redeemable after delivery."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+    await _make_worker(env).drain_once(limit=50)
+
+    links = [m[2] for m in env.notifier.sent if "/login/" in m[2]]
+    assert len(links) == 1
+    raw = links[0].rsplit("/login/", 1)[1]
+    assert await env.dashboard.peek_login_token(raw) is not None
+
+    # The job records that credential so a later attempt could revoke it.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT login_token_hash, status FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"
+    assert row.login_token_hash == hash_token(raw)
+
+
+async def test_revoke_login_token_is_idempotent(env):
+    """revoke_login_token spends a live token once and is a no-op after
+    that — the retry path can call it freely."""
+    raw = await env.dashboard.create_login_token(env.coach1_id, env.gym_id)
+    assert await env.dashboard.peek_login_token(raw) is not None
+    assert await env.dashboard.revoke_login_token(hash_token(raw)) is True
+    assert await env.dashboard.peek_login_token(raw) is None
+    assert await env.dashboard.revoke_login_token(hash_token(raw)) is False
+    assert await env.dashboard.revoke_login_token("") is False
+    assert await env.dashboard.revoke_login_token("not-a-real-hash") is False

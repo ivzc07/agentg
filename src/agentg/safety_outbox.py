@@ -1,9 +1,36 @@
-"""Durable outbox for safety-flag coach notifications (issue #216).
+"""Durable outbox for safety-flag coach notifications (issues #216, #217).
 
 Safety Notes commit with one outbox job per eligible Coach in the same
 transaction.  A background worker sends pending jobs without delaying the
 Member's reply, recovers on startup, mints authenticated dashboard links at
 delivery time, and falls back to text-only when minting fails.
+
+Delivery guarantee: **at-least-once with bounded duplicate risk — not
+exactly-once.**  A Coach can see the same heads-up twice.  The windows are
+named, not hand-waved:
+
+* A job is claimed (``pending`` → ``sending``) *before* the network send and
+  only marked ``delivered`` *after* it returns.  A crash, a lease expiry
+  (``reset_stale_claims``), or a restart (``reset_claimed``) in between
+  re-queues a job whose message may already have landed.
+* A send that times out (``SEND_TIMEOUT_SECONDS``) is retried even though the
+  provider may have delivered it.
+* The ``claimed_at`` lease stamp fences a *stale* owner out of
+  ``mark_delivered``/``mark_failed``/``reset_for_retry``, so a re-claimed job
+  has exactly one owner that can record an outcome — but it cannot un-send a
+  message the stale owner already put on the wire.
+
+What *is* bounded:
+
+* One job per (Note, Coach) forever — ``uq_outbox_job_note_coach``.
+* At most ``MAX_DELIVERY_ATTEMPTS`` attempts per job, after which the
+  terminal policy retires it as ``failed`` with
+  ``failure_kind="retry_exhausted"``.
+* At most **one live dashboard credential per job**: every mint first revokes
+  the token the previous attempt left outstanding (``login_token_hash``), so
+  a crash-loop cannot accumulate valid magic links for their 10-minute TTL.
+
+See ``docs/spec-dashboard.md`` §Safety flags for the product-level wording.
 
 Global lock order across all paths that acquire multiple row locks:
   Gym → Member → MemberChannel → SafetyOutboxJob → MemberNote
@@ -28,7 +55,10 @@ MemberChannel.  All consistent — no circular wait.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import random
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -36,6 +66,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agentg.dashboard_store import hash_token
 from agentg.models import Gym, Member, MemberChannel, MemberNote, SafetyOutboxJob
 
 if TYPE_CHECKING:
@@ -47,16 +78,28 @@ MAX_NOTE_LENGTH = 400
 # reset to pending by the next poll cycle (stale-claim recovery).
 LEASE_TIMEOUT_SECONDS = 60
 
-# Backoff: each retry waits retry_count * BASE_BACKOFF seconds before
-# the next attempt (linear backoff), capped at MAX_BACKOFF_SECONDS.
-# Jobs are never permanently failed solely from retry count (P1 #4).
+# Backoff (issue #217): attempt *n* waits BASE_BACKOFF * 2**(n-1) seconds,
+# capped at MAX_BACKOFF_SECONDS, then spread by ±BACKOFF_JITTER_RATIO so a
+# provider outage that failed a whole batch at once does not retry the whole
+# batch at once either (thundering herd).
 BASE_BACKOFF_SECONDS = 5
 MAX_BACKOFF_SECONDS = 300  # 5-minute cap on retry delay
+BACKOFF_JITTER_RATIO = 0.25  # ±25% around the exponential delay
+MIN_BACKOFF_SECONDS = 1  # jitter never schedules a retry sooner than this
+
+# Terminal policy (issue #217): a job that has failed this many times stops
+# retrying and is retired as ``failed`` with failure_kind RETRY_EXHAUSTED.
+# Retrying forever turns one dead channel into an unbounded background load
+# and hides the failure from operators; with the exponential schedule above
+# the eight attempts span ~10 minutes before the job is surfaced instead.
+MAX_DELIVERY_ATTEMPTS = 8
+
 # Bounded send: a notifier.send that hangs longer than this is cancelled
 # so a hung channel adapter never blocks gather or strands other jobs.
 SEND_TIMEOUT_SECONDS = 15
 
 Clock = Callable[[], datetime]
+Random = Callable[[], float]  # returns a float in [0, 1)
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +107,132 @@ _POLL_INTERVAL = 10  # seconds between pending-job sweeps
 _STARTUP_BATCH = 50  # max jobs to drain in one batch
 
 
+class FailureKind:
+    """Machine-readable classes of a terminal outbox failure (issue #217).
+
+    Stored on ``SafetyOutboxJob.failure_kind`` so failed jobs stay queryable
+    by *why* they died rather than by prose that may be reworded later.
+    """
+
+    #: The terminal policy retired the job after MAX_DELIVERY_ATTEMPTS.
+    RETRY_EXHAUSTED = "retry_exhausted"
+    #: The Coach is no longer reachable in this Gym (demoted, gym switch).
+    UNAUTHORIZED = "unauthorized"
+    #: The safety Note is gone (forget-me) — nothing left to deliver.
+    NOTE_DELETED = "note_deleted"
+    #: Retired by a caller that did not classify the cause.
+    UNSPECIFIED = "unspecified"
+
+
+TERMINAL_FAILURE_KINDS = frozenset(
+    {
+        FailureKind.RETRY_EXHAUSTED,
+        FailureKind.UNAUTHORIZED,
+        FailureKind.NOTE_DELETED,
+        FailureKind.UNSPECIFIED,
+    }
+)
+
+# Sanitisation (issue #217): failure strings and telemetry are operator-facing
+# and land in logs, so credentials must never survive into them.  These are a
+# backstop — the delivery path only ever records fixed error codes and
+# exception *type* names, never a Member's Note text or an exception message.
+MAX_ERROR_LENGTH = 200
+_REDACTED = "[redacted]"
+_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Authorization headers: "Bearer eyJ...", "Basic dXNlcjpwdw==".
+    (re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._\-~+/=]{8,}"), r"\1 " + _REDACTED),
+    # Our own magic links: https://dash/login/<raw token>.
+    (re.compile(r"(?i)(/login/)[A-Za-z0-9._\-~+/=]+"), r"\1" + _REDACTED),
+    # Telegram bot tokens: "123456789:AAH...".
+    (re.compile(r"\b\d{6,}:[A-Za-z0-9_\-]{20,}\b"), _REDACTED),
+    # Provider API keys with a conventional prefix.
+    (re.compile(r"(?i)\b(sk|pk|rk|api)[-_][A-Za-z0-9]{16,}\b"), _REDACTED),
+    # key=value / "key": "value" secrets in URLs, JSON, and repr() output.
+    (
+        re.compile(
+            r"(?i)\b(api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token"
+            r"|token|secret|password|passwd|pwd|signature|credential)\b"
+            r"\s*[=:]\s*[\"']?[^\s\"'&,;}]+"
+        ),
+        r"\1=" + _REDACTED,
+    ),
+    # Anything else long and high-entropy enough to be a credential.
+    (re.compile(r"\b[A-Za-z0-9_\-]{40,}\b"), _REDACTED),
+)
+
+
+def sanitize_error(reason: str | None, *, limit: int = MAX_ERROR_LENGTH) -> str:
+    """Return *reason* with credential-shaped substrings redacted, collapsed
+    to one line and truncated to *limit* characters.
+
+    Applied to everything the outbox durably records (``last_error``,
+    ``failure_reason``) and to every structured telemetry payload, so a
+    bearer token, a provider API key, or one of our own ``/login/<token>``
+    magic links can never reach the database or the log stream.
+
+    It does **not** try to detect a Member's private Note text — that is
+    guaranteed by construction instead: the delivery path records only fixed
+    error codes and exception type names, never message bodies.
+    """
+    if not reason:
+        return ""
+    cleaned = " ".join(str(reason).split())
+    for pattern, replacement in _SECRET_PATTERNS:
+        cleaned = pattern.sub(replacement, cleaned)
+    return cleaned[:limit]
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def delivery_telemetry(
+    job: SafetyOutboxJob,
+    *,
+    outcome: str,
+    error: str | None,
+    attempt: int,
+    failure_kind: str | None = None,
+    next_retry_at: datetime | None = None,
+) -> dict[str, object]:
+    """Build the structured, sanitized payload for a failed delivery.
+
+    Carries the identifiers an operator needs to find the job (ids, channel
+    name, attempt count, next attempt time, failure class) and deliberately
+    omits everything private or secret: the Note text, the heads-up message,
+    the magic link, the raw dashboard token, and the Coach's
+    ``channel_user_id`` (the provider-side account identifier).
+    """
+    return {
+        "event": "safety_outbox.delivery_failed",
+        "outcome": outcome,  # "retry" | "terminal"
+        "terminal": outcome == "terminal",
+        "job_id": job.id,
+        "gym_id": job.gym_id,
+        "note_id": job.note_id,
+        "coach_member_id": job.coach_member_id,
+        "channel": job.channel,
+        "attempt": attempt,
+        "max_attempts": MAX_DELIVERY_ATTEMPTS,
+        "failure_kind": failure_kind,
+        "error": sanitize_error(error),
+        "next_retry_at": _iso(next_retry_at),
+    }
+
+
+def _emit_telemetry(payload: dict[str, object]) -> None:
+    """Log one delivery-failure payload as both a readable line and a
+    machine-parseable record (``record.outbox``)."""
+    logger.warning(
+        "safety outbox delivery failed: %s",
+        json.dumps(payload, sort_keys=True, default=str),
+        extra={"outbox": payload},
+    )
 
 
 async def _coaches_for_gym_in_session(
@@ -123,12 +290,35 @@ async def _coaches_for_gym_in_session(
 class SafetyOutbox:
     """Create and manage outbox jobs for safety-flag coach notifications."""
 
-    def __init__(self, engine, clock: Clock = _utcnow) -> None:
+    def __init__(
+        self, engine, clock: Clock = _utcnow, rng: Random = random.random
+    ) -> None:
         from sqlalchemy.ext.asyncio import async_sessionmaker
 
         self._engine = engine
         self._sessions = async_sessionmaker(engine, expire_on_commit=False)
         self._clock = clock
+        # Injectable jitter source so backoff is deterministic in tests
+        # (rng() == 0.5 yields exactly the unjittered exponential delay).
+        self._rng = rng
+
+    def backoff_delay(self, attempt: int) -> float:
+        """Seconds to wait before *attempt* (1-based): an exponential
+        ``BASE_BACKOFF_SECONDS * 2**(attempt-1)`` capped at
+        ``MAX_BACKOFF_SECONDS``, then spread by ±``BACKOFF_JITTER_RATIO``.
+
+        The jittered result is clamped into
+        ``[MIN_BACKOFF_SECONDS, MAX_BACKOFF_SECONDS]``, so the cap is a hard
+        ceiling that jitter cannot push past and a retry is never scheduled
+        for the same instant it failed.
+        """
+        exponent = max(attempt - 1, 0)
+        # Cap the exponent too: 2**attempt overflows into absurd floats long
+        # before a real job gets there, and min() would hide it.
+        exponent = min(exponent, 32)
+        base = min(BASE_BACKOFF_SECONDS * (2**exponent), MAX_BACKOFF_SECONDS)
+        spread = base * BACKOFF_JITTER_RATIO * (2 * self._rng() - 1)
+        return max(MIN_BACKOFF_SECONDS, min(base + spread, MAX_BACKOFF_SECONDS))
 
     async def create_note_and_jobs(
         self,
@@ -260,48 +450,96 @@ class SafetyOutbox:
             )
             await db.commit()
 
-    async def mark_failed(self, job: SafetyOutboxJob, reason: str) -> None:
-        """Mark a single job as permanently failed — only if still ``sending``.
+    async def mark_failed(
+        self,
+        job: SafetyOutboxJob,
+        reason: str,
+        *,
+        kind: str = FailureKind.UNSPECIFIED,
+        retry_count: int | None = None,
+    ) -> None:
+        """Mark a single job as terminally failed — only if still ``sending``.
 
         ``delivered_at`` stays ``None`` — no delivery occurred.
-        ``failed_at`` records the failure timestamp for audit.
-        Guarded by the ``claimed_at`` lease stamp like ``mark_delivered``."""
+        ``failed_at`` records the failure timestamp for audit and
+        ``failure_kind`` records *which* terminal policy retired it, so
+        ``failed_jobs`` can query by cause (issue #217).
+        Guarded by the ``claimed_at`` lease stamp like ``mark_delivered``.
+
+        The reason is sanitized before it is stored: it lands in operator
+        logs and dashboards, so it must never carry a credential."""
+        safe = sanitize_error(reason)
+        attempt = retry_count if retry_count is not None else job.retry_count
+        values: dict[str, object] = {
+            "status": "failed",
+            "failure_reason": safe,
+            "failure_kind": kind,
+            "last_error": safe,
+            "failed_at": self._clock(),
+        }
+        if retry_count is not None:
+            values["retry_count"] = retry_count
         async with self._sessions() as db:
-            await db.execute(
+            result = await db.execute(
                 update(SafetyOutboxJob)
                 .where(
                     SafetyOutboxJob.id == job.id,
                     SafetyOutboxJob.status == "sending",
                     SafetyOutboxJob.claimed_at == job.claimed_at,
                 )
-                .values(
-                    status="failed",
-                    failure_reason=reason[:400],
-                    last_error=reason[:400],
-                    failed_at=self._clock(),
-                )
+                .values(**values)
             )
             await db.commit()
+        if result.rowcount:  # type: ignore[attr-defined]
+            _emit_telemetry(
+                delivery_telemetry(
+                    job,
+                    outcome="terminal",
+                    error=safe,
+                    attempt=attempt,
+                    failure_kind=kind,
+                )
+            )
 
-    async def reset_for_retry(self, job: SafetyOutboxJob, reason: str) -> None:
-        """Increment the retry counter and reset to ``pending`` so the poller
-        tries again.  Jobs are never permanently failed solely from retry
-        count — the backoff is bounded at *MAX_BACKOFF_SECONDS* so
-        persistently-failing jobs retry at that ceiling forever (P1 #4).
+    async def reset_for_retry(self, job: SafetyOutboxJob, reason: str) -> bool:
+        """Schedule the next attempt, or retire the job when the terminal
+        policy is reached.  Returns ``True`` when the job was rescheduled and
+        ``False`` when it was retired as ``failed``.
+
+        Attempts are counted durably in ``retry_count``.  Once it reaches
+        ``MAX_DELIVERY_ATTEMPTS`` the job stops retrying and is marked
+        ``failed`` with ``failure_kind="retry_exhausted"`` (issue #217) — the
+        named terminal policy that replaces #216's retry-forever behaviour,
+        which turned one dead channel into unbounded background load and left
+        the failure invisible.
+
+        Otherwise the job returns to ``pending`` with ``next_retry_at`` set
+        ``backoff_delay(attempt)`` seconds ahead — exponential, jittered, and
+        capped at ``MAX_BACKOFF_SECONDS``.
 
         Only acts when the job is still ``sending`` under OUR claim
         (``claimed_at`` lease stamp) — a delivery that completed between
         the attempt and this guard, or a claim reset-and-re-claimed by
         another owner, is not overwritten.
         ``claimed_at`` is cleared so the next claim can stamp a fresh lease.
-        ``last_error`` records the transient reason for diagnostics.
+        ``last_error`` records the sanitized transient reason for diagnostics.
         ``next_retry_at`` gates the next claim so the bounded backoff is
         honoured even across process restarts."""
         next_count = job.retry_count + 1
-        delay = min(next_count * BASE_BACKOFF_SECONDS, MAX_BACKOFF_SECONDS)
-        next_retry_at = self._clock() + timedelta(seconds=delay)
+        safe = sanitize_error(reason)
+        if next_count >= MAX_DELIVERY_ATTEMPTS:
+            await self.mark_failed(
+                job,
+                f"{safe} (terminal after {next_count} attempts)",
+                kind=FailureKind.RETRY_EXHAUSTED,
+                retry_count=next_count,
+            )
+            return False
+        next_retry_at = self._clock() + timedelta(
+            seconds=self.backoff_delay(next_count)
+        )
         async with self._sessions() as db:
-            await db.execute(
+            result = await db.execute(
                 update(SafetyOutboxJob)
                 .where(
                     SafetyOutboxJob.id == job.id,
@@ -311,12 +549,89 @@ class SafetyOutbox:
                 .values(
                     status="pending",
                     retry_count=next_count,
-                    last_error=reason[:400],
+                    last_error=safe,
                     claimed_at=None,
                     next_retry_at=next_retry_at,
                 )
             )
             await db.commit()
+        if result.rowcount:  # type: ignore[attr-defined]
+            _emit_telemetry(
+                delivery_telemetry(
+                    job,
+                    outcome="retry",
+                    error=safe,
+                    attempt=next_count,
+                    next_retry_at=next_retry_at,
+                )
+            )
+        return True
+
+    async def failed_jobs(
+        self,
+        *,
+        gym_id: int | None = None,
+        kind: str | None = None,
+        limit: int = 100,
+    ) -> list[SafetyOutboxJob]:
+        """Terminally-failed jobs, newest failure first — the queryable
+        surface behind the terminal policy (issue #217).
+
+        Optionally narrowed to one Gym and/or one ``FailureKind`` so an
+        operator can ask "which safety pings died, and why" without reading
+        prose out of ``failure_reason``.
+        """
+        stmt = select(SafetyOutboxJob).where(SafetyOutboxJob.status == "failed")
+        if gym_id is not None:
+            stmt = stmt.where(SafetyOutboxJob.gym_id == gym_id)
+        if kind is not None:
+            stmt = stmt.where(SafetyOutboxJob.failure_kind == kind)
+        stmt = stmt.order_by(SafetyOutboxJob.failed_at.desc()).limit(limit)
+        async with self._sessions() as db:
+            return list((await db.scalars(stmt)).all())
+
+    async def record_login_token(self, job_id: int, token_hash: str) -> None:
+        """Remember the dashboard credential this job currently has
+        outstanding, so the next attempt can revoke it before minting
+        another (issue #217).
+
+        Written by job id rather than under the lease guard on purpose: a
+        token that exists but is not recorded could never be revoked, which
+        is exactly the leak this column closes.
+        """
+        async with self._sessions() as db:
+            await db.execute(
+                update(SafetyOutboxJob)
+                .where(SafetyOutboxJob.id == job_id)
+                .values(login_token_hash=token_hash)
+            )
+            await db.commit()
+
+    async def take_login_token_hash(self, job_id: int) -> str | None:
+        """Read and clear this job's outstanding dashboard-credential hash.
+
+        Returns ``None`` when the job holds none.  The read and the clear are
+        two statements; a lost race can only revoke the same hash twice,
+        which the revoke itself makes idempotent.
+        """
+        async with self._sessions() as db:
+            current = await db.scalar(
+                select(SafetyOutboxJob.login_token_hash).where(
+                    SafetyOutboxJob.id == job_id
+                )
+            )
+            if current is None:
+                return None
+            await db.execute(
+                update(SafetyOutboxJob)
+                .where(
+                    SafetyOutboxJob.id == job_id,
+                    SafetyOutboxJob.login_token_hash == current,
+                )
+                .values(login_token_hash=None)
+            )
+            await db.commit()
+            return current
 
     async def reset_claimed(self) -> int:
         """Reset every ``sending`` job back to ``pending``.
@@ -441,8 +756,11 @@ class OutboxWorker:
                 if stale:
                     logger.info("reset %d stale outbox claims", stale)
                 await self.drain_once(limit=10)
-            except Exception:
-                logger.exception("outbox poll cycle failed")
+            except Exception as exc:
+                # Class only — a SQLAlchemy error renders the statement and
+                # its bound parameters, which on this path can include a
+                # Member's Note text (issue #217 sanitization).
+                logger.error("outbox poll cycle failed: %s", type(exc).__name__)
             try:
                 await asyncio.sleep(_POLL_INTERVAL)
             except asyncio.CancelledError:
@@ -463,8 +781,14 @@ class OutboxWorker:
         deleted by forget-me between claim and delivery the job is failed
         instead of sending retained text (P1 #1).
 
-        Transient failures are always retried with bounded backoff — jobs
-        are never permanently failed solely from attempt count (P1 #4).
+        Transient failures are retried with bounded exponential, jittered
+        backoff until ``MAX_DELIVERY_ATTEMPTS``, at which point the terminal
+        policy retires the job as ``failed`` (issue #217).
+
+        The dashboard credential is minted only **after** the heads-up send
+        has re-checked authorization, and every mint first revokes the token
+        the previous attempt left outstanding — so retries cannot accumulate
+        live magic links (issue #217, deferred P3 from PR #224).
 
         Each notifier.send is wrapped in asyncio.wait_for so a hung
         channel adapter never blocks gather or strands other jobs (P2).
@@ -479,8 +803,8 @@ class OutboxWorker:
             # fail immediately without sending anything.
             note_text = await self._note_text(job.note_id)
             if note_text is None:
-                return await self._outbox.mark_failed(
-                    job, "safety note no longer exists"
+                return await self._fail(
+                    job, "safety note no longer exists", FailureKind.NOTE_DELETED,
                 )
 
             # Verify the job still exists (cascade-delete from forget-me
@@ -489,21 +813,6 @@ class OutboxWorker:
                 return
 
             text = f"Heads-up from your member {job.member_name}: {note_text}"
-
-            # Mint a dashboard link at delivery time.
-            link: str | None = None
-            if self._base_url is not None:
-                try:
-                    next_path = "/" if job.member_is_coach else f"/members/{job.member_id}"
-                    token = await self._dashboard.create_login_token(
-                        job.coach_member_id, job.gym_id, next_path=next_path,
-                    )
-                    link = f"{self._base_url}/login/{token}"
-                except Exception:
-                    logger.exception(
-                        "failed to mint dashboard link for coach %s",
-                        job.coach_member_id,
-                    )
 
             # Send heads-up with narrow row locking — the lock serializes
             # with set_coach and link_member so authorization is stable
@@ -519,19 +828,26 @@ class OutboxWorker:
                     )
 
             if headsup_failed == "coach no longer reachable in this gym":
-                return await self._outbox.mark_failed(
-                    job, "coach no longer reachable in this gym"
+                return await self._fail(
+                    job,
+                    "coach no longer reachable in this gym",
+                    FailureKind.UNAUTHORIZED,
                 )
             elif headsup_failed == "safety note no longer exists":
-                return await self._outbox.mark_failed(
-                    job, "safety note no longer exists"
+                return await self._fail(
+                    job, "safety note no longer exists", FailureKind.NOTE_DELETED,
                 )
             elif headsup_failed == "job_gone":
                 return
             elif headsup_failed in ("notifier send failed", "notifier send timed out"):
-                return await self._outbox.reset_for_retry(
-                    job, headsup_failed
-                )
+                await self._retry(job, headsup_failed)
+                return
+
+            # Mint the dashboard link only now: _authorized_send has just
+            # re-verified that this Coach is still a Coach of this Gym, so a
+            # job that can never be authorized never mints a credential, and
+            # a retry loop mints at most one live token at a time (#217).
+            link = await self._mint_link(job)
 
             if link is not None:
                 # Re-authorize with narrow locks for the link send too —
@@ -555,6 +871,10 @@ class OutboxWorker:
 
                 if link_failed == "unauthorized":
                     # Heads-up already landed; link can't be delivered.
+                    # The credential we minted a moment ago was never sent
+                    # and the Coach is no longer authorized — revoke it
+                    # rather than leave it live for its TTL (#217).
+                    await self._revoke_outstanding_token(job)
                     # Mark delivered anyway — the safety text arrived.
                     return await self._outbox.mark_delivered(job)
                 # link_failed == "job_gone" or "safety note no longer
@@ -562,20 +882,96 @@ class OutboxWorker:
                 # heads-up and link; bail without marking anything —
                 # forget-me already cleaned up.  (P1 #1 r6)
                 if link_failed in ("job_gone", "safety note no longer exists"):
+                    await self._revoke_outstanding_token(job)
                     return
                 # link_failed == "notifier": the heads-up already landed;
                 # a missing link is unfortunate but not worth marking the
-                # whole job failed.
+                # whole job failed.  The token is left alone deliberately:
+                # a timeout may still have delivered the link, and revoking
+                # a link the Coach can see would be worse than its TTL.
 
             await self._outbox.mark_delivered(job)
         except Exception as exc:
-            logger.exception("error delivering outbox job %s", job.id)
+            # Log the exception *class*, never its message: an adapter's
+            # error text can embed the request body (the Note) or the URL
+            # (the magic link).  The traceback is dropped for the same
+            # reason — the structured telemetry carries the diagnostics.
+            logger.error(
+                "error delivering outbox job %s: %s", job.id, type(exc).__name__,
+            )
             try:
-                await self._outbox.reset_for_retry(
-                    job, f"delivery error: {type(exc).__name__}"
+                await self._retry(job, f"delivery error: {type(exc).__name__}")
+            except Exception as inner:
+                logger.error(
+                    "failed to reset job %s for retry: %s",
+                    job.id,
+                    type(inner).__name__,
                 )
-            except Exception:
-                logger.exception("failed to reset job %s for retry", job.id)
+
+    # ── outcome helpers ────────────────────────────────────────────
+
+    async def _fail(self, job: SafetyOutboxJob, reason: str, kind: str) -> None:
+        """Terminally fail a job, revoking any credential it still holds."""
+        await self._revoke_outstanding_token(job)
+        await self._outbox.mark_failed(job, reason, kind=kind)
+
+    async def _retry(self, job: SafetyOutboxJob, reason: str) -> None:
+        """Schedule the next attempt; revoke the outstanding credential when
+        the terminal policy retires the job instead (issue #217)."""
+        rescheduled = await self._outbox.reset_for_retry(job, reason)
+        if not rescheduled:
+            await self._revoke_outstanding_token(job)
+
+    # ── dashboard credentials ─────────────────────────────────────
+
+    async def _revoke_outstanding_token(self, job: SafetyOutboxJob) -> bool:
+        """Retire the dashboard credential this job still has outstanding.
+
+        Returns True when a live token was revoked.  Idempotent, and never
+        raises: a revoke failure must not turn a recoverable delivery into a
+        crash, it just leaves the token to expire on its own TTL.
+        """
+        try:
+            token_hash = await self._outbox.take_login_token_hash(job.id)
+            if token_hash is None:
+                return False
+            return bool(await self._dashboard.revoke_login_token(token_hash))
+        except Exception as exc:
+            logger.error(
+                "failed to revoke dashboard credential for job %s: %s",
+                job.id,
+                type(exc).__name__,
+            )
+            return False
+
+    async def _mint_link(self, job: SafetyOutboxJob) -> str | None:
+        """Mint the Coach's authenticated deep link for this attempt.
+
+        Revokes the credential a previous attempt left outstanding first, so
+        one Note/Coach pair never has more than one live dashboard token
+        however many times delivery is retried (issue #217).  Returns None
+        when no dashboard is configured or minting fails — the heads-up is
+        text-only then, which is the pre-existing fallback.
+        """
+        if self._base_url is None:
+            return None
+        try:
+            await self._revoke_outstanding_token(job)
+            next_path = "/" if job.member_is_coach else f"/members/{job.member_id}"
+            token = await self._dashboard.create_login_token(
+                job.coach_member_id, job.gym_id, next_path=next_path,
+            )
+            # Record before returning: an unrecorded token could never be
+            # revoked, which is the leak this whole path closes.
+            await self._outbox.record_login_token(job.id, hash_token(token))
+            return f"{self._base_url}/login/{token}"
+        except Exception as exc:
+            logger.error(
+                "failed to mint dashboard link for job %s: %s",
+                job.id,
+                type(exc).__name__,
+            )
+            return None
 
     async def _authorized_send(
         self, job: SafetyOutboxJob, text: str, *,
@@ -701,14 +1097,24 @@ class OutboxWorker:
                     timeout=SEND_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
+                # Identify the Coach by internal id, not by the
+                # provider-side channel_user_id (issue #217 telemetry).
                 logger.error(
-                    "send timeout for coach %s", channel_user_id,
+                    "send timeout for outbox job %s (coach %s)",
+                    job.id,
+                    job.coach_member_id,
                 )
                 await conn.rollback()
                 return "notifier send timed out"
-            except Exception:
-                logger.exception(
-                    "failed to send to coach %s", channel_user_id,
+            except Exception as exc:
+                # Class only, never the message or traceback: an adapter's
+                # error text routinely echoes the request body (the Note)
+                # or the URL (the magic link).
+                logger.error(
+                    "failed to send outbox job %s (coach %s): %s",
+                    job.id,
+                    job.coach_member_id,
+                    type(exc).__name__,
                 )
                 await conn.rollback()
                 return "notifier send failed"

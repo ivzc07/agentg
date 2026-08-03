@@ -445,6 +445,15 @@ class SafetyOutboxJob(Base):
     delivered_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     failed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     failure_reason: Mapped[str | None] = mapped_column(String(400), default=None)
+    # Machine-readable class of a terminal failure (issue #217), so failed
+    # jobs stay queryable by *why* they died rather than by prose:
+    # see agentg.safety_outbox.FailureKind.  NULL while the job is still
+    # pending/sending/delivered.
+    failure_kind: Mapped[str | None] = mapped_column(String(32), default=None)
+    # Hash of the dashboard login token this job currently has outstanding
+    # (issue #217).  Retries revoke the previous one before minting a new
+    # one, so a Note/Coach pair never holds more than one live credential.
+    login_token_hash: Mapped[str | None] = mapped_column(String(64), default=None)
 
 
 class WorkoutExercise(Base):
