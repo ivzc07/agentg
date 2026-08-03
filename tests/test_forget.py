@@ -262,16 +262,52 @@ async def test_confirm_phrase_deletes_and_clears_request(env):
 
 
 async def test_second_request_replaces_first(env):
-    """A second request atomically replaces the first."""
+    """A second request does NOT replace an active pending row — it returns
+    the same stored phrase (issue #212, fix-r14 P2).
+
+    The first request wins; the second sees the existing row and returns its
+    phrase so every concurrent warning is confirmable."""
     member = await populate(env)
     now = datetime.now(UTC)
 
     phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
     phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
 
-    assert phrase1 != phrase2, "each request must produce a fresh random phrase"
+    assert phrase1 == phrase2, (
+        "second request must return the same stored phrase, not a new one"
+    )
     assert await _pending_count(env, member.id) == 1, "only one pending request"
-    # The stored phrase is the second one.
+    # The stored phrase is phrase1 (the first writer).
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending.confirmation_phrase == phrase1
+
+
+async def test_second_request_after_expiry_gets_fresh_phrase(env):
+    """After the pending row expires, a new request creates a fresh phrase
+    (issue #212, fix-r14 P2)."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # First request — short lifetime so it expires.
+    phrase1 = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, lifetime_seconds=1
+    )
+    assert phrase1.startswith("DELETE-ME-")
+    assert await _pending_count(env, member.id) == 1
+
+    # Wait past expiry.
+    import asyncio
+    await asyncio.sleep(1.5)
+
+    # Second request after expiry must get a NEW phrase.
+    phrase2 = await env.forget.request_forget_me(
+        member.id, env.gym_id, datetime.now(UTC), 300
+    )
+    assert phrase2.startswith("DELETE-ME-")
+    assert phrase2 != phrase1, (
+        "request after expiry must produce a fresh phrase"
+    )
+    assert await _pending_count(env, member.id) == 1
     pending = await env.forget.get_pending_request(member.id)
     assert pending.confirmation_phrase == phrase2
 
@@ -1040,15 +1076,15 @@ async def test_safety_net_deleting_check_before_identity(env):
 
 
 async def test_concurrent_initial_requests_no_integrity_error(env):
-    """P2 from fix-r4: two initial forget-me requests (no prior row for
-    this Member) must not collide on the unique member_id constraint.
-    The upsert in request_forget_me replaces the old delete-then-insert
-    so concurrent initial requests are race-safe."""
+    """P2 from fix-r4 + fix-r14: two initial forget-me requests (no prior
+    row for this Member) must not collide on the unique member_id constraint.
+    With ON CONFLICT DO NOTHING, the first writer wins and both callers
+    return the same stored phrase — no IntegrityError."""
     member = await populate(env)
     now = datetime.now(UTC)
 
-    # Two rapid initial requests — the second overwrites the first
-    # without ever seeing a delete-then-insert race window.
+    # Two rapid initial requests — the second is a no-op and returns
+    # the same stored phrase as the first (fix-r14 P2).
     phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
     phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
 
@@ -1056,12 +1092,17 @@ async def test_concurrent_initial_requests_no_integrity_error(env):
     assert phrase1.startswith("DELETE-ME-")
     assert phrase2.startswith("DELETE-ME-")
 
-    # Exactly one row exists (the second one won).
+    # Both return the SAME phrase — the first writer's persisted row.
+    assert phrase1 == phrase2, (
+        "second request must return the same stored phrase"
+    )
+
+    # Exactly one row exists.
     assert await _pending_count(env, member.id) == 1
     pending = await env.forget.get_pending_request(member.id)
     assert pending is not None
-    assert pending.confirmation_phrase == phrase2
-    assert pending.language == "es"  # second request's language
+    assert pending.confirmation_phrase == phrase1
+    assert pending.language == "en"  # first request's language wins
     assert pending.status == "pending"
 
 
@@ -1363,9 +1404,10 @@ async def test_concurrent_initial_requests_across_sessions_no_error(env):
 
 
 async def test_upsert_preserves_pending_for_second_write(env):
-    """P2 fix-r5: the upsert on a pending row preserves status as pending.
-    When process A created a pending request and process B's upsert lands,
-    the row must still be in pending state (not deleting)."""
+    """P2 fix-r5 + fix-r14: when a pending row already exists, a second
+    request does NOT overwrite it — the ON CONFLICT DO NOTHING preserves
+    the first writer's row.  Both callers return the same stored phrase
+    so every warning is confirmable (fix-r14 P2)."""
     member = await populate(env)
     now = datetime.now(UTC)
 
@@ -1376,14 +1418,16 @@ async def test_upsert_preserves_pending_for_second_write(env):
     assert pending1.status == "pending"
     assert pending1.language == "en"
 
-    # Second request (via upsert) overwrites pending → still pending.
+    # Second request — returns the same stored phrase, does NOT overwrite.
     phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
+    assert phrase2 == phrase1, (
+        "second request must return the same stored phrase"
+    )
     pending2 = await env.forget.get_pending_request(member.id)
     assert pending2 is not None
     assert pending2.status == "pending"
-    assert pending2.language == "es"
-    assert pending2.confirmation_phrase == phrase2
-    assert pending2.confirmation_phrase != phrase1
+    assert pending2.language == "en"  # first request's language preserved
+    assert pending2.confirmation_phrase == phrase1  # same stored phrase
 
 
 # -- P1: upsert WHERE guard prevents overwriting deleting rows (fix-r6) ---
@@ -3496,5 +3540,289 @@ async def test_loser_with_non_matching_message_sees_deleting_in_progress(env):
         member.id, phrase, now
     )
     assert retry is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+# -- Concurrent request_forget_me tests (fix-r14 P2) ---------------------
+
+
+async def test_concurrent_initial_requests_return_same_phrase(env):
+    """fix-r14 P2: two concurrent initial Forget-me requests must each
+    return the SAME stored phrase — not two different locally-generated
+    phrases.  Both callers must be able to confirm with the returned
+    phrase.
+
+    Uses asyncio.Event barriers for deterministic interleaving."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # Barriers: both tasks start simultaneously.
+    gate = asyncio.Event()
+    phrase_a: str | None = None
+    phrase_b: str | None = None
+
+    async def caller_a():
+        nonlocal phrase_a
+        await gate.wait()
+        phrase_a = await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "en"
+        )
+
+    async def caller_b():
+        nonlocal phrase_b
+        await gate.wait()
+        phrase_b = await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "en"
+        )
+
+    # Start both tasks; release them simultaneously.
+    task_a = asyncio.create_task(caller_a())
+    task_b = asyncio.create_task(caller_b())
+    gate.set()
+    await asyncio.gather(task_a, task_b)
+
+    # Both must return a valid phrase.
+    assert phrase_a is not None
+    assert phrase_a.startswith("DELETE-ME-")
+    assert phrase_b is not None
+    assert phrase_b.startswith("DELETE-ME-")
+
+    # Both must return the SAME phrase — the single persisted winner.
+    assert phrase_a == phrase_b, (
+        f"concurrent callers must return same stored phrase, "
+        f"got {phrase_a!r} vs {phrase_b!r}"
+    )
+
+    # Only one row exists.
+    assert await _pending_count(env, member.id) == 1
+
+    # The stored phrase matches what both callers received.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.confirmation_phrase == phrase_a
+
+    # Either caller can confirm with the phrase.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase_a, datetime.now(UTC)
+    )
+    assert claimed is not None, (
+        "confirmation with the stored phrase must succeed"
+    )
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_concurrent_request_one_interleaves_with_read(env):
+    """fix-r14 P2: caller A's INSERT wins while caller B is still in the
+    fast-path read.  Caller B's ON CONFLICT DO NOTHING is a no-op and it
+    re-reads the stored phrase — both return the same value.
+
+    Uses the _pre_upsert_hook barrier for deterministic interleaving."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # Barrier: caller A finishes its upsert while caller B is in the hook.
+    a_done = asyncio.Event()
+    b_can_proceed = asyncio.Event()
+
+    _original_hook = env.forget._pre_upsert_hook
+
+    async def _b_barrier():
+        """Caller B pauses after its fast-path read, before upsert."""
+        a_done.set()          # Signal: caller A, you may proceed
+        await b_can_proceed.wait()  # Wait for caller A to finish
+
+    env.forget._pre_upsert_hook = _b_barrier
+
+    phrase_b: str | None = None
+
+    async def caller_a():
+        await a_done.wait()  # Wait for caller B to enter barrier
+        return await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "en"
+        )
+
+    async def caller_b():
+        nonlocal phrase_b
+        phrase_b = await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "en"
+        )
+
+    # Start both; caller B enters the barrier, caller A waits.
+    task_a = asyncio.create_task(caller_a())
+    task_b = asyncio.create_task(caller_b())
+
+    # Wait for caller B to hit the barrier and signal.
+    await a_done.wait()
+
+    # Now caller A proceeds: it reads (no row), does the upsert (wins),
+    # and returns its local phrase.
+    # But first let caller A get past its fast-path read...
+    # Actually caller A races through the whole method now.
+    # Let's give it a moment to win the INSERT.
+    await asyncio.sleep(0.1)
+
+    # Release caller B.
+    b_can_proceed.set()
+
+    phrase_a = await task_a
+    await task_b
+
+    # Restore original hook.
+    env.forget._pre_upsert_hook = _original_hook
+
+    # Both must have valid phrases.
+    assert phrase_a is not None
+    assert phrase_a.startswith("DELETE-ME-")
+    assert phrase_b is not None
+    assert phrase_b.startswith("DELETE-ME-")
+
+    # Both must return the same stored phrase.
+    assert phrase_a == phrase_b, (
+        f"interleaved callers must return same phrase, "
+        f"got {phrase_a!r} (A) vs {phrase_b!r} (B)"
+    )
+
+    # Only one row.
+    assert await _pending_count(env, member.id) == 1
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending.confirmation_phrase == phrase_a
+
+    # Either phrase works for confirmation.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase_a, datetime.now(UTC)
+    )
+    assert claimed is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_concurrent_request_three_callers_same_phrase(env):
+    """fix-r14 P2: three concurrent initial requests all return the same
+    stored phrase — the first INSERT wins and the other two are no-ops.
+    All three callers can confirm with the returned phrase."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    gate = asyncio.Event()
+    phrases: list[str | None] = [None, None, None]
+
+    async def caller(idx: int):
+        await gate.wait()
+        phrases[idx] = await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "en"
+        )
+
+    # Start all three; release simultaneously.
+    tasks = [asyncio.create_task(caller(i)) for i in range(3)]
+    gate.set()
+    await asyncio.gather(*tasks)
+
+    # All three must return valid phrases.
+    for i in range(3):
+        assert phrases[i] is not None
+        assert phrases[i].startswith("DELETE-ME-"), (
+            f"caller {i} must return valid phrase, got {phrases[i]!r}"
+        )
+
+    # All three must return the SAME phrase.
+    assert phrases[0] == phrases[1] == phrases[2], (
+        f"three concurrent callers must return same phrase, "
+        f"got {phrases}"
+    )
+
+    # Only one row exists.
+    assert await _pending_count(env, member.id) == 1
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending.confirmation_phrase == phrases[0]
+
+    # Any caller can confirm.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrases[0], datetime.now(UTC)
+    )
+    assert claimed is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_concurrent_request_with_expired_row(env):
+    """fix-r14 P2: when an expired row exists, two concurrent requests
+    both delete the expired row, then one INSERT wins.  Both return the
+    same fresh phrase."""
+    import asyncio
+
+    member = await populate(env)
+    past = datetime.now(UTC) - timedelta(seconds=600)
+
+    # Seed an expired pending row directly.
+    async with async_sessionmaker(env.engine)() as db:
+        from agentg.models import ForgetMeRequest as FMR
+        db.add(
+            FMR(
+                member_id=member.id,
+                gym_id=env.gym_id,
+                confirmation_phrase="DELETE-ME-OLDEXP",
+                expires_at=past,
+                created_at=past,
+                language="en",
+                status=STATUS_PENDING,
+            )
+        )
+        await db.commit()
+
+    assert await _pending_count(env, member.id) == 1
+
+    gate = asyncio.Event()
+    phrase_a: str | None = None
+    phrase_b: str | None = None
+
+    async def caller_a():
+        nonlocal phrase_a
+        await gate.wait()
+        phrase_a = await env.forget.request_forget_me(
+            member.id, env.gym_id, datetime.now(UTC), 300, "en"
+        )
+
+    async def caller_b():
+        nonlocal phrase_b
+        await gate.wait()
+        phrase_b = await env.forget.request_forget_me(
+            member.id, env.gym_id, datetime.now(UTC), 300, "en"
+        )
+
+    # Start both; release simultaneously.
+    tasks = [asyncio.create_task(caller_a()), asyncio.create_task(caller_b())]
+    gate.set()
+    await asyncio.gather(*tasks)
+
+    # Both must return the same fresh phrase — NOT the old expired one.
+    assert phrase_a is not None
+    assert phrase_b is not None
+    assert phrase_a.startswith("DELETE-ME-")
+    assert phrase_a == phrase_b, (
+        f"concurrent requests on expired row must return same phrase, "
+        f"got {phrase_a!r} vs {phrase_b!r}"
+    )
+    assert phrase_a != "DELETE-ME-OLDEXP", (
+        "must not return the expired phrase"
+    )
+
+    # Only one row exists.
+    assert await _pending_count(env, member.id) == 1
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending.confirmation_phrase == phrase_a
+
+    # Can confirm.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase_a, datetime.now(UTC)
+    )
+    assert claimed is not None
     await env.forget.forget_member(member.id)
     assert await count(env, Member, id=member.id) == 0

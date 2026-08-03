@@ -169,10 +169,15 @@ class ForgetStore:
         """Persist an expiring confirmation and return the exact phrase the
         Member must send to complete deletion.
 
-        Uses a real database atomic upsert (INSERT … ON CONFLICT DO UPDATE)
-        so two concurrent initial requests across processes both succeed
-        without an IntegrityError on the unique member_id constraint
-        (issue #212, P2).
+        Atomically creates a row only when no active pending request exists
+        for this Member (INSERT … ON CONFLICT DO NOTHING).  When a pending
+        row already exists — including one concurrently created by another
+        runtime — the method returns the *stored* phrase from that single
+        persisted row, so every warning is confirmable even under concurrent
+        initial requests (issue #212, fix-r14 P2).
+
+        Expired pending rows are silently removed before the insert so a
+        re-request after expiry creates a fresh phrase.
 
         A row with status ``deleting`` (or legacy ``consumed`` — deletion
         already confirmed but not yet completed) is NEVER reset to ``pending``
@@ -189,7 +194,7 @@ class ForgetStore:
 
         # P1 fast-path read in its own transaction so a concurrent
         # runtime can interleave between this read and the upsert below
-        # (the upsert's WHERE clause is the real guard).
+        # (the upsert's ON CONFLICT DO NOTHING is the real guard).
         async with self._sessions() as db:
             existing = await db.scalar(
                 select(ForgetMeRequest).where(
@@ -210,11 +215,24 @@ class ForgetStore:
         if self._pre_upsert_hook is not None:
             await self._pre_upsert_hook()
 
-        # P2: Atomic upsert with a WHERE guard on the conflict action.
-        # If the row became deleting/consumed between the read above and
-        # this upsert, the WHERE clause prevents the overwrite — the
-        # DO UPDATE only fires on a still-pending row.
+        # P2: Atomically create only when absent or expired.
+        # 1. Silently remove any expired pending row so a re-request
+        #    after expiry gets a fresh phrase.
+        # 2. INSERT … ON CONFLICT DO NOTHING — the first caller wins;
+        #    subsequent callers leave the winning row untouched.
+        # 3. Always re-read and return the single persisted phrase so
+        #    every concurrent caller returns the same confirmable phrase.
         async with self._sessions() as db:
+            # Remove expired pending rows — a new request after expiry
+            # should create a fresh phrase, not resurrect the old one.
+            await db.execute(
+                delete(ForgetMeRequest).where(
+                    ForgetMeRequest.member_id == member_id,
+                    ForgetMeRequest.status == STATUS_PENDING,
+                    ForgetMeRequest.expires_at <= now,
+                )
+            )
+
             values = dict(
                 member_id=member_id,
                 gym_id=gym_id,
@@ -231,24 +249,13 @@ class ForgetStore:
                 from sqlalchemy.dialects.sqlite import insert as _dialect_insert
 
             stmt = _dialect_insert(ForgetMeRequest).values(**values)
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["member_id"],
-                set_=dict(
-                    gym_id=gym_id,
-                    confirmation_phrase=phrase,
-                    expires_at=expires_at,
-                    created_at=now,
-                    language=language,
-                    status=STATUS_PENDING,
-                ),
-                where=(ForgetMeRequest.status == STATUS_PENDING),
-            )
+            stmt = stmt.on_conflict_do_nothing(index_elements=["member_id"])
             await db.execute(stmt)
             await db.commit()
 
-        # P1 post-upsert re-check: if the row became deleting/consumed
-        # between our read and upsert, the WHERE clause prevented the
-        # overwrite.  Return the sentinel so the caller can recover.
+        # Post-upsert: always re-read the single persisted row so every
+        # caller — concurrent or sequential — returns the same winning
+        # phrase (issue #212, fix-r14 P2).
         async with self._sessions() as db:
             existing_after = await db.scalar(
                 select(ForgetMeRequest).where(
@@ -258,10 +265,24 @@ class ForgetStore:
             if existing_after is not None and existing_after.status not in (
                 STATUS_PENDING,
             ):
+                # Row became deleting/consumed between our operations
+                # (a concurrent claim won).  Return the sentinel so
+                # the caller can recover.
                 await db.commit()
                 return ""  # sentinel: deleting row exists
+
+            if existing_after is not None:
+                # Return the single persisted winning phrase — not our
+                # locally generated one — so every warning is confirmable.
+                stored_phrase: str = existing_after.confirmation_phrase
+                await db.commit()
+                return stored_phrase
+
             await db.commit()
 
+        # No row exists (our INSERT was a no-op and the expired-row
+        # delete left nothing).  Return our local phrase as a safe
+        # fallback; the caller will re-request on next turn.
         return phrase
 
     async def get_pending_request(
