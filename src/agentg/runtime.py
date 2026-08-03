@@ -35,6 +35,7 @@ from agentg.linking import Linking
 from agentg.linking_store import LinkedIdentity
 from agentg.context import MemberContext
 from agentg.instrument import TurnContext
+from agentg.safety_outbox import OutboxWorker
 from agentg.parsing import parse_set_line
 from agentg.snapshot import member_snapshot
 from agentg.stores import Stores
@@ -502,6 +503,9 @@ class AgentRuntime:
     # wedge that Member, so the wait is bounded and the entry is consumed on
     # read — ordering is a nicety, liveness is not negotiable.
     _compaction_done: dict[tuple[str, str], asyncio.Event] = field(default_factory=dict)
+    # Durable safety-outbox worker — started after ensure_schema, stopped on
+    # shutdown.  None when no dashboard is wired (tests, headless runs).
+    _outbox_worker: OutboxWorker | None = None
     # Per-Member lease tokens for this runtime so the pre-acquire cleanup
     # can release a lease leaked by a dropped after_send without weakening
     # the token-based fencing (fix-r21).  Keyed by member_id → owner_token.
@@ -513,6 +517,42 @@ class AgentRuntime:
         await self.stores.training.ensure_seeded()
         session = SQLAlchemySession("startup:schema", engine=self.engine, create_tables=True)
         await session.get_items(limit=1)  # table creation happens on first use
+
+    async def start_background_tasks(self) -> None:
+        """Start the outbox worker after ensure_schema has created its table.
+
+        Idempotent: safe to call when no notifier is wired (tests, headless
+        runs).  The dashboard is optional — without it, the worker sends
+        text-only notifications.
+        """
+        if self._outbox_worker is not None:
+            return  # already started
+        if self.notifier is None:
+            return  # nothing to wire
+        worker = OutboxWorker(
+            outbox=self.stores.safety_outbox,
+            notifier=self.notifier,
+            dashboard_store=self.stores.dashboard,
+            dashboard_base_url=self.dashboard.base_url if self.dashboard else None,
+            linking_store=self.stores.linking,
+        )
+        await worker.start()
+        self._outbox_worker = worker
+
+    async def shutdown(self) -> None:
+        """Stop background tasks.  Safe to call when none were started."""
+        if self._outbox_worker is not None:
+            # Stop the poll loop BEFORE the final drain: a live poll loop
+            # could reset_stale_claims a slow drain-claimed job (worst-case
+            # drain exceeds the lease timeout) and re-claim it, so the same
+            # job would be delivered twice.  With the loop stopped, the
+            # drain owns every claim it makes.
+            await self._outbox_worker.stop()
+            try:
+                await self._outbox_worker.drain_once()
+            except Exception:
+                logger.exception("final outbox drain failed")
+            self._outbox_worker = None
 
     def session_for_member(self, member_id: int) -> SQLAlchemySession:
         return SQLAlchemySession(f"member:{member_id}", engine=self.engine)

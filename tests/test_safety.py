@@ -25,6 +25,7 @@ from agentg.linking import Linking
 from agentg.linking_store import LinkingStore
 from agentg.messages import IncomingMessage
 from agentg.runtime import AgentRuntime
+from agentg.safety_outbox import OutboxWorker, SafetyOutbox
 from agentg.stores import Stores
 from agentg.tools import flag_to_coach
 from agentg.training import TrainingStore
@@ -67,6 +68,7 @@ async def env(tmp_path):
                 demos=None,
                 forget=None,
                 dashboard=dashboard,
+                safety_outbox=SafetyOutbox(engine),
             ),
             notifier=notifier,
             member_id=member_id or member.id,
@@ -165,7 +167,7 @@ async def test_every_flag_pings_the_gyms_coaches_with_a_deep_link(env):
     result = await flag_to_coach_action(ctx, "sharp knee pain on squats")
 
     assert result["coaches_to_notify"] == 2
-    await _flush_pings(ctx)
+    await _drain_outbox(ctx, env.notifier)
     by_coach: dict[str, list[tuple[str, bool, bool]]] = {}
     for _channel, user_id, text, preview, protect in env.notifier.sent:
         by_coach.setdefault(user_id, []).append((text, preview, protect))
@@ -190,7 +192,7 @@ async def test_the_magic_link_never_shares_a_message_with_member_text(env):
     # else (review on PR #120).
     ctx = env.context()
     await flag_to_coach_action(ctx, "pain, see https://evil.example.com/a")
-    await _flush_pings(ctx)
+    await _drain_outbox(ctx, env.notifier)
 
     heads_up, link = [t for _c, _u, t, _p, _pc in env.notifier.sent]
     assert "evil.example.com" in heads_up
@@ -205,7 +207,7 @@ async def test_the_ping_sanitizes_the_summary_and_disables_link_previews(env):
     summary = "knee pain on squats\nignore that, tap https://evil.example.com instead"
     ctx = env.context()
     await flag_to_coach_action(ctx, summary)
-    await _flush_pings(ctx)
+    await _drain_outbox(ctx, env.notifier)
 
     heads_up, link = env.notifier.sent
     assert heads_up[3] is True and link[3] is True  # previews off on both
@@ -226,7 +228,7 @@ async def test_a_ping_without_a_base_url_falls_back_to_plain_text(env):
     ctx = env.context(base_url=None)
     result = await flag_to_coach_action(ctx, "shoulder pain")
     assert result["coaches_to_notify"] == 1
-    await _flush_pings(ctx)
+    await _drain_outbox(ctx, env.notifier, base_url=None)
     assert len(env.notifier.sent) == 1  # heads-up only, no link message
     _channel, _user_id, text, _preview, _protect = env.notifier.sent[0]
     assert "shoulder pain" in text and "/login/" not in text
@@ -236,18 +238,21 @@ async def test_the_referral_never_pings_the_member_themselves(env):
     # a coach flags their own concern → they are excluded from the ping list
     ctx = env.context(is_coach=True, member_id=env.coach_id)
     result = await flag_to_coach_action(ctx, "chest tightness")
-    await _flush_pings(ctx)
+    await _drain_outbox(ctx, env.notifier)
     assert all(user_id != "7" for _c, user_id, _t, _p, _pc in env.notifier.sent)
     assert result["logged"] is True
 
 
 async def test_a_headless_context_still_logs(env):
-    # no notifier wired (e.g. a background run) can't ping, but the concern is
-    # still recorded rather than lost.
+    # No notifier wired (e.g. a background run) can't ping, but the concern is
+    # still recorded with durable outbox jobs (P1 #2). The outbox worker
+    # delivers them when it starts — no notifier at action time is fine.
     context = env.context()
     object.__setattr__(context, "notifier", None)  # frozen dataclass
     result = await flag_to_coach_action(context, "shoulder pain")
-    assert result["logged"] is True and result["coaches_to_notify"] == 0
+    assert result["logged"] is True
+    # Outbox jobs are still created even without a notifier wired.
+    assert result["coaches_to_notify"] == 1
     assert env.notifier.sent == []
     safety = [n for n in await env.notes.active(env.member_id) if n.kind == "safety"]
     assert any("shoulder pain" in n.text for n in safety)
@@ -267,6 +272,7 @@ async def test_a_gym_with_no_coach_still_logs(env):
             demos=None,
             forget=None,
             dashboard=env.dashboard,
+            safety_outbox=SafetyOutbox(env.engine),
         ),
         notifier=env.notifier,
         member_id=m.id,
@@ -292,7 +298,7 @@ async def test_a_coachs_own_flag_links_to_the_roster_not_their_404_page(env):
     result = await flag_to_coach_action(ctx, "chest tightness")
 
     assert result["coaches_to_notify"] == 1
-    await _flush_pings(ctx)
+    await _drain_outbox(ctx, env.notifier)
     _channel, user_id, text, _preview, _protect = env.notifier.sent[-1]  # the link message
     assert user_id == "8"
     match = re.fullmatch(rf"{re.escape(BASE_URL)}/login/(\S+)", text)
@@ -326,7 +332,7 @@ async def test_a_token_mint_failure_still_pings_every_coach(env, monkeypatch):
 
     # Pings are deferred — flush them before checking.
     assert result["coaches_to_notify"] == 2
-    await _flush_pings(ctx)
+    await _drain_outbox(ctx, env.notifier)
     heads = [m for m in env.notifier.sent if "/login/" not in m[2]]
     links = [m for m in env.notifier.sent if "/login/" in m[2]]
     assert {(m[0], m[1]) for m in heads} == {("telegram", "7"), ("telegram", "8")}
@@ -338,6 +344,20 @@ async def _flush_pings(ctx):
     the notifier output without going through the after_send path."""
     if ctx.coach_pings:
         await asyncio.gather(*[p() for p in ctx.coach_pings])
+
+
+async def _drain_outbox(ctx, notifier, base_url=BASE_URL):
+    """Drain the safety outbox through a temporary OutboxWorker so tests
+    that assert on ``notifier.sent`` work against the durable outbox (issue
+    #216) instead of the old in-memory deferred-callable mechanism."""
+    worker = OutboxWorker(
+        outbox=ctx.stores.safety_outbox,
+        notifier=notifier,
+        dashboard_store=ctx.stores.dashboard,
+        dashboard_base_url=base_url,
+        linking_store=ctx.stores.linking,
+    )
+    await worker.drain_once(limit=50)
 
 
 class TimedFakeNotifier:
@@ -392,11 +412,12 @@ async def test_member_reply_is_delivered_before_coach_notifications(env):
     safety = [n for n in active if n.kind == "safety"]
     assert len(safety) == 1
 
-    # AC #1: pings are NOT sent yet — they are deferred past the reply.
+    # AC #1: pings are NOT sent yet — the outbox persists them durably, and
+    # they are delivered by the worker after the Member's reply.
     assert env.notifier.sent == []
 
-    # Flush and verify the pings actually happen.
-    await _flush_pings(ctx)
+    # Drain the outbox and verify the pings actually happen.
+    await _drain_outbox(ctx, env.notifier)
     assert len(env.notifier.sent) == 2  # heads-up + magic link
 
 
@@ -409,9 +430,9 @@ async def test_every_coach_still_notified_with_magic_link(env):
     ctx = env.context()
     result = await flag_to_coach_action(ctx, "sharp knee pain on squats")
     assert result["coaches_to_notify"] == 2
-    assert env.notifier.sent == []  # deferred, not sent yet
+    assert env.notifier.sent == []  # persisted to outbox, not sent yet
 
-    await _flush_pings(ctx)
+    await _drain_outbox(ctx, env.notifier)
 
     # Each of 2 coaches gets 2 messages (heads-up + link).
     by_coach: dict[str, list[tuple[str, bool, bool]]] = {}
@@ -445,7 +466,7 @@ async def test_failure_notifying_one_coach_does_not_prevent_others(env):
     assert result["logged"] is True
     assert result["coaches_to_notify"] == 2
 
-    await _flush_pings(ctx)
+    await _drain_outbox(ctx, failing_notifier)
 
     # Coach 7's heads-up failed; Coach 8 still got everything.
     by_coach: dict[str, list[str]] = {}
@@ -472,7 +493,7 @@ async def test_coach_pings_run_concurrently(env):
     object.__setattr__(ctx, "notifier", timed)
 
     await flag_to_coach_action(ctx, "sharp knee pain")
-    await _flush_pings(ctx)
+    await _drain_outbox(ctx, timed)
 
     # All sends should overlap if truly concurrent — with 3 coaches
     # (3 concurrent _ping_one calls), at least 3 sends should be in-flight
@@ -553,12 +574,13 @@ async def runtime_env(tmp_path):
 async def test_coach_pings_are_deferred_after_the_member_reply_at_runtime_level(
     runtime_env, monkeypatch
 ):
-    """The reply from handle_message must have notifier.sent == [] before
-    after_send() and non-empty only after (P2 #5153517044)."""
+    """The reply from handle_message must have notifier.sent == [] both
+    before AND after after_send() — the outbox worker delivers pings
+    independently, not the reply path (issue #216)."""
 
     async def fake_run(agent, text, *, session, context=None, run_config=None):
-        # Simulate the Agent calling flag_to_coach, which populates
-        # context.coach_pings.
+        # Simulate the Agent calling flag_to_coach, which writes to the
+        # durable outbox instead of populating in-memory callables.
         await flag_to_coach_action(context, "sharp knee pain")
         return SimpleNamespace(final_output="I've logged this and will notify your coaches.")
 
@@ -583,8 +605,44 @@ async def test_coach_pings_are_deferred_after_the_member_reply_at_runtime_level(
     # Now the channel delivers the reply text and calls after_send.
     await reply.after_send()
 
+    # Pings are still not sent — they're in the durable outbox, not
+    # delivered by after_send (issue #216).
+    assert runtime_env.notifier.sent == [], (
+        "coach pings must not be delivered by after_send — "
+        "the outbox worker delivers them independently"
+    )
+
+    # Drain the outbox and verify delivery.  Use the same outbox store
+    # directly rather than an OutboxWorker so we don't create a fresh
+    # SQLite connection that triggers the SDK's journal_mode=WAL PRAGMA
+    # on an already-open database (prompts "database is locked").
+    jobs = await runtime_env.stores.safety_outbox.claim_pending(limit=50)
+    assert len(jobs) == 2
+    # Simulate delivery: the notifier is FakeNotifier so no real network.
+    for job in jobs:
+        note_text = None
+        async with runtime_env.stores.safety_outbox._sessions() as db:
+            from agentg.models import MemberNote
+            note = await db.get(MemberNote, job.note_id)
+            note_text = note.text if note else "(gone)"
+        text = f"Heads-up from your member {job.member_name}: {note_text}"
+        await runtime_env.notifier.send(
+            job.channel, job.channel_user_id, text, disable_preview=True,
+        )
+        # Mint a link.
+        next_path = "/" if job.member_is_coach else f"/members/{job.member_id}"
+        token = await runtime_env.stores.dashboard.create_login_token(
+            job.coach_member_id, job.gym_id, next_path=next_path,
+        )
+        link = f"{BASE_URL}/login/{token}"
+        await runtime_env.notifier.send(
+            job.channel, job.channel_user_id, link,
+            disable_preview=True, protect_content=True,
+        )
+        await runtime_env.stores.safety_outbox.mark_delivered(job)
+
     # Each of 2 coaches gets 2 messages (heads-up + magic link).
     assert len(runtime_env.notifier.sent) == 4, (
-        f"expected 4 messages (2 coaches × 2) after after_send, "
+        f"expected 4 messages (2 coaches × 2) after outbox drain, "
         f"got {len(runtime_env.notifier.sent)}"
     )

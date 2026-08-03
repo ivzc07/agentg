@@ -252,6 +252,72 @@ def _add_missing_columns(conn: Connection) -> None:
         conn.execute(
             text("CREATE INDEX ix_member_channels_gym_id ON member_channels (gym_id)")
         )
+    # Safety-outbox columns (issue #216): transient failures are retried
+    # before a job is permanently failed; claimed_at enables lease detection;
+    # last_error captures the most recent transient failure reason.
+    outbox_columns = {c["name"] for c in inspect(conn).get_columns("safety_outbox_jobs")}
+    if "retry_count" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0")
+        )
+    if "claimed_at" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN claimed_at TIMESTAMP")
+        )
+    if "last_error" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN last_error VARCHAR(400)")
+        )
+    if "next_retry_at" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN next_retry_at TIMESTAMP")
+        )
+    if "failed_at" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN failed_at TIMESTAMP")
+        )
+    # P1 #1: tighten unique constraint from (gym_id, note_id, coach_member_id)
+    # to (note_id, coach_member_id) — one job per Note/Coach regardless of
+    # gym_id (the Note already owns the Gym scope; the gym_id column is
+    # denormalised for convenience and must match the Note's gym_id).
+    #
+    # Use get_unique_constraints (not get_indexes) so the inspection works
+    # on PostgreSQL (where unique constraints are not regular indexes) and
+    # column_names are strings — iterate them directly (P1 #5 r5).
+    outbox_uniques = {
+        c["name"]: c
+        for c in inspect(conn).get_unique_constraints("safety_outbox_jobs")
+    }
+    if "uq_outbox_job_note_coach" in outbox_uniques:
+        existing_cols = list(
+            outbox_uniques["uq_outbox_job_note_coach"]["column_names"]
+        )
+        # Recreate if the old three-column form is still present.
+        if "gym_id" in existing_cols:
+            if conn.dialect.name == "postgresql":
+                conn.execute(
+                    text(
+                        "ALTER TABLE safety_outbox_jobs "
+                        "DROP CONSTRAINT uq_outbox_job_note_coach"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "ALTER TABLE safety_outbox_jobs "
+                        "ADD CONSTRAINT uq_outbox_job_note_coach "
+                        "UNIQUE (note_id, coach_member_id)"
+                    )
+                )
+            else:
+                conn.execute(
+                    text("DROP INDEX IF EXISTS uq_outbox_job_note_coach")
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX uq_outbox_job_note_coach "
+                        "ON safety_outbox_jobs (note_id, coach_member_id)"
+                    )
+                )
     # One open Session per Member, DB-enforced (issue #213).
     sessions_indexes = {i["name"] for i in inspect(conn).get_indexes("sessions")}
     if "uq_sessions_one_open_per_member" not in sessions_indexes:
@@ -359,6 +425,36 @@ async def _link_member_in_session(
             )
         )
     else:
+        # Gym switch: lock the affected Gym row FIRST, then the old
+        # Member, then the MemberChannel.  Global lock order is
+        #   Gym → Member → MemberChannel → SafetyOutboxJob → MemberNote
+        # so _authorized_send (Member → MemberChannel) and gym-switch
+        # cannot deadlock (P1 r9).
+        #
+        # Locking the old Gym serializes this switch with
+        # _coaches_for_gym_in_session which locks Gym to select
+        # eligible Coaches — a selected Coach cannot have their
+        # channel repointed between eligibility resolution and job
+        # creation (P2 r10).
+        old_gym_id = pointer.gym_id
+        if old_gym_id is not None:
+            await db.execute(
+                select(Gym)
+                .where(Gym.id == old_gym_id)
+                .with_for_update()
+            )
+        old_member_id = pointer.member_id
+        if old_member_id is not None:
+            await db.execute(
+                select(Member)
+                .where(Member.id == old_member_id)
+                .with_for_update()
+            )
+        await db.execute(
+            select(MemberChannel)
+            .where(MemberChannel.id == pointer.id)
+            .with_for_update()
+        )
         pointer.member_id = member.id
         pointer.gym_id = gym_id
     return member
@@ -566,6 +662,21 @@ class LinkingStore:
 
     async def set_coach(self, member_id: int, is_coach: bool = True) -> None:
         async with self._sessions() as db:
+            # Global lock order: Gym → Member → MemberChannel → …
+            # Lock the Gym row FIRST so a concurrent promote_to_coach
+            # (which locks Gym via _redeem_coach_code then updates
+            # Member) cannot deadlock with this path (P1 r9).
+            member = await db.get(Member, member_id)
+            if member is not None:
+                await db.execute(
+                    select(Gym).where(Gym.id == member.gym_id).with_for_update()
+                )
+            # Lock the Member row to serialize with _authorized_send
+            # (delivery path) so a concurrent safety-flag delivery
+            # sees a consistent coach status.
+            await db.execute(
+                select(Member).where(Member.id == member_id).with_for_update()
+            )
             await db.execute(update(Member).where(Member.id == member_id).values(is_coach=is_coach))
             await db.commit()
 
@@ -594,9 +705,13 @@ class LinkingStore:
     async def coaches_for_gym(
         self, gym_id: int, exclude_member_id: int | None = None
     ) -> list[tuple[int, str, str, str]]:
-        """The Gym's Coaches reachable on a channel, as
+        """Exactly one Coach per Coach in the Gym, as
         ``(member_id, name, channel, channel_user_id)`` — who a safety flag
-        gets pinged to."""
+        gets pinged to.
+
+        A Coach may have multiple channel identities (MemberChannel rows);
+        exactly one is selected per Coach (deterministic: first by channel
+        name, then by channel_user_id)."""
         async with self._sessions() as db:
             rows = (
                 await db.execute(
@@ -608,13 +723,59 @@ class LinkingStore:
                     )
                     .join(MemberChannel, MemberChannel.member_id == Member.id)
                     .where(Member.gym_id == gym_id, Member.is_coach.is_(True))
+                    .order_by(
+                        Member.id,
+                        MemberChannel.channel,
+                        MemberChannel.channel_user_id,
+                    )
                 )
             ).all()
-        return [
-            (member_id, name, channel, channel_user_id)
-            for member_id, name, channel, channel_user_id in rows
-            if member_id != exclude_member_id
-        ]
+        seen: set[int] = set()
+        result: list[tuple[int, str, str, str]] = []
+        for member_id, name, channel, channel_user_id in rows:
+            if member_id == exclude_member_id or member_id in seen:
+                continue
+            seen.add(member_id)
+            result.append((member_id, name, channel, channel_user_id))
+        return result
+
+    async def coach_channel_in_gym(
+        self, member_id: int, gym_id: int
+    ) -> tuple[str, str] | None:
+        """Return ``(channel, channel_user_id)`` for *member_id* if they are
+        still reachable in *gym_id* and still flagged as Coach, or ``None``
+        when the channel was repointed (gym switch leaving no channel row for
+        the old member) or the Coach flag was removed.
+
+        When a Coach has multiple channels, the determination is
+        deterministic (by channel name, then channel_user_id).
+
+        This is called at delivery time so a coach who switched gyms or was
+        demoted between job creation and delivery never receives a cross-gym
+        or cross-role notification.
+        """
+        async with self._sessions() as db:
+            row = (
+                await db.execute(
+                    select(
+                        MemberChannel.channel,
+                        MemberChannel.channel_user_id,
+                    )
+                    .join(Member, Member.id == MemberChannel.member_id)
+                    .where(
+                        MemberChannel.member_id == member_id,
+                        MemberChannel.gym_id == gym_id,
+                        Member.is_coach.is_(True),
+                    )
+                    .order_by(
+                        MemberChannel.channel,
+                        MemberChannel.channel_user_id,
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        return (row.channel, row.channel_user_id)
 
     async def regenerate_invite_code(self, gym_id: int) -> str:
         """The old code stops matching the moment this commits."""

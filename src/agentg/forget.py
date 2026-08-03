@@ -25,6 +25,7 @@ from agentg.models import (
     MemberNote,
     ModelTurnLease,
     Routine,
+    SafetyOutboxJob,
     Session,
     Set,
     Workout,
@@ -85,15 +86,24 @@ DEFAULT_STALE_LEASE_SECONDS = 30
 _MIN_STALE_LEASE_SECONDS = 30
 
 
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+Clock = Callable[[], datetime]
+
+
 class ForgetStore:
     def __init__(
         self,
         engine: AsyncEngine,
         *,
+        clock: Clock = _utcnow,
         stale_lease_seconds: int = DEFAULT_STALE_LEASE_SECONDS,
     ) -> None:
         self.engine = engine
         self._sessions = async_sessionmaker(engine)
+        # Injectable clock so outbox-related timestamps are testable (#216).
+        self._clock = clock
         self.stale_lease_seconds = max(stale_lease_seconds, _MIN_STALE_LEASE_SECONDS)
         # Heartbeat interval: beat at most a third of the stale bound so
         # two consecutive heartbeats can be lost before the lease looks
@@ -149,6 +159,24 @@ class ForgetStore:
         member_workout_ids = select(Workout.id).where(Workout.routine_id.in_(member_routine_ids))
 
         async with self._sessions() as db:
+            # Lock the Member row to serialize with outbox delivery —
+            # delivery's _authorized_send locks the Coach Member row,
+            # MemberChannel, Note, and job rows.  Locking the same narrow
+            # rows here guarantees no notification can send after the
+            # note/job are deleted (P1 #1 r6, P1 r8).
+            member = await db.get(Member, member_id)
+            if member is not None:
+                await db.execute(
+                    select(Member).where(Member.id == member_id).with_for_update()
+                )
+                # Lock MemberChannel rows for this Member — serializes
+                # with _authorized_send's MemberChannel lock.
+                await db.execute(
+                    select(MemberChannel)
+                    .where(MemberChannel.member_id == member_id)
+                    .with_for_update()
+                )
+
             await db.execute(delete(Set).where(Set.session_id.in_(member_session_ids)))
             await db.execute(delete(Session).where(Session.member_id == member_id))
             await db.execute(
@@ -156,6 +184,28 @@ class ForgetStore:
             )
             await db.execute(delete(Workout).where(Workout.routine_id.in_(member_routine_ids)))
             await db.execute(delete(Routine).where(Routine.member_id == member_id))
+            # Explicitly fail pending/sending outbox jobs before deleting
+            # Notes so an in-flight worker delivery with retained note text
+            # can never send after forget-me (P1 #1).  The cascade delete on
+            # note_id would remove them anyway, but the explicit fail gives
+            # a clear reason and guards the race window.
+            await db.execute(
+                update(SafetyOutboxJob)
+                .where(
+                    SafetyOutboxJob.note_id.in_(
+                        select(MemberNote.id).where(
+                            MemberNote.member_id == member_id
+                        )
+                    ),
+                    SafetyOutboxJob.status.in_(["pending", "sending"]),
+                )
+                .values(
+                    status="failed",
+                    failure_reason="member data deleted (forget-me)",
+                    last_error="member data deleted (forget-me)",
+                    failed_at=self._clock(),
+                )
+            )
             await db.execute(delete(MemberNote).where(MemberNote.member_id == member_id))
             # References OTHER Members' rows hold back: a forgotten Coach's
             # Routine actor stamps stay coach-authored but by nobody (NULL) —
@@ -175,8 +225,20 @@ class ForgetStore:
                 .where(MemberNote.acknowledged_by_member_id == member_id)
                 .values(acknowledged_by_member_id=None)
             )
+            # Delete tokens owned by this Member (they logged in once).
             await db.execute(
                 delete(DashboardLoginToken).where(DashboardLoginToken.member_id == member_id)
+            )
+            # Also delete tokens whose next_path targets this Member —
+            # a delivered safety link mints a Coach-owned token with
+            # next_path=/members/{member_id}.  Forget-me must remove
+            # every durable reference to the forgotten Member, regardless
+            # of token owner, without deleting unrelated Coach tokens
+            # (P1 r11).
+            await db.execute(
+                delete(DashboardLoginToken).where(
+                    DashboardLoginToken.next_path == f"/members/{member_id}"
+                )
             )
             # Pending confirmation dies with the Member; must run before the
             # Member delete so the FK doesn't block.

@@ -9,6 +9,7 @@ from agentg.dashboard_store import DashboardStore
 from agentg.demos import DemoStore
 from agentg.forget import ForgetStore
 from agentg.routines import DEFAULT_RULES_DOC, ExerciseSpec, RoutineStore, WorkoutSpec
+from agentg.safety_outbox import SafetyOutbox
 from agentg.coaching import update_rules_doc_action, write_routine_action
 from agentg.context import MemberContext
 from agentg.linking_store import LinkingStore
@@ -40,6 +41,7 @@ async def make_context(engine, *, is_coach, can_author_routine=True):
             demos=DemoStore(engine),
             forget=ForgetStore(engine),
             dashboard=DashboardStore(engine),
+            safety_outbox=SafetyOutbox(engine),
         ),
         member_id=actor.id,
         gym_id=gym.id,

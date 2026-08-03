@@ -26,6 +26,7 @@ from agentg.linking import Linking
 from agentg.messages import IncomingMessage
 from agentg.models import DashboardLoginToken, Exercise, Set
 from agentg.runtime import AgentRuntime
+from agentg.safety_outbox import OutboxWorker
 from agentg.stores import Stores
 from agentg.tools import build_tools
 from agentg.training import Clock
@@ -239,4 +240,15 @@ class ConversationHarness:
         # hid a deadlock once already (#173).
         if reply.after_send is not None:
             await reply.after_send()
+        # Drain the safety outbox so behavioral tests that assert on
+        # ``notifier.sent`` see coach pings delivered (issue #216).
+        if self.runtime.dashboard is not None:
+            worker = OutboxWorker(
+                outbox=self.stores.safety_outbox,
+                notifier=self.notifier,
+                dashboard_store=self.stores.dashboard,
+                dashboard_base_url=self.runtime.dashboard.base_url,
+                linking_store=self.stores.linking,
+            )
+            await worker.drain_once(limit=50)
         return str(reply)

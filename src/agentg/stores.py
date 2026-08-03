@@ -19,6 +19,7 @@ from agentg.forget import DEFAULT_STALE_LEASE_SECONDS, ForgetStore
 from agentg.notes import NotesStore
 from agentg.routines import RoutineStore
 from agentg.linking_store import LinkingStore
+from agentg.safety_outbox import SafetyOutbox
 from agentg.training import Clock, TrainingStore
 
 
@@ -32,6 +33,7 @@ class Stores:
     demos: DemoStore
     forget: ForgetStore
     dashboard: DashboardStore
+    safety_outbox: SafetyOutbox
 
     @classmethod
     def from_engine(
@@ -53,6 +55,7 @@ class Stores:
                 demos=DemoStore(engine),
                 forget=ForgetStore(engine, stale_lease_seconds=stale_lease_seconds),
                 dashboard=DashboardStore(engine, clock=clock),
+                safety_outbox=SafetyOutbox(engine, clock=clock),
             )
         return cls(
             linking=LinkingStore(engine),
@@ -63,4 +66,5 @@ class Stores:
             demos=DemoStore(engine),
             forget=ForgetStore(engine, stale_lease_seconds=stale_lease_seconds),
             dashboard=DashboardStore(engine),
+            safety_outbox=SafetyOutbox(engine),
         )

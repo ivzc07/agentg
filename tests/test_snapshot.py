@@ -17,6 +17,7 @@ from agentg.dashboard_store import DashboardStore
 from agentg.demos import DemoStore
 from agentg.forget import ForgetStore
 from agentg.routines import ExerciseSpec, RoutineStore, WorkoutSpec
+from agentg.safety_outbox import SafetyOutbox
 from agentg.snapshot import member_snapshot
 from agentg.linking_store import LinkingStore
 from agentg.context import MemberContext
@@ -48,6 +49,7 @@ async def env(tmp_path):
             demos=DemoStore(engine),
             forget=ForgetStore(engine),
             dashboard=DashboardStore(engine),
+            safety_outbox=SafetyOutbox(engine),
         ),
         member_id=member.id,
         gym_id=gym.id,

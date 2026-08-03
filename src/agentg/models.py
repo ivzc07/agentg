@@ -399,6 +399,54 @@ class Workout(Base):
     name: Mapped[str] = mapped_column(String(100))
 
 
+class SafetyOutboxJob(Base):
+    """One coach notification for a safety Note, durably queued.
+
+    Written in the same transaction as its safety Note so a committed Note
+    can never lose every Coach notification on delivery failure or process
+    exit (issue #216). One row per eligible Coach, per Note.
+    """
+
+    __tablename__ = "safety_outbox_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "note_id", "coach_member_id",
+            name="uq_outbox_job_note_coach",
+        ),
+        Index("ix_outbox_jobs_pending", "status", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    note_id: Mapped[int] = mapped_column(
+        ForeignKey("member_notes.id", ondelete="CASCADE"), index=True,
+    )
+    coach_member_id: Mapped[int] = mapped_column(
+        ForeignKey("members.id", ondelete="CASCADE"),
+    )
+    # The coach's channel identity at job-creation time (audit snapshot only;
+    # delivery re-resolves via coach_channel_in_gym at delivery time so a
+    # coach who switched gyms never receives a cross-gym notification).
+    channel: Mapped[str] = mapped_column(String(32))
+    channel_user_id: Mapped[str] = mapped_column(String(64))
+    # Denormalised snapshot of the flagged Member: the message text and the
+    # dashboard deep-link target both need these at delivery time.
+    member_id: Mapped[int] = mapped_column(ForeignKey("members.id", ondelete="CASCADE"))
+    member_name: Mapped[str] = mapped_column(String(100))
+    member_is_coach: Mapped[bool] = mapped_column(default=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    retry_count: Mapped[int] = mapped_column(default=0)
+    # Earliest time this job may be claimed again (bounded backoff).
+    # NULL means immediately claimable.
+    next_retry_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    claimed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    last_error: Mapped[str | None] = mapped_column(String(400), default=None)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime())
+    delivered_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    failed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    failure_reason: Mapped[str | None] = mapped_column(String(400), default=None)
+
+
 class WorkoutExercise(Base):
     """One Exercise in a Workout: structure (order, optional set/rep scheme)
     drawn from the Exercise catalog. Never a target weight."""
