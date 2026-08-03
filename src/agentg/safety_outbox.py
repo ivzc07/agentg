@@ -4,6 +4,16 @@ Safety Notes commit with one outbox job per eligible Coach in the same
 transaction.  A background worker sends pending jobs without delaying the
 Member's reply, recovers on startup, mints authenticated dashboard links at
 delivery time, and falls back to text-only when minting fails.
+
+Global lock order across all paths that acquire multiple row locks:
+  Gym → Member → MemberChannel → SafetyOutboxJob → MemberNote
+
+Every path that needs two or more of these rows must acquire them in this
+order.  The delivery path (_authorized_send) locks Member then
+MemberChannel then SafetyOutboxJob then MemberNote.  The gym-switch path
+(_link_member_in_session) locks the old Member first then MemberChannel.
+set_coach locks Gym then Member.  ForgetStore locks Member then
+MemberChannel.  All consistent — no circular wait.
 """
 
 from __future__ import annotations

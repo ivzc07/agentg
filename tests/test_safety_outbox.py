@@ -3228,3 +3228,227 @@ async def test_hung_notifier_does_not_block_flag_in_other_gym(env, monkeypatch):
     # Unblock the original delivery.
     gate._gate.set()
     await deliver_task
+
+
+# ── P1 r9: deadlock-free lock ordering ────────────────────────────────────
+
+
+async def test_delivery_and_gym_switch_lock_order_no_deadlock(env):
+    """Concurrent delivery and Coach gym-switch complete without deadlock
+    because both paths now lock in the same global order: Member →
+    MemberChannel.
+
+    Before r9, _link_member_in_session locked MemberChannel then Member
+    while _authorized_send locked Member then MemberChannel — a circular
+    wait that PostgreSQL would detect and abort."""
+    # Give the Coach a safety outbox job.
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Claim the job so it's in 'sending' state.
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    # Use a gated notifier so delivery blocks inside _authorized_send
+    # (after acquiring the Member lock, before MemberChannel lock),
+    # creating a window for the gym-switch to interleave.
+    notifier = GateNotifier()
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=notifier,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+
+    # Start delivery — it will acquire the Member lock then block on
+    # the gated notifier.send inside _authorized_send.
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+    await asyncio.sleep(0.15)  # let delivery acquire its locks
+
+    # Meanwhile, gym-switch the Coach: link_member re-points the channel
+    # identity.  With the fixed lock order, this locks the old Member
+    # first then MemberChannel — same order as delivery — so it
+    # serializes without deadlock.
+    gym2 = await env.linking.create_gym("Other Iron")
+    start = time.monotonic()
+    switch_task = asyncio.create_task(
+        env.linking.link_member(gym2.id, "Coach Sam", "telegram", "7")
+    )
+
+    # Both tasks are now racing.  If the lock orders were opposite,
+    # PostgreSQL would detect the deadlock and abort one transaction.
+    # With consistent ordering, one waits for the other and both
+    # complete.
+
+    # Unblock delivery.
+    notifier._gate.set()
+    await deliver_task
+
+    # Gym switch should now complete (it was blocked on the Member lock
+    # held by delivery, released when delivery committed).
+    switched_member = await switch_task
+    elapsed = time.monotonic() - start
+
+    # The gym switch completed (no deadlock).
+    assert switched_member is not None
+    assert switched_member.gym_id == gym2.id
+
+    # The delivery should have completed and the job marked delivered.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    # If the gym-switch re-pointed before delivery's authorization
+    # check, the job is failed with "no longer reachable"; if delivery
+    # finished first, it's delivered.  Either outcome is correct and
+    # proves no deadlock.
+    assert row.status in ("delivered", "failed")
+
+    # Importantly, elapsed should be reasonable — a deadlock would have
+    # hung indefinitely or been aborted by the DB after a timeout.
+    assert elapsed < 5.0, f"gym switch blocked for {elapsed:.2f}s"
+
+
+async def test_delivery_and_set_coach_lock_order_no_deadlock(env):
+    """Concurrent delivery and set_coach complete without deadlock because
+    both paths now lock in the same global order: Gym → Member.
+
+    Before r9, set_coach locked Member then Gym while
+    _coaches_for_gym_in_session (and promote_to_coach via
+    _redeem_coach_code) locked Gym first — opposite orders."""
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    notifier = GateNotifier()
+    worker = OutboxWorker(
+        outbox=env.outbox,
+        notifier=notifier,
+        dashboard_store=env.dashboard,
+        dashboard_base_url=env.DASHBOARD_BASE,
+        linking_store=env.linking,
+    )
+
+    # Start delivery — blocks inside _authorized_send on the gated send.
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+    await asyncio.sleep(0.15)
+
+    # set_coach on the same Coach (demote).  With the fixed lock order
+    # (Gym → Member), this and delivery serialize cleanly.
+    start = time.monotonic()
+    demote_task = asyncio.create_task(
+        env.linking.set_coach(env.coach1_id, is_coach=False)
+    )
+
+    # Unblock delivery.
+    notifier._gate.set()
+    await deliver_task
+    await demote_task
+    elapsed = time.monotonic() - start
+
+    # Both completed — no deadlock.
+    assert elapsed < 5.0, f"set_coach blocked for {elapsed:.2f}s"
+
+
+# ── P1 r9: DB-abort retry ─────────────────────────────────────────────────
+
+
+async def test_delivery_retries_on_db_abort(env, monkeypatch):
+    """When a delivery's transactional block raises a DBAPIError (e.g.
+    PostgreSQL serialization failure or deadlock detection abort), the
+    job is retried rather than permanently failed.
+
+    This exercises the outer catch-all in _deliver_one which must call
+    reset_for_retry on transient errors, not mark_failed."""
+    from sqlalchemy.exc import DBAPIError
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Make _authorized_send raise a DBAPIError on first call, succeed
+    # on second.
+    import agentg.safety_outbox as outbox_module
+
+    real_send = outbox_module.OutboxWorker._authorized_send
+    call_count = [0]
+
+    async def flaky_send(self, job, text, *, disable_preview=True,
+                         protect_content=False):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise DBAPIError(
+                "deadlock detected",
+                params=None,
+                orig=RuntimeError("simulated serialization failure"),
+            )
+        return await real_send(
+            self, job, text, disable_preview=disable_preview,
+            protect_content=protect_content,
+        )
+
+    monkeypatch.setattr(
+        outbox_module.OutboxWorker, "_authorized_send", flaky_send,
+    )
+
+    worker = _make_worker(env)
+    await worker.drain_once(limit=50)
+
+    # First attempt failed transiently — job retried, not permanently
+    # failed.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count, last_error, failure_reason "
+                    "FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.status == "pending", (
+        f"expected pending (retry), got {row.status}"
+    )
+    assert row.retry_count == 1
+    assert "DBAPIError" in (row.last_error or "")
+    assert row.failure_reason is None  # not permanently failed
+
+    # Advance clock past next_retry_at so claim_pending can re-claim.
+    future = datetime.now(UTC) + timedelta(days=1)
+    env.outbox._clock = lambda: future
+
+    # Second attempt succeeds.
+    await worker.drain_once(limit=50)
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"
