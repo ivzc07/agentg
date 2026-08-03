@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.models import (
     DashboardLoginToken,
+    Gym,
     Member,
     MemberChannel,
     MemberNote,
@@ -51,6 +52,16 @@ class ForgetStore:
         member_workout_ids = select(Workout.id).where(Workout.routine_id.in_(member_routine_ids))
 
         async with self._sessions() as db:
+            # Lock the Gym row to serialize with outbox delivery — delivery's
+            # _authorized_send also locks Gym, and re-checks the job/note on
+            # the locked connection.  Together they guarantee no notification
+            # can send after the note/job are deleted (P1 #1 r6).
+            member = await db.get(Member, member_id)
+            if member is not None:
+                await db.execute(
+                    select(Gym).where(Gym.id == member.gym_id).with_for_update()
+                )
+
             await db.execute(delete(Set).where(Set.session_id.in_(member_session_ids)))
             await db.execute(delete(Session).where(Session.member_id == member_id))
             await db.execute(

@@ -423,15 +423,11 @@ class OutboxWorker:
         Each notifier.send is wrapped in asyncio.wait_for so a hung
         channel adapter never blocks gather or strands other jobs (P2).
         """
-        # Backoff: wait before attempting delivery so transient outages
-        # (network flap, DB restart) have time to resolve.  The claim_pending
-        # filter gates on next_retry_at (the restart-safe enforcement), so
-        # this sleep is belt-and-suspenders for in-process retries that land
-        # before the poll cycle sets next_retry_at on reset.
-        if job.retry_count > 0:
-            delay = min(job.retry_count * BASE_BACKOFF_SECONDS, MAX_BACKOFF_SECONDS)
-            await asyncio.sleep(delay)
-
+        # Backoff is enforced solely by next_retry_at gating in
+        # claim_pending — no second sleep here.  reset_for_retry sets
+        # next_retry_at to now + bounded delay, and claim_pending skips
+        # jobs whose next_retry_at hasn't passed.  A single durable gate
+        # avoids doubling the delay and survives restart (P2 r6).
         try:
             # Resolve note text first — if the note is gone (forget-me),
             # fail immediately without sending anything.
@@ -480,6 +476,10 @@ class OutboxWorker:
                 return await self._outbox.mark_failed(
                     job, "coach no longer reachable in this gym"
                 )
+            elif headsup_failed == "safety note no longer exists":
+                return await self._outbox.mark_failed(
+                    job, "safety note no longer exists"
+                )
             elif headsup_failed == "job_gone":
                 return
             elif headsup_failed in ("notifier send failed", "notifier send timed out"):
@@ -511,9 +511,11 @@ class OutboxWorker:
                     # Heads-up already landed; link can't be delivered.
                     # Mark delivered anyway — the safety text arrived.
                     return await self._outbox.mark_delivered(job)
-                # link_failed == "job_gone": job was deleted between
-                # heads-up and link; bail without marking anything.
-                if link_failed == "job_gone":
+                # link_failed == "job_gone" or "safety note no longer
+                # exists": the note/job was deleted (forget-me) between
+                # heads-up and link; bail without marking anything —
+                # forget-me already cleaned up.  (P1 #1 r6)
+                if link_failed in ("job_gone", "safety note no longer exists"):
                     return
                 # link_failed == "notifier": the heads-up already landed;
                 # a missing link is unfortunate but not worth marking the
@@ -568,6 +570,35 @@ class OutboxWorker:
                 )
                 .with_for_update()
             )
+
+            # Lock and re-check the job and note while holding the Gym
+            # lock — serializes with ForgetStore which also locks the Gym
+            # row before deleting.  Together they guarantee no notification
+            # can send after the note/job are deleted (P1 #1 r6).
+            job_row = (
+                await conn.execute(
+                    sa_select(SafetyOutboxJob)
+                    .where(
+                        SafetyOutboxJob.id == job.id,
+                        SafetyOutboxJob.status == "sending",
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if job_row is None:
+                await conn.rollback()
+                return "job_gone"
+
+            note_row = (
+                await conn.execute(
+                    sa_select(MemberNote)
+                    .where(MemberNote.id == job.note_id)
+                    .with_for_update()
+                )
+            ).first()
+            if note_row is None:
+                await conn.rollback()
+                return "safety note no longer exists"
 
             # Check authorization on the locked connection: the Member
             # must still be flagged Coach with a channel pointing at the

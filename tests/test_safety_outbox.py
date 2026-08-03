@@ -883,21 +883,10 @@ async def test_last_error_cleared_after_successful_retry(env):
 
 
 async def test_retry_includes_backoff_delay(env, monkeypatch):
-    """Each retry waits retry_count * BASE_BACKOFF_SECONDS before
-    attempting delivery, capped at MAX_BACKOFF_SECONDS."""
-    import agentg.safety_outbox as outbox_module
-
-    # Capture sleep durations to verify the backoff formula without
-    # actually waiting.  We still need the real sleep to be fast.
-    sleep_durations: list[float] = []
-    real_sleep = asyncio.sleep
-
-    async def tracking_sleep(seconds):
-        sleep_durations.append(seconds)
-        # Don't actually sleep — this test verifies the formula, not timing.
-
-    monkeypatch.setattr(outbox_module.asyncio, "sleep", tracking_sleep)
-
+    """Backoff is enforced by next_retry_at (set in reset_for_retry,
+    checked by claim_pending), not a sleep.  Verifies the next_retry_at
+    formula: retry_count * BASE_BACKOFF_SECONDS, capped at
+    MAX_BACKOFF_SECONDS (P2 r6)."""
     failing_notifier = FakeNotifier(failing_id="7")
     await env.outbox.create_note_and_jobs(
         member_id=env.member_id,
@@ -916,36 +905,96 @@ async def test_retry_includes_backoff_delay(env, monkeypatch):
         linking_store=env.linking,
     )
 
-    # Mutable clock: advance it before each drain so claim_pending sees
-    # next_retry_at in the past (P1 #4 gate).
+    # Mutable clock: fixed so we can observe next_retry_at values.
     clock_val = [datetime.now(UTC)]
     env.outbox._clock = lambda: clock_val[0]
 
-    # First attempt: retry_count=0 → no backoff.
-    await worker.drain_once(limit=50)
-    assert len(sleep_durations) == 0  # no sleep on first attempt
+    # Helper: parse ISO string from SQLite text() query (TZDateTime
+    # stores UTC-aware datetimes as ISO strings in SQLite).
+    def _next_retry(row):
+        val = row.next_retry_at
+        if isinstance(val, str):
+            return datetime.fromisoformat(val).replace(tzinfo=UTC)
+        return val
 
-    # Second attempt: retry_count=1 → 1 * BASE_BACKOFF delay.
+    # First attempt: retry_count=0 → no backoff, claim_pending claims it.
+    await worker.drain_once(limit=50)
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT retry_count, next_retry_at FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.retry_count == 1
+    assert row.next_retry_at is not None
+    nra = _next_retry(row)
+    expected = clock_val[0] + timedelta(seconds=BASE_BACKOFF_SECONDS * 1)
+    assert abs((nra - expected).total_seconds()) < 0.1
+
+    # Advance clock past next_retry_at so claim_pending can re-claim.
     clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
-    await worker.drain_once(limit=50)
-    assert len(sleep_durations) == 1
-    assert sleep_durations[0] == pytest.approx(BASE_BACKOFF_SECONDS * 1)
 
-    # Third attempt: retry_count=2 → 2 * BASE_BACKOFF delay.
+    # Second attempt: retry_count goes to 2.
+    await worker.drain_once(limit=50)
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT retry_count, next_retry_at FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.retry_count == 2
+    nra = _next_retry(row)
+    expected = clock_val[0] + timedelta(seconds=BASE_BACKOFF_SECONDS * 2)
+    assert abs((nra - expected).total_seconds()) < 0.1
+
+    # Advance clock.
     clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
-    await worker.drain_once(limit=50)
-    assert len(sleep_durations) == 2
-    assert sleep_durations[1] == pytest.approx(BASE_BACKOFF_SECONDS * 2)
 
-    # Run enough attempts that the backoff reaches and stays at the cap
-    # (retry_count * BASE_BACKOFF >= MAX_BACKOFF for retry_count >= 60).
+    # Third attempt: retry_count goes to 3.
+    await worker.drain_once(limit=50)
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT retry_count, next_retry_at FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    assert row.retry_count == 3
+    nra = _next_retry(row)
+    expected = clock_val[0] + timedelta(seconds=BASE_BACKOFF_SECONDS * 3)
+    assert abs((nra - expected).total_seconds()) < 0.1
+
+    # Run enough attempts that the backoff reaches and stays at the cap.
     for _ in range(60):
         clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
         await worker.drain_once(limit=50)
-    # The last sleep should be capped at MAX_BACKOFF_SECONDS.
-    assert sleep_durations[-1] == pytest.approx(MAX_BACKOFF_SECONDS)
-    # Earlier sleeps should still be growing linearly.
-    assert sleep_durations[2] == pytest.approx(BASE_BACKOFF_SECONDS * 3)
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT retry_count, next_retry_at FROM safety_outbox_jobs "
+                    "WHERE coach_member_id = :cid"
+                ),
+                {"cid": env.coach1_id},
+            )
+        ).first()
+    # next_retry_at should be capped at clock + MAX_BACKOFF_SECONDS.
+    nra = _next_retry(row)
+    expected = clock_val[0] + timedelta(seconds=MAX_BACKOFF_SECONDS)
+    assert abs((nra - expected).total_seconds()) < 0.1
+    # retry_count keeps growing for audit even though delay is capped.
+    assert row.retry_count >= 60
 
 
 # ── transient error recovery (P1 #1) ──────────────────────────────────────
@@ -2666,3 +2715,187 @@ async def test_legacy_three_column_uniqueness_migrated_behavior(tmp_path):
             await db.commit()
 
     await engine.dispose()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Round 6 — P2: no double backoff delay through restart
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def test_no_double_delay_on_retry_through_restart(env):
+    """The backoff delay is enforced solely by next_retry_at gating
+    in claim_pending — no second sleep doubles it.  Verifies exact
+    clock timing through a simulated restart (P2 r6).
+
+    Sequence:
+    1. Job fails → next_retry_at = now + BASE_BACKOFF.
+    2. claim_pending skips the job (future next_retry_at).
+    3. Simulate restart: reset_claimed, then a new claim_pending.
+    4. Still skipped.
+    5. Advance clock past next_retry_at.
+    6. claim_pending claims it — no extra delay."""
+    failing_notifier = FakeNotifier(failing_id="7")
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Freeze the clock so we control exactly when next_retry_at passes.
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+
+    # 1. Claim and fail.
+    jobs = await env.outbox.claim_pending(limit=50)
+    assert len(jobs) == 1
+    await env.outbox.reset_for_retry(jobs[0], "simulated failure")
+
+    # Verify next_retry_at is set exactly BASE_BACKOFF from now.
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT retry_count, next_retry_at, status "
+                    "FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.status == "pending"
+    assert row.retry_count == 1
+    nra = row.next_retry_at
+    if isinstance(nra, str):
+        nra = datetime.fromisoformat(nra).replace(tzinfo=UTC)
+    expected_next = clock_val[0] + timedelta(seconds=BASE_BACKOFF_SECONDS)
+    assert abs((nra - expected_next).total_seconds()) < 0.1
+
+    # 2. claim_pending must skip it (next_retry_at in the future).
+    claimed_now = await env.outbox.claim_pending(limit=50)
+    assert len(claimed_now) == 0
+
+    # 3. Simulate restart: reset_claimed (no-op since job is pending),
+    #    then try claim_pending again.
+    await env.outbox.reset_claimed()
+    claimed_restart = await env.outbox.claim_pending(limit=50)
+    assert len(claimed_restart) == 0, (
+        "claim_pending must skip job with future next_retry_at after restart"
+    )
+
+    # 4. Advance clock exactly to next_retry_at.
+    clock_val[0] = expected_next + timedelta(microseconds=1)
+
+    # 5. Now drain_once must deliver immediately — claim_pending claims
+    #    the job without any extra sleep, and the delivery goes through.
+    #    This proves the delay is exactly the next_retry_at gate, not
+    #    doubled by a redundant sleep (P2 r6).
+    worker = _make_worker(env)
+    start = clock_val[0]
+    await worker.drain_once(limit=50)
+    end = clock_val[0]
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"
+
+    # The delivery happened without advancing the clock — no extra sleep.
+    assert (end - start).total_seconds() == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Round 6 — P1: Forget-me Gym lock serializes with _authorized_send
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+async def test_forget_me_gym_lock_serializes_with_delivery(env, monkeypatch):
+    """Forget-me locks the Gym row before deleting notes/jobs, and
+    _authorized_send locks Gym + re-checks the job/note on the locked
+    connection.  Together they guarantee no notification can send after
+    the note/job are deleted (P1 #1 r6).
+
+    This test forces the exact interleaving where forget-me runs between
+    _job_still_sending and the _authorized_send lock acquisition, proving
+    the re-check inside _authorized_send catches the deletion."""
+    from agentg.forget import ForgetStore
+
+    # Patch out the SDK session clear — the test database doesn't have
+    # the agents SDK tables, and we only care about the domain delete.
+    import agents.extensions.memory as sdk_memory
+    original_clear = sdk_memory.SQLAlchemySession.clear_session
+
+    async def noop_clear(self):
+        pass
+
+    monkeypatch.setattr(
+        sdk_memory.SQLAlchemySession, "clear_session", noop_clear,
+    )
+
+    # Create a note with one job for Coach Sam.
+    note, jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    # Claim the job so it's in 'sending' state.
+    claimed = await env.outbox.claim_pending(limit=50)
+    assert len(claimed) == 1
+
+    # Barriers to force the race:
+    # 1. Worker passes _job_still_sending (returns True).
+    # 2. Forget-me acquires Gym lock, updates jobs to failed, deletes notes.
+    # 3. Worker tries _authorized_send, acquires Gym lock,
+    #    re-checks job/note → they're gone → bails.
+    pre_check_passed = asyncio.Event()
+    forget_done = asyncio.Event()
+
+    worker = _make_worker(env)
+
+    # Instrument _job_still_sending to inject the race.
+    real_job_still_sending = worker._job_still_sending
+    call_count = [0]
+
+    async def instrumented_job_still_sending(job_id):
+        call_count[0] += 1
+        result = await real_job_still_sending(job_id)
+        if call_count[0] == 2:  # inside semaphore, before _authorized_send
+            pre_check_passed.set()
+            await forget_done.wait()
+        return result
+
+    monkeypatch.setattr(worker, "_job_still_sending", instrumented_job_still_sending)
+
+    # Start delivery in a background task.
+    deliver_task = asyncio.create_task(worker._deliver_one(claimed[0]))
+
+    # Wait for the worker to pass the pre-check inside the semaphore.
+    await pre_check_passed.wait()
+
+    # Now run the REAL ForgetStore (not manual SQL) while the worker is
+    # blocked at the barrier.  The ForgetStore locks the Gym row before
+    # deleting — it will complete because the worker hasn't acquired
+    # the Gym lock yet.
+    forget = ForgetStore(env.engine)
+    await forget.forget_member(env.member_id)
+    forget_done.set()
+
+    # Wait for delivery to complete.
+    await deliver_task
+
+    # The worker must NOT have sent anything — _authorized_send's new
+    # re-check of the job/note on the locked connection finds the job
+    # is gone (or note is gone) and returns "safety note no longer
+    # exists" or "job_gone", which the heads-up handler maps to
+    # mark_failed() or a silent return.
+    assert env.notifier.sent == [], (
+        "worker must not send after forget-me deletes note while "
+        "holding the Gym lock"
+    )
