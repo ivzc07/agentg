@@ -178,6 +178,11 @@ class ForgetMeRequest(Base):
     completes so a concurrent loser sees a durable in-progress signal,
     and the exact confirmation phrase can retry deletion if the wipe
     fails partway through (issue #212, fix-3).
+
+    Model-turn exclusivity is handled by the separate ``ModelTurnLease``
+    table — it is never mixed into the forget-me request row, so a
+    model-turn gate can never overwrite or clear a real forget-me
+    intent (issue #212, fix-r11).
     """
 
     __tablename__ = "forget_me_requests"
@@ -190,18 +195,29 @@ class ForgetMeRequest(Base):
     confirmation_phrase: Mapped[str] = mapped_column(String(64))
     language: Mapped[str | None] = mapped_column(String(2), default=None)
     status: Mapped[str] = mapped_column(String(10), default="pending")
-    # Cross-runtime model-turn gate: set to True while a model turn is
-    # active for this Member so a concurrent claim_forget_me_request
-    # cannot proceed — closes the TOCTOU between the end-of-method
-    # deleting check and Runner.run() (issue #212, fix-r9).
-    model_turn_active: Mapped[bool] = mapped_column(default=False)
-    # When a model turn lease was acquired (UTC).  NULL when no lease
-    # is active.  Used for stale-lease recovery: a lease older than a
-    # bounded threshold (e.g. 30 s) is cleared so a crashed runtime
-    # cannot strand deletion forever (issue #212, fix-r10).
-    turn_lease_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     expires_at: Mapped[datetime] = mapped_column(TZDateTime())
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
+
+
+class ModelTurnLease(Base):
+    """Exclusive model-turn gate keyed by Member — separate from
+    ``ForgetMeRequest`` so a model-turn lease never collides with or
+    overwrites a real forget-me intent (issue #212, fix-r11).
+
+    One row per Member at most.  A runtime acquires the lease before
+    calling ``Runner.run()`` and releases it in a ``finally`` block.
+    A stale lease (``acquired_at`` older than a bounded threshold) is
+    reclaimed by another runtime so a crash cannot strand deletion.
+    """
+
+    __tablename__ = "model_turn_leases"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    member_id: Mapped[int] = mapped_column(
+        ForeignKey("members.id"), unique=True, index=True
+    )
+    gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
+    acquired_at: Mapped[datetime] = mapped_column(TZDateTime())
 
 
 class DashboardLoginToken(Base):

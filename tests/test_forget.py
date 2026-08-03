@@ -211,8 +211,8 @@ async def test_messaging_after_forget_dead_ends_in_linking(env):
 
 from datetime import UTC, datetime, timedelta
 
-from agentg.forget import (STATUS_DELETING, STATUS_GATE, STATUS_PENDING, STALE_LEASE_SECONDS, detect_forget_me_language, is_forget_me_request, normalize_confirmation)
-from agentg.models import ForgetMeRequest
+from agentg.forget import (STATUS_DELETING, STATUS_PENDING, STALE_LEASE_SECONDS, detect_forget_me_language, is_forget_me_request, normalize_confirmation)
+from agentg.models import ForgetMeRequest, ModelTurnLease
 
 
 async def _pending_count(env, member_id: int) -> int:
@@ -2040,43 +2040,47 @@ async def test_failed_deletion_clock_advance_private_retry(env):
     assert items == []
 
 
-# -- Cross-runtime model-turn gate (issue #212, fix-r9) -------------------
+
+# -- Model-turn lease (issue #212, fix-r11) --------------------------------
+# The old gate (fix-r9, fix-r10) overlaid model_turn_active / turn_lease_at
+# onto ForgetMeRequest rows, mixing two separate concerns.  fix-r11 splits
+# them: a standalone ModelTurnLease table keyed by member_id so a
+# model-turn lease can never overwrite or clear a real forget-me intent.
 
 
-async def test_acquire_model_turn_gate_no_row_returns_true(env):
-    """When no forget-me request row exists at all, acquire_model_turn_gate
-    returns True — there is nothing to gate."""
+async def test_acquire_lease_no_row_returns_true(env):
+    """When no forget-me request row exists and no lease exists,
+    acquire_model_turn_lease returns True — the model may proceed."""
     member = await populate(env)
-    result = await env.forget.acquire_model_turn_gate(member.id, env.gym_id)
+    result = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
     assert result is True
 
 
-async def test_acquire_model_turn_gate_pending_returns_true(env):
-    """When a pending forget-me request exists, acquire_model_turn_gate
-    atomically marks model_turn_active = True and returns True."""
+async def test_acquire_lease_pending_returns_true(env):
+    """When a pending forget-me request exists but no lease,
+    acquire_model_turn_lease succeeds — the lease and the pending
+    request are independent."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
     assert phrase != ""
 
-    # Acquire the gate — must succeed.
-    result = await env.forget.acquire_model_turn_gate(member.id, env.gym_id)
+    # Acquire the lease — must succeed.
+    result = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
     assert result is True
 
-    # Verify the row has model_turn_active = True.
-    async with async_sessionmaker(env.engine)() as db:
-        row = await db.scalar(
-            select(ForgetMeRequest).where(
-                ForgetMeRequest.member_id == member.id
-            )
-        )
-        assert row is not None
-        assert row.model_turn_active is True
-        assert row.status == STATUS_PENDING
+    # Verify the lease row exists in the separate table.
+    assert await env.forget.model_turn_lease_exists(member.id) is True
+
+    # Verify the forget-me request is still pending and untouched.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.status == STATUS_PENDING
+    assert pending.confirmation_phrase == phrase
 
 
-async def test_acquire_model_turn_gate_deleting_returns_false(env):
-    """When a deleting request exists, acquire_model_turn_gate returns
+async def test_acquire_lease_deleting_returns_false(env):
+    """When a deleting request exists, acquire_model_turn_lease returns
     False — the model must not proceed."""
     member = await populate(env)
     now = datetime.now(UTC)
@@ -2088,89 +2092,80 @@ async def test_acquire_model_turn_gate_deleting_returns_false(env):
     )
     assert claimed is not None
 
-    # The gate must fail — deletion is in progress.
-    result = await env.forget.acquire_model_turn_gate(member.id, env.gym_id)
+    # The lease must fail — deletion is in progress.
+    result = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
     assert result is False
 
 
-async def test_release_model_turn_gate_resets_flag(env):
-    """After releasing the gate, the row goes back to model_turn_active=False
-    and a subsequent acquire succeeds."""
+async def test_release_lease_deletes_row(env):
+    """After releasing the lease, the lease row is deleted and a
+    subsequent acquire succeeds."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
     # Acquire.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
+    assert await env.forget.model_turn_lease_exists(member.id) is True
 
     # Release.
-    await env.forget.release_model_turn_gate(member.id)
+    await env.forget.release_model_turn_lease(member.id)
 
-    # Verify flag is cleared.
-    async with async_sessionmaker(env.engine)() as db:
-        row = await db.scalar(
-            select(ForgetMeRequest).where(
-                ForgetMeRequest.member_id == member.id
-            )
-        )
-        assert row is not None
-        assert row.model_turn_active is False
-        assert row.status == STATUS_PENDING
+    # Verify lease is gone.
+    assert await env.forget.model_turn_lease_exists(member.id) is False
 
     # Re-acquire must succeed.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
-    await env.forget.release_model_turn_gate(member.id)
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
+    await env.forget.release_model_turn_lease(member.id)
 
 
-async def test_claim_forget_me_request_rejected_when_gate_held(env):
-    """When the model turn gate is held (model_turn_active=True),
-    claim_forget_me_request must fail — the model turn is in progress
-    and deletion must wait.  This is the cross-runtime TOCTOU fix."""
+async def test_claim_forget_me_request_rejected_when_lease_held(env):
+    """When the model turn lease is held, claim_forget_me_request must
+    fail — the model turn is in progress and deletion must wait.
+    This is the cross-runtime TOCTOU fix (issue #212, fix-r11)."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
-    # Model turn acquires the gate first.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    # Model turn acquires the lease first.
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
-    # A concurrent deletion attempt must fail while the gate is held.
+    # A concurrent deletion attempt must fail while the lease is held.
     claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
     assert claimed is None, (
-        "claim must fail when model_turn_active is True — "
-        "the model turn is in progress"
+        "claim must fail when model-turn lease is held"
     )
 
     # The row must still be pending (not deleting).
     pending = await env.forget.get_pending_request(member.id)
     assert pending is not None, "row must stay pending — claim was rejected"
     assert pending.status == STATUS_PENDING
-    assert pending.model_turn_active is True
 
     # After release, the claim succeeds.
-    await env.forget.release_model_turn_gate(member.id)
+    await env.forget.release_model_turn_lease(member.id)
     claimed_after = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
     assert claimed_after is not None, (
-        "claim must succeed after model turn gate is released"
+        "claim must succeed after model turn lease is released"
     )
     assert claimed_after.status == STATUS_DELETING
 
 
-async def test_gate_is_held_claim_loser_sees_pending_not_deleting(env):
-    """The loser of a claim-while-gate-held race sees the row as pending
+async def test_lease_held_claim_loser_sees_pending_not_deleting(env):
+    """The loser of a claim-while-lease-held race sees the row as pending
     (not deleting) — get_deleting_request returns None.  The runtime must
     NOT interpret this as successful deletion."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
-    # Acquire the gate (model turn is in progress).
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    # Acquire the lease (model turn is in progress).
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
-    # The claim loses because of the gate.
+    # The claim loses because of the lease.
     claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
@@ -2186,82 +2181,30 @@ async def test_gate_is_held_claim_loser_sees_pending_not_deleting(env):
     pending = await env.forget.get_pending_request(member.id)
     assert pending is not None
     assert pending.status == STATUS_PENDING
-    assert pending.model_turn_active is True
 
 
-async def test_forged_interleaving_gate_acquired_before_claim(env):
-    """True concurrent interleaving: Task A acquires the gate just before
-    Task B tries to claim.  The claim must lose because the gate is held.
-
-    Uses asyncio.Event barriers to create deterministic interleaving
-    without race conditions."""
-    import asyncio
-
-    member = await populate(env)
-    now = datetime.now(UTC)
-    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
-
-    # Barrier events for deterministic interleaving.
-    gate_acquired = asyncio.Event()  # Task A has acquired the gate
-    claim_allowed = asyncio.Event()  # Task B may now attempt the claim
-
-    result_b: bool | None = None
-
-    async def task_a():
-        """Model turn: acquires the gate, signals, waits."""
-        ok = await env.forget.acquire_model_turn_gate(member.id, env.gym_id)
-        assert ok is True
-        gate_acquired.set()   # Signal: gate is held, Task B can try
-        await claim_allowed.wait()  # Wait for Task B to finish
-        await env.forget.release_model_turn_gate(member.id)
-
-    async def task_b():
-        """Deletion attempt: waits for gate, then tries to claim."""
-        await gate_acquired.wait()  # Wait for Task A to acquire gate
-        # Now try to claim while gate is held.
-        nonlocal result_b
-        claimed = await env.forget.claim_forget_me_request(
-            member.id, phrase, datetime.now(UTC)
-        )
-        result_b = claimed is not None
-        claim_allowed.set()  # Signal: Task B is done
-
-    await asyncio.gather(task_a(), task_b())
-
-    # Task B must have lost — the gate was held by Task A.
-    assert result_b is False, (
-        "claim while gate is held must lose — cross-runtime TOCTOU fix"
-    )
-
-    # The row must still be pending.
-    pending = await env.forget.get_pending_request(member.id)
-    assert pending is not None
-    assert pending.status == STATUS_PENDING
-    assert pending.model_turn_active is False  # Released by Task A
-
-
-async def test_concurrent_claim_and_gate_one_wins(env):
-    """When both a claim and a gate acquisition race, exactly one wins.
+async def test_concurrent_claim_and_lease_one_wins(env):
+    """When both a claim and a lease acquisition race, exactly one wins.
     SQLite serializes writers, so we test both orderings explicitly:
-    (a) gate-first then claim, and (b) claim-first then gate."""
-    # Ordering (a): gate acquires first, claim loses.
+    (a) lease-first then claim, and (b) claim-first then lease."""
+    # Ordering (a): lease acquires first, claim loses.
     member_a = await populate(env)
     now = datetime.now(UTC)
     phrase_a = await env.forget.request_forget_me(
         member_a.id, env.gym_id, now, 300, "en"
     )
 
-    gate_ok = await env.forget.acquire_model_turn_gate(member_a.id, env.gym_id)
-    assert gate_ok is True
+    lease_ok = await env.forget.acquire_model_turn_lease(member_a.id, env.gym_id)
+    assert lease_ok is True
 
     claimed_a = await env.forget.claim_forget_me_request(
         member_a.id, phrase_a, datetime.now(UTC)
     )
-    assert claimed_a is None, "claim must lose when gate is held"
+    assert claimed_a is None, "claim must lose when lease is held"
 
-    await env.forget.release_model_turn_gate(member_a.id)
+    await env.forget.release_model_turn_lease(member_a.id)
 
-    # Ordering (b): claim wins first, gate loses.
+    # Ordering (b): claim wins first, lease loses.
     member_b = await populate(env, channel_user_id="99", name="Ben")
     phrase_b = await env.forget.request_forget_me(
         member_b.id, env.gym_id, now, 300, "en"
@@ -2270,143 +2213,138 @@ async def test_concurrent_claim_and_gate_one_wins(env):
     claimed_b = await env.forget.claim_forget_me_request(
         member_b.id, phrase_b, datetime.now(UTC)
     )
-    assert claimed_b is not None, "claim must win when gate is not held"
+    assert claimed_b is not None, "claim must win when lease is not held"
 
-    gate_b = await env.forget.acquire_model_turn_gate(member_b.id, env.gym_id)
-    assert gate_b is False, "gate must lose when row is deleting"
+    lease_b = await env.forget.acquire_model_turn_lease(member_b.id, env.gym_id)
+    assert lease_b is False, "lease must lose when row is deleting"
 
 
-async def test_double_acquire_gate_fails_second(env):
-    """Two concurrent model turns racing for the gate: the second
+async def test_double_acquire_lease_fails_second(env):
+    """Two concurrent model turns racing for the lease: the second
     acquire must fail when the first already holds it."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
     # First acquire succeeds.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
-    # Second acquire must fail — gate already held.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is False
+    # Second acquire must fail — lease already held.
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is False
 
     # Clean up.
-    await env.forget.release_model_turn_gate(member.id)
+    await env.forget.release_model_turn_lease(member.id)
 
     # Now the second acquire (in reality, a retry) succeeds.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
-    await env.forget.release_model_turn_gate(member.id)
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
+    await env.forget.release_model_turn_lease(member.id)
 
 
-async def test_release_does_not_reset_deleting_row(env):
-    """If deletion proceeds while a model turn is in progress (a rare
-    but possible edge case), release_model_turn_gate must NOT reset a
-    deleting row back to pending."""
+async def test_release_does_not_affect_forget_me_row(env):
+    """Releasing a lease must never touch the ForgetMeRequest row.
+    The two tables are independent — only the lease row is deleted."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
-    # Acquire the gate.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    # Acquire the lease.
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
-    # Manually override: set status to deleting directly (simulating
-    # a concurrent claim that bypassed the gate).
+    # Manually claim the request (status -> 'deleting') while the lease exists.
+    # (In production claim_forget_me_request would reject due to lease, but
+    #  we bypass that to test the release path's safety.)
     async with async_sessionmaker(env.engine)() as db:
         await db.execute(
             update(ForgetMeRequest)
             .where(ForgetMeRequest.member_id == member.id)
-            .values(status=STATUS_DELETING, model_turn_active=False)
+            .values(status=STATUS_DELETING)
         )
         await db.commit()
 
-    # Release must NOT affect the row — WHERE clause requires status='pending'.
-    await env.forget.release_model_turn_gate(member.id)
+    # Release the lease — must NOT affect the ForgetMeRequest row.
+    await env.forget.release_model_turn_lease(member.id)
 
     # Row must still be deleting.
     deleting = await env.forget.get_deleting_request(member.id)
     assert deleting is not None
     assert deleting.status == STATUS_DELETING
-    assert deleting.model_turn_active is False
 
 
-async def test_acquire_gate_release_gate_no_forget_row_idempotent(env):
-    """Release is a no-op when no forget-me row exists (no error)."""
+async def test_release_lease_no_row_idempotent(env):
+    """Release is a no-op when no lease exists (no error)."""
     member = await populate(env)
-    # Release on a member with no forget-me row — must not error.
-    await env.forget.release_model_turn_gate(member.id)
+    # Release on a member with no lease — must not error.
+    await env.forget.release_model_turn_lease(member.id)
 
 
-# -- fix-r10: Atomic gate with no-row insert and stale-lease recovery ----
+# -- Lease: no-row insert atomic path (fix-r11) ---------------------------
 
 
-async def test_acquire_gate_no_row_inserts_gate_row(env):
-    """fix-r10: when no forget-me row exists, acquire_model_turn_gate
-    atomically inserts a gate-only row so a concurrent request_forget_me +
-    claim cannot race through the gap."""
+async def test_acquire_lease_no_row_inserts_lease_row(env):
+    """fix-r11: when no forget-me row exists, acquire_model_turn_lease
+    atomically inserts a lease row in the separate ModelTurnLease table
+    so a concurrent request_forget_me + claim cannot race through the gap."""
     member = await populate(env)
 
-    # No row exists.
+    # No row exists in either table.
     assert await env.forget.get_pending_request(member.id) is None
     assert await env.forget.get_deleting_request(member.id) is None
+    assert await env.forget.model_turn_lease_exists(member.id) is False
 
-    # Acquire the gate — must insert a gate row.
-    result = await env.forget.acquire_model_turn_gate(member.id, env.gym_id)
+    # Acquire the lease — must insert a lease row.
+    result = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
     assert result is True
 
-    # A gate row now exists, but NOT visible to get_pending_request
-    # or get_deleting_request (they filter by status).
-    assert await env.forget.get_pending_request(member.id) is None
-    assert await env.forget.get_deleting_request(member.id) is None
+    # The lease row now exists.
+    assert await env.forget.model_turn_lease_exists(member.id) is True
 
-    # Verify the gate row exists at the DB level.
+    # But no ForgetMeRequest row was created.
     async with async_sessionmaker(env.engine)() as db:
         row = await db.scalar(
             select(ForgetMeRequest).where(
                 ForgetMeRequest.member_id == member.id
             )
         )
-        assert row is not None
-        assert row.status == STATUS_GATE
-        assert row.model_turn_active is True
-        assert row.turn_lease_at is not None
-        assert row.confirmation_phrase == "__GATE__"
+        assert row is None, "lease acquisition must not create a forget-me row"
 
-    # Release must delete the gate row.
-    await env.forget.release_model_turn_gate(member.id)
-
-    async with async_sessionmaker(env.engine)() as db:
-        row = await db.scalar(
-            select(ForgetMeRequest).where(
-                ForgetMeRequest.member_id == member.id
-            )
-        )
-        assert row is None, "release must delete gate-only rows"
+    # Release must delete the lease row.
+    await env.forget.release_model_turn_lease(member.id)
+    assert await env.forget.model_turn_lease_exists(member.id) is False
 
 
-async def test_gate_row_overwritten_by_real_forget_me_request(env):
-    """fix-r10: a real forget-me request must overwrite a gate-only row,
-    releasing the model turn lease and creating a proper pending request."""
+async def test_request_forget_me_never_clears_lease(env):
+    """fix-r11: a real forget-me request must NOT clear an active
+    model-turn lease.  The lease and the forget-me request are
+    independent — request_forget_me only touches ForgetMeRequest."""
     member = await populate(env)
     now = datetime.now(UTC)
 
-    # Acquire gate → gate row created.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    # Acquire lease.
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
-    # Member sends "forget me" → request_forget_me must overwrite gate row.
+    # Member sends "forget me" — must create a pending request without
+    # touching the lease.
     phrase = await env.forget.request_forget_me(
         member.id, env.gym_id, now, 300, "en"
     )
     assert phrase.startswith("DELETE-ME-"), (
-        f"must overwrite gate row and return valid phrase, got {phrase!r}"
+        f"must return valid phrase, got {phrase!r}"
     )
 
-    # Now a real pending request exists (not a gate row).
+    # The lease must still exist.
+    assert await env.forget.model_turn_lease_exists(member.id) is True, (
+        "request_forget_me must never clear an active model-turn lease"
+    )
+
+    # The forget-me request must exist and be pending.
     pending = await env.forget.get_pending_request(member.id)
     assert pending is not None
     assert pending.status == STATUS_PENDING
-    assert pending.model_turn_active is False  # released by upsert
-    assert pending.turn_lease_at is None
     assert pending.language == "en"
-    assert pending.confirmation_phrase == phrase
+
+    # Release the lease — pending request is still there.
+    await env.forget.release_model_turn_lease(member.id)
+    assert await env.forget.model_turn_lease_exists(member.id) is False
 
     # Claim and delete — full flow works.
     claimed = await env.forget.claim_forget_me_request(
@@ -2417,30 +2355,32 @@ async def test_gate_row_overwritten_by_real_forget_me_request(env):
     assert await count(env, Member, id=member.id) == 0
 
 
-async def test_concurrent_gate_insert_and_forget_me_request_no_collision(env):
-    """fix-r10: when acquire_model_turn_gate races with request_forget_me
+async def test_concurrent_lease_and_forget_me_no_collision(env):
+    """fix-r11: when acquire_model_turn_lease races with request_forget_me
     on a Member with no prior row, both must succeed without collision —
-    the ON CONFLICT DO NOTHING on the gate insert ensures no IntegrityError,
-    and request_forget_me's upsert overwrites whichever landed first."""
+    the ON CONFLICT DO NOTHING on the lease insert ensures no IntegrityError,
+    and request_forget_me's upsert only touches the ForgetMeRequest table."""
     member = await populate(env)
     now = datetime.now(UTC)
 
-    # Gate acquires first (inserts gate row).
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    # Lease acquires first (inserts lease row).
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
-    # request_forget_me must overwrite the gate row without error.
+    # request_forget_me must work normally — no collision.
     phrase = await env.forget.request_forget_me(
         member.id, env.gym_id, now, 300, "es"
     )
     assert phrase.startswith("DELETE-ME-")
 
-    # Now the row is a proper pending request.
+    # Both the lease and the pending request exist independently.
+    assert await env.forget.model_turn_lease_exists(member.id) is True
     pending = await env.forget.get_pending_request(member.id)
     assert pending is not None
     assert pending.status == STATUS_PENDING
     assert pending.language == "es"
 
     # Clean up.
+    await env.forget.release_model_turn_lease(member.id)
     claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
@@ -2448,89 +2388,53 @@ async def test_concurrent_gate_insert_and_forget_me_request_no_collision(env):
     await env.forget.forget_member(member.id)
 
 
-async def test_stale_gate_lease_recovered_by_another_runtime(env):
-    """fix-r10: a gate row with a stale turn_lease_at is cleared and
-    re-acquired by another runtime, so a crash cannot strand deletion."""
+async def test_stale_lease_recovered_by_another_runtime(env):
+    """fix-r11: a lease row with a stale acquired_at is reclaimed by
+    another runtime, so a crash cannot strand deletion."""
     member = await populate(env)
-    now = datetime.now(UTC)
 
-    # Acquire gate normally.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    # Acquire lease normally.
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
     # Manually age the lease past the stale threshold.
-    stale_time = now - timedelta(seconds=STALE_LEASE_SECONDS + 5)
+    stale_time = datetime.now(UTC) - timedelta(seconds=STALE_LEASE_SECONDS + 5)
     async with async_sessionmaker(env.engine)() as db:
         await db.execute(
-            update(ForgetMeRequest)
-            .where(ForgetMeRequest.member_id == member.id)
-            .values(turn_lease_at=stale_time)
+            update(ModelTurnLease)
+            .where(ModelTurnLease.member_id == member.id)
+            .values(acquired_at=stale_time)
         )
         await db.commit()
 
     # Another runtime (simulated by a second acquire call) must succeed —
     # the stale lease is recovered.
-    result = await env.forget.acquire_model_turn_gate(member.id, env.gym_id)
+    result = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
     assert result is True, (
-        "stale gate lease must be recoverable by another runtime"
+        "stale lease must be recoverable by another runtime"
     )
 
     # Verify the lease was updated to a fresh timestamp.
     async with async_sessionmaker(env.engine)() as db:
         row = await db.scalar(
-            select(ForgetMeRequest).where(
-                ForgetMeRequest.member_id == member.id
+            select(ModelTurnLease).where(
+                ModelTurnLease.member_id == member.id
             )
         )
         assert row is not None
-        assert row.status == STATUS_GATE
-        assert row.model_turn_active is True
-        assert row.turn_lease_at > stale_time, "lease must be refreshed"
+        assert row.acquired_at > stale_time, "lease must be refreshed"
 
     # Clean up.
-    await env.forget.release_model_turn_gate(member.id)
-
-
-async def test_stale_pending_lease_recovered(env):
-    """fix-r10: a pending row with a stale turn_lease_at from a crashed
-    model turn is recovered — the stale lease is cleared and a new model
-    turn can acquire it."""
-    member = await populate(env)
-    now = datetime.now(UTC)
-    phrase = await env.forget.request_forget_me(
-        member.id, env.gym_id, now, 300, "en"
-    )
-
-    # Acquire gate on pending row.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
-
-    # Simulate crash: age the lease without releasing.
-    stale_time = now - timedelta(seconds=STALE_LEASE_SECONDS + 5)
-    async with async_sessionmaker(env.engine)() as db:
-        await db.execute(
-            update(ForgetMeRequest)
-            .where(ForgetMeRequest.member_id == member.id)
-            .values(turn_lease_at=stale_time)
-        )
-        await db.commit()
-
-    # A second acquire must succeed by recovering the stale lease.
-    result = await env.forget.acquire_model_turn_gate(member.id, env.gym_id)
-    assert result is True
-
-    # Clean up.
-    await env.forget.release_model_turn_gate(member.id)
-    pending = await env.forget.get_pending_request(member.id)
-    assert pending is not None
-    assert pending.model_turn_active is False
+    await env.forget.release_model_turn_lease(member.id)
 
 
 async def test_non_matching_message_in_deleting_state_not_auto_completed(env):
-    """fix-r10: when a deleting row exists (crash after confirmation),
+    """fix-r11: when a deleting row exists (crash after confirmation),
     a non-matching message must NOT auto-complete deletion.  Only the
     exact confirmation phrase resumes deletion.
 
-    This simulates the runtime gate-failure path where acquire_model_turn_gate
-    returns False because of a deleting row."""
+    The model-turn lease gate rejects the model turn because a deleting
+    request exists, but forget_member is NOT called — the runtime returns
+    a 'deletion in progress' reply."""
     from agents.extensions.memory import SQLAlchemySession
 
     member = await populate(env)
@@ -2565,10 +2469,10 @@ async def test_non_matching_message_in_deleting_state_not_auto_completed(env):
         "non-matching phrase must NOT find the deleting request"
     )
 
-    # The runtime proceeds to acquire_model_turn_gate, which returns False
+    # The runtime proceeds to acquire_model_turn_lease, which returns False
     # because a deleting row exists.  The gate failure path must NOT call
     # forget_member — it returns _FORGET_DELETING_IN_PROGRESS.
-    gate_ok = await env.forget.acquire_model_turn_gate(
+    gate_ok = await env.forget.acquire_model_turn_lease(
         member.id, env.gym_id
     )
     assert gate_ok is False
@@ -2591,11 +2495,12 @@ async def test_non_matching_message_in_deleting_state_not_auto_completed(env):
     )
     assert deleting_by_phrase2 is not None
     await env.forget.forget_member(member.id)
+
     assert await count(env, Member, id=member.id) == 0
 
 
 async def test_exact_phrase_in_private_resumes_deletion(env):
-    """fix-r10: the exact confirmation phrase in a private message
+    """fix-r11: the exact confirmation phrase in a private message
     must resume deletion after a crash — this is the only path that
     completes deletion."""
     from agents.extensions.memory import SQLAlchemySession
@@ -2621,7 +2526,6 @@ async def test_exact_phrase_in_private_resumes_deletion(env):
     assert await count(env, Member, id=member.id) == 1
 
     # Simulate the runtime: deleting_before_link with exact phrase.
-    # This is the fix-r10 flow — get_deleting_by_phrase is used.
     deleting_before_link = await env.forget.get_deleting_by_phrase(
         member.id, phrase, now
     )
@@ -2639,125 +2543,396 @@ async def test_exact_phrase_in_private_resumes_deletion(env):
     assert items == []
 
 
-async def test_gate_release_on_failure_path_blocking(env):
-    """fix-r10: verify that release_model_turn_gate properly cleans up
-    after a model failure — the gate must not strand deletion.
-
-    Tests the store-level guarantee: acquire + release cycle works
-    correctly even when the 'model' (test code) raises."""
+async def test_lease_release_on_failure_path(env):
+    """fix-r11: verify that release_model_turn_lease properly cleans up
+    after a model failure — the lease must not strand deletion."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(
         member.id, env.gym_id, now, 300, "en"
     )
 
-    # Acquire the gate (simulates pre-model check).
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    # Acquire the lease (simulates pre-model check).
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
-    # Verify gate is held.
-    async with async_sessionmaker(env.engine)() as db:
-        row = await db.scalar(
-            select(ForgetMeRequest).where(
-                ForgetMeRequest.member_id == member.id
-            )
-        )
-        assert row.model_turn_active is True
+    # Verify lease exists.
+    assert await env.forget.model_turn_lease_exists(member.id) is True
 
-    # Simulate failure: release the gate.
-    await env.forget.release_model_turn_gate(member.id)
+    # Simulate failure: release the lease.
+    await env.forget.release_model_turn_lease(member.id)
 
-    # Gate must be released — claim must now succeed.
+    # Lease must be released — claim must now succeed.
     claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
     assert claimed is not None, (
-        "claim must succeed after gate is released on failure path"
+        "claim must succeed after lease is released on failure path"
     )
     assert claimed.status == STATUS_DELETING
 
 
-async def test_gate_not_stranded_by_exception_in_blocking_path(env):
-    """fix-r10: if an exception occurs between acquire and release,
-    the gate must still be releasable — the store layer must not require
+async def test_lease_not_stranded_by_exception(env):
+    """fix-r11: if an exception occurs between acquire and release,
+    the lease must still be releasable — the store layer must not require
     the exact same session/transaction to release."""
     member = await populate(env)
 
-    # Acquire gate (inserts gate row).
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    # Acquire lease.
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
-    # Gate row exists.
-    async with async_sessionmaker(env.engine)() as db:
-        row = await db.scalar(
-            select(ForgetMeRequest).where(
-                ForgetMeRequest.member_id == member.id
-            )
-        )
-        assert row is not None
-        assert row.status == STATUS_GATE
+    # Lease row exists.
+    assert await env.forget.model_turn_lease_exists(member.id) is True
 
-    # Release from a "different session" (simulated by the normal
-    # release call — each call opens its own session).
-    await env.forget.release_model_turn_gate(member.id)
+    # Release from a "different session" (each call opens its own session).
+    await env.forget.release_model_turn_lease(member.id)
 
-    # Gate row must be gone.
-    async with async_sessionmaker(env.engine)() as db:
-        row = await db.scalar(
-            select(ForgetMeRequest).where(
-                ForgetMeRequest.member_id == member.id
-            )
-        )
-        assert row is None
+    # Lease row must be gone.
+    assert await env.forget.model_turn_lease_exists(member.id) is False
 
     # Re-acquire must work (clean slate).
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
-    await env.forget.release_model_turn_gate(member.id)
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
+    await env.forget.release_model_turn_lease(member.id)
 
 
-async def test_no_row_gate_prevents_immediate_claim(env):
-    """fix-r10: the no-row→gate-insert atomic path prevents a concurrent
-    claim from racing through.  After acquire inserts a gate row, a
+async def test_no_row_lease_prevents_immediate_claim(env):
+    """fix-r11: the no-row→lease-insert atomic path prevents a concurrent
+    claim from racing through.  After acquire inserts a lease row, a
     claim_forget_me_request on a freshly-created pending request must
-    still fail because the gate row blocks it (model_turn_active=True).
+    still fail because the lease blocks it.
 
-    This is the cross-runtime race that fix-r10 closes: the gate row
+    This is the cross-runtime race that fix-r11 closes: the lease row
     is the durable signal that a model turn is active even when no
     forget-me request existed yet."""
     member = await populate(env)
     now = datetime.now(UTC)
 
-    # Runtime A: acquire gate on a Member with no forget-me row.
-    # This inserts a gate row atomically.
-    assert await env.forget.acquire_model_turn_gate(member.id, env.gym_id) is True
+    # Runtime A: acquire lease on a Member with no forget-me row.
+    # This inserts a lease row atomically (separate table).
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
 
     # Runtime B: Member sends "forget me" and confirmation.
-    # request_forget_me must overwrite the gate row.
+    # request_forget_me creates a pending request without touching the lease.
     phrase = await env.forget.request_forget_me(
         member.id, env.gym_id, now, 300, "en"
     )
     assert phrase.startswith("DELETE-ME-")
 
-    # Runtime B: try to claim — must fail because the gate row was
-    # overwritten by request_forget_me (which sets model_turn_active=False).
-    # Wait — actually, request_forget_me sets model_turn_active=False.
-    # So the claim should SUCCEED.  But Runtime A still holds the gate!
-    #
-    # This is the correct behavior: request_forget_me clears the gate
-    # when it overwrites the row.  The new pending request has
-    # model_turn_active=False, so the claim succeeds.  Runtime A's
-    # gate was effectively released by the overwrite.
-    #
-    # The real protection is: Runtime B's claim succeeds, sets status
-    # to 'deleting', and then Runtime A's model turn gate check (at
-    # the end of handle_message) would fail because a deleting row
-    # now exists.  The model never runs.
-    #
-    # Actually, the test just verifies that request_forget_me can
-    # overwrite a gate row and the resulting pending request works
-    # normally for claim.
+    # Runtime B: try to claim — must fail because the lease exists.
     claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert claimed is not None, (
-        "claim must succeed — gate was cleared by request_forget_me"
+    assert claimed is None, (
+        "claim must fail when model-turn lease is held"
     )
-    assert claimed.status == STATUS_DELETING
+
+    # The pending request is still there, untouched.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.status == STATUS_PENDING
+
+    # Runtime A releases the lease.  Now claim succeeds.
+    await env.forget.release_model_turn_lease(member.id)
+    claimed_after = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed_after is not None
+    assert claimed_after.status == STATUS_DELETING
+
+
+# -- Concurrent barrier tests (fix-r11) -----------------------------------
+
+
+async def test_barrier_lease_acquired_before_claim(env):
+    """True concurrent interleaving: Task A acquires the lease just before
+    Task B tries to claim.  The claim must lose because the lease is held.
+
+    Uses asyncio.Event barriers to create deterministic interleaving."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Barrier events for deterministic interleaving.
+    lease_acquired = asyncio.Event()   # Task A has acquired the lease
+    claim_allowed = asyncio.Event()    # Task B may now attempt the claim
+
+    result_b: bool | None = None
+
+    async def task_a():
+        """Model turn: acquires the lease, signals, waits."""
+        ok = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+        assert ok is True
+        lease_acquired.set()        # Signal: lease is held, Task B can try
+        await claim_allowed.wait()  # Wait for Task B to finish
+        await env.forget.release_model_turn_lease(member.id)
+
+    async def task_b():
+        """Deletion attempt: waits for lease, then tries to claim."""
+        await lease_acquired.wait()  # Wait for Task A to acquire lease
+        # Now try to claim while lease is held.
+        nonlocal result_b
+        claimed = await env.forget.claim_forget_me_request(
+            member.id, phrase, datetime.now(UTC)
+        )
+        result_b = claimed is not None
+        claim_allowed.set()  # Signal: Task B is done
+
+    await asyncio.gather(task_a(), task_b())
+
+    # Task B must have lost — the lease was held by Task A.
+    assert result_b is False, (
+        "claim while lease is held must lose — cross-runtime TOCTOU fix"
+    )
+
+    # The row must still be pending.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.status == STATUS_PENDING
+
+
+async def test_barrier_request_during_active_runner(env):
+    """True concurrent interleaving: a forget-me request arrives while
+    the model-turn lease is held (active Runner).  request_forget_me
+    must create the pending request WITHOUT clearing the lease.
+
+    Uses asyncio.Event barriers for deterministic interleaving."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # Barrier events.
+    lease_held = asyncio.Event()
+    request_done = asyncio.Event()
+
+    phrase_result: str | None = None
+
+    async def task_a():
+        """Model turn: acquires lease, signals, waits for request."""
+        ok = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+        assert ok is True
+        lease_held.set()         # Signal: lease is held
+        await request_done.wait()  # Wait for request to finish
+        # Lease still exists — verify.
+        assert await env.forget.model_turn_lease_exists(member.id) is True
+        await env.forget.release_model_turn_lease(member.id)
+
+    async def task_b():
+        """Forget-me request while Runner is active."""
+        await lease_held.wait()  # Wait for lease to be acquired
+        nonlocal phrase_result
+        phrase_result = await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "en"
+        )
+        request_done.set()  # Signal: request is done
+
+    await asyncio.gather(task_a(), task_b())
+
+    # The request must have succeeded WITHOUT clearing the lease.
+    assert phrase_result is not None
+    assert phrase_result.startswith("DELETE-ME-")
+
+    # The lease was held throughout the request (released after).
+    # Verify the pending request is there.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.status == STATUS_PENDING
+    assert pending.confirmation_phrase == phrase_result
+
+
+async def test_barrier_two_model_turns_exactly_one_wins(env):
+    """Two concurrent model turns racing for the lease: exactly one wins.
+    The loser sees acquire_model_turn_lease return False."""
+    import asyncio
+
+    member = await populate(env)
+
+    # Barrier events.
+    first_acquired = asyncio.Event()
+    second_done = asyncio.Event()
+
+    result_a: bool | None = None
+    result_b: bool | None = None
+
+    async def turn_a():
+        nonlocal result_a
+        result_a = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+        first_acquired.set()        # Signal: Turn A done
+        await second_done.wait()    # Wait for Turn B
+        if result_a:
+            await env.forget.release_model_turn_lease(member.id)
+
+    async def turn_b():
+        await first_acquired.wait()  # Wait for Turn A to finish
+        nonlocal result_b
+        result_b = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+        second_done.set()           # Signal: Turn B done
+        if result_b:
+            await env.forget.release_model_turn_lease(member.id)
+
+    await asyncio.gather(turn_a(), turn_b())
+
+    # Exactly one winner.
+    assert (result_a is True and result_b is False) or \
+           (result_a is False and result_b is True), \
+        f"exactly one turn must win: A={result_a}, B={result_b}"
+
+
+async def test_barrier_confirmation_vs_model_admission(env):
+    """True concurrent interleaving: a deletion confirmation (claim) arrives
+    while the model-turn lease is being acquired.  The claim checks the
+    lease and loses; the lease is then checked against ForgetMeRequest
+    (which is pending, not deleting) and the model proceeds.
+
+    Uses asyncio.Event barriers for deterministic interleaving."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Barrier events.
+    claim_checking = asyncio.Event()  # Claim is checking the lease
+
+    claim_result: bool | None = None
+    lease_result: bool | None = None
+
+    async def model_admission():
+        """Model turn: acquires lease after claim starts checking."""
+        nonlocal lease_result
+        await claim_checking.wait()
+        lease_result = await env.forget.acquire_model_turn_lease(
+            member.id, env.gym_id
+        )
+
+    async def deletion_confirmation():
+        """Deletion claim: checks lease, signals, then attempts claim."""
+        # Check lease exists (should be False at start).
+        exists_before = await env.forget.model_turn_lease_exists(member.id)
+        assert exists_before is False
+        claim_checking.set()  # Signal: claim is now checking
+        # Now the model admission task will race to acquire the lease.
+        nonlocal claim_result
+        claimed = await env.forget.claim_forget_me_request(
+            member.id, phrase, datetime.now(UTC)
+        )
+        claim_result = claimed is not None
+
+    await asyncio.gather(model_admission(), deletion_confirmation())
+
+    # Both may succeed or one may lose; in any case the system must be
+    # consistent.
+    if claim_result:
+        deleting = await env.forget.get_deleting_request(member.id)
+        assert deleting is not None
+        assert deleting.status == STATUS_DELETING
+    else:
+        pending = await env.forget.get_pending_request(member.id)
+        assert pending is not None
+        assert pending.status == STATUS_PENDING
+
+    # Clean up.
+    if lease_result:
+        await env.forget.release_model_turn_lease(member.id)
+
+
+async def test_barrier_stale_lease_recovery(env):
+    """True concurrent interleaving: a lease is manually aged past the
+    stale threshold, then two runtimes race to acquire it.  At least one
+    must succeed (stale lease recovery).
+
+    Uses asyncio.Event barriers for deterministic interleaving."""
+    import asyncio
+
+    member = await populate(env)
+
+    # Acquire lease, then immediately age it past the stale threshold.
+    assert await env.forget.acquire_model_turn_lease(member.id, env.gym_id) is True
+    stale_time = datetime.now(UTC) - timedelta(seconds=STALE_LEASE_SECONDS + 5)
+    async with async_sessionmaker(env.engine)() as db:
+        await db.execute(
+            update(ModelTurnLease)
+            .where(ModelTurnLease.member_id == member.id)
+            .values(acquired_at=stale_time)
+        )
+        await db.commit()
+
+    # Now two runtimes race to acquire the stale lease.
+    barrier = asyncio.Event()
+    results: list[bool] = []
+
+    async def runtime():
+        await barrier.wait()
+        result = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+        results.append(result)
+
+    # Start both runtimes simultaneously.
+    t1 = asyncio.create_task(runtime())
+    t2 = asyncio.create_task(runtime())
+    barrier.set()
+    await asyncio.gather(t1, t2)
+
+    # At least one must succeed — the stale lease was recovered.
+    assert any(results), f"at least one runtime must acquire stale lease: {results}"
+
+    # Clean up.
+    await env.forget.release_model_turn_lease(member.id)
+
+
+async def test_barrier_lease_released_after_failure(env):
+    """True concurrent interleaving: a model turn acquires the lease,
+    fails (simulated), and releases.  A concurrent forget-me flow must
+    be able to proceed after the release.
+
+    Uses asyncio.Event barriers for deterministic interleaving."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # Barrier events.
+    lease_acquired = asyncio.Event()
+    failure_simulated = asyncio.Event()
+    lease_released = asyncio.Event()
+
+    async def model_turn():
+        """Model turn: acquires, fails, releases."""
+        ok = await env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+        assert ok is True
+        lease_acquired.set()          # Signal: lease is held
+        await failure_simulated.wait()  # Wait for failure signal
+        # Release on failure path.
+        await env.forget.release_model_turn_lease(member.id)
+        lease_released.set()          # Signal: lease is released
+
+    async def forget_me_flow():
+        """Forget-me: starts after failure, must succeed once lease is released."""
+        await lease_acquired.wait()   # Wait for lease to be acquired
+        # Create a pending request while lease is held (this must work).
+        phrase = await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "en"
+        )
+        assert phrase.startswith("DELETE-ME-")
+        failure_simulated.set()       # Signal: failure can happen now
+
+        # Try to claim — must fail while lease is held.
+        claimed_while_held = await env.forget.claim_forget_me_request(
+            member.id, phrase, datetime.now(UTC)
+        )
+        assert claimed_while_held is None, "claim must fail while lease is held"
+
+        await lease_released.wait()   # Wait for lease release
+
+        # Now claim must succeed.
+        claimed_after = await env.forget.claim_forget_me_request(
+            member.id, phrase, datetime.now(UTC)
+        )
+        assert claimed_after is not None, "claim must succeed after lease release"
+        assert claimed_after.status == STATUS_DELETING
+        await env.forget.forget_member(member.id)
+
+    await asyncio.gather(model_turn(), forget_me_flow())
+
+    # Full deletion completed.
+    assert await count(env, Member, id=member.id) == 0

@@ -353,17 +353,20 @@ class AgentRuntime:
                 # touches the check-in rhythm, compaction, or history.
                 if self.dashboard is not None and is_dashboard_command(msg.text):
                     return await self.dashboard.handle(linked, is_group=msg.is_group)
-                # P1 (fix-r10): Cross-runtime atomic model-turn gate —
-                # checks for a deleting request and records a turn lease
-                # in ONE transaction, closing the no-row-read→Runner race
-                # across runtimes.  If a concurrent runtime confirmed
-                # deletion between _handle_forget_me and now, the gate
-                # returns False and the model must not run.
+                # P1 (fix-r11): Cross-runtime atomic model-turn lease —
+                # checks for a deleting request and acquires an exclusive
+                # lease in the separate ModelTurnLease table, closing the
+                # no-row-read→Runner race across runtimes.
                 #
-                # The gate is released in try/finally around the model
-                # call (not deferred to after_send) so a crash during
-                # Runner.run() or process_send cannot strand deletion.
-                model_turn_gated = await self.stores.forget.acquire_model_turn_gate(
+                # Before acquiring, release any existing lease.  The
+                # per-identity lock guarantees the previous turn is done,
+                # so any stale lease is from a dropped after_send (or a
+                # crash) — reclaim it so a dropped hook cannot wedge the
+                # Member forever (issue #212, fix-r11).
+                await self.stores.forget.release_model_turn_lease(
+                    linked.member.id
+                )
+                model_turn_gated = await self.stores.forget.acquire_model_turn_lease(
                     linked.member.id, linked.gym.id
                 )
                 if not model_turn_gated:
@@ -445,12 +448,12 @@ class AgentRuntime:
                     # settled first so we don't race on the SQLite writer
                     # lock (the reset task runs concurrently).
                     try:
-                        await self.stores.forget.release_model_turn_gate(
+                        await self.stores.forget.release_model_turn_lease(
                             member_id
                         )
                     except Exception:
                         logger.exception(
-                            "release_model_turn_gate failed for %d",
+                            "release_model_turn_lease failed for %d",
                             member_id,
                         )
                     if context.coach_pings:
@@ -513,10 +516,10 @@ class AgentRuntime:
         if _turn is not None:
             _turn.defer_logging = True
             stream = _finish_turn(stream, _turn)
-        # Outermost: release the model-turn gate on every path — a
+        # Outermost: release the model-turn lease on every path — a
         # stream failure, GeneratorExit, or dropped after_send must
-        # not strand deletion (issue #212, fix-r10).
-        stream = _release_gate_on_close(
+        # not strand deletion (issue #212, fix-r11).
+        stream = _release_lease_on_close(
             stream, self.stores.forget, member_id, logger
         )
         return Reply(
@@ -588,19 +591,19 @@ class AgentRuntime:
                 # The rhythm reset is settled here too, isolated from the
                 # demo/ping fan-out so one failure cannot block it.
                 await await_reset()
-                # Release the model-turn gate after the reset is settled
+                # Release the model-turn lease after the reset is settled
                 # so we don't race on the SQLite writer lock (the reset
                 # task runs concurrently in the normal path).  The
-                # streaming path releases the gate in _release_gate_on_close
+                # streaming path releases the lease in _release_lease_on_close
                 # before after_send even starts; the blocking path releases
-                # it here (issue #212, fix-r10).
+                # it here (issue #212, fix-r11).
                 try:
-                    await self.stores.forget.release_model_turn_gate(
+                    await self.stores.forget.release_model_turn_lease(
                         member_id
                     )
                 except Exception:
                     logger.exception(
-                        "release_model_turn_gate failed for %d", member_id
+                        "release_model_turn_lease failed for %d", member_id
                     )
                 # Read now, not at build time: on the streaming path the tools
                 # populate these while the stream is being consumed.
@@ -890,15 +893,15 @@ async def _hold_lock(
         raise
 
 
-async def _release_gate_on_close(
+async def _release_lease_on_close(
     inner: AsyncIterator[str],
     forget_store,
     member_id: int,
     logger: logging.Logger,
 ) -> AsyncIterator[str]:
-    """Release the forget-me model-turn gate when the stream is exhausted
-    or errors, guaranteeing the gate is cleared even when ``after_send``
-    is never called (issue #212, fix-r10).
+    """Release the forget-me model-turn lease when the stream is exhausted
+    or errors, guaranteeing the lease is cleared even when ``after_send``
+    is never called (issue #212, fix-r11).
 
     Placed outermost so it runs after lock release, instrument close,
     and all other cleanup.
@@ -908,16 +911,16 @@ async def _release_gate_on_close(
             yield chunk
     finally:
         # Propagate close inward first, but never at the cost of the
-        # gate release — a leaked gate strands deletion forever.
+        # lease release — a leaked lease strands deletion forever.
         try:
             await inner.aclose()
         except Exception:
             pass
         try:
-            await forget_store.release_model_turn_gate(member_id)
+            await forget_store.release_model_turn_lease(member_id)
         except Exception:
             logger.exception(
-                "release_model_turn_gate failed for %d", member_id
+                "release_model_turn_lease failed for %d", member_id
             )
 
 

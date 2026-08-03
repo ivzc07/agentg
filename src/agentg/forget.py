@@ -23,6 +23,7 @@ from agentg.models import (
     Member,
     MemberChannel,
     MemberNote,
+    ModelTurnLease,
     Routine,
     Session,
     Set,
@@ -65,10 +66,9 @@ _FORGET_ME_TRIGGERS: tuple[str, ...] = _FORGET_ME_TRIGGERS_EN + _FORGET_ME_TRIGG
 STATUS_PENDING = "pending"
 STATUS_DELETING = "deleting"
 STATUS_CONSUMED = "consumed"  # legacy — no longer written; kept for migration compat
-STATUS_GATE = "gate"  # model-turn-only lease row (fix-r10): no real forget-me request
 
 # Bounded stale-lease recovery threshold: a turn lease older than this
-# is cleared so a crashed runtime cannot strand deletion forever
+# is reclaimed so a crashed runtime cannot strand deletion forever
 # (issue #212, fix-r10).
 STALE_LEASE_SECONDS = 30
 
@@ -136,6 +136,12 @@ class ForgetStore:
             await db.execute(
                 delete(ForgetMeRequest).where(ForgetMeRequest.member_id == member_id)
             )
+            # Release the model-turn lease (if any) during deletion so a
+            # crashed runtime's lease doesn't block re-linking.  Must run
+            # before the Member delete (FK constraint).
+            await db.execute(
+                delete(ModelTurnLease).where(ModelTurnLease.member_id == member_id)
+            )
             await db.execute(delete(MemberChannel).where(MemberChannel.member_id == member_id))
             await db.execute(delete(Member).where(Member.id == member_id))
             await db.commit()
@@ -164,12 +170,9 @@ class ForgetStore:
         method is called, so the guard here is defense in depth (issue #212,
         fix-r5 P1).
 
-        A gate-only row (``status='gate'`` from ``acquire_model_turn_gate``)
-        is safely overwritten — the model turn lease is released and the
-        real forget-me request takes its place (issue #212, fix-r10).
-
-        ``language`` is the two-letter code detected from the triggering
-        message so the confirmation goodbye can mirror the Member.
+        Model-turn leases live in the separate ``ModelTurnLease`` table and
+        are never touched by this method — a ``request_forget_me`` can never
+        overwrite or clear an active model-turn gate (issue #212, fix-r11).
         """
         phrase = "DELETE-ME-" + secrets.token_hex(3).upper()
         expires_at = now + timedelta(seconds=lifetime_seconds)
@@ -184,11 +187,10 @@ class ForgetStore:
                 )
             )
             if existing is not None and existing.status not in (
-                STATUS_PENDING, STATUS_GATE
+                STATUS_PENDING,
             ):
                 # Deletion is already in progress; the caller must
-                # complete it, not overwrite the row.  Gate rows are
-                # fine — they are overwritten below.
+                # complete it, not overwrite the row.
                 await db.commit()
                 return ""  # sentinel: deleting row exists
 
@@ -214,11 +216,11 @@ class ForgetStore:
             )
             dialect_name = self.engine.sync_engine.dialect.name
             if dialect_name == "postgresql":
-                from sqlalchemy.dialects.postgresql import insert as dialect_insert
+                from sqlalchemy.dialects.postgresql import insert as _dialect_insert
             else:
-                from sqlalchemy.dialects.sqlite import insert as dialect_insert
+                from sqlalchemy.dialects.sqlite import insert as _dialect_insert
 
-            stmt = dialect_insert(ForgetMeRequest).values(**values)
+            stmt = _dialect_insert(ForgetMeRequest).values(**values)
             stmt = stmt.on_conflict_do_update(
                 index_elements=["member_id"],
                 set_=dict(
@@ -228,10 +230,8 @@ class ForgetStore:
                     created_at=now,
                     language=language,
                     status=STATUS_PENDING,
-                    model_turn_active=False,
-                    turn_lease_at=None,
                 ),
-                where=(ForgetMeRequest.status.in_([STATUS_PENDING, STATUS_GATE])),
+                where=(ForgetMeRequest.status == STATUS_PENDING),
             )
             await db.execute(stmt)
             await db.commit()
@@ -239,8 +239,6 @@ class ForgetStore:
         # P1 post-upsert re-check: if the row became deleting/consumed
         # between our read and upsert, the WHERE clause prevented the
         # overwrite.  Return the sentinel so the caller can recover.
-        # Gate rows are overwritten by the upsert, so they won't appear
-        # here.  Only deleting/consumed rows trigger the sentinel.
         async with self._sessions() as db:
             existing_after = await db.scalar(
                 select(ForgetMeRequest).where(
@@ -248,7 +246,7 @@ class ForgetStore:
                 )
             )
             if existing_after is not None and existing_after.status not in (
-                STATUS_PENDING, STATUS_GATE
+                STATUS_PENDING,
             ):
                 await db.commit()
                 return ""  # sentinel: deleting row exists
@@ -332,182 +330,174 @@ class ForgetStore:
             )
             await db.commit()
 
-    async def acquire_model_turn_gate(
+    # -- Model-turn lease (issue #212, fix-r11) ------------------------------
+
+    async def acquire_model_turn_lease(
         self, member_id: int, gym_id: int
     ) -> bool:
-        """Atomically check that no deletion is in progress and record a
-        turn lease in the same transaction, closing the no-row-read→Runner
-        race across runtimes (issue #212, fix-r10).
+        """Atomically check that no deletion is in progress and acquire an
+        exclusive model-turn lease in the separate ``ModelTurnLease`` table,
+        closing the no-row-read→Runner race across runtimes (issue #212,
+        fix-r11).
 
-        When no forget-me row exists, a gate-only row (``status='gate'``)
-        is atomically inserted so a concurrent ``request_forget_me`` +
-        ``claim_forget_me_request`` cannot race through the gap between
-        this check and ``Runner.run()``.
+        Steps:
+        1. If a ``ForgetMeRequest`` with status ``deleting`` exists → False.
+        2. Try INSERT into ``ModelTurnLease`` with ON CONFLICT DO NOTHING.
+        3. If our INSERT succeeded (rowcount > 0) → True.
+        4. If a competing row exists, check for stale-lease recovery.
+        5. If stale, UPDATE the stale row (reclaim it); otherwise False.
 
         Returns ``True`` when the model may proceed safely.  Returns
-        ``False`` when a ``deleting`` row exists or when the conditional
-        UPDATE lost a race (the row is no longer ``pending``/``gate``).
-
-        Stale-lease recovery: if an existing gate or pending row has a
-        ``turn_lease_at`` older than ``STALE_LEASE_SECONDS``, the stale
-        lease is cleared and this call acquires it — a crashed runtime
-        cannot strand deletion forever.
+        ``False`` when a deleting request exists or another runtime holds
+        a non-stale lease.
         """
         now = datetime.now(UTC)
         stale_cutoff = now - timedelta(seconds=STALE_LEASE_SECONDS)
+
         async with self._sessions() as db:
-            existing = await db.scalar(
+            # 1. Reject when a deleting request exists — deletion is
+            #    confirmed and in progress; the model must never run.
+            deleting = await db.scalar(
                 select(ForgetMeRequest).where(
-                    ForgetMeRequest.member_id == member_id
+                    ForgetMeRequest.member_id == member_id,
+                    ForgetMeRequest.status.in_([STATUS_DELETING, STATUS_CONSUMED]),
                 )
             )
-            # A deleting row means deletion is confirmed — never allow
-            # a model turn to proceed.
-            if existing is not None and existing.status == STATUS_DELETING:
+            if deleting is not None:
+                await db.commit()
                 return False
 
-            if existing is None:
-                # No row at all — atomically INSERT a gate-only row so
-                # a concurrent request_forget_me + claim cannot race
-                # through the gap.
-                dialect_name = self.engine.sync_engine.dialect.name
-                if dialect_name == "postgresql":
-                    from sqlalchemy.dialects.postgresql import (
-                        insert as dialect_insert,
-                    )
-                else:
-                    from sqlalchemy.dialects.sqlite import (
-                        insert as dialect_insert,
-                    )
-                stmt = dialect_insert(ForgetMeRequest).values(
-                    member_id=member_id,
-                    gym_id=gym_id,
-                    confirmation_phrase="__GATE__",
-                    expires_at=now,  # placeholder; overwritten by real request
-                    created_at=now,
-                    status=STATUS_GATE,
-                    model_turn_active=True,
-                    turn_lease_at=now,
-                )
-                # ON CONFLICT DO NOTHING: if a concurrent runtime
-                # inserted a row between our SELECT and INSERT, this
-                # becomes a no-op.  We re-read to decide.
-                stmt = stmt.on_conflict_do_nothing(
-                    index_elements=["member_id"]
-                )
-                await db.execute(stmt)
-                await db.commit()
-                # Re-read: if a row appeared (pending or deleting), we
-                # lost the race — but our INSERT was a no-op, so the
-                # concurrent row is untouched.  A pending row is fine
-                # (the real request will overwrite our gate later); a
-                # deleting row means we must not proceed.
-                return True  # gate row inserted or no-op; proceed
+            # 2. Try to insert a fresh lease row.
+            dialect_name = self.engine.sync_engine.dialect.name
+            if dialect_name == "postgresql":
+                from sqlalchemy.dialects.postgresql import insert as _dialect_insert  # type: ignore[assignment]
+            else:
+                from sqlalchemy.dialects.sqlite import insert as _dialect_insert  # type: ignore[assignment]
 
-            # Row exists.  If it is a gate row, recover it — a previous
-            # turn's after_send may have been dropped (or a runtime
-            # crashed).  We hold the per-identity lock (from
-            # handle_message), so the previous turn is definitively
-            # done — the gate row is stranded and must be cleared.
-            if existing.status == STATUS_GATE:
-                # Recover: update the gate row to a fresh lease.
-                await db.execute(
-                    update(ForgetMeRequest)
-                    .where(
-                        ForgetMeRequest.member_id == member_id,
-                        ForgetMeRequest.status == STATUS_GATE,
-                    )
-                    .values(
-                        model_turn_active=True,
-                        turn_lease_at=now,
-                    )
-                )
-                await db.commit()
+            stmt = _dialect_insert(ModelTurnLease).values(
+                member_id=member_id,
+                gym_id=gym_id,
+                acquired_at=now,
+            )
+            stmt = stmt.on_conflict_do_nothing(
+                index_elements=["member_id"]
+            )
+            result = await db.execute(stmt)
+            await db.commit()
+
+            # 3. Our INSERT succeeded — the row is new and we own the lease.
+            rowcount = getattr(result, "rowcount", 0)
+            if rowcount > 0:
                 return True
 
-            # Pending row: atomically acquire the lease.
-            # Also recover stale leases on pending rows.
-            result = await db.execute(
-                update(ForgetMeRequest)
-                .where(
-                    ForgetMeRequest.member_id == member_id,
-                    ForgetMeRequest.status == STATUS_PENDING,
-                    ForgetMeRequest.model_turn_active == False,
+        # 4. INSERT was a no-op — a lease row already exists.
+        #    Check for stale-lease recovery.
+        async with self._sessions() as db:
+            lease = await db.scalar(
+                select(ModelTurnLease).where(
+                    ModelTurnLease.member_id == member_id
                 )
-                .values(model_turn_active=True, turn_lease_at=now)
             )
-            # If the conditional UPDATE failed because model_turn_active
-            # was already True, check for stale lease recovery.
-            if result.rowcount == 0:
-                # Maybe the lease is stale — try to recover.
-                recovery = await db.execute(
-                    update(ForgetMeRequest)
+            if lease is None:
+                # Race: the row disappeared between the no-op insert and
+                # this read.  Retry once by recursing.
+                await db.commit()
+                return await self.acquire_model_turn_lease(member_id, gym_id)
+
+            # 5. Check if the existing lease is stale.
+            if lease.acquired_at < stale_cutoff:
+                # Reclaim the stale lease.
+                await db.execute(
+                    update(ModelTurnLease)
                     .where(
-                        ForgetMeRequest.member_id == member_id,
-                        ForgetMeRequest.status == STATUS_PENDING,
-                        ForgetMeRequest.model_turn_active == True,
-                        ForgetMeRequest.turn_lease_at < stale_cutoff,
+                        ModelTurnLease.member_id == member_id,
+                        ModelTurnLease.acquired_at < stale_cutoff,
                     )
-                    .values(model_turn_active=True, turn_lease_at=now)
+                    .values(acquired_at=now, gym_id=gym_id)
                 )
                 await db.commit()
-                return recovery.rowcount > 0
+                # Verify the UPDATE succeeded.
+                lease2 = await db.scalar(
+                    select(ModelTurnLease).where(
+                        ModelTurnLease.member_id == member_id
+                    )
+                )
+                if lease2 is not None and lease2.acquired_at >= now - timedelta(seconds=1):
+                    return True
+                await db.commit()
+                return False
+
             await db.commit()
-            return True
+            return False
 
-    async def release_model_turn_gate(self, member_id: int) -> None:
-        """Release the model-turn gate so a pending forget-me request can
-        be claimed again (issue #212, fix-r9).
+    async def release_model_turn_lease(self, member_id: int) -> None:
+        """Release the model-turn lease so another runtime (or a claim)
+        can proceed.  Must be called in a ``finally`` block so a crash
+        during ``Runner.run()`` cannot strand deletion (issue #212, fix-r11).
 
-        For gate-only rows (``status='gate'`` — no real forget-me
-        request), the row is deleted.  For pending rows, the lease is
-        cleared but the row stays.  A row that transitioned to
-        ``deleting`` while the model ran is NOT touched.
+        Idempotent: releasing when no lease exists is a no-op.
         """
         async with self._sessions() as db:
-            # Gate-only rows: delete them — they serve no purpose once
-            # the model turn is done.
             await db.execute(
-                delete(ForgetMeRequest).where(
-                    ForgetMeRequest.member_id == member_id,
-                    ForgetMeRequest.status == STATUS_GATE,
+                delete(ModelTurnLease).where(
+                    ModelTurnLease.member_id == member_id
                 )
-            )
-            # Pending rows: clear the lease so a claim can proceed.
-            await db.execute(
-                update(ForgetMeRequest)
-                .where(
-                    ForgetMeRequest.member_id == member_id,
-                    ForgetMeRequest.model_turn_active == True,
-                    ForgetMeRequest.status == STATUS_PENDING,
-                )
-                .values(model_turn_active=False, turn_lease_at=None)
             )
             await db.commit()
+
+    async def model_turn_lease_exists(self, member_id: int) -> bool:
+        """Return True when a model-turn lease exists for this Member.
+
+        Used by ``claim_forget_me_request`` to reject a claim while a
+        model turn is active — the cross-runtime guard (issue #212, fix-r11).
+        """
+        async with self._sessions() as db:
+            row = await db.scalar(
+                select(ModelTurnLease).where(
+                    ModelTurnLease.member_id == member_id
+                )
+            )
+            return row is not None
 
     async def claim_forget_me_request(
         self, member_id: int, confirmation_phrase: str, now: datetime
     ) -> ForgetMeRequest | None:
         """Atomically claim the pending request only when the confirmation
-        phrase matches and hasn't expired yet.  Returns the claimed request
-        (for language mirroring) or None if the claim lost.
+        phrase matches, hasn't expired yet, and NO model-turn lease exists
+        — closes the TOCTOU between the model-turn gate and a concurrent
+        deletion (issue #212, fix-r11).
+
+        Returns the claimed request (for language mirroring) or None if the
+        claim lost.
 
         A single conditional UPDATE (``pending`` → ``deleting``) is the
         compare-and-claim primitive: two concurrent sessions can't both
         update the same row — exactly one sees ``rowcount > 0`` and becomes
-        the winner.  The loser (wrong phrase, expired, or beaten by a
-        concurrent winner) sees zero rows updated and must not proceed.
+        the winner.
 
-        The row stays with status ``deleting`` so the exact confirmation
-        phrase can retry deletion if ``forget_member`` fails partway
-        through (issue #212, fix-3).  ``forget_member`` deletes the row
-        when it completes.
-
-        The WHERE clause also requires ``model_turn_active = False`` so a
-        concurrent model turn holding the gate prevents the claim — the
-        cross-runtime TOCTOU fix (issue #212, fix-r9).
+        Before attempting the claim, checks the ``ModelTurnLease`` table.
+        If a lease exists, a model turn is active and the claim must not
+        proceed.  This check has a tiny TOCTOU window between the lease
+        check and the UPDATE, but the model-turn gate in ``handle_message``
+        catches any loser: if a lease appears after our check, the
+        ``acquire_model_turn_lease`` call at the model gate will see the
+        now-deleting row and reject the model — the deletion wins.
         """
+        # Fast-path: if a model-turn lease exists, fail early.
+        if await self.model_turn_lease_exists(member_id):
+            return None
+
         async with self._sessions() as db:
+            # Re-check lease inside the same transaction that claims.
+            lease = await db.scalar(
+                select(ModelTurnLease).where(
+                    ModelTurnLease.member_id == member_id
+                )
+            )
+            if lease is not None:
+                await db.commit()
+                return None
+
             result = await db.execute(
                 update(ForgetMeRequest)
                 .where(
@@ -515,11 +505,14 @@ class ForgetStore:
                     ForgetMeRequest.confirmation_phrase == confirmation_phrase,
                     ForgetMeRequest.expires_at > now,
                     ForgetMeRequest.status == STATUS_PENDING,
-                    ForgetMeRequest.model_turn_active == False,
                 )
-                .values(status=STATUS_DELETING, model_turn_active=False)
+                .values(status=STATUS_DELETING)
             )
-            if result.rowcount == 0:
+            # Use `getattr` for portable SQLAlchemy typing: the dialect's
+            # Result proxy may not expose `rowcount` in stubs but always
+            # returns it at runtime.
+            rowcount = getattr(result, "rowcount", 0)
+            if rowcount == 0:
                 await db.commit()
                 return None
             claimed = await db.scalar(

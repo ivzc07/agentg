@@ -240,6 +240,25 @@ def _add_missing_columns(conn: Connection) -> None:
                     "turn_lease_at TIMESTAMP"
                 )
             )
+    # issue #212 fix-r11: separate ModelTurnLease table so the model-turn
+    # gate is never mixed with forget-me request rows.
+    if "model_turn_leases" not in set(inspect(conn).get_table_names()):
+        conn.execute(
+            text(
+                "CREATE TABLE model_turn_leases ("
+                "  id INTEGER PRIMARY KEY,"
+                "  member_id INTEGER NOT NULL UNIQUE REFERENCES members(id),"
+                "  gym_id INTEGER NOT NULL REFERENCES gyms(id),"
+                "  acquired_at TIMESTAMP NOT NULL"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_model_turn_leases_member_id "
+                "ON model_turn_leases (member_id)"
+            )
+        )
     # FK indexes for Gym-scoped reads (issue #178): Coach lookup, roster,
     # and the check-in sweep join on these columns.
     members_indexes = {i["name"] for i in inspect(conn).get_indexes("members")}
