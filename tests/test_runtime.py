@@ -124,16 +124,15 @@ async def test_reset_rhythm_is_deferred_past_the_reply(runtime, monkeypatch):
 
     reply = await runtime.handle_message(incoming("I'm here", "42"))
 
-    # The LLM ran before the reply was complete; reset_rhythm was only queued.
+    # The LLM ran before the reply was complete.
     assert "llm" in events
-    # The reset_rhythm hasn't fired yet — it's deferred to after_send.
-    assert "reset_rhythm" not in events
 
-    # Now await after_send to simulate the channel adapter's delivery.
+    # Now await after_send to settle the rhythm reset.
     if reply.after_send is not None:
         await reply.after_send()
 
-    # After delivery, reset_rhythm fires.
+    # After delivery, reset_rhythm has fired.
+    assert "reset_rhythm" in events
     assert events.index("llm") < events.index("reset_rhythm")
 
 

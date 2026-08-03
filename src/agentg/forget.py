@@ -222,12 +222,18 @@ class ForgetStore:
         method is called, so the guard here is defense in depth (issue #212,
         fix-r5 P1).
 
+        fix-r24 #4: The persisted row can disappear between the atomic
+        upsert commit and the re-read (e.g. a concurrent ``cancel_forget_me``
+        on a wrong-phrase handler).  The method retries the create+read
+        cycle boundedly; if the row keeps disappearing it returns the empty
+        sentinel so the runtime sends truthful guidance — never a local
+        phrase that wasn't persisted.
+
         Model-turn leases live in the separate ``ModelTurnLease`` table and
         are never touched by this method — a ``request_forget_me`` can never
         overwrite or clear an active model-turn gate (issue #212, fix-r11).
         """
-        phrase = "DELETE-ME-" + secrets.token_hex(3).upper()
-        expires_at = now + timedelta(seconds=lifetime_seconds)
+        _MAX_RETRIES = 3
 
         # P1 fast-path read in its own transaction so a concurrent
         # runtime can interleave between this read and the upsert below
@@ -252,13 +258,41 @@ class ForgetStore:
         if self._pre_upsert_hook is not None:
             await self._pre_upsert_hook()
 
-        # P2: Atomically create only when absent or expired.
-        # 1. Silently remove any expired pending row so a re-request
-        #    after expiry gets a fresh phrase.
-        # 2. INSERT … ON CONFLICT DO NOTHING — the first caller wins;
-        #    subsequent callers leave the winning row untouched.
-        # 3. Always re-read and return the single persisted phrase so
-        #    every concurrent caller returns the same confirmable phrase.
+        # fix-r24 #4: retry loop — if the row disappears between the
+        # upsert commit and the re-read (concurrent cancel as wrong
+        # phrase), retry the atomic create+read boundedly.
+        for attempt in range(_MAX_RETRIES):
+            stored = await self._atomic_create_and_read(
+                member_id, gym_id, now, lifetime_seconds, language
+            )
+            if stored is not None:
+                return stored
+            # Row disappeared between write and read — retry.
+
+        # Exhausted retries — the row keeps disappearing (concurrent
+        # cancel loop).  Return sentinel so the runtime gives truthful
+        # guidance rather than a local phrase that was never persisted.
+        return ""
+
+    async def _atomic_create_and_read(
+        self,
+        member_id: int,
+        gym_id: int,
+        now: datetime,
+        lifetime_seconds: int,
+        language: str,
+    ) -> str | None:
+        """Atomically create or read a pending ForgetMeRequest row and
+        return its persisted confirmation phrase.
+
+        Returns ``None`` when the row disappeared between the upsert
+        commit and the re-read — the caller must retry or give up.
+        Returns the empty string when the row has a blocking status
+        (deleting) — the caller must not proceed.
+        """
+        phrase = "DELETE-ME-" + secrets.token_hex(3).upper()
+        expires_at = now + timedelta(seconds=lifetime_seconds)
+
         async with self._sessions() as db:
             # Remove expired pending rows — a new request after expiry
             # should create a fresh phrase, not resurrect the old one.
@@ -303,8 +337,7 @@ class ForgetStore:
                 STATUS_BLOCKING
             ):
                 # Row became deleting/consumed between our operations
-                # (a concurrent claim won).  Return the sentinel so
-                # the caller can recover.
+                # (a concurrent claim won).
                 await db.commit()
                 return ""  # sentinel: deleting row exists
 
@@ -317,10 +350,10 @@ class ForgetStore:
 
             await db.commit()
 
-        # No row exists (our INSERT was a no-op and the expired-row
-        # delete left nothing).  Return our local phrase as a safe
-        # fallback; the caller will re-request on next turn.
-        return phrase
+        # No row exists — the row disappeared between the upsert and
+        # the re-read (e.g. a concurrent cancel).  Return None so the
+        # caller can retry (fix-r24 #4).
+        return None
 
     async def get_pending_request(
         self, member_id: int
@@ -782,6 +815,19 @@ class ForgetStore:
                 )
             )
             return row
+
+    async def stop_lease_heartbeat(
+        self, member_id: int, owner_token: str
+    ) -> None:
+        """Stop the heartbeat for *(member_id, owner_token)* without
+        deleting the lease row.  The lease remains valid for fencing
+        (compaction) but will become stale without renewal — a dropped
+        after_send can no longer block a later confirmation indefinitely
+        (fix-r24 #3).
+
+        Idempotent: a second call or a subsequent release_model_turn_lease
+        with the same token is harmless."""
+        await self._stop_heartbeat(member_id, owner_token)
 
     async def is_lease_held_by_other(
         self, member_id: int, our_token: str | None

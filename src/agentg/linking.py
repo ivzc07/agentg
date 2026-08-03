@@ -186,6 +186,15 @@ def _looks_like_a_name(text: str) -> bool:
     return 0 < len(text.split()) <= MAX_NAME_WORDS
 
 
+def _looks_like_confirmation_phrase(text: str) -> bool:
+    """True when *text* looks like a forget-me confirmation phrase
+    (starts with "DELETE-ME-" after normalization).  These must never
+    reach the linking phraser — the runtime handles them deterministically
+    (fix-r24 #2)."""
+    from agentg.forget import normalize_confirmation
+    return normalize_confirmation(text).startswith("DELETE-ME-")
+
+
 def _looks_like_invite_code(text: str) -> bool:
     """A near-miss code: typed like an invite code but matching no Gym.
 
@@ -365,6 +374,13 @@ class Linking:
         if is_forget_me_request(msg.text):
             del self._pending[identity]
             return None  # let runtime handle forget-me
+        # fix-r24 #2: detect raw DELETE-ME confirmation phrases before
+        # any name processing — the runtime must handle these
+        # deterministically; the phraser must never see a confirmation
+        # phrase text.
+        if _looks_like_confirmation_phrase(msg.text):
+            del self._pending[identity]
+            return None  # let runtime handle forget-me confirmation
         # A pasted Invite or coach code mid-flow restarts linking, not a
         # name change. Short-circuit: skip DB lookups when it can't be a code (#169).
         resolved = await self._resolve_typed_code(msg.text)
@@ -426,6 +442,13 @@ class Linking:
         if is_forget_me_request(msg.text):
             del self._pending[identity]
             return None  # let runtime handle forget-me
+        # fix-r24 #2: detect raw DELETE-ME confirmation phrases before
+        # any switch processing — the runtime must handle these
+        # deterministically; the phraser must never see a confirmation
+        # phrase text.
+        if _looks_like_confirmation_phrase(msg.text):
+            del self._pending[identity]
+            return None  # let runtime handle forget-me confirmation
         if not _is_affirmative(msg.text):  # anything but a clear yes stays put
             del self._pending[identity]
             instruction = SWITCH_CANCELLED_INSTRUCTION.format(gym=linked.gym.name)

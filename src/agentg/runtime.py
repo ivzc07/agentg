@@ -331,9 +331,8 @@ class FencedSession:
 
     async def _verify_fence_on_conn(self, conn) -> bool:
         """Check the fence using an active DB *conn* inside an already-open
-        transaction — for use by ``_replace_items_atomically`` so the
-        compaction write is fenced atomically with the lease check
-        (fix-r23 P1 #2)."""
+        transaction — for use by ``replace_items`` so the compaction write
+        is fenced atomically with the lease check (fix-r23 P1 #2)."""
         if self._owner_token is None:
             return False
         from sqlalchemy import select as sa_select
@@ -346,6 +345,120 @@ class FencedSession:
         )
         current = result.scalar_one_or_none()
         return current == self._owner_token
+
+    async def replace_items(self, new_items: list) -> None:
+        """Replace all SDK session items atomically with *new_items*.
+
+        Locks the Member row, validates the owner token, deletes every
+        existing SDK message for this session, inserts *new_items*, and
+        commits — all in a single database transaction.  A concurrent
+        deletion or reclaim that changes the lease token causes the
+        entire operation to be a no-op (fix-r24 #1).
+
+        This is the fenced equivalent of ``_replace_items_atomically``
+        and is the single write path compaction must use.
+        """
+        import asyncio
+        import json as _json
+
+        from sqlalchemy import delete, insert, select as sa_select, update as sa_update
+        from sqlalchemy import text as sql_text
+        from sqlalchemy.exc import IntegrityError, OperationalError
+        from agentg.models import Member, ModelTurnLease
+
+        if not new_items:
+            return
+        if self._owner_token is None:
+            return
+
+        engine = self._inner.engine
+        messages = self._inner._messages
+        sessions = self._inner._sessions
+        ensure_ascii = getattr(self._inner, "_ensure_ascii", True)
+        session_id = self._inner.session_id
+        member_id = self._member_id
+        owner_token = self._owner_token
+
+        serialized = [
+            _json.dumps(item, ensure_ascii=ensure_ascii, separators=(",", ":"))
+            for item in new_items
+        ]
+
+        _SQLITE_LOCK_DELAYS = (0.0, 0.05, 0.1, 0.2, 0.4, 0.8)
+
+        async def _replace() -> None:
+            async with engine.begin() as conn:
+                # Lock the Member row to serialize with acquire/claim.
+                await conn.execute(
+                    sa_select(Member.id)
+                    .where(Member.id == member_id)
+                    .with_for_update()
+                )
+                await conn.execute(
+                    sa_update(Member)
+                    .where(Member.id == member_id)
+                    .values(id=member_id)
+                )
+
+                # Validate owner token inside the SAME transaction.
+                lease_result = await conn.execute(
+                    sa_select(ModelTurnLease.owner_token)
+                    .where(ModelTurnLease.member_id == member_id)
+                    .with_for_update()
+                )
+                current_token = lease_result.scalar_one_or_none()
+                if current_token != owner_token:
+                    return  # Token lost — no-op, rollback
+
+                # Idempotent session-row upsert.
+                existing = await conn.execute(
+                    sa_select(sessions.c.session_id).where(
+                        sessions.c.session_id == session_id
+                    )
+                )
+                if not existing.scalar_one_or_none():
+                    try:
+                        async with conn.begin_nested():
+                            await conn.execute(
+                                insert(sessions).values({"session_id": session_id})
+                            )
+                    except IntegrityError:
+                        pass
+
+                await conn.execute(
+                    sa_update(sessions)
+                    .where(sessions.c.session_id == session_id)
+                    .values(updated_at=sql_text("CURRENT_TIMESTAMP"))
+                )
+
+                # Delete every existing message …
+                await conn.execute(
+                    delete(messages).where(
+                        messages.c.session_id == session_id
+                    )
+                )
+                # … and write the replacement set.
+                if serialized:
+                    payload = [
+                        {"session_id": session_id, "message_data": item}
+                        for item in serialized
+                    ]
+                    await conn.execute(insert(messages), payload)
+
+        if engine.dialect.name == "sqlite":
+            for attempt, delay in enumerate(_SQLITE_LOCK_DELAYS):
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    await _replace()
+                    return
+                except OperationalError as exc:
+                    if "database is locked" not in str(exc).lower():
+                        raise
+                    if attempt == len(_SQLITE_LOCK_DELAYS) - 1:
+                        raise
+        else:
+            await _replace()
 
 
 @dataclass
@@ -714,18 +827,67 @@ class AgentRuntime:
         turn_lease_token: str | None,
         await_reset,
     ) -> Reply:
-        """Non-streaming path kept deliberately for tests (#176)."""
-        result = await Runner.run(
-            self.agent,
-            msg.text,
-            session=session,
-            context=context,
-            run_config=_SNAPSHOT_RUN_CONFIG,
-        )
+        """Non-streaming path kept deliberately for tests (#176).
+
+        fix-r24 #3: compaction and lease release happen inline after
+        Runner.run() returns — the SDK writes are done, so the turn
+        token is released here rather than waiting for after_send.
+        A dropped after_send can no longer keep the heartbeat alive
+        or block a later confirmation."""
+        try:
+            result = await Runner.run(
+                self.agent,
+                msg.text,
+                session=session,
+                context=context,
+                run_config=_SNAPSHOT_RUN_CONFIG,
+            )
+        except BaseException:
+            # Release the lease on failure — a Runner failure must not
+            # strand deletion (issue #212, fix-r10).
+            if turn_lease_token is not None:
+                try:
+                    await self.stores.forget.release_model_turn_lease(
+                        member_id, turn_lease_token
+                    )
+                except Exception:
+                    logger.exception(
+                        "release_model_turn_lease failed for %d", member_id
+                    )
+            raise
         text = str(result.final_output)
+        # Compaction runs inline while the turn_lease_token is still
+        # valid so the fence check passes (fix-r24 #1 + #3).
+        _fence_check = getattr(session, "_verify_fence_on_conn", None)
+        try:
+            from agentg.compaction import maybe_compact
+            await maybe_compact(
+                session,
+                self.summarizer,
+                self.stores.notes,
+                member_id,
+                context.gym_id,
+                fence_check=_fence_check,
+            )
+        except Exception:
+            logger.exception("compaction failed for member %d", member_id)
+        # Release the model-turn lease now — writes are done, compaction
+        # is done.  The after_send hook only needs to signal the next turn
+        # and handle demos/pings/reset.
+        if turn_lease_token is not None:
+            try:
+                await self.stores.forget.release_model_turn_lease(
+                    member_id, turn_lease_token
+                )
+            except Exception:
+                logger.exception(
+                    "release_model_turn_lease failed for %d", member_id
+                )
         return Reply(
             text,
-            after_send=self._post_turn(msg, context, session, key, member_id, turn_lease_token, await_reset),
+            after_send=self._post_turn_no_lease(
+                msg, context, key, member_id, await_reset
+            ),
         )
 
     def _streamed_reply(
@@ -758,15 +920,74 @@ class AgentRuntime:
         if _turn is not None:
             _turn.defer_logging = True
             stream = _finish_turn(stream, _turn)
-        # fix-r23 P1 #2: the lease is released in after_send AFTER
-        # compaction — not here.  The heartbeat keeps the lease alive
-        # in the meantime; if after_send is dropped (channel dies),
-        # the stale-lease recovery path reclaims it.
+        # fix-r24 #3: stop the heartbeat when the stream is exhausted
+        # so a dropped after_send cannot keep the lease alive
+        # indefinitely.  The lease row stays so compaction in
+        # after_send is still fenced; after_send releases the lease
+        # after compaction (idempotent heartbeat stop there).
+        if turn_lease_token is not None:
+            stream = _stop_heartbeat_on_close(
+                stream, self.stores.forget, member_id, turn_lease_token, logger
+            )
         return Reply(
             "",
             stream=stream,
             after_send=self._post_turn(msg, context, session, key, member_id, turn_lease_token, await_reset),
         )
+
+    def _post_turn_no_lease(
+        self,
+        msg: IncomingMessage,
+        context: MemberContext,
+        key: tuple[str, str],
+        member_id: int,
+        await_reset,
+    ):
+        """Build the ``after_send`` hook for the non-streaming path.
+
+        Compaction and lease release already happened inline in
+        ``_blocking_reply`` (fix-r24 #3) — this hook only signals the
+        next turn, settles the rhythm reset, and fires demos/pings.
+        """
+        compaction_done = asyncio.Event()
+        self._compaction_done[key] = compaction_done
+        sender = self.demo_sender
+        lock = self._locks[key]
+        channel, user_id = msg.channel, msg.channel_user_id
+
+        async def after_send(*, deliver_media: bool = True) -> None:
+            try:
+                await await_reset()
+                deliver_demos = sender is not None and deliver_media
+                demo_refs = list(context.demo_requests) if deliver_demos else []
+                coach_pings = list(context.coach_pings)
+
+                async def _send_demo(ref) -> None:
+                    try:
+                        assert sender is not None
+                        await _send_resolved_demo(
+                            self.stores.demos, sender, ref, channel, user_id
+                        )
+                    except Exception:
+                        logger.exception(
+                            "failed to serve demo %r to %s", ref.exercise_name, user_id
+                        )
+
+                async def _run_ping(ping):
+                    try:
+                        await ping()
+                    except Exception:
+                        logger.exception("deferred coach ping failed")
+
+                tasks = [_send_demo(ref) for ref in demo_refs] + [
+                    _run_ping(p) for p in coach_pings
+                ]
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+            finally:
+                compaction_done.set()
+
+        return after_send
 
     def _post_turn(
         self,
@@ -778,7 +999,7 @@ class AgentRuntime:
         turn_lease_token: str | None,
         await_reset,
     ):
-        """Build the ``after_send`` hook both reply paths share.
+        """Build the ``after_send`` hook for the streaming path.
 
         Everything deferred past the reply lives here: the rhythm reset
         (#169), demo animations (#179), coach pings (#172) and compaction
@@ -1244,6 +1465,39 @@ async def _release_lease_on_close(
             logger.exception(
                 "release_model_turn_lease failed for %d", member_id
             )
+
+
+async def _stop_heartbeat_on_close(
+    inner: AsyncIterator[str],
+    forget_store,
+    member_id: int,
+    owner_token: str | None,
+    logger: logging.Logger,
+) -> AsyncIterator[str]:
+    """Stop the lease heartbeat when the stream is exhausted or errors
+    so a dropped ``after_send`` cannot keep the lease alive indefinitely
+    (fix-r24 #3).  The lease row stays — ``after_send`` still compacts
+    (fenced) and releases the lease fully later.  If ``after_send`` is
+    dropped the lease becomes stale without heartbeat renewal and is
+    reclaimed by the next turn's stale-lease recovery.
+
+    When *owner_token* is ``None`` the call is a no-op.
+    """
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        try:
+            await inner.aclose()
+        except Exception:
+            pass
+        if owner_token is not None:
+            try:
+                await forget_store.stop_lease_heartbeat(member_id, owner_token)
+            except Exception:
+                logger.exception(
+                    "stop_lease_heartbeat failed for %d", member_id
+                )
 
 
 async def _stream_text(result: "RunResultStreaming") -> AsyncIterator[str]:

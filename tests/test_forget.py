@@ -5376,3 +5376,122 @@ async def test_compaction_with_lost_fence_is_noop(env):
     # Content preserved.
     for i in range(5):
         assert items_after[i]["content"] == f"message {i}"
+
+
+# -- fix-r24 #4: cancel between commit and reread -------------------------
+
+
+async def test_request_forget_me_retry_when_row_disappears_between_commit_and_reread(env):
+    """fix-r24 #4: when the persisted row disappears between the atomic
+    upsert commit and the re-read (a concurrent ``cancel_forget_me`` on
+    a wrong-phrase handler), ``request_forget_me`` retries boundedly.
+
+    It must never return a local phrase that was never persisted — only
+    a phrase proven present at return time, or the empty sentinel."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    call_count: list[int] = [0]
+    original_create_and_read = env.forget._atomic_create_and_read
+
+    async def disappearing_create_and_read(*args, **kwargs):
+        call_count[0] += 1
+        result = await original_create_and_read(*args, **kwargs)
+        if call_count[0] == 1:
+            # First call: the row was created and read successfully,
+            # but we simulate it being cancelled before the caller
+            # can use it — cancel the row now.
+            pending = await env.forget.get_pending_request(member.id)
+            if pending is not None:
+                await env.forget.cancel_forget_me(
+                    member.id,
+                    confirmation_phrase=pending.confirmation_phrase,
+                    expires_at=pending.expires_at,
+                )
+            return None  # Simulate: row disappeared
+        return result  # Second call: normal behavior
+
+    env.forget._atomic_create_and_read = disappearing_create_and_read  # type: ignore[method-assign]
+
+    try:
+        phrase = await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "en"
+        )
+
+        # Must have retried — called _atomic_create_and_read at least twice.
+        assert call_count[0] >= 2, (
+            f"expected at least 2 retries, got {call_count[0]}"
+        )
+
+        # Must return a valid persisted phrase, not a local one.
+        assert phrase.startswith("DELETE-ME-"), (
+            f"expected valid phrase, got {phrase!r}"
+        )
+        assert phrase != "", "must not return empty sentinel on retry success"
+
+        # The returned phrase must be the one in the DB.
+        pending = await env.forget.get_pending_request(member.id)
+        assert pending is not None
+        assert pending.confirmation_phrase == phrase, (
+            f"returned phrase {phrase!r} must match DB"
+            f" {pending.confirmation_phrase!r}"
+        )
+    finally:
+        env.forget._atomic_create_and_read = original_create_and_read  # type: ignore[method-assign]
+
+
+async def test_request_forget_me_returns_sentinel_when_row_keeps_disappearing(env):
+    """fix-r24 #4: when the row keeps disappearing on every retry
+    (e.g. a concurrent cancel loop), ``request_forget_me`` exhausts
+    retries and returns the empty sentinel so the runtime can give
+    truthful guidance — never a local phrase that wasn't persisted."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    call_count: list[int] = [0]
+    original_create_and_read = env.forget._atomic_create_and_read
+
+    async def always_disappearing(*args, **kwargs):
+        call_count[0] += 1
+        result = await original_create_and_read(*args, **kwargs)
+        if result is not None and result != "":
+            # Row was created — cancel it immediately to simulate
+            # a concurrent cancel loop.
+            pending = await env.forget.get_pending_request(member.id)
+            if pending is not None:
+                await env.forget.cancel_forget_me(
+                    member.id,
+                    confirmation_phrase=pending.confirmation_phrase,
+                    expires_at=pending.expires_at,
+                )
+        return None  # Always report "disappeared"
+
+    env.forget._atomic_create_and_read = always_disappearing  # type: ignore[method-assign]
+
+    try:
+        phrase = await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "en"
+        )
+
+        # Must exhaust retries and return sentinel.
+        assert phrase == "", (
+            f"expected empty sentinel when row keeps disappearing,"
+            f" got {phrase!r}"
+        )
+
+        # Must have retried at least 3 times (MAX_RETRIES).
+        assert call_count[0] >= 3, (
+            f"expected at least 3 retries, got {call_count[0]}"
+        )
+
+        # No row should exist (all were cancelled).
+        pending = await env.forget.get_pending_request(member.id)
+        assert pending is None, (
+            "no pending request should remain after cancellations"
+        )
+    finally:
+        env.forget._atomic_create_and_read = original_create_and_read  # type: ignore[method-assign]

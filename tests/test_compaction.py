@@ -298,12 +298,14 @@ async def test_failing_summarizer_in_handle_message_does_not_block_reply(env, mo
 
     # The reply still arrived — compaction failure didn't block it.
     assert str(reply) == "ok"
-    # Compaction hasn't been called yet — it's deferred to after_send.
-    assert len(env.runtime.summarizer.calls) == 0
-
-    # after_send calls the summarizer; the failure is caught and logged.
-    await reply.after_send()
+    # fix-r24 #3: non-streaming compaction runs inline in
+    # _blocking_reply, not deferred to after_send.  The summarizer was
+    # called and its failure caught and logged.
     assert len(env.runtime.summarizer.calls) == 1
+
+    # after_send is still callable but doesn't compact again.
+    await reply.after_send()
+    assert len(env.runtime.summarizer.calls) == 1  # no second call
 
 
 async def test_convergence_guard_skips_when_old_items_are_all_summaries(env):
@@ -455,9 +457,14 @@ async def test_convergence_guard_skips_when_one_fresh_item_and_summaries_exist(e
 
 
 async def test_compaction_in_after_send_serializes_with_next_turn(env, monkeypatch):
-    """Compaction running inside after_send and the next handle_message
-    must never interleave — both acquire the same per-identity asyncio.Lock,
-    so Runner.run and maybe_compact are strictly serialized (issue #173)."""
+    """Compaction and the next handle_message must never interleave.
+
+    fix-r24 #3: non-streaming compaction now runs inline inside
+    ``_blocking_reply`` while the per-identity lock is held, so
+    Runner.run (which runs before compaction) and maybe_compact are
+    naturally serialized by the lock — no separate after_send
+    serialization is needed.  This test verifies that a second turn
+    blocks on the lock while the first turn is compacting."""
     import agentg.runtime as runtime_module
     from types import SimpleNamespace
     import asyncio
@@ -466,7 +473,7 @@ async def test_compaction_in_after_send_serializes_with_next_turn(env, monkeypat
     running: set[str] = set()
     overlapped: list[str] = []
 
-    # Gate holds the summarizer mid-flight inside the lock.
+    # Gate holds the summarizer mid-flight while the lock is held.
     gate = asyncio.Event()
     compaction_started = asyncio.Event()
 
@@ -491,19 +498,18 @@ async def test_compaction_in_after_send_serializes_with_next_turn(env, monkeypat
     total = KEEP_RECENT + 20
     await env.session.add_items(over_budget_items(total))
 
-    # First turn returns immediately; compaction is deferred to after_send.
-    reply = await env.runtime.handle_message(
-        IncomingMessage(channel="telegram", channel_user_id="42", text="first")
+    # First turn: handle_message holds the lock, calls Runner.run (quick),
+    # then calls maybe_compact which blocks on the gate.
+    first_task = asyncio.create_task(
+        env.runtime.handle_message(
+            IncomingMessage(channel="telegram", channel_user_id="42", text="first")
+        )
     )
-    assert reply.after_send is not None
-
-    # Start after_send in a concurrent task.
-    after_task = asyncio.create_task(reply.after_send())
     # Wait until compaction is definitely inside the lock.
     await asyncio.wait_for(compaction_started.wait(), timeout=5)
 
     # Fire a second message for the same identity.  It must block on the
-    # per-identity lock that after_send still holds.
+    # per-identity lock that the first turn still holds (during compaction).
     second_task = asyncio.create_task(
         env.runtime.handle_message(
             IncomingMessage(channel="telegram", channel_user_id="42", text="second")
@@ -512,26 +518,23 @@ async def test_compaction_in_after_send_serializes_with_next_turn(env, monkeypat
     # Let the second task reach the lock-acquisition point.
     await asyncio.sleep(0.05)
 
-    # Release the gate so compaction finishes and releases the lock.
+    # Release the gate so compaction finishes, lock is released, and
+    # the first turn returns.
     gate.set()
-    await asyncio.wait_for(after_task, timeout=5)
+    reply1 = await asyncio.wait_for(first_task, timeout=5)
     second_reply = await asyncio.wait_for(second_task, timeout=5)
 
     # No overlap detected — the lock serialized correctly.
     assert overlapped == []
+    assert str(reply1) == "ok"
     assert str(second_reply) == "ok"
 
 
 async def test_compaction_completes_before_next_turn_even_when_after_send_is_delayed(env, monkeypatch):
-    """When the adapter delays calling after_send (e.g. Telegram's
-    message.answer calls), a rapid second message for the same identity must
-    still wait for the first turn's compaction to finish before its own
-    Runner.run begins (issue #173 criterion 2 — inverted ordering).
-
-    This is the case the existing serialization test does NOT cover: there,
-    after_send already holds the lock so the second turn blocks on the lock
-    itself.  Here after_send hasn't even started — the second turn must
-    block on _compaction_done instead."""
+    """When the adapter delays calling after_send, a rapid second message
+    for the same identity must see the first turn's compaction already
+    finished — compaction runs inline before handle_message returns
+    (fix-r24 #3), so by the time the second turn runs, compaction is done."""
     import agentg.runtime as runtime_module
     from types import SimpleNamespace
     import asyncio
@@ -539,13 +542,7 @@ async def test_compaction_completes_before_next_turn_even_when_after_send_is_del
 
     run_order: list[str] = []
 
-    # Gate holds the summarizer mid-flight.  after_send hasn't started yet
-    # when the second message arrives — it's still queued behind the
-    # adapter's message.answer calls.
-    gate = asyncio.Event()
-
-    async def slow_summarizer(old_items, existing_notes):
-        await gate.wait()
+    async def recording_summarizer(old_items, existing_notes):
         run_order.append("compaction-1")
         return CompactionSummary(summary="Dani benched 60.", notes=[])
 
@@ -554,45 +551,35 @@ async def test_compaction_completes_before_next_turn_even_when_after_send_is_del
         return SimpleNamespace(final_output="ok")
 
     monkeypatch.setattr(runtime_module.Runner, "run", fake_run)
-    env.runtime.summarizer = slow_summarizer
+    env.runtime.summarizer = recording_summarizer
 
     total = KEEP_RECENT + 20
     await env.session.add_items(over_budget_items(total))
 
-    # First turn returns immediately; compaction is deferred to after_send.
+    # First turn: compaction runs inline in _blocking_reply after
+    # Runner.run, before the reply is returned.
     reply1 = await env.runtime.handle_message(
         IncomingMessage(channel="telegram", channel_user_id="42", text="first")
     )
     assert reply1.after_send is not None
 
-    # Simulate the adapter delay: the second message arrives BEFORE
-    # after_send is called (while the adapter is still sending
-    # message.answer chunks).  The second turn must block on
-    # _compaction_done, not on the lock.
+    # Compaction is already done when handle_message returns.
+    assert run_order == ["run:first", "compaction-1"]
+
+    # Second turn arrives while after_send hasn't run yet.
     second_task = asyncio.create_task(
         env.runtime.handle_message(
             IncomingMessage(channel="telegram", channel_user_id="42", text="second")
         )
     )
-    # Let the second task reach the _compaction_done wait point.
+    # Delay then call after_send to set the compaction_done signal.
     await asyncio.sleep(0.05)
-    # The second turn should NOT have run yet.
-    assert run_order == ["run:first"]
+    await reply1.after_send()
 
-    # Now start after_send — it will block inside the lock on the gate.
-    after_task = asyncio.create_task(reply1.after_send())
-    await asyncio.sleep(0.05)
-    # Still blocked.
-    assert run_order == ["run:first"]
-
-    # Release the gate so compaction finishes and sets the event.
-    gate.set()
-    await asyncio.wait_for(after_task, timeout=5)
     reply2 = await asyncio.wait_for(second_task, timeout=5)
-
     assert str(reply2) == "ok"
-    # Compaction from turn 1 finished before turn 2's Agent ran — even
-    # though the second message arrived before after_send even started.
+    # Compaction from turn 1 finished before turn 2's Agent ran — inline
+    # compaction guarantees ordering without relying on _compaction_done.
     assert run_order == ["run:first", "compaction-1", "run:second"]
 
 
@@ -718,3 +705,61 @@ async def test_a_failing_after_send_does_not_wedge_the_member(env, monkeypatch):
 
     second = await asyncio.wait_for(env.runtime.handle_message(msg), timeout=5)
     assert str(second) == "ok"
+
+
+# ---------------------------------------------------------------------------
+# fix-r24 #1 — stale-compactor revoke/clear/commit interleaving
+# ---------------------------------------------------------------------------
+
+
+async def test_stale_compactor_cannot_write_after_lease_revoked(env, monkeypatch):
+    """fix-r24 #1: a stale compactor whose lease was revoked (by a
+    concurrent deletion or reclaim) must not be able to write history
+    — the FencedSession.replace_items validates the owner token inside
+    the same DB transaction and becomes a no-op when the token is gone.
+
+    Sequence:
+    1. Acquire a model-turn lease (token T1)
+    2. Create a FencedSession with T1
+    3. Revoke the lease (simulating concurrent deletion/reclaim)
+    4. Try to replace items via FencedSession.replace_items
+    5. The write must be a no-op — old items intact"""
+    from agentg.compaction import _replace_items_atomically
+    from agentg.runtime import FencedSession
+
+    total = 15
+    original_items = [item(i) for i in range(total)]
+    await env.session.add_items(original_items)
+
+    # Acquire a lease token.
+    token = await env.runtime.stores.forget.acquire_model_turn_lease(
+        env.member_id, env.gym_id
+    )
+    assert token is not None
+
+    # Create a fenced session with that token.
+    fenced = env.runtime.fenced_session_for_member(env.member_id, token)
+
+    # Seed the fenced session with different items to confirm it works.
+    current = await fenced.get_items()
+    assert len(current) == total
+
+    # Revoke the lease (simulating concurrent deletion).
+    await env.runtime.stores.forget.release_model_turn_lease(
+        env.member_id, token
+    )
+
+    # Now try to replace items — the replace must be a no-op because
+    # the lease token is gone.
+    new_items = [item(900), item(901)]
+    await fenced.replace_items(new_items)
+
+    # Old items must still be there — the stale compactor's write
+    # was rejected atomically.
+    items = await env.session.get_items()
+    assert len(items) == total
+    for i in range(total):
+        assert f"turn {i}" in str(items[i])
+    # None of the new items leaked through.
+    assert not any("turn 900" in str(it) for it in items)
+    assert not any("turn 901" in str(it) for it in items)

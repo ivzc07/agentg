@@ -1266,3 +1266,132 @@ async def test_ordinary_switch_answer_still_works_after_forget_me_detect(runtime
     assert identity2.gym.id == old_gym2.id, (
         "'no' must still cancel the gym switch"
     )
+
+
+# --- fix-r24 #2: raw DELETE-ME confirmation phrase detected before linking ---
+
+
+async def test_delete_me_confirmation_phrase_blocked_in_pending_switch(runtime, monkeypatch):
+    """fix-r24 #2: a raw DELETE-ME confirmation phrase sent during a
+    pending gym-switch state must NEVER reach the linking phraser/model.
+    The linking handler returns None, and the runtime handles the
+    confirmation phrase deterministically.
+
+    When the phrase matches a pending ForgetMeRequest, deletion
+    completes — the switch is cancelled and the Member is deleted,
+    never routing through the linking phraser."""
+    from datetime import datetime, timezone
+    from agentg.linking import _AwaitingSwitch
+
+    seen_phraser: list[str] = []
+
+    async def recording_phraser(instruction, member_text):
+        seen_phraser.append((instruction, member_text))
+        return instruction
+
+    old_gym = await runtime.stores.linking.create_gym("Iron Temple")
+    new_gym = await runtime.stores.linking.create_gym("Steel Yard")
+    await runtime.stores.linking.link_member(old_gym.id, "Ana", "telegram", "42")
+
+    # Create a pending forget-me request with a known confirmation phrase.
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        1, old_gym.id, now, 300, "en"
+    )
+    assert phrase.startswith("DELETE-ME-")
+
+    # Inject a pending _AwaitingSwitch into the in-memory state —
+    # simulating a second runtime where the switch was initiated
+    # before the confirmation phrase arrived.
+    runtime.linking._pending[("telegram", "42")] = _AwaitingSwitch(
+        gym_id=new_gym.id,
+        gym_name=new_gym.name,
+        invite_code=new_gym.invite_code or "",
+        as_coach=False,
+    )
+
+    # Now send the raw confirmation phrase (not a trigger word like
+    # "forget me" — the actual DELETE-ME-XXXXXX phrase).
+    runtime.linking.phraser = recording_phraser
+    reply = await runtime.handle_message(incoming(phrase))
+
+    # Must NOT have called the phraser — the confirmation phrase was
+    # detected in _confirm_switch and cleared the pending state.
+    assert seen_phraser == [], (
+        f"linking phraser must NOT be called for DELETE-ME phrase"
+        f" during pending switch; saw {seen_phraser}"
+    )
+
+    # The reply must be the goodbye — deletion completed successfully
+    # because the phrase matched a pending request.
+    reply_str = str(reply)
+    assert "deleted" in reply_str.lower() or "eliminados" in reply_str.lower(), (
+        f"expected goodbye after matching confirmation phrase,"
+        f" got: {reply!r}"
+    )
+
+    # The pending switch must be cleared from memory.
+    assert ("telegram", "42") not in runtime.linking._pending
+
+    # Identity must be gone — deletion completed.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is None, (
+        "Member must be deleted after valid confirmation phrase"
+    )
+
+
+async def test_delete_me_confirmation_phrase_blocked_in_pending_name(runtime):
+    """fix-r24 #2: a raw DELETE-ME confirmation phrase sent during a
+    pending name-confirm state must NEVER reach the linking phraser."""
+    from datetime import datetime, timezone
+    from agentg.linking import _AwaitingName
+
+    seen_phraser: list[str] = []
+
+    async def recording_phraser(instruction, member_text):
+        seen_phraser.append(instruction)
+        return instruction
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+
+    # Create a pending forget-me request.
+    now = datetime.now(timezone.utc)
+    # First link the member so they have an identity.
+    member = await runtime.stores.linking.link_member(
+        gym.id, "Ana", "telegram", "42"
+    )
+    phrase = await runtime.stores.forget.request_forget_me(
+        member.id, gym.id, now, 300, "en"
+    )
+    assert phrase.startswith("DELETE-ME-")
+
+    # Inject a pending _AwaitingName — simulating a second runtime
+    # where the name flow started before the phrase arrived.
+    runtime.linking._pending[("telegram", "42")] = _AwaitingName(
+        gym_id=gym.id,
+        gym_name=gym.name,
+        invite_code=gym.invite_code or "",
+        prefilled="Ana",
+        as_coach=False,
+    )
+
+    # Send the raw confirmation phrase.
+    runtime.linking.phraser = recording_phraser
+    reply = await runtime.handle_message(incoming(phrase))
+
+    # Must NOT have called the phraser.
+    assert seen_phraser == [], (
+        f"linking phraser must NOT be called for DELETE-ME phrase"
+        f" during pending name; saw {seen_phraser}"
+    )
+
+    # The reply must be the goodbye — deletion completed successfully
+    # because the phrase matched a pending request.
+    reply_str = str(reply)
+    assert "deleted" in reply_str.lower() or "eliminados" in reply_str.lower(), (
+        f"expected goodbye after matching confirmation phrase,"
+        f" got: {reply!r}"
+    )
+
+    # The pending name state must be cleared.
+    assert ("telegram", "42") not in runtime.linking._pending

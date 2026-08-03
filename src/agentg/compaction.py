@@ -240,9 +240,17 @@ async def maybe_compact(
     new_items = old_summaries + [summary_item] + recent
     # Single-transaction replacement: the old items are only deleted after
     # the new items are committed — a crash cannot leave an empty session
-    # (issue #165).  When fence_check is provided the lease token is
-    # verified inside the same transaction (fix-r23 P1 #2).
-    await _replace_items_atomically(session, new_items, fence_check=fence_check)
+    # (issue #165).  Prefer the FencedSession's atomic replace_items which
+    # locks+validates the owner token, deletes, and inserts in one DB
+    # transaction (fix-r24 #1).  Fall back to the standalone helper for
+    # non-fenced sessions (tests that don't use FencedSession).
+    _replace = getattr(session, "replace_items", None)
+    if _replace is not None:
+        await _replace(new_items)
+    else:
+        await _replace_items_atomically(
+            session, new_items, fence_check=fence_check
+        )
     return True
 
 
