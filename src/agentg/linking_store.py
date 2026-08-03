@@ -212,7 +212,7 @@ def _add_missing_columns(conn: Connection) -> None:
                     "ALTER TABLE forget_me_requests ADD COLUMN language VARCHAR(2)"
                 )
             )
-        # issue #212 P1: durable consumed state so a concurrent loser
+        # issue #212 P1: durable deleting state so a concurrent loser
         # sees deletion in progress and never reaches the model.
         if "status" not in fme_columns:
             conn.execute(

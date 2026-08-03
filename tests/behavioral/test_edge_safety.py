@@ -405,7 +405,7 @@ async def test_forget_me_pending_cancelled_by_dashboard_command(tmp_path):
 
 async def test_forget_me_loser_does_not_reach_model_after_member_deleted(tmp_path):
     """P1: A losing concurrent confirmation must not reach the model after
-    another runtime consumed the request and deleted the member.  The loser
+    another runtime claimed the request and deleted the member.  The loser
     must detect the vanished identity and return a dead-end reply without
     creating chat-history residue."""
     from agents.extensions.memory import SQLAlchemySession
@@ -426,15 +426,15 @@ async def test_forget_me_loser_does_not_reach_model_after_member_deleted(tmp_pat
         phrase = _extract_confirmation_phrase(request_reply)
         assert phrase is not None
 
-        # Simulate the winning runtime: consume + delete.
-        consumed = await h.stores.forget.consume_pending_forget_me(
+        # Simulate the winning runtime: claim + delete.
+        claimed = await h.stores.forget.claim_forget_me_request(
             member_id, phrase, datetime.now(timezone.utc),
         )
-        assert consumed
+        assert claimed is not None
         await h.stores.forget.forget_member(member_id)
 
         # Now the "loser" sends the confirmation phrase.  The pending is
-        # already consumed, and the member is gone.  The loser's runtime
+        # already claimed, and the member is gone.  The loser's runtime
         # must detect the vanished identity and return a dead-end reply
         # without touching the model (no scripted model steps defined).
         loser_reply = await h.say(phrase)

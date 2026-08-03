@@ -211,7 +211,7 @@ async def test_messaging_after_forget_dead_ends_in_linking(env):
 
 from datetime import UTC, datetime, timedelta
 
-from agentg.forget import detect_forget_me_language, is_forget_me_request, normalize_confirmation
+from agentg.forget import (STATUS_DELETING, STATUS_PENDING, detect_forget_me_language, is_forget_me_request, normalize_confirmation)
 from agentg.models import ForgetMeRequest
 
 
@@ -250,11 +250,11 @@ async def test_confirm_phrase_deletes_and_clears_request(env):
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
-    # Confirm with the exact phrase via atomic consume.
-    consumed = await env.forget.consume_pending_forget_me(
+    # Confirm with the exact phrase via atomic claim.
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert consumed
+    assert claimed is not None
     await env.forget.forget_member(member.id)
 
     assert await count(env, Member, id=member.id) == 0
@@ -466,40 +466,40 @@ def test_detect_forget_me_language(text, expected):
 # -- Atomic consume (P1) -------------------------------------------------
 
 
-async def test_consume_pending_succeeds_with_matching_unexpired(env):
-    """An exact match on an unexpired request consumes it — the row now
-    stays with status 'consumed' (not deleted) so a concurrent loser can
-    detect deletion in progress (P1)."""
+async def test_claim_succeeds_with_matching_unexpired(env):
+    """An exact match on an unexpired request claims it — the row now
+    stays with status 'deleting' (not deleted) so a concurrent loser can
+    detect deletion in progress and the phrase remains valid for retry (fix-3)."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
 
-    consumed = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert consumed
-    # The row stays (status = 'consumed') — not deleted.
+    assert claimed is not None
+    # The row stays (status = 'deleting') — not deleted.
     assert await _pending_count(env, member.id) == 1
     # But get_pending_request filters to status='pending', so it returns None.
     pending = await env.forget.get_pending_request(member.id)
     assert pending is None
-    # get_consumed_request finds it.
-    consumed_req = await env.forget.get_consumed_request(member.id)
-    assert consumed_req is not None
-    assert consumed_req.status == "consumed"
+    # get_deleting_request finds it.
+    deleting_req = await env.forget.get_deleting_request(member.id)
+    assert deleting_req is not None
+    assert deleting_req.status == "deleting"
 
 
-async def test_consume_pending_fails_with_wrong_phrase(env):
-    """A non-matching phrase does not consume the request — the row
+async def test_claim_fails_with_wrong_phrase(env):
+    """A non-matching phrase does not claim the request — the row
     stays with status 'pending'."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
 
-    consumed = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, "WRONG-PHRASE", datetime.now(UTC)
     )
-    assert not consumed
+    assert claimed is None
     # The row is still there (pending).
     assert await _pending_count(env, member.id) == 1
     pending = await env.forget.get_pending_request(member.id)
@@ -508,57 +508,57 @@ async def test_consume_pending_fails_with_wrong_phrase(env):
     assert pending.status == "pending"
 
 
-async def test_consume_pending_fails_with_expired_request(env):
-    """An expired request is not consumed even with the correct phrase."""
+async def test_claim_fails_with_expired_request(env):
+    """An expired request is not claimed even with the correct phrase."""
     member = await populate(env)
     past = datetime(2020, 1, 1, tzinfo=UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, past, 1)
 
-    consumed = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert not consumed
+    assert claimed is None
     # The row is still there (runtime's job to cancel expired ones).
     assert await _pending_count(env, member.id) == 1
 
 
-async def test_consume_pending_fails_with_no_request(env):
-    """Consuming when there's no pending request returns False."""
+async def test_claim_fails_with_no_request(env):
+    """Claiming when there's no pending request returns None."""
     member = await populate(env)
-    consumed = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, "DELETE-ME-XXXXXX", datetime.now(UTC)
     )
-    assert not consumed
+    assert claimed is None
 
 
-async def test_consume_pending_exactly_at_expiry_is_expired(env):
+async def test_claim_exactly_at_expiry_is_expired(env):
     """When expires_at == now the request is expired (P2: <= not <)."""
     member = await populate(env)
     now = datetime.now(UTC)
     # expires_at == now (lifetime=0)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 0)
 
-    consumed = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, now
     )
-    assert not consumed, "expires_at == now must be expired"
+    assert claimed is None, "expires_at == now must be expired"
 
 
-async def test_consume_pending_is_idempotent(env):
-    """A second consume on an already-consumed request returns False."""
+async def test_claim_is_idempotent(env):
+    """A second claim on an already-claimed request returns None."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
 
-    consumed = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert consumed
+    assert claimed is not None
     # Second attempt with the same phrase finds nothing.
-    consumed2 = await env.forget.consume_pending_forget_me(
+    claimed2 = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert not consumed2
+    assert claimed2 is None
 
 
 # -- Residue test with chat history (P2) ---------------------------------
@@ -583,11 +583,11 @@ async def test_two_turn_forget_with_chat_history_leaves_zero_residue(env):
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
-    # Consume (like the runtime does) then hard-delete.
-    consumed = await env.forget.consume_pending_forget_me(
+    # Claim (like the runtime does) then hard-delete.
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert consumed
+    assert claimed is not None
     await env.forget.forget_member(member.id)
 
     # Domain rows must be gone.
@@ -653,23 +653,23 @@ async def test_conversation_language_detects_english_from_history(env):
 # -- Separate-session concurrency (P1) -----------------------------------
 
 
-async def test_consume_pending_concurrent_sessions_one_winner(env):
-    """Two separate sessions trying to consume the same pending request
-    must have exactly one winner.  The winner sets status='consumed';
+async def test_claim_concurrent_sessions_one_winner(env):
+    """Two separate sessions trying to claim the same pending request
+    must have exactly one winner.  The winner sets status='deleting';
     the loser sees zero rows because the status filter (pending) no
     longer matches.  SQLite serializes writes (single-writer design);
     Postgres would also serialise the conditional UPDATEs — either way,
-    the DB guarantees exactly one row is consumed."""
+    the DB guarantees exactly one row is claimed."""
     from sqlalchemy.ext.asyncio import async_sessionmaker
     from sqlalchemy import update as sa_update
     from agentg.models import ForgetMeRequest
-    from agentg.forget import STATUS_CONSUMED, STATUS_PENDING
+    from agentg.forget import STATUS_DELETING, STATUS_PENDING
 
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
 
-    # Session A consumes first.
+    # Session A claims first.
     rowcount_a: int = 0
     async with async_sessionmaker(env.engine)() as db:
         result = await db.execute(
@@ -680,13 +680,13 @@ async def test_consume_pending_concurrent_sessions_one_winner(env):
                 ForgetMeRequest.expires_at > now,
                 ForgetMeRequest.status == STATUS_PENDING,
             )
-            .values(status=STATUS_CONSUMED)
+            .values(status=STATUS_DELETING)
         )
         await db.commit()
         rowcount_a = result.rowcount
 
-    # Session B tries to consume the same row — must see zero rows
-    # because status is now 'consumed', not 'pending'.
+    # Session B tries to claim the same row — must see zero rows
+    # because status is now 'deleting', not 'pending'.
     rowcount_b: int = 0
     async with async_sessionmaker(env.engine)() as db:
         result = await db.execute(
@@ -697,7 +697,7 @@ async def test_consume_pending_concurrent_sessions_one_winner(env):
                 ForgetMeRequest.expires_at > now,
                 ForgetMeRequest.status == STATUS_PENDING,
             )
-            .values(status=STATUS_CONSUMED)
+            .values(status=STATUS_DELETING)
         )
         await db.commit()
         rowcount_b = result.rowcount
@@ -706,23 +706,23 @@ async def test_consume_pending_concurrent_sessions_one_winner(env):
     assert rowcount_a == 1, f"session A should have won, got {rowcount_a}"
     assert rowcount_b == 0, f"session B should have lost, got {rowcount_b}"
 
-    # The row still exists (status='consumed').
-    consumed_row = await env.forget.get_consumed_request(member.id)
-    assert consumed_row is not None
-    assert consumed_row.status == STATUS_CONSUMED
+    # The row still exists (status='deleting').
+    deleting_row = await env.forget.get_deleting_request(member.id)
+    assert deleting_row is not None
+    assert deleting_row.status == STATUS_DELETING
 
 
-# -- Loser-safety: consumed state prevents model access (P1) --------------
+# -- Loser-safety: deleting state prevents model access (P1) --------------
 
 
-async def test_loser_sees_consumed_state_before_deletion_completes(env):
-    """True interleaving test: after consume_pending_forget_me commits
-    (winner claims the row), a concurrent loser that also tries to consume
-    sees the consumed status — not just a missing row.  The loser must
+async def test_loser_sees_deleting_state_before_deletion_completes(env):
+    """True interleaving test: after claim_forget_me_request commits
+    (winner claims the row), a concurrent loser that also tries to claim
+    sees the deleting status — not just a missing row.  The loser must
     return a safe goodbye without reaching the model, even while the
     winner is still mid-deletion.
 
-    This is the P1 from fix-r3: the consumed row acts as a durable
+    This is the P1 from fix-r3: the deleting row acts as a durable
     in-progress signal so a matched-but-lost confirmation never reaches
     the model, including while deletion is in progress."""
     from agents.extensions.memory import SQLAlchemySession
@@ -739,23 +739,23 @@ async def test_loser_sees_consumed_state_before_deletion_completes(env):
     items_before = await session.get_items()
     assert len(items_before) == 1
 
-    # Winner consumes the request (status -> 'consumed').
-    won = await env.forget.consume_pending_forget_me(
+    # Winner claims the request (status -> 'deleting').
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert won
+    assert claimed is not None
 
-    # The consumed row is visible to any concurrent runtime.
-    consumed_req = await env.forget.get_consumed_request(member.id)
-    assert consumed_req is not None
-    assert consumed_req.status == "consumed"
-    assert consumed_req.language == "en"
+    # The deleting row is visible to any concurrent runtime.
+    deleting_req = await env.forget.get_deleting_request(member.id)
+    assert deleting_req is not None
+    assert deleting_req.status == "deleting"
+    assert deleting_req.language == "en"
 
     # The Member still exists (winner hasn't called forget_member yet —
     # simulating mid-deletion window).
     assert await count(env, Member, id=member.id) == 1
 
-    # The loser would call get_consumed_request, find the row, and return
+    # The loser would call get_deleting_request, find the row, and return
     # a goodbye WITHOUT calling forget_member and WITHOUT falling through
     # to the model.  The chat history must be exactly as before.
     items_after = await session.get_items()
@@ -763,9 +763,9 @@ async def test_loser_sees_consumed_state_before_deletion_completes(env):
     assert await count(env, Member, id=member.id) == 1  # winner hasn't deleted yet
 
 
-async def test_interrupted_deletion_recovered_by_consumed_state(env):
-    """When a winner consumes the request but crashes before forget_member
-    completes, the consumed row persists.  On the next message, the runtime
+async def test_interrupted_deletion_recovered_by_deleting_state(env):
+    """When a winner claims the request but crashes before forget_member
+    completes, the deleting row persists.  On the next message, the runtime
     detects it and completes the deletion — retries safely complete
     deletion after interruption."""
     from agents.extensions.memory import SQLAlchemySession
@@ -780,24 +780,24 @@ async def test_interrupted_deletion_recovered_by_consumed_state(env):
         {"role": "user", "content": "hola"},
     ])
 
-    # Simulate: winner consumes (sets status='consumed') but then "crashes"
+    # Simulate: winner claims (sets status='deleting') but then "crashes"
     # before calling forget_member.
-    won = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert won
+    assert claimed is not None
     # forget_member was NOT called — simulating the crash.
 
-    # The consumed row is there.
-    consumed_req = await env.forget.get_consumed_request(member.id)
-    assert consumed_req is not None
+    # The deleting row is there.
+    deleting_req = await env.forget.get_deleting_request(member.id)
+    assert deleting_req is not None
 
     # On retry (simulating the next message arriving), the runtime detects
-    # the consumed row and completes the deletion.
-    if consumed_req is not None:
+    # the deleting row and completes the deletion.
+    if deleting_req is not None:
         await env.forget.forget_member(member.id)
         # Return goodbye with the stored language.
-        assert consumed_req.language == "es"
+        assert deleting_req.language == "es"
 
     # Deletion completed.
     assert await count(env, Member, id=member.id) == 0
@@ -806,36 +806,36 @@ async def test_interrupted_deletion_recovered_by_consumed_state(env):
     # Chat history wiped by forget_member.
     items = await session.get_items()
     assert items == []
-    # The consumed row was cleaned up by forget_member.
+    # The deleting row was cleaned up by forget_member.
     assert await _pending_count(env, member.id) == 0
 
 
-async def test_consumed_request_blocks_model_access(env):
-    """get_consumed_request returns the consumed row while deletion is
+async def test_deleting_request_blocks_model_access(env):
+    """get_deleting_request returns the deleting row while deletion is
     in progress.  get_pending_request must NOT return it (it filters to
     status='pending').  This means a loser checking for pending finds
-    nothing, then checking for consumed finds the signal — and must
+    nothing, then checking for deleting finds the signal — and must
     return a goodbye, never falling through to the model."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300)
 
-    # Winner consumes.
-    won = await env.forget.consume_pending_forget_me(
+    # Winner claims.
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert won
+    assert claimed is not None
 
-    # get_pending_request must NOT see the consumed row.
+    # get_pending_request must NOT see the deleting row.
     pending = await env.forget.get_pending_request(member.id)
     assert pending is None, (
         "get_pending_request must filter to status='pending' only"
     )
 
-    # get_consumed_request must see it.
-    consumed = await env.forget.get_consumed_request(member.id)
-    assert consumed is not None
-    assert consumed.status == "consumed"
+    # get_deleting_request must see it.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == "deleting"
 
 
 async def test_loser_after_member_deleted_must_not_reach_model(env):
@@ -855,11 +855,11 @@ async def test_loser_after_member_deleted_must_not_reach_model(env):
         {"role": "user", "content": "hola"},
     ])
 
-    # Simulate the winner: consume + delete.
-    consumed = await env.forget.consume_pending_forget_me(
+    # Simulate the winner: claim + delete.
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert consumed
+    assert claimed is not None
     await env.forget.forget_member(member.id)
 
     # The member is gone.
@@ -913,23 +913,23 @@ async def test_forget_me_detects_language_from_chat_history_not_trigger(env):
     )
 
 
-# -- P1: end-of-method safety-net consumed re-check (issue #212, fix-r4) --
+# -- P1: end-of-method safety-net deleting re-check (issue #212, fix-r4) --
 
 
-async def test_ordinary_message_caught_by_end_of_method_consumed_check(env):
+async def test_ordinary_message_caught_by_end_of_method_deleting_check(env):
     """P1 from fix-r4: an ordinary message that enters _handle_forget_me
-    before the consumed row exists but reaches the end-of-method safety net
-    after a concurrent runtime consumed the request MUST be caught by the
-    safety net's re-check of get_consumed_request — before the identity
+    before the deleting row exists but reaches the end-of-method safety net
+    after a concurrent runtime claimed the request MUST be caught by the
+    safety net's re-check of get_deleting_request — before the identity
     check and before the model ever sees the message.
 
     The scenario (true interleaving):
     1. Runtime B enters _handle_forget_me with an ordinary message ("hola")
-    2. get_consumed_request → None (no request yet)
+    2. get_deleting_by_phrase → None (no deleting request yet)
     3. get_pending_request → None
     4. is_forget_me_request("hola") → False
-    5. [RUNTIME A consumes the request and starts deletion]
-    6. End-of-method: consumed re-check → catches the row → returns goodbye
+    5. [RUNTIME A claims the request and starts deletion]
+    6. End-of-method: deleting re-check → catches the row → returns goodbye
 
     Without the re-check, step 6 would see identity still exists (Member
     not yet deleted) and fall through to the model while deletion is in
@@ -948,29 +948,29 @@ async def test_ordinary_message_caught_by_end_of_method_consumed_check(env):
     items_before = await session.get_items()
     assert len(items_before) == 1
 
-    # Simulates initial checks passing (no consumed, no pending matching
+    # Simulates initial checks passing (no deleting, no pending matching
     # an ordinary message).
-    consumed_initial = await env.forget.get_consumed_request(member.id)
-    assert consumed_initial is None
+    deleting_initial = await env.forget.get_deleting_request(member.id)
+    assert deleting_initial is None
     pending = await env.forget.get_pending_request(member.id)
     assert pending is not None  # a pending exists, but...
     # ...the message is ordinary, not a confirmation.
     normalized = "hola".strip().upper()
     assert normalized != pending.confirmation_phrase
 
-    # Runtime A consumes the request while Runtime B is mid-method.
-    won = await env.forget.consume_pending_forget_me(
+    # Runtime A claims the request while Runtime B is mid-method.
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert won
+    assert claimed is not None
 
-    # Now simulate the end-of-method safety net: re-check consumed state
+    # Now simulate the end-of-method safety net: re-check deleting state
     # BEFORE checking identity.  This is what our P1 fix adds.
-    consumed_now = await env.forget.get_consumed_request(member.id)
-    assert consumed_now is not None, (
-        "end-of-method consumed re-check MUST find the consumed row"
+    deleting_now = await env.forget.get_deleting_request(member.id)
+    assert deleting_now is not None, (
+        "end-of-method deleting re-check MUST find the deleting row"
     )
-    assert consumed_now.language == "en"
+    assert deleting_now.language == "en"
     # The safety net returns a goodbye; the model is never touched.
     items_after = await session.get_items()
     assert len(items_after) == 1  # no new model residue
@@ -978,61 +978,61 @@ async def test_ordinary_message_caught_by_end_of_method_consumed_check(env):
     assert await count(env, Member, id=member.id) == 1
 
 
-async def test_ordinary_message_caught_after_consumed_but_before_identity_gone(env):
-    """The critical interleaving gap: consumed row exists but identity still
+async def test_ordinary_message_caught_after_deleting_but_before_identity_gone(env):
+    """The critical interleaving gap: deleting row exists but identity still
     resolves.  The old safety net only checked identity (which still
-    resolves → falls through to model).  The new safety net checks consumed
+    resolves → falls through to model).  The new safety net checks deleting
     state FIRST and catches the in-progress deletion."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
 
     # Consume the request (deletion in progress, Member still exists).
-    won = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert won
+    assert claimed is not None
 
-    # At this point: consumed row exists, identity still resolves.
-    consumed = await env.forget.get_consumed_request(member.id)
-    assert consumed is not None
+    # At this point: deleting row exists, identity still resolves.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
     identity = await env.linking.identity_for("telegram", "42")
     assert identity is not None, "Member still exists mid-deletion"
 
-    # The safety net must check consumed FIRST.  If it checked identity
+    # The safety net must check deleting FIRST.  If it checked identity
     # first (it resolves → pass), the model would see the message while
-    # deletion is in progress.  Consumed check catches it.
-    assert consumed.language == "es"
+    # deletion is in progress.  Deleting check catches it.
+    assert deleting.language == "es"
     # The runtime returns a goodbye here, never calls the model.
     assert await count(env, Member, id=member.id) == 1  # not yet deleted
 
 
-async def test_safety_net_consumed_check_before_identity(env):
-    """Explicit ordering test: the safety net must check consumed state
-    BEFORE re-verifying identity.  If consumed exists, return goodbye
+async def test_safety_net_deleting_check_before_identity(env):
+    """Explicit ordering test: the safety net must check deleting state
+    BEFORE re-verifying identity.  If deleting exists, return goodbye
     regardless of identity — even if the Member row still exists."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
-    # Consume → consumed row exists, identity still intact.
-    won = await env.forget.consume_pending_forget_me(
+    # Consume → deleting row exists, identity still intact.
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert won
+    assert claimed is not None
 
     # Simulate the safety net in the correct order:
-    # 1. Check consumed first.
-    consumed = await env.forget.get_consumed_request(member.id)
-    assert consumed is not None
-    # If consumed found → goodbye.  Identity check is skipped.
-    assert consumed.language == "en"
+    # 1. Check deleting first.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    # If deleting found → goodbye.  Identity check is skipped.
+    assert deleting.language == "en"
 
     # If the check were identity-first, it would resolve successfully
     # (Member row still exists) and the model would run — the bug.
     identity = await env.linking.identity_for("telegram", "42")
     assert identity is not None, (
-        "identity still resolves — but consumed check must gate first"
+        "identity still resolves — but deleting check must gate first"
     )
 
 
@@ -1065,52 +1065,54 @@ async def test_concurrent_initial_requests_no_integrity_error(env):
     assert pending.status == "pending"
 
 
-async def test_request_forget_me_does_not_reset_consumed_to_pending(env):
-    """P1 fix-r5: a re-request must never reset a consumed row to pending.
-    When a previous deletion was confirmed (consumed) but not yet completed,
-    a new forget-me trigger must NOT overwrite the consumed row — the
-    deletion must complete, not be discarded.  The consumed row stays intact
+async def test_request_forget_me_does_not_reset_deleting_to_pending(env):
+    """P1 fix-r5: a re-request must never reset a deleting row to pending.
+    When a previous deletion was confirmed (deleting) but not yet completed,
+    a new forget-me trigger must NOT overwrite the deleting row — the
+    deletion must complete, not be discarded.  The deleting row stays intact
     so the runtime can recover it."""
     member = await populate(env)
     now = datetime.now(UTC)
     phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
 
-    # Consume the first request (status -> 'consumed').
-    won = await env.forget.consume_pending_forget_me(
+    # Claim the first request (status -> 'deleting').
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase1, datetime.now(UTC)
     )
-    assert won
+    assert claimed is not None
 
-    # Verify consumed row exists.
-    consumed = await env.forget.get_consumed_request(member.id)
-    assert consumed is not None
-    assert consumed.status == "consumed"
+    # Verify deleting row exists.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == "deleting"
 
-    # A new forget-me request must NOT reset consumed to pending.
+    # A new forget-me request must NOT reset deleting to pending —
+    # request_forget_me returns empty string when the row is deleting
+    # so the caller can recover (issue #212, fix-r6).
     phrase2 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
-    assert phrase2.startswith("DELETE-ME-")
+    assert phrase2 == "", f"request_forget_me must return '' when row is deleting, got {phrase2!r}"
 
-    # Consumed row is still there — NOT overwritten.
-    consumed_after = await env.forget.get_consumed_request(member.id)
-    assert consumed_after is not None, (
-        "consumed row must NOT be reset to pending by a re-request"
+    # Deleting row is still there — NOT overwritten.
+    deleting_after = await env.forget.get_deleting_request(member.id)
+    assert deleting_after is not None, (
+        "deleting row must NOT be reset to pending by a re-request"
     )
-    assert consumed_after.status == "consumed"
-    assert consumed_after.language == "en"  # original language preserved
-    assert consumed_after.confirmation_phrase == phrase1  # original phrase preserved
+    assert deleting_after.status == "deleting"
+    assert deleting_after.language == "en"  # original language preserved
+    assert deleting_after.confirmation_phrase == phrase1  # original phrase preserved
 
-    # The runtime would detect the consumed row on next message and complete
+    # The runtime would detect the deleting row on next message and complete
     # the deletion — simulate that flow.
-    recovered = await env.forget.get_consumed_request(member.id)
+    recovered = await env.forget.get_deleting_request(member.id)
     assert recovered is not None
     await env.forget.forget_member(member.id)
     assert await count(env, Member, id=member.id) == 0
 
 
-async def test_consumed_row_recovered_by_runtime_not_overwritten(env):
-    """End-to-end fix-r5: when a consumed row exists, the runtime detects it
+async def test_deleting_row_recovered_by_runtime_not_overwritten(env):
+    """End-to-end fix-r5: when a deleting row exists, the runtime detects it
     first (before calling request_forget_me) and completes the deletion.
-    The store's request_forget_me never overwrites a consumed row, so the
+    The store's request_forget_me never overwrites a deleting row, so the
     original confirmation phrase is preserved and the runtime can complete
     deletion on the next message."""
     from agents.extensions.memory import SQLAlchemySession
@@ -1124,17 +1126,17 @@ async def test_consumed_row_recovered_by_runtime_not_overwritten(env):
         {"role": "user", "content": "hola"},
     ])
 
-    # First request → consume → consumed row exists.
+    # First request → claim → deleting row exists.
     phrase1 = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
-    won = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase1, datetime.now(UTC)
     )
-    assert won
+    assert claimed is not None
 
-    # Simulate the runtime flow: consumed check first → complete deletion.
-    consumed_req = await env.forget.get_consumed_request(member.id)
-    assert consumed_req is not None
-    assert consumed_req.status == "consumed"
+    # Simulate the runtime flow: deleting check first → complete deletion.
+    deleting_req = await env.forget.get_deleting_request(member.id)
+    assert deleting_req is not None
+    assert deleting_req.status == "deleting"
     await env.forget.forget_member(member.id)
 
     # Full deletion completed.
@@ -1144,12 +1146,12 @@ async def test_consumed_row_recovered_by_runtime_not_overwritten(env):
     assert items == []
 
 
-# -- P1: group messages must not bypass the consumed gate (fix-r5) --------
+# -- P1: group messages must not bypass the deleting gate (fix-r5) --------
 
 
-async def test_group_message_cannot_bypass_consumed_gate(env):
-    """P1 fix-r5: a group message from a Member with a consumed (deletion
-    in progress) request must NOT reach the model.  The consumed check gates
+async def test_group_message_cannot_bypass_deleting_gate(env):
+    """P1 fix-r5: a group message from a Member with a deleting (deletion
+    in progress) request must NOT reach the model.  The deleting check gates
     ALL paths, including group messages."""
     from agents.extensions.memory import SQLAlchemySession
 
@@ -1166,17 +1168,17 @@ async def test_group_message_cannot_bypass_consumed_gate(env):
     assert len(items_before) == 1
 
     # Consume the request (deletion confirmed, but not yet completed).
-    won = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert won
+    assert claimed is not None
 
-    # Simulate what _handle_forget_me now does: consumed check FIRST,
+    # Simulate what _handle_forget_me does: deleting check FIRST,
     # BEFORE the group early return.  A group message should still trigger
     # completion of the deletion, not fall through to the model.
-    consumed = await env.forget.get_consumed_request(member.id)
-    assert consumed is not None
-    assert consumed.status == "consumed"
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == "deleting"
 
     # The runtime completes deletion and returns goodbye.
     await env.forget.forget_member(member.id)
@@ -1187,8 +1189,8 @@ async def test_group_message_cannot_bypass_consumed_gate(env):
     assert items_after == []
 
 
-async def test_group_message_recovers_interrupted_consumed_deletion(env):
-    """P1 fix-r5: a group message after a crashed deletion (consumed row
+async def test_group_message_recovers_interrupted_deleting_deletion(env):
+    """P1 fix-r5: a group message after a crashed deletion (deleting row
     exists, Member still exists) must complete the deletion rather than
     cancelling or falling through."""
     from agents.extensions.memory import SQLAlchemySession
@@ -1204,20 +1206,20 @@ async def test_group_message_recovers_interrupted_consumed_deletion(env):
     ])
 
     # Consume but don't delete — simulating a crash after confirmation.
-    won = await env.forget.consume_pending_forget_me(
+    claimed = await env.forget.claim_forget_me_request(
         member.id, phrase, datetime.now(UTC)
     )
-    assert won
+    assert claimed is not None
 
-    # Consumed row exists, Member still exists (simulated crash).
-    consumed = await env.forget.get_consumed_request(member.id)
-    assert consumed is not None
-    assert consumed.status == "consumed"
+    # Deleting row exists, Member still exists (simulated crash).
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == "deleting"
     assert await count(env, Member, id=member.id) == 1
 
-    # A group message now arrives.  With the fix-r5 reorder, the consumed
+    # A group message now arrives.  With the fix-r5 reorder, the deleting
     # check runs FIRST and completes the deletion.
-    if consumed is not None:
+    if deleting is not None:
         await env.forget.forget_member(member.id)
 
     # Deletion completed, no model residue.
@@ -1363,7 +1365,7 @@ async def test_concurrent_initial_requests_across_sessions_no_error(env):
 async def test_upsert_preserves_pending_for_second_write(env):
     """P2 fix-r5: the upsert on a pending row preserves status as pending.
     When process A created a pending request and process B's upsert lands,
-    the row must still be in pending state (not consumed)."""
+    the row must still be in pending state (not deleting)."""
     member = await populate(env)
     now = datetime.now(UTC)
 
@@ -1382,3 +1384,344 @@ async def test_upsert_preserves_pending_for_second_write(env):
     assert pending2.language == "es"
     assert pending2.confirmation_phrase == phrase2
     assert pending2.confirmation_phrase != phrase1
+
+
+# -- P1: upsert WHERE guard prevents overwriting deleting rows (fix-r6) ---
+
+
+async def test_upsert_where_guard_prevents_overwriting_deleting(env):
+    """P1 fix-r6: the conditional upsert's WHERE status='pending' clause
+    prevents the DO UPDATE from firing when another runtime claimed the
+    row between our fast-path read and the upsert.  Tested at the SQL level
+    with independent sessions — no hook needed."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+    from agentg.forget import STATUS_DELETING, STATUS_PENDING
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # Create a pending request via the store.
+    phrase_a = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Simulate Runtime A: read the row (sees pending) but pause.
+    # Meanwhile Runtime B claims the request (status → deleting).
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase_a, datetime.now(UTC)
+    )
+    assert claimed is not None
+    # Verify the claim set status to 'deleting'.
+    verifying = await env.forget.get_deleting_request(member.id)
+    assert verifying is not None
+    assert verifying.status == STATUS_DELETING
+
+    # Runtime A now runs its upsert with WHERE status='pending'.
+    # Because Runtime B already set status to 'deleting', the WHERE
+    # clause prevents the DO UPDATE from firing.
+    phrase_b = "DELETE-ME-BBBBBB"
+    expires = now + timedelta(seconds=300)
+    async with async_sessionmaker(env.engine)() as db:
+        stmt = sqlite_insert(ForgetMeRequest).values(
+            member_id=member.id,
+            gym_id=env.gym_id,
+            confirmation_phrase=phrase_b,
+            expires_at=expires,
+            created_at=now,
+            language="es",
+            status=STATUS_PENDING,
+        ).on_conflict_do_update(
+            index_elements=["member_id"],
+            set_=dict(
+                gym_id=env.gym_id,
+                confirmation_phrase=phrase_b,
+                expires_at=expires,
+                created_at=now,
+                language="es",
+                status=STATUS_PENDING,
+            ),
+            where=(ForgetMeRequest.status == STATUS_PENDING),
+        )
+        await db.execute(stmt)
+        await db.commit()
+
+    # The row must still be 'deleting' — the upsert's WHERE guard
+    # prevented the overwrite.  phrase_a is still the one that won.
+    row = await env.forget.get_deleting_request(member.id)
+    assert row is not None
+    assert row.status == STATUS_DELETING
+    assert row.confirmation_phrase == phrase_a
+    assert row.language == "en"
+
+
+async def test_barrier_consume_between_read_and_upsert(env):
+    """P1 fix-r6: true barrier-based interleaving where a concurrent
+    runtime consumes the request between request_forget_me's fast-path
+    read and its conditional upsert.  The read sees 'pending'; the upsert
+    arrives after another runtime set 'deleting' — the WHERE guard
+    prevents the overwrite, and the post-upsert re-check returns the
+    empty-string sentinel so the caller can complete deletion.
+
+    Uses asyncio.Event barriers to create deterministic interleaving
+    without sequential/manual substitutes."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Verify the pending row exists.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.status == "pending"
+
+    # Barrier events for true interleaving.
+    read_done = asyncio.Event()   # Task A has completed the fast-path read
+    consume_done = asyncio.Event()  # Task B has claimed the request
+
+    async def pre_upsert_hook():
+        """Called between read and upsert inside request_forget_me."""
+        read_done.set()        # Signal: Task A is paused, ready for Task B
+        await consume_done.wait()  # Wait for Task B to consume
+
+    # Install the test hook on the store.
+    env.forget._pre_upsert_hook = pre_upsert_hook
+
+    result_a: str | None = None
+
+    async def task_a():
+        nonlocal result_a
+        # This will: read (sees pending) → hook (pauses) → upsert → re-check
+        result_a = await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "es"
+        )
+
+    async def task_b():
+        # Wait for Task A to complete its read and hit the barrier.
+        await read_done.wait()
+        # Now consume the request while Task A is paused.
+        claimed = await env.forget.claim_forget_me_request(
+            member.id, phrase, datetime.now(UTC)
+        )
+        assert claimed is not None
+        # Release Task A immediately so it can proceed.
+        consume_done.set()
+
+    # Run both tasks concurrently.
+    await asyncio.gather(task_a(), task_b())
+
+    # Remove the hook (clean up).
+    env.forget._pre_upsert_hook = None
+
+    # Task A must have detected the deleting state and returned sentinel.
+    assert result_a == "", (
+        f"request_forget_me must return empty string when row was"
+        f" claimed between read and upsert, got {result_a!r}"
+    )
+
+    # The row must still be 'deleting' — the WHERE guard prevented
+    # Task A's upsert from overwriting it.
+    deleting_row = await env.forget.get_deleting_request(member.id)
+    assert deleting_row is not None
+    assert deleting_row.status == "deleting"
+    assert deleting_row.confirmation_phrase == phrase  # original preserved
+    assert deleting_row.language == "en"  # original language preserved
+
+
+# -- Failure-injection: partial wipe recovery via exact phrase (fix-3) -----
+
+
+async def test_partial_failure_retryable_via_exact_phrase(env):
+    """fix-3: when forget_member's clear_session succeeds but the domain
+    transaction fails (chat history gone, domain data intact), the deleting
+    request persists.  Retrying the exact confirmation phrase
+    deterministically resumes deletion and eventually leaves zero residue.
+
+    The scenario:
+    1. Claim the pending request (pending → deleting).
+    2. clear_session succeeds (chat history wiped).
+    3. Domain transaction fails (Member + domain rows still intact).
+    4. Retry: send the exact phrase → get_deleting_by_phrase finds it.
+    5. forget_member runs fully this time → zero residue."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # Seed chat history to prove it is wiped and stays gone.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "bench 60 8,8,8"},
+        {"role": "assistant", "content": "Logged! 3 sets at 60 kg."},
+    ])
+    items_before = await session.get_items()
+    assert len(items_before) == 2
+
+    # Step 1-2: claim the request, then clear chat history (simulating
+    # the first part of forget_member succeeding).
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+    await SQLAlchemySession(
+        f"member:{member.id}", engine=env.engine
+    ).clear_session()
+
+    # Step 3: domain delete did NOT run (simulating the transaction
+    # failure).  Verify partial state: chat gone, domain intact,
+    # request is deleting.
+    items_after_clear = await session.get_items()
+    assert items_after_clear == [], "chat history must be gone"
+    assert await count(env, Member, id=member.id) == 1, "domain data intact"
+    assert await count(env, Session, member_id=member.id) == 1
+    deleting_req = await env.forget.get_deleting_request(member.id)
+    assert deleting_req is not None
+    assert deleting_req.status == "deleting"
+    assert deleting_req.confirmation_phrase == phrase
+
+    # Step 4: retry — send the exact confirmation phrase.  The runtime
+    # detects the deleting request via get_deleting_by_phrase and
+    # resumes deletion deterministically.
+    retry_req = await env.forget.get_deleting_by_phrase(
+        member.id, phrase, now
+    )
+    assert retry_req is not None, (
+        "exact phrase must find the deleting request for retry"
+    )
+    assert retry_req.status == "deleting"
+    assert retry_req.language == "en"
+
+    # Step 5: resume deletion — this time forget_member completes fully.
+    await env.forget.forget_member(member.id)
+
+    # Zero residue: everything gone.
+    assert await count(env, Member, id=member.id) == 0
+    assert await count(env, Session, member_id=member.id) == 0
+    assert await count(env, MemberNote, member_id=member.id) == 0
+    assert await count(env, Routine, member_id=member.id) == 0
+    assert await count(env, Set) == 0
+    assert await count(env, Workout) == 0
+    assert await count(env, WorkoutExercise) == 0
+    assert await _pending_count(env, member.id) == 0
+    items_final = await session.get_items()
+    assert items_final == [], "no chat history residue"
+
+
+async def test_partial_failure_non_matching_message_falls_through(env):
+    """fix-3: when a deleting request exists but the message does NOT match
+    the confirmation phrase, get_deleting_by_phrase returns None and the
+    runtime falls through to normal processing — the model can respond
+    while the user waits for recovery."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "es"
+    )
+
+    # Claim + clear session (partial failure).
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+    await SQLAlchemySession(
+        f"member:{member.id}", engine=env.engine
+    ).clear_session()
+
+    # A non-matching message must NOT resume deletion.
+    non_match = await env.forget.get_deleting_by_phrase(
+        member.id, "WRONG-PHRASE", now
+    )
+    assert non_match is None, (
+        "non-matching phrase must not find the deleting request"
+    )
+
+    # The deleting request is still there (via get_deleting_request),
+    # but the runtime lets non-matching messages fall through to the
+    # model — the Member data is still intact.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == "deleting"
+    assert await count(env, Member, id=member.id) == 1
+
+
+async def test_idempotent_retry_after_full_success(env):
+    """fix-3: calling forget_member a second time after successful deletion
+    is a no-op (the method is already documented as idempotent).  After
+    recovery completes, there must be no residue from the retry."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # Seed chat history.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([{"role": "user", "content": "hola"}])
+
+    # Claim + partial failure + retry (complete deletion).
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+    await SQLAlchemySession(
+        f"member:{member.id}", engine=env.engine
+    ).clear_session()
+    # Domain data still intact (simulating failure).
+    assert await count(env, Member, id=member.id) == 1
+    # Retry via phrase → full deletion.
+    retry_req = await env.forget.get_deleting_by_phrase(
+        member.id, phrase, now
+    )
+    assert retry_req is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+    # A second retry after complete deletion must not error.
+    await env.forget.forget_member(member.id)  # idempotent — must not raise
+    assert await count(env, Member, id=member.id) == 0
+    assert await _pending_count(env, member.id) == 0
+    items = await session.get_items()
+    assert items == []
+
+
+# -- Concurrency: two callers claiming the same request (fix-3) ------------
+
+
+async def test_claim_method_one_winner_one_loser(env):
+    """fix-3: two sequential claim_forget_me_request calls with the same
+    phrase must produce exactly one winner (returns the request object)
+    and one loser (returns None).  The loser can detect the deleting
+    state via get_deleting_request.
+
+    SQLite serializes writes so we run sequentially; the conditional
+    UPDATE is the guard on Postgres where true concurrency is possible."""
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "es"
+    )
+
+    # First claim wins.
+    winner = await env.forget.claim_forget_me_request(
+        member.id, phrase, now
+    )
+    assert winner is not None
+    assert winner.language == "es"
+
+    # Second claim with same phrase loses — the row is now 'deleting'.
+    loser = await env.forget.claim_forget_me_request(
+        member.id, phrase, now
+    )
+    assert loser is None
+
+    # The loser can detect the deleting state.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == "deleting"
+    assert deleting.confirmation_phrase == phrase

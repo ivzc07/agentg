@@ -476,18 +476,21 @@ class AgentRuntime:
 
         now = datetime.now(timezone.utc)
 
-        # P1: Check for a consumed (in-progress or interrupted) deletion
+        # P1: Check for a deleting (in-progress or interrupted) deletion
         # FIRST — before the group early return, before anything else.  A
-        # consumed row is the durable signal that deletion was already
-        # confirmed; it must gate ALL paths including group messages so a
-        # group message can never reach the model while deletion is in
-        # progress (issue #212, fix-r5).
-        consumed_req = await self.stores.forget.get_consumed_request(
-            linked.member.id
+        # deleting row is the durable signal that deletion was already
+        # confirmed.
+        #
+        # When the exact confirmation phrase is repeated, resume deletion
+        # deterministically (partial-failure recovery, issue #212, fix-3).
+        # Any other message from a deleting state falls through — the
+        # model can respond while the user waits for recovery.
+        deleting_req = await self.stores.forget.get_deleting_by_phrase(
+            linked.member.id, normalize_confirmation(msg.text), now
         )
-        if consumed_req is not None:
+        if deleting_req is not None:
             await self.stores.forget.forget_member(linked.member.id)
-            return Reply(_FORGET_GOODBYE[consumed_req.language or "es"])
+            return Reply(_FORGET_GOODBYE[deleting_req.language or "es"])
 
         # Group messages never trigger or confirm forget-me, but a
         # group/different message from a Member with a pending request
@@ -511,31 +514,31 @@ class AgentRuntime:
             else:
                 normalized = normalize_confirmation(msg.text)
                 if normalized == pending.confirmation_phrase:
-                    # P1: atomic compare-and-consume so concurrent
+                    # P1: atomic compare-and-claim so concurrent
                     # confirmations across runtimes have exactly one
                     # winner and a stale confirmation cannot delete.
-                    won = await self.stores.forget.consume_pending_forget_me(
+                    claimed = await self.stores.forget.claim_forget_me_request(
                         linked.member.id, normalized, now
                     )
-                    if won:
+                    if claimed is not None:
                         await self.stores.forget.forget_member(
                             linked.member.id
                         )
-                        lang = pending.language or "es"
+                        lang = claimed.language or "es"
                         return Reply(_FORGET_GOODBYE[lang])
                     # P1: Lost the race — another runtime already claimed
                     # this request and may be deleting the Member right
-                    # now. The row now has status "consumed" (not deleted),
+                    # now. The row now has status "deleting" (not deleted),
                     # so check for it to prevent falling through to the
                     # model while deletion is still in progress.
-                    consumed_req = await self.stores.forget.get_consumed_request(
+                    deleting_req = await self.stores.forget.get_deleting_request(
                         linked.member.id
                     )
-                    if consumed_req is not None:
+                    if deleting_req is not None:
                         return Reply(
-                            _FORGET_GOODBYE[consumed_req.language or "es"]
+                            _FORGET_GOODBYE[deleting_req.language or "es"]
                         )
-                    # The pending was cancelled (not consumed) — fall
+                    # The pending was cancelled (not claimed) — fall
                     # through to normal processing.
                 else:
                     # Wrong phrase — cancel the pending request.  A new
@@ -560,6 +563,13 @@ class AgentRuntime:
                 self.forget_me_confirmation_seconds,
                 lang,
             )
+            # Empty string is the sentinel: a deleting row was
+            # detected between the fast-path read and the conditional
+            # upsert — another runtime claimed this Member's deletion.
+            # Complete it deterministically (issue #212, fix-r6).
+            if not phrase:
+                await self.stores.forget.forget_member(linked.member.id)
+                return Reply(_FORGET_GOODBYE[lang])
             minutes = max(1, self.forget_me_confirmation_seconds // 60)
             warning = _FORGET_WARNING[lang].format(
                 phrase=phrase,
@@ -569,16 +579,16 @@ class AgentRuntime:
             return Reply(warning)
 
         # P1 safety net: before falling through to the model, re-verify
-        # the Member still exists AND that no consumed request appeared
+        # the Member still exists AND that no deleting request appeared
         # since our initial check.  A concurrent runtime may have claimed
         # the pending request and begun deletion while we processed this
-        # ordinary message — the consumed row is the durable signal that
+        # ordinary message — the deleting row is the durable signal that
         # the model must never see this message.
-        consumed_now = await self.stores.forget.get_consumed_request(
+        deleting_now = await self.stores.forget.get_deleting_request(
             linked.member.id
         )
-        if consumed_now is not None:
-            return Reply(_FORGET_GOODBYE[consumed_now.language or "es"])
+        if deleting_now is not None:
+            return Reply(_FORGET_GOODBYE[deleting_now.language or "es"])
         identity = await self.stores.linking.identity_for(
             msg.channel, msg.channel_user_id
         )
