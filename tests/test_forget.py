@@ -3174,3 +3174,327 @@ async def test_group_redirect_never_reveals_deletion(env):
         assert len(_FORGET_PRIVATE_REDIRECT.get(lang, "")) > 0, (
             f"_FORGET_PRIVATE_REDIRECT[{lang!r}] must not be empty"
         )
+
+
+# -- P1 (fix-r13): Conservative stale-lease threshold ---------------------
+
+
+async def test_live_turn_lease_not_reclaimed_past_30s(env):
+    """fix-r13 P1: a live turn whose lease age exceeds the old 30s
+    threshold must NOT be reclaimed by a concurrent claim or acquire.
+    The STALE_LEASE_SECONDS bound is now 86_400 (24h) — safely above
+    any Runner retry/backoff duration — so a live turn can never be
+    intercepted by a concurrent runtime.
+
+    This test ages the lease past 30s (the old threshold) but well under
+    the current 24h bound and proves both acquire and claim correctly
+    treat it as still live."""
+    from agentg.forget import STALE_LEASE_SECONDS
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # Runtime A acquires the lease (model turn starts).
+    assert await env.forget.acquire_model_turn_lease(
+        member.id, env.gym_id
+    ) is True
+
+    # Age the lease past the OLD 30s threshold but well under 24h.
+    # This simulates a long-running model turn (Runner retries/backoff).
+    # Also update the in-memory token so a later release works correctly
+    # — the stale check uses the DB row, not the token.
+    aged_time = datetime.now(UTC) - timedelta(seconds=120)  # 2 minutes
+    env.forget._lease_tokens[member.id] = aged_time
+    async with async_sessionmaker(env.engine)() as db:
+        await db.execute(
+            update(ModelTurnLease)
+            .where(ModelTurnLease.member_id == member.id)
+            .values(acquired_at=aged_time)
+        )
+        await db.commit()
+
+    # Verify the lease is older than 30s but the stale bound is 24h.
+    async with async_sessionmaker(env.engine)() as db:
+        lease_row = await db.scalar(
+            select(ModelTurnLease).where(
+                ModelTurnLease.member_id == member.id
+            )
+        )
+        assert lease_row is not None
+        age_seconds = (datetime.now(UTC) - lease_row.acquired_at).total_seconds()
+        assert age_seconds > 30, (
+            f"lease must be older than the old 30s threshold, got {age_seconds}s"
+        )
+        assert age_seconds < STALE_LEASE_SECONDS, (
+            f"lease must still be within the new {STALE_LEASE_SECONDS}s bound"
+        )
+
+    # Runtime B tries to claim — must lose because the lease is still live.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is None, (
+        "claim must lose — the lease is aged but still within the"
+        " conservative stale threshold"
+    )
+
+    # Runtime C tries to acquire — must also lose.
+    acquired = await env.forget.acquire_model_turn_lease(
+        member.id, env.gym_id
+    )
+    assert acquired is False, (
+        "second acquire must lose — the lease is still live"
+    )
+
+    # The pending request is still pending (not deleting).
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.status == STATUS_PENDING
+
+    # Member still exists — deletion was NOT triggered.
+    assert await count(env, Member, id=member.id) == 1
+
+    # Release the lease (model turn completes normally).
+    await env.forget.release_model_turn_lease(member.id)
+
+    # Now claim succeeds.
+    claimed_after = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed_after is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_stale_lease_recovery_still_works_with_new_threshold(env):
+    """fix-r13 P1: crash recovery still works — a lease aged past the
+    new 24h threshold IS reclaimed.  This is the safety net for a
+    genuinely crashed runtime."""
+    from agentg.forget import STALE_LEASE_SECONDS
+
+    member = await populate(env)
+
+    # Acquire lease normally.
+    assert await env.forget.acquire_model_turn_lease(
+        member.id, env.gym_id
+    ) is True
+
+    # Age the lease past the 24h threshold (simulate crashed runtime).
+    stale_time = datetime.now(UTC) - timedelta(
+        seconds=STALE_LEASE_SECONDS + 60
+    )
+    async with async_sessionmaker(env.engine)() as db:
+        await db.execute(
+            update(ModelTurnLease)
+            .where(ModelTurnLease.member_id == member.id)
+            .values(acquired_at=stale_time)
+        )
+        await db.commit()
+
+    # Another runtime must recover the stale lease.
+    result = await env.forget.acquire_model_turn_lease(
+        member.id, env.gym_id
+    )
+    assert result is True, (
+        "stale lease past 24h must be recoverable — crash recovery works"
+    )
+
+    # Verify the lease timestamp was refreshed.
+    async with async_sessionmaker(env.engine)() as db:
+        row = await db.scalar(
+            select(ModelTurnLease).where(
+                ModelTurnLease.member_id == member.id
+            )
+        )
+        assert row is not None
+        assert row.acquired_at > stale_time, "lease must be refreshed"
+
+    # Clean up.
+    await env.forget.release_model_turn_lease(member.id)
+
+
+# -- P2 (fix-r13): Losing confirmation response ---------------------------
+
+
+async def test_claim_loser_gets_deleting_in_progress_not_goodbye(env):
+    """fix-r13 P2: when two concurrent confirmations race and one loses,
+    the loser must receive 'deletion in progress' — NOT 'goodbye'.
+    The winner might still crash; only the exact phrase retry can
+    complete deletion.
+
+    This test validates the response that _handle_forget_me returns
+    on the losing path by directly exercising the store-level claim
+    method and verifying the loser sees a deleting (not deleted) state."""
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # Runtime A (winner) claims the request.
+    winner = await env.forget.claim_forget_me_request(
+        member.id, phrase, now
+    )
+    assert winner is not None, "runtime A must win the claim"
+
+    # Runtime B (loser) tries — loses.
+    loser = await env.forget.claim_forget_me_request(
+        member.id, phrase, now
+    )
+    assert loser is None, "runtime B must lose the claim"
+
+    # After losing, the loser checks get_deleting_request.
+    # The row exists with status 'deleting' — NOT 'consumed'.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None, (
+        "loser must find a deleting row — deletion was claimed but"
+        " not yet completed"
+    )
+    assert deleting.status == STATUS_DELETING
+
+    # The correct response for the loser is _FORGET_DELETING_IN_PROGRESS,
+    # not _FORGET_GOODBYE.  Member data still exists — winner might
+    # still crash before completing forget_member.
+    assert await count(env, Member, id=member.id) == 1, (
+        "Member must still exist — winner has not yet deleted"
+    )
+
+    # Now complete deletion via the winner.
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_winner_failure_loser_retry_completes_deletion(env):
+    """fix-r13 P2: the winner of the claim race crashes AFTER setting
+    status to 'deleting' but BEFORE calling forget_member.  The loser
+    must NOT claim permanent deletion.  A subsequent message with the
+    exact phrase must complete deletion via get_deleting_by_phrase.
+
+    This is the full winner-failure / loser-response / retry scenario."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # Seed chat history.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([{"role": "user", "content": "hello coach"}])
+
+    # Runtime A wins the claim race.  This atomically sets status to
+    # 'deleting'.  We then simulate a crash: forget_member is NEVER called.
+    winner = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert winner is not None, "runtime A must win the claim"
+    assert winner.status == STATUS_DELETING
+
+    # Runtime B loses the claim race and receives None.
+    loser = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert loser is None, "runtime B must lose — row is already deleting"
+
+    # Runtime B checks get_deleting_request — finds the deleting row.
+    # In _handle_forget_me this path now returns _FORGET_DELETING_IN_PROGRESS,
+    # NOT _FORGET_GOODBYE — because the winner might crash.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None, (
+        "loser must find the deleting row — deletion was claimed but"
+        " not completed (winner crashed)"
+    )
+    assert deleting.status == STATUS_DELETING
+
+    # Member still exists — deletion has NOT completed.
+    assert await count(env, Member, id=member.id) == 1, (
+        "Member must still exist after winner crash — deletion"
+        " was claimed but not completed"
+    )
+    assert await count(env, Session, member_id=member.id) == 1
+
+    # Chat history still intact — model was never reached.
+    items = await session.get_items()
+    assert len(items) == 1
+
+    # Later, the Member sends the exact confirmation phrase again.
+    # This is the retry path: get_deleting_by_phrase finds the deleting
+    # row because the phrase matches, and forget_member completes deletion.
+    retry = await env.forget.get_deleting_by_phrase(
+        member.id, phrase, now
+    )
+    assert retry is not None, (
+        "exact phrase retry must find the deleting request — the"
+        " crashed winner left it in 'deleting' status"
+    )
+    assert retry.status == STATUS_DELETING
+
+    # Complete deletion on the retry.
+    await env.forget.forget_member(member.id)
+
+    # Deletion completed successfully.
+    assert await count(env, Member, id=member.id) == 0
+    assert await _pending_count(env, member.id) == 0
+
+    # Chat history cleared.
+    items_after = await session.get_items()
+    assert items_after == []
+
+
+async def test_loser_with_non_matching_message_sees_deleting_in_progress(env):
+    """fix-r13 P2: a loser that sends a different message (not the
+    exact phrase) while the deleting row exists must receive
+    'deletion in progress' — deletion must never auto-complete for
+    a non-matching message."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # Seed chat history.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([{"role": "user", "content": "hello"}])
+
+    # Winner claims, then crashes before completing deletion.
+    winner = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert winner is not None
+
+    # A non-matching message arrives (e.g. "hello" or "status").
+    # get_deleting_by_phrase returns None — phrase doesn't match.
+    not_found = await env.forget.get_deleting_by_phrase(
+        member.id, normalize_confirmation("hello"), now
+    )
+    assert not_found is None, (
+        "non-matching phrase must NOT find the deleting request"
+    )
+
+    # get_deleting_request still finds it — the runtime's safety net
+    # returns _FORGET_DELETING_IN_PROGRESS, not goodbye.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == STATUS_DELETING
+
+    # Member still exists — deletion was NOT auto-completed.
+    assert await count(env, Member, id=member.id) == 1
+
+    # Chat history unchanged.
+    items = await session.get_items()
+    assert len(items) == 1
+
+    # Only the exact phrase can complete deletion.
+    retry = await env.forget.get_deleting_by_phrase(
+        member.id, phrase, now
+    )
+    assert retry is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0

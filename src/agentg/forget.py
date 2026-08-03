@@ -68,9 +68,11 @@ STATUS_DELETING = "deleting"
 STATUS_CONSUMED = "consumed"  # legacy — no longer written; kept for migration compat
 
 # Bounded stale-lease recovery threshold: a turn lease older than this
-# is reclaimed so a crashed runtime cannot strand deletion forever
-# (issue #212, fix-r10).
-STALE_LEASE_SECONDS = 30
+# is reclaimed so a crashed runtime cannot strand deletion forever.
+# Must be conservatively above the maximum possible Runner duration
+# (retries + backoff) so a live turn is never reclaimed by a concurrent
+# runtime (issue #212, fix-r13 P1).
+STALE_LEASE_SECONDS = 86_400  # 24 hours — safely above any Runner duration
 
 
 class ForgetStore:

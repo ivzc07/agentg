@@ -726,17 +726,20 @@ class AgentRuntime:
                         )
                         lang = claimed.language or "es"
                         return Reply(_FORGET_GOODBYE[lang])
-                    # P1: Lost the race — another runtime already claimed
-                    # this request and may be deleting the Member right
-                    # now. The row now has status "deleting" (not deleted),
-                    # so check for it to prevent falling through to the
-                    # model while deletion is still in progress.
+                    # P2 (fix-r13): Lost the race — another runtime already
+                    # claimed this request and may still fail.  The row now
+                    # has status "deleting" (not necessarily deleted), so
+                    # we must NOT claim permanent deletion completed.  Return
+                    # a truthful "deletion in progress" message; only the
+                    # exact phrase resumes/completes deletion.
                     deleting_req = await self.stores.forget.get_deleting_request(
                         linked.member.id
                     )
                     if deleting_req is not None:
                         return Reply(
-                            _FORGET_GOODBYE[deleting_req.language or "es"]
+                            _FORGET_DELETING_IN_PROGRESS[
+                                deleting_req.language or "es"
+                            ]
                         )
                     # The pending was cancelled (not claimed) — fall
                     # through to normal processing.
