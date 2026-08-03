@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 
 from agents.extensions.memory import SQLAlchemySession
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from agentg.models import (
@@ -80,6 +80,14 @@ class ForgetStore:
         # Test-only hook: called between the read and upsert in
         # request_forget_me (issue #212, fix-r6 barrier test).
         self._pre_upsert_hook: Callable[[], Awaitable[None]] | None = None  # type: ignore[assignment]
+        # Per-Member lease tokens so release_model_turn_lease only deletes
+        # a lease WE created — never another runtime's live lease (fix-r12).
+        self._lease_tokens: dict[int, datetime] = {}
+        # Test-only hooks for barrier tests (fix-r12 R3).  Called inside
+        # the engine.begin() transaction, after the Member-row lock is
+        # acquired, before business logic.
+        self._post_acquire_lock_hook: Callable[[int], Awaitable[None]] | None = None  # type: ignore[assignment]
+        self._post_claim_lock_hook: Callable[[int], Awaitable[None]] | None = None  # type: ignore[assignment]
 
     async def forget_member(self, member_id: int) -> None:
         """Hard-delete every trace of a Member. Idempotent: a second call on an
@@ -336,78 +344,72 @@ class ForgetStore:
         self, member_id: int, gym_id: int
     ) -> bool:
         """Atomically check that no deletion is in progress and acquire an
-        exclusive model-turn lease in the separate ``ModelTurnLease`` table,
-        closing the no-row-read→Runner race across runtimes (issue #212,
-        fix-r11).
+        exclusive model-turn lease, serialised with
+        ``claim_forget_me_request`` via a shared Member-row lock (fix-r12).
 
-        Steps:
-        1. If a ``ForgetMeRequest`` with status ``deleting`` exists → False.
-        2. Try INSERT into ``ModelTurnLease`` with ON CONFLICT DO NOTHING.
-        3. If our INSERT succeeded (rowcount > 0) → True.
-        4. If a competing row exists, check for stale-lease recovery.
-        5. If stale, UPDATE the stale row (reclaim it); otherwise False.
+        Uses ``engine.begin()`` for an explicit transaction (SQLite
+        IMMEDIATE + Postgres ``SELECT … FOR UPDATE``) so a concurrent claim
+        cannot interleave between our delete-check and the lease insert.
 
-        Returns ``True`` when the model may proceed safely.  Returns
-        ``False`` when a deleting request exists or another runtime holds
-        a non-stale lease.
+        Only reclaims a lease that is explicitly stale; a live lease owned
+        by another runtime is never touched (fix-r12).
+
+        Returns ``True`` when the model may proceed safely.
         """
         now = datetime.now(UTC)
         stale_cutoff = now - timedelta(seconds=STALE_LEASE_SECONDS)
 
-        async with self._sessions() as db:
-            # 1. Reject when a deleting request exists — deletion is
-            #    confirmed and in progress; the model must never run.
-            deleting = await db.scalar(
+        async with self.engine.begin() as conn:
+            # Lock the Member row to serialize with claim_forget_me_request.
+            # On Postgres this is a row-level lock; on SQLite WAL the
+            # IMMEDIATE transaction provides the write lock.
+            member_row = await conn.execute(
+                select(Member.id).where(Member.id == member_id).with_for_update()
+            )
+            if member_row.first() is None:
+                return False  # Member doesn't exist
+
+            # Test-only barrier hook — fires after the Member-row lock is
+            # held so a concurrent claim is serialised (fix-r12 R3).
+            if self._post_acquire_lock_hook is not None:
+                await self._post_acquire_lock_hook(member_id)
+
+            # 1. Reject when a deleting request exists.
+            del_result = await conn.execute(
                 select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == member_id,
                     ForgetMeRequest.status.in_([STATUS_DELETING, STATUS_CONSUMED]),
                 )
             )
-            if deleting is not None:
-                await db.commit()
+            if del_result.first() is not None:
                 return False
 
-            # 2. Try to insert a fresh lease row.
-            dialect_name = self.engine.sync_engine.dialect.name
-            if dialect_name == "postgresql":
-                from sqlalchemy.dialects.postgresql import insert as _dialect_insert  # type: ignore[assignment]
-            else:
-                from sqlalchemy.dialects.sqlite import insert as _dialect_insert  # type: ignore[assignment]
+            # 2. Check existing lease — use table columns for Core connection.
+            lease_row = (
+                await conn.execute(
+                    select(
+                        ModelTurnLease.member_id,
+                        ModelTurnLease.acquired_at,
+                    ).where(ModelTurnLease.member_id == member_id)
+                )
+            ).first()
 
-            stmt = _dialect_insert(ModelTurnLease).values(
-                member_id=member_id,
-                gym_id=gym_id,
-                acquired_at=now,
-            )
-            stmt = stmt.on_conflict_do_nothing(
-                index_elements=["member_id"]
-            )
-            result = await db.execute(stmt)
-            await db.commit()
-
-            # 3. Our INSERT succeeded — the row is new and we own the lease.
-            rowcount = getattr(result, "rowcount", 0)
-            if rowcount > 0:
+            if lease_row is None:
+                await conn.execute(
+                    insert(ModelTurnLease).values(
+                        member_id=member_id,
+                        gym_id=gym_id,
+                        acquired_at=now,
+                    )
+                )
+                self._lease_tokens[member_id] = now
                 return True
 
-        # 4. INSERT was a no-op — a lease row already exists.
-        #    Check for stale-lease recovery.
-        async with self._sessions() as db:
-            lease = await db.scalar(
-                select(ModelTurnLease).where(
-                    ModelTurnLease.member_id == member_id
-                )
-            )
-            if lease is None:
-                # Race: the row disappeared between the no-op insert and
-                # this read.  Retry once by recursing.
-                await db.commit()
-                return await self.acquire_model_turn_lease(member_id, gym_id)
-
-            # 5. Check if the existing lease is stale.
-            if lease.acquired_at < stale_cutoff:
-                # Reclaim the stale lease.
-                await db.execute(
+            # 3. Stale-lease recovery: only reclaim if explicitly stale.
+            #    Use rowcount to verify OUR update won — two concurrent
+            #    reclaimers cannot both succeed (fix-r12).
+            if lease_row.acquired_at < stale_cutoff:
+                result = await conn.execute(
                     update(ModelTurnLease)
                     .where(
                         ModelTurnLease.member_id == member_id,
@@ -415,32 +417,31 @@ class ForgetStore:
                     )
                     .values(acquired_at=now, gym_id=gym_id)
                 )
-                await db.commit()
-                # Verify the UPDATE succeeded.
-                lease2 = await db.scalar(
-                    select(ModelTurnLease).where(
-                        ModelTurnLease.member_id == member_id
-                    )
-                )
-                if lease2 is not None and lease2.acquired_at >= now - timedelta(seconds=1):
+                if getattr(result, "rowcount", 0) > 0:
+                    self._lease_tokens[member_id] = now
                     return True
-                await db.commit()
-                return False
 
-            await db.commit()
             return False
 
     async def release_model_turn_lease(self, member_id: int) -> None:
-        """Release the model-turn lease so another runtime (or a claim)
+        """Release our model-turn lease so another runtime (or a claim)
         can proceed.  Must be called in a ``finally`` block so a crash
         during ``Runner.run()`` cannot strand deletion (issue #212, fix-r11).
 
-        Idempotent: releasing when no lease exists is a no-op.
+        Only deletes a lease WE created (matched by ``acquired_at`` token).
+        A lease created by another runtime is never touched (fix-r12).
+
+        Idempotent: releasing when no lease exists, or when we never
+        acquired one, is a no-op.
         """
+        token = self._lease_tokens.pop(member_id, None)
+        if token is None:
+            return  # We never acquired a lease for this Member — no-op
         async with self._sessions() as db:
             await db.execute(
                 delete(ModelTurnLease).where(
-                    ModelTurnLease.member_id == member_id
+                    ModelTurnLease.member_id == member_id,
+                    ModelTurnLease.acquired_at == token,
                 )
             )
             await db.commit()
@@ -448,8 +449,9 @@ class ForgetStore:
     async def model_turn_lease_exists(self, member_id: int) -> bool:
         """Return True when a model-turn lease exists for this Member.
 
-        Used by ``claim_forget_me_request`` to reject a claim while a
-        model turn is active — the cross-runtime guard (issue #212, fix-r11).
+        Used by non-critical-path checks; the real gate is the atomic
+        Member-row lock inside ``acquire_model_turn_lease`` and
+        ``claim_forget_me_request`` (fix-r12).
         """
         async with self._sessions() as db:
             row = await db.scalar(
@@ -463,42 +465,46 @@ class ForgetStore:
         self, member_id: int, confirmation_phrase: str, now: datetime
     ) -> ForgetMeRequest | None:
         """Atomically claim the pending request only when the confirmation
-        phrase matches, hasn't expired yet, and NO model-turn lease exists
-        — closes the TOCTOU between the model-turn gate and a concurrent
-        deletion (issue #212, fix-r11).
+        phrase matches, hasn't expired yet, and no non-stale model-turn
+        lease exists — serialised with ``acquire_model_turn_lease`` via a
+        shared Member-row lock so both cannot succeed concurrently (fix-r12).
+
+        Uses ``engine.begin()`` for an explicit transaction: the shared
+        ``SELECT … FOR UPDATE`` on the Member row ensures that a claim and
+        a model-turn admission never interleave across runtimes.
 
         Returns the claimed request (for language mirroring) or None if the
         claim lost.
-
-        A single conditional UPDATE (``pending`` → ``deleting``) is the
-        compare-and-claim primitive: two concurrent sessions can't both
-        update the same row — exactly one sees ``rowcount > 0`` and becomes
-        the winner.
-
-        Before attempting the claim, checks the ``ModelTurnLease`` table.
-        If a lease exists, a model turn is active and the claim must not
-        proceed.  This check has a tiny TOCTOU window between the lease
-        check and the UPDATE, but the model-turn gate in ``handle_message``
-        catches any loser: if a lease appears after our check, the
-        ``acquire_model_turn_lease`` call at the model gate will see the
-        now-deleting row and reject the model — the deletion wins.
         """
-        # Fast-path: if a model-turn lease exists, fail early.
-        if await self.model_turn_lease_exists(member_id):
-            return None
+        stale_cutoff = now - timedelta(seconds=STALE_LEASE_SECONDS)
 
-        async with self._sessions() as db:
-            # Re-check lease inside the same transaction that claims.
-            lease = await db.scalar(
-                select(ModelTurnLease).where(
-                    ModelTurnLease.member_id == member_id
-                )
+        async with self.engine.begin() as conn:
+            # Lock the Member row to serialize with acquire_model_turn_lease.
+            member_row = await conn.execute(
+                select(Member.id).where(Member.id == member_id).with_for_update()
             )
-            if lease is not None:
-                await db.commit()
-                return None
+            if member_row.first() is None:
+                return None  # Member doesn't exist
 
-            result = await db.execute(
+            # Test-only barrier hook — fires after the Member-row lock is
+            # held so a concurrent acquire is serialised (fix-r12 R3).
+            if self._post_claim_lock_hook is not None:
+                await self._post_claim_lock_hook(member_id)
+
+            # 1. Check for a non-stale model-turn lease.  A stale lease
+            #    means the owning runtime crashed — the claim may proceed.
+            lease_row = (
+                await conn.execute(
+                    select(ModelTurnLease.acquired_at).where(
+                        ModelTurnLease.member_id == member_id
+                    )
+                )
+            ).first()
+            if lease_row is not None and lease_row.acquired_at >= stale_cutoff:
+                return None  # Active lease — claim must lose
+
+            # 2. Atomic compare-and-claim on ForgetMeRequest.
+            result = await conn.execute(
                 update(ForgetMeRequest)
                 .where(
                     ForgetMeRequest.member_id == member_id,
@@ -508,24 +514,26 @@ class ForgetStore:
                 )
                 .values(status=STATUS_DELETING)
             )
-            # Use `getattr` for portable SQLAlchemy typing: the dialect's
-            # Result proxy may not expose `rowcount` in stubs but always
-            # returns it at runtime.
             rowcount = getattr(result, "rowcount", 0)
             if rowcount == 0:
-                await db.commit()
                 return None
+
+            # Read the claimed row to return language info.  Use the
+            # session maker so the returned ORM instance is usable after
+            # the transaction closes (its column attributes are loaded).
+            pass  # fall through to post-transaction read
+
+        # Read the claimed row outside the lock — the atomic UPDATE above
+        # already settled the winner; this read is just for the caller.
+        async with self._sessions() as db:
             claimed = await db.scalar(
                 select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == member_id,
                     ForgetMeRequest.status == STATUS_DELETING,
                 )
             )
-            # Detach the object before commit so callers can read its
-            # attributes (language, status, etc.) after the session closes.
             if claimed is not None:
                 db.expunge(claimed)
-            await db.commit()
             return claimed
 
 

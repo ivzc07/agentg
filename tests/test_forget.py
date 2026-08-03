@@ -2936,3 +2936,241 @@ async def test_barrier_lease_released_after_failure(env):
 
     # Full deletion completed.
     assert await count(env, Member, id=member.id) == 0
+
+
+# -- Mutual-exclusion barrier tests (fix-r12) -----------------------------
+
+
+async def test_barrier_claim_and_acquire_mutually_exclusive(env):
+    """fix-r12 R3: claim commits fully (deleting row set), THEN a
+    concurrent acquire tries.  The acquire must see the deleting row
+    and lose — proving that the shared Member-row lock serialises
+    the two operations and both cannot succeed.
+
+    Uses monkey-patching so claim signals AFTER its transaction commits."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    claim_done = asyncio.Event()
+    acquire_result: bool | None = None
+
+    _original_claim = env.forget.claim_forget_me_request
+
+    async def _claim_wrapper(member_id, confirmation_phrase, now_dt):
+        result = await _original_claim(member_id, confirmation_phrase, now_dt)
+        claim_done.set()  # Signal AFTER commit
+        return result
+
+    env.forget.claim_forget_me_request = _claim_wrapper  # type: ignore[assignment]
+
+    async def run_acquire():
+        nonlocal acquire_result
+        await claim_done.wait()  # Wait for claim to fully commit
+        acquire_result = await env.forget.acquire_model_turn_lease(
+            member.id, env.gym_id
+        )
+
+    claim_task = asyncio.create_task(
+        env.forget.claim_forget_me_request(member.id, phrase, datetime.now(UTC))
+    )
+    acquire_task = asyncio.create_task(run_acquire())
+
+    await asyncio.gather(claim_task, acquire_task)
+
+    # Restore original.
+    env.forget.claim_forget_me_request = _original_claim  # type: ignore[assignment]
+
+    # Claim must have won (deleting row).
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None, "claim must succeed"
+    assert deleting.status == STATUS_DELETING
+
+    # Acquire must have lost (deleting row blocks it).
+    assert acquire_result is False, (
+        f"acquire after claim commits must see deleting row and lose,"
+        f" got {acquire_result}"
+    )
+
+    # Clean up.
+    await env.forget.forget_member(member.id)
+
+
+async def test_barrier_acquire_enters_first_claim_loses(env):
+    """fix-r12 R3: counterpart — acquire commits fully (lease inserted),
+    THEN claim tries.  Claim must see the lease and lose."""
+    import asyncio
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    acquire_done = asyncio.Event()
+    claim_result: bool | None = None
+
+    _original_acquire = env.forget.acquire_model_turn_lease
+
+    async def _acquire_wrapper(member_id, gym_id):
+        result = await _original_acquire(member_id, gym_id)
+        acquire_done.set()  # Signal AFTER commit
+        return result
+
+    env.forget.acquire_model_turn_lease = _acquire_wrapper  # type: ignore[assignment]
+
+    async def run_claim():
+        nonlocal claim_result
+        await acquire_done.wait()  # Wait for acquire to fully commit
+        claimed = await env.forget.claim_forget_me_request(
+            member.id, phrase, datetime.now(UTC)
+        )
+        claim_result = claimed is not None
+
+    acquire_task = asyncio.create_task(
+        env.forget.acquire_model_turn_lease(member.id, env.gym_id)
+    )
+    claim_task = asyncio.create_task(run_claim())
+
+    await asyncio.gather(acquire_task, claim_task)
+
+    # Restore original.
+    env.forget.acquire_model_turn_lease = _original_acquire  # type: ignore[assignment]
+
+    # Acquire must have won (lease exists).
+    assert await env.forget.model_turn_lease_exists(member.id) is True, (
+        "acquire must succeed — lease must exist"
+    )
+
+    # Claim must have lost (lease blocks claim).
+    assert claim_result is False, (
+        f"claim after acquire commits must see lease and lose,"
+        f" got {claim_result}"
+    )
+
+    # Pending request still exists, untouched.
+    pending = await env.forget.get_pending_request(member.id)
+    assert pending is not None
+    assert pending.status == STATUS_PENDING
+
+    # Clean up.
+    await env.forget.release_model_turn_lease(member.id)
+
+
+async def test_new_forget_me_in_deleting_state_does_not_delete(env):
+    """fix-r12 R4: when a deleting row exists (deletion confirmed but
+    not yet completed), a new generic "forget me" request must NOT
+    trigger deletion.  Only the exact stored confirmation phrase may
+    retry deletion.
+
+    The runtime's _handle_forget_me must gate with get_deleting_request
+    BEFORE is_forget_me_request, returning "deletion in progress."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "es"
+    )
+
+    # Seed chat history.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([{"role": "user", "content": "hola"}])
+
+    # Claim the request (deletion confirmed, not completed).
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+
+    # Verify deleting row exists, Member still exists.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == STATUS_DELETING
+    assert await count(env, Member, id=member.id) == 1
+
+    # Simulate the runtime's _handle_forget_me for a new "olvídame":
+    # 1. get_deleting_by_phrase("olvídame") → None (phrase mismatch)
+    # 2. get_deleting_request → found → return "deletion in progress"
+    # 3. Never reaches is_forget_me_request or request_forget_me.
+    deleting_by_phrase = await env.forget.get_deleting_by_phrase(
+        member.id, normalize_confirmation("olvídame"), now
+    )
+    assert deleting_by_phrase is None, (
+        "new 'forget me' must NOT match the stored exact phrase"
+    )
+
+    # Step 2: the runtime's new gate (fix-r12).
+    deleting_now = await env.forget.get_deleting_request(member.id)
+    assert deleting_now is not None, (
+        "deleting row must be found — the runtime must return"
+        " _FORGET_DELETING_IN_PROGRESS, NOT proceed to deletion"
+    )
+
+    # Member still exists — deletion was NOT triggered.
+    assert await count(env, Member, id=member.id) == 1, (
+        "new generic 'forget me' must NOT trigger deletion"
+    )
+    assert await count(env, Session, member_id=member.id) == 1
+
+    # Deleting state preserved.
+    deleting_after = await env.forget.get_deleting_request(member.id)
+    assert deleting_after is not None
+    assert deleting_after.status == STATUS_DELETING
+    assert deleting_after.language == "es"
+
+    # Chat history unchanged — model never reached, deletion never happened.
+    items = await session.get_items()
+    assert len(items) == 1
+
+    # Only the exact phrase can still resume deletion.
+    deleting_exact = await env.forget.get_deleting_by_phrase(
+        member.id, phrase, now
+    )
+    assert deleting_exact is not None, (
+        "exact phrase must still be able to resume deletion"
+    )
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_group_redirect_never_reveals_deletion(env):
+    """fix-r12 R1: the private-message redirect sent to a group MUST
+    NOT mention deletion, goodbye, data, or any confirmation phrase.
+    Group visibility means anyone can read the reply — it must be a
+    generic "send this privately" message with zero deletion context."""
+    from agentg.runtime import _FORGET_PRIVATE_REDIRECT
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(
+        member.id, env.gym_id, now, 300, "en"
+    )
+
+    # Claim → deleting state.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+
+    # Verify both language strings contain no deletion-related words.
+    forbidden = ["delet", "delete", "borr", "elimin", "goodbye", "adiós",
+                 "phrase", "frase", "confirm", "data", "datos",
+                 "permanent", "history", "historial"]
+    for lang in ("en", "es"):
+        text = _FORGET_PRIVATE_REDIRECT.get(lang, "").lower()
+        for word in forbidden:
+            assert word not in text, (
+                f"_FORGET_PRIVATE_REDIRECT[{lang!r}] must NOT contain"
+                f" '{word}' (reveals deletion info in group): {text!r}"
+            )
+
+    # The message must still be non-empty and ask for private messaging.
+    for lang in ("en", "es"):
+        assert len(_FORGET_PRIVATE_REDIRECT.get(lang, "")) > 0, (
+            f"_FORGET_PRIVATE_REDIRECT[{lang!r}] must not be empty"
+        )

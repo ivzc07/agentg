@@ -308,32 +308,47 @@ async def test_forget_me_warning_resets_checkin_rhythm(runtime):
 
 
 async def test_forget_me_warning_does_not_crash_on_sentinel(runtime):
-    """Edge case: when request_forget_me returns the empty-string sentinel
-    (a concurrent runtime already claimed the deletion), the runtime completes
-    it.  The check-in reset must still be handled — the goodbye reply is
-    returned, not the warning, and reset_rhythm is benign on a deleted Member
-    (no-op)."""
+    """fix-r12 R4: when a deleting row exists (deletion already confirmed
+    but not completed), a new generic "forget me" request must NOT trigger
+    deletion.  The runtime's _handle_forget_me gates with get_deleting_request
+    BEFORE is_forget_me_request, returning "deletion in progress."
+
+    Only the exact stored confirmation phrase may retry deletion.  The
+    sentinel (empty string) from request_forget_me is still handled in the
+    true race case where a concurrent runtime claims between our deleting
+    check and the request_forget_me call."""
     from datetime import datetime, timezone
 
     gym = await runtime.stores.linking.create_gym("Iron Temple")
     await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
 
-    # Simulate: claim the request (status -> 'deleting') before
-    # re-requesting so the store returns the empty-string sentinel.
+    # Simulate: another runtime already claimed the request (status -> deleting).
     now = datetime.now(timezone.utc)
     phrase = await runtime.stores.forget.request_forget_me(1, gym.id, now, 300, "en")
     claimed = await runtime.stores.forget.claim_forget_me_request(1, phrase, now)
     assert claimed is not None
 
-    # The forget-me trigger now hits the sentinel path: request_forget_me
-    # returns "" because the row is deleting.  The runtime completes deletion.
+    # A new generic "forget me" arrives.  The runtime must gate with
+    # get_deleting_request BEFORE is_forget_me_request and return
+    # "deletion in progress" — the Member must NOT be deleted.
     reply = await runtime.handle_message(incoming("forget me", "42"))
-    # This is a goodbye (deletion completed), not a warning.
-    assert "permanently" in str(reply).lower() or "deleted" in str(reply).lower() or (
-        "eliminados" in str(reply).lower()
+    assert "deletion is in progress" in str(reply).lower(), (
+        f"expected 'deletion in progress', got: {reply!r}"
     )
 
-    # The Member is gone.
+    # The Member must still exist — deletion was NOT triggered.
     identity = await runtime.stores.linking.identity_for("telegram", "42")
-    assert identity is None, "Member must be deleted after sentinel goodbye"
+    assert identity is not None, (
+        "Member must NOT be deleted by a new generic 'forget me' in deleting state"
+    )
+
+    # Only the exact phrase can resume deletion.
+    reply_exact = await runtime.handle_message(incoming(phrase, "42"))
+    assert "permanently" in str(reply_exact).lower() or (
+        "eliminados" in str(reply_exact).lower()
+    )
+    identity_after = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity_after is None, (
+        "exact phrase must still resume and complete deletion"
+    )
 

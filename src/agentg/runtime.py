@@ -129,16 +129,15 @@ _FORGET_WARNING: dict[str, str] = {
     ),
 }
 
-# Private-message redirect when a Member tries to confirm or interact with
-# a deletion from a group chat (issue #212, fix-r7 P1).
+# Generic private-message redirect when a Member sends a sensitive
+# message from a group chat.  Never reveals anything about deletion —
+# group visibility means anyone can read the reply (fix-r12 P1).
 _FORGET_PRIVATE_REDIRECT: dict[str, str] = {
     "en": (
-        "Your data deletion is in progress. "
-        "Please send the confirmation phrase as a private message to complete it."
+        "Please send this as a private message and I'll take care of it."
     ),
     "es": (
-        "La eliminaci\u00f3n de tus datos est\u00e1 en curso. "
-        "Env\u00eda la frase de confirmaci\u00f3n como mensaje privado para completarla."
+        "Env\u00edamelo como mensaje privado y me encargo."
     ),
 }
 
@@ -353,16 +352,17 @@ class AgentRuntime:
                 # touches the check-in rhythm, compaction, or history.
                 if self.dashboard is not None and is_dashboard_command(msg.text):
                     return await self.dashboard.handle(linked, is_group=msg.is_group)
-                # P1 (fix-r11): Cross-runtime atomic model-turn lease —
+                # P1 (fix-r12): Cross-runtime atomic model-turn lease —
                 # checks for a deleting request and acquires an exclusive
-                # lease in the separate ModelTurnLease table, closing the
-                # no-row-read→Runner race across runtimes.
+                # lease, serialised with claim_forget_me_request via a
+                # shared Member-row lock so both cannot succeed
+                # concurrently.  The acquire itself handles stale-lease
+                # recovery for crashed runtimes.
                 #
-                # Before acquiring, release any existing lease.  The
-                # per-identity lock guarantees the previous turn is done,
-                # so any stale lease is from a dropped after_send (or a
-                # crash) — reclaim it so a dropped hook cannot wedge the
-                # Member forever (issue #212, fix-r11).
+                # Before acquiring, release any lease WE created from a
+                # previous turn whose after_send was dropped.  The
+                # token-based release never touches another runtime's
+                # live lease (fix-r12).
                 await self.stores.forget.release_model_turn_lease(
                     linked.member.id
                 )
@@ -672,20 +672,36 @@ class AgentRuntime:
                 await self.stores.forget.cancel_forget_me(linked.member.id)
             return None
 
-        # P1: Check for a deleting (in-progress or interrupted) deletion
-        # FIRST — before anything else.  A deleting row is the durable
-        # signal that deletion was already confirmed.
+        # P1 (fix-r12): Check for a deleting (in-progress or interrupted)
+        # deletion FIRST — before anything else.  A deleting row is the
+        # durable signal that deletion was already confirmed.
         #
-        # When the exact confirmation phrase is repeated, resume deletion
-        # deterministically (partial-failure recovery, issue #212, fix-3).
-        # Any other message from a deleting state falls through — the
-        # model can respond while the user waits for recovery.
+        # Only the exact stored confirmation phrase may retry deletion
+        # (partial-failure recovery, issue #212, fix-3).  Any other
+        # message — including a new generic "forget me" request — must
+        # NOT trigger deletion (fix-r12).
         deleting_req = await self.stores.forget.get_deleting_by_phrase(
             linked.member.id, normalize_confirmation(msg.text), now
         )
         if deleting_req is not None:
             await self.stores.forget.forget_member(linked.member.id)
             return Reply(_FORGET_GOODBYE[deleting_req.language or "es"])
+
+        # P1 (fix-r12): Before handling any new forget-me request or
+        # ordinary message, check for a deleting row.  If deletion was
+        # already confirmed (status=deleting), only the exact phrase
+        # can resume it (already checked above).  A new generic
+        # "forget me" or ordinary message gets "deletion in progress"
+        # — never auto-complete deletion (fix-r12).
+        deleting_now = await self.stores.forget.get_deleting_request(
+            linked.member.id
+        )
+        if deleting_now is not None:
+            return Reply(
+                _FORGET_DELETING_IN_PROGRESS[
+                    deleting_now.language or "es"
+                ]
+            )
 
         pending = await self.stores.forget.get_pending_request(
             linked.member.id
