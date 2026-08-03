@@ -195,6 +195,11 @@ class ForgetMeRequest(Base):
     # cannot proceed — closes the TOCTOU between the end-of-method
     # deleting check and Runner.run() (issue #212, fix-r9).
     model_turn_active: Mapped[bool] = mapped_column(default=False)
+    # When a model turn lease was acquired (UTC).  NULL when no lease
+    # is active.  Used for stale-lease recovery: a lease older than a
+    # bounded threshold (e.g. 30 s) is cleared so a crashed runtime
+    # cannot strand deletion forever (issue #212, fix-r10).
+    turn_lease_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     expires_at: Mapped[datetime] = mapped_column(TZDateTime())
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
 

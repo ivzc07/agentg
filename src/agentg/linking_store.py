@@ -230,6 +230,16 @@ def _add_missing_columns(conn: Connection) -> None:
                     "model_turn_active BOOLEAN NOT NULL DEFAULT false"
                 )
             )
+        # issue #212 fix-r10: stale-lease recovery timestamp — a lease
+        # older than the bounded threshold is cleared so a crashed
+        # runtime cannot strand deletion forever.
+        if "turn_lease_at" not in fme_columns:
+            conn.execute(
+                text(
+                    "ALTER TABLE forget_me_requests ADD COLUMN "
+                    "turn_lease_at TIMESTAMP"
+                )
+            )
     # FK indexes for Gym-scoped reads (issue #178): Coach lookup, roster,
     # and the check-in sweep join on these columns.
     members_indexes = {i["name"] for i in inspect(conn).get_indexes("members")}

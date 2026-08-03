@@ -142,6 +142,22 @@ _FORGET_PRIVATE_REDIRECT: dict[str, str] = {
     ),
 }
 
+# Gate-failure reply when a deleting row exists but the message does NOT
+# carry the exact confirmation phrase — deletion was already confirmed
+# but is not yet complete (e.g. a crash interrupted it).  Only the exact
+# phrase resumes deletion; any other message gets this reply (issue #212,
+# fix-r10).
+_FORGET_DELETING_IN_PROGRESS: dict[str, str] = {
+    "en": (
+        "Your data deletion is in progress. "
+        "To complete it, please send the confirmation phrase again."
+    ),
+    "es": (
+        "La eliminaci\u00f3n de tus datos est\u00e1 en curso. "
+        "Para completarla, env\u00eda de nuevo la frase de confirmaci\u00f3n."
+    ),
+}
+
 
 @dataclass
 class AgentRuntime:
@@ -259,16 +275,25 @@ class AgentRuntime:
             with turn:
                 linked = await self.stores.linking.identity_for(msg.channel, msg.channel_user_id)
 
-                # P1 (fix-r9): A durable deleting request must gate linking/switch
-                # BEFORE identity repointing.  If a confirmed deletion exists,
-                # recover it first — otherwise a Gym switch could repoint the
-                # channel identity and orphan the deleting row.
+                # P1 (fix-r10): A durable deleting request must gate
+                # linking/switch BEFORE identity repointing.  Only the
+                # exact confirmation phrase resumes deletion — an
+                # arbitrary message (e.g. "hello") must NOT trigger
+                # deletion (issue #212, fix-r10).
                 #
-                # Private turns recover deletion; group turns redirect privately
-                # without revealing the deletion in public.
+                # Private turns with the exact phrase recover deletion;
+                # group turns redirect privately without revealing the
+                # deletion in public.
+                now = datetime.now(timezone.utc)
                 if linked is not None:
-                    deleting_before_link = await self.stores.forget.get_deleting_request(
-                        linked.member.id
+                    from agentg.forget import normalize_confirmation
+
+                    deleting_before_link = (
+                        await self.stores.forget.get_deleting_by_phrase(
+                            linked.member.id,
+                            normalize_confirmation(msg.text),
+                            now,
+                        )
                     )
                     if deleting_before_link is not None:
                         if msg.is_group:
@@ -298,6 +323,22 @@ class AgentRuntime:
                             await self.stores.forget.cancel_forget_me(
                                 linked.member.id
                             )
+                        # P1 (fix-r10): A deleting request gates the linking
+                        # early return too — a confirmed deletion in progress
+                        # must block all normal replies, including linking.
+                        # Only the exact confirmation phrase resumes deletion
+                        # (already checked above via deleting_before_link).
+                        deleting_fm = (
+                            await self.stores.forget.get_deleting_request(
+                                linked.member.id
+                            )
+                        )
+                        if deleting_fm is not None:
+                            return Reply(
+                                _FORGET_DELETING_IN_PROGRESS[
+                                    deleting_fm.language or "es"
+                                ]
+                            )
                     return Reply(reply)
                 if linked is None:  # linking always replies for unlinked identities
                     raise RuntimeError("unlinked message reached the agent loop")
@@ -312,41 +353,48 @@ class AgentRuntime:
                 # touches the check-in rhythm, compaction, or history.
                 if self.dashboard is not None and is_dashboard_command(msg.text):
                     return await self.dashboard.handle(linked, is_group=msg.is_group)
-                # P1 (fix-r9): Cross-runtime TOCTOU gate — atomically mark the
-                # Member's forget-me row as having an active model turn before
-                # the model ever sees input.  If a concurrent runtime claimed
-                # the request between _handle_forget_me and now, this gate
-                # returns False and we return a goodbye instead of running the
-                # model.  The gate is released in after_send.
+                # P1 (fix-r10): Cross-runtime atomic model-turn gate —
+                # checks for a deleting request and records a turn lease
+                # in ONE transaction, closing the no-row-read→Runner race
+                # across runtimes.  If a concurrent runtime confirmed
+                # deletion between _handle_forget_me and now, the gate
+                # returns False and the model must not run.
+                #
+                # The gate is released in try/finally around the model
+                # call (not deferred to after_send) so a crash during
+                # Runner.run() or process_send cannot strand deletion.
                 model_turn_gated = await self.stores.forget.acquire_model_turn_gate(
-                    linked.member.id
+                    linked.member.id, linked.gym.id
                 )
                 if not model_turn_gated:
-                    # Deletion was claimed during the window — the Member
-                    # may still exist (forget_member hasn't run yet), so
-                    # complete the deletion now.  If no deleting row exists,
-                    # another model turn holds the gate or the Member was
-                    # already deleted — return a safe goodbye in all cases.
-                    deleting_after_gate = await self.stores.forget.get_deleting_request(
-                        linked.member.id
+                    # A deleting row exists — deletion was confirmed.
+                    # Only the exact confirmation phrase can resume
+                    # deletion (already checked above via
+                    # deleting_before_link).  Any other message in a
+                    # deleting state gets a "deletion in progress"
+                    # reply — the model must never run, and deletion
+                    # must NOT auto-complete for non-matching messages
+                    # (issue #212, fix-r10).
+                    deleting_after_gate = (
+                        await self.stores.forget.get_deleting_request(
+                            linked.member.id
+                        )
                     )
                     if deleting_after_gate is not None:
-                        await self.stores.forget.forget_member(linked.member.id)
                         return Reply(
-                            _FORGET_GOODBYE[
+                            _FORGET_DELETING_IN_PROGRESS[
                                 deleting_after_gate.language or "es"
                             ]
                         )
-                    # The Member may already be deleted — identity check.
+                    # Gate held by a concurrent model turn (rare, even
+                    # across runtimes).  Return a safe fallback — the
+                    # model must not proceed.
                     identity = await self.stores.linking.identity_for(
                         msg.channel, msg.channel_user_id
                     )
                     if identity is None:
                         return Reply(_FORGET_GOODBYE["es"])
-                    # Gate held by a concurrent model turn (rare: the
-                    # per-identity lock makes this near-impossible in a
-                    # single process).  Fail safe — return goodbye.
-                    return Reply(_FORGET_GOODBYE["es"])
+                    return Reply(_FORGET_DELETING_IN_PROGRESS["es"])
 
                 session = self.session_for_member(linked.member.id)
                 # Awaited: the tool set is scoped to the caller's role, which
@@ -391,6 +439,20 @@ class AgentRuntime:
                     # On failure the reset must still land, or a lapsed Member
                     # is never revived (issue #169).
                     await _await_reset()
+                    # Release the model-turn gate on the failure path — a
+                    # Runner failure (model error, timeout, etc.) must not
+                    # strand deletion (issue #212, fix-r10).  The reset is
+                    # settled first so we don't race on the SQLite writer
+                    # lock (the reset task runs concurrently).
+                    try:
+                        await self.stores.forget.release_model_turn_gate(
+                            member_id
+                        )
+                    except Exception:
+                        logger.exception(
+                            "release_model_turn_gate failed for %d",
+                            member_id,
+                        )
                     if context.coach_pings:
                         pings = list(context.coach_pings)
                         asyncio.create_task(_drain_coach_pings(pings))
@@ -451,6 +513,12 @@ class AgentRuntime:
         if _turn is not None:
             _turn.defer_logging = True
             stream = _finish_turn(stream, _turn)
+        # Outermost: release the model-turn gate on every path — a
+        # stream failure, GeneratorExit, or dropped after_send must
+        # not strand deletion (issue #212, fix-r10).
+        stream = _release_gate_on_close(
+            stream, self.stores.forget, member_id, logger
+        )
         return Reply(
             "",
             stream=stream,
@@ -520,12 +588,16 @@ class AgentRuntime:
                 # The rhythm reset is settled here too, isolated from the
                 # demo/ping fan-out so one failure cannot block it.
                 await await_reset()
-                # Release the cross-runtime model-turn gate so a pending
-                # forget-me confirmation can be claimed again (issue #212,
-                # fix-r9).  Best-effort: a failure here must not block
-                # compaction or the next turn.
+                # Release the model-turn gate after the reset is settled
+                # so we don't race on the SQLite writer lock (the reset
+                # task runs concurrently in the normal path).  The
+                # streaming path releases the gate in _release_gate_on_close
+                # before after_send even starts; the blocking path releases
+                # it here (issue #212, fix-r10).
                 try:
-                    await self.stores.forget.release_model_turn_gate(member_id)
+                    await self.stores.forget.release_model_turn_gate(
+                        member_id
+                    )
                 except Exception:
                     logger.exception(
                         "release_model_turn_gate failed for %d", member_id
@@ -699,11 +771,20 @@ class AgentRuntime:
         # the pending request and begun deletion while we processed this
         # ordinary message — the deleting row is the durable signal that
         # the model must never see this message.
+        #
+        # Only the exact confirmation phrase can resume deletion
+        # (already checked above via get_deleting_by_phrase).  For a
+        # non-matching message in a deleting state, return "deletion in
+        # progress" — never auto-complete deletion (issue #212, fix-r10).
         deleting_now = await self.stores.forget.get_deleting_request(
             linked.member.id
         )
         if deleting_now is not None:
-            return Reply(_FORGET_GOODBYE[deleting_now.language or "es"])
+            return Reply(
+                _FORGET_DELETING_IN_PROGRESS[
+                    deleting_now.language or "es"
+                ]
+            )
         identity = await self.stores.linking.identity_for(
             msg.channel, msg.channel_user_id
         )
@@ -807,6 +888,37 @@ async def _hold_lock(
         if not released:
             lock.release()
         raise
+
+
+async def _release_gate_on_close(
+    inner: AsyncIterator[str],
+    forget_store,
+    member_id: int,
+    logger: logging.Logger,
+) -> AsyncIterator[str]:
+    """Release the forget-me model-turn gate when the stream is exhausted
+    or errors, guaranteeing the gate is cleared even when ``after_send``
+    is never called (issue #212, fix-r10).
+
+    Placed outermost so it runs after lock release, instrument close,
+    and all other cleanup.
+    """
+    try:
+        async for chunk in inner:
+            yield chunk
+    finally:
+        # Propagate close inward first, but never at the cost of the
+        # gate release — a leaked gate strands deletion forever.
+        try:
+            await inner.aclose()
+        except Exception:
+            pass
+        try:
+            await forget_store.release_model_turn_gate(member_id)
+        except Exception:
+            logger.exception(
+                "release_model_turn_gate failed for %d", member_id
+            )
 
 
 async def _stream_text(result: "RunResultStreaming") -> AsyncIterator[str]:

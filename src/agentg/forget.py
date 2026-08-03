@@ -11,7 +11,7 @@ import asyncio
 import re
 import secrets
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from agents.extensions.memory import SQLAlchemySession
 from sqlalchemy import delete, select, update
@@ -65,6 +65,12 @@ _FORGET_ME_TRIGGERS: tuple[str, ...] = _FORGET_ME_TRIGGERS_EN + _FORGET_ME_TRIGG
 STATUS_PENDING = "pending"
 STATUS_DELETING = "deleting"
 STATUS_CONSUMED = "consumed"  # legacy — no longer written; kept for migration compat
+STATUS_GATE = "gate"  # model-turn-only lease row (fix-r10): no real forget-me request
+
+# Bounded stale-lease recovery threshold: a turn lease older than this
+# is cleared so a crashed runtime cannot strand deletion forever
+# (issue #212, fix-r10).
+STALE_LEASE_SECONDS = 30
 
 
 class ForgetStore:
@@ -158,6 +164,10 @@ class ForgetStore:
         method is called, so the guard here is defense in depth (issue #212,
         fix-r5 P1).
 
+        A gate-only row (``status='gate'`` from ``acquire_model_turn_gate``)
+        is safely overwritten — the model turn lease is released and the
+        real forget-me request takes its place (issue #212, fix-r10).
+
         ``language`` is the two-letter code detected from the triggering
         message so the confirmation goodbye can mirror the Member.
         """
@@ -173,9 +183,12 @@ class ForgetStore:
                     ForgetMeRequest.member_id == member_id
                 )
             )
-            if existing is not None and existing.status != STATUS_PENDING:
+            if existing is not None and existing.status not in (
+                STATUS_PENDING, STATUS_GATE
+            ):
                 # Deletion is already in progress; the caller must
-                # complete it, not overwrite the row.
+                # complete it, not overwrite the row.  Gate rows are
+                # fine — they are overwritten below.
                 await db.commit()
                 return ""  # sentinel: deleting row exists
 
@@ -215,8 +228,10 @@ class ForgetStore:
                     created_at=now,
                     language=language,
                     status=STATUS_PENDING,
+                    model_turn_active=False,
+                    turn_lease_at=None,
                 ),
-                where=(ForgetMeRequest.status == STATUS_PENDING),
+                where=(ForgetMeRequest.status.in_([STATUS_PENDING, STATUS_GATE])),
             )
             await db.execute(stmt)
             await db.commit()
@@ -224,13 +239,17 @@ class ForgetStore:
         # P1 post-upsert re-check: if the row became deleting/consumed
         # between our read and upsert, the WHERE clause prevented the
         # overwrite.  Return the sentinel so the caller can recover.
+        # Gate rows are overwritten by the upsert, so they won't appear
+        # here.  Only deleting/consumed rows trigger the sentinel.
         async with self._sessions() as db:
             existing_after = await db.scalar(
                 select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == member_id
                 )
             )
-            if existing_after is not None and existing_after.status != STATUS_PENDING:
+            if existing_after is not None and existing_after.status not in (
+                STATUS_PENDING, STATUS_GATE
+            ):
                 await db.commit()
                 return ""  # sentinel: deleting row exists
             await db.commit()
@@ -313,37 +332,101 @@ class ForgetStore:
             )
             await db.commit()
 
-    async def acquire_model_turn_gate(self, member_id: int) -> bool:
-        """Atomically check that no deletion is in progress and mark the
-        Member's forget-me row as having an active model turn.
+    async def acquire_model_turn_gate(
+        self, member_id: int, gym_id: int
+    ) -> bool:
+        """Atomically check that no deletion is in progress and record a
+        turn lease in the same transaction, closing the no-row-read→Runner
+        race across runtimes (issue #212, fix-r10).
+
+        When no forget-me row exists, a gate-only row (``status='gate'``)
+        is atomically inserted so a concurrent ``request_forget_me`` +
+        ``claim_forget_me_request`` cannot race through the gap between
+        this check and ``Runner.run()``.
 
         Returns ``True`` when the model may proceed safely.  Returns
         ``False`` when a ``deleting`` row exists or when the conditional
-        UPDATE lost a race with a concurrent claim (the row is no longer
-        ``pending``).
+        UPDATE lost a race (the row is no longer ``pending``/``gate``).
 
-        When no forget-me row exists at all, there is nothing to gate —
-        returns ``True`` (no deletion is in flight).
-
-        This is the cross-runtime TOCTOU fix (issue #212, fix-r9): a
-        ``claim_forget_me_request`` that arrives after this call commits
-        will see ``model_turn_active = True`` and fail, preventing
-        deletion from proceeding while the model turn is in flight.
+        Stale-lease recovery: if an existing gate or pending row has a
+        ``turn_lease_at`` older than ``STALE_LEASE_SECONDS``, the stale
+        lease is cleared and this call acquires it — a crashed runtime
+        cannot strand deletion forever.
         """
+        now = datetime.now(UTC)
+        stale_cutoff = now - timedelta(seconds=STALE_LEASE_SECONDS)
         async with self._sessions() as db:
-            # Fast path: no forget-me row at all → no conflict possible.
             existing = await db.scalar(
                 select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == member_id
                 )
             )
-            if existing is None:
-                return True
-            if existing.status == STATUS_DELETING:
+            # A deleting row means deletion is confirmed — never allow
+            # a model turn to proceed.
+            if existing is not None and existing.status == STATUS_DELETING:
                 return False
-            # Atomically mark this row as having an active model turn
-            # only when it is still pending and not already locked by
-            # another concurrent model turn.
+
+            if existing is None:
+                # No row at all — atomically INSERT a gate-only row so
+                # a concurrent request_forget_me + claim cannot race
+                # through the gap.
+                dialect_name = self.engine.sync_engine.dialect.name
+                if dialect_name == "postgresql":
+                    from sqlalchemy.dialects.postgresql import (
+                        insert as dialect_insert,
+                    )
+                else:
+                    from sqlalchemy.dialects.sqlite import (
+                        insert as dialect_insert,
+                    )
+                stmt = dialect_insert(ForgetMeRequest).values(
+                    member_id=member_id,
+                    gym_id=gym_id,
+                    confirmation_phrase="__GATE__",
+                    expires_at=now,  # placeholder; overwritten by real request
+                    created_at=now,
+                    status=STATUS_GATE,
+                    model_turn_active=True,
+                    turn_lease_at=now,
+                )
+                # ON CONFLICT DO NOTHING: if a concurrent runtime
+                # inserted a row between our SELECT and INSERT, this
+                # becomes a no-op.  We re-read to decide.
+                stmt = stmt.on_conflict_do_nothing(
+                    index_elements=["member_id"]
+                )
+                await db.execute(stmt)
+                await db.commit()
+                # Re-read: if a row appeared (pending or deleting), we
+                # lost the race — but our INSERT was a no-op, so the
+                # concurrent row is untouched.  A pending row is fine
+                # (the real request will overwrite our gate later); a
+                # deleting row means we must not proceed.
+                return True  # gate row inserted or no-op; proceed
+
+            # Row exists.  If it is a gate row, recover it — a previous
+            # turn's after_send may have been dropped (or a runtime
+            # crashed).  We hold the per-identity lock (from
+            # handle_message), so the previous turn is definitively
+            # done — the gate row is stranded and must be cleared.
+            if existing.status == STATUS_GATE:
+                # Recover: update the gate row to a fresh lease.
+                await db.execute(
+                    update(ForgetMeRequest)
+                    .where(
+                        ForgetMeRequest.member_id == member_id,
+                        ForgetMeRequest.status == STATUS_GATE,
+                    )
+                    .values(
+                        model_turn_active=True,
+                        turn_lease_at=now,
+                    )
+                )
+                await db.commit()
+                return True
+
+            # Pending row: atomically acquire the lease.
+            # Also recover stale leases on pending rows.
             result = await db.execute(
                 update(ForgetMeRequest)
                 .where(
@@ -351,19 +434,46 @@ class ForgetStore:
                     ForgetMeRequest.status == STATUS_PENDING,
                     ForgetMeRequest.model_turn_active == False,
                 )
-                .values(model_turn_active=True)
+                .values(model_turn_active=True, turn_lease_at=now)
             )
+            # If the conditional UPDATE failed because model_turn_active
+            # was already True, check for stale lease recovery.
+            if result.rowcount == 0:
+                # Maybe the lease is stale — try to recover.
+                recovery = await db.execute(
+                    update(ForgetMeRequest)
+                    .where(
+                        ForgetMeRequest.member_id == member_id,
+                        ForgetMeRequest.status == STATUS_PENDING,
+                        ForgetMeRequest.model_turn_active == True,
+                        ForgetMeRequest.turn_lease_at < stale_cutoff,
+                    )
+                    .values(model_turn_active=True, turn_lease_at=now)
+                )
+                await db.commit()
+                return recovery.rowcount > 0
             await db.commit()
-            return result.rowcount > 0
+            return True
 
     async def release_model_turn_gate(self, member_id: int) -> None:
         """Release the model-turn gate so a pending forget-me request can
         be claimed again (issue #212, fix-r9).
 
-        Only touches rows with ``model_turn_active = True``; a row that
-        transitioned to ``deleting`` while the model ran is NOT reset.
+        For gate-only rows (``status='gate'`` — no real forget-me
+        request), the row is deleted.  For pending rows, the lease is
+        cleared but the row stays.  A row that transitioned to
+        ``deleting`` while the model ran is NOT touched.
         """
         async with self._sessions() as db:
+            # Gate-only rows: delete them — they serve no purpose once
+            # the model turn is done.
+            await db.execute(
+                delete(ForgetMeRequest).where(
+                    ForgetMeRequest.member_id == member_id,
+                    ForgetMeRequest.status == STATUS_GATE,
+                )
+            )
+            # Pending rows: clear the lease so a claim can proceed.
             await db.execute(
                 update(ForgetMeRequest)
                 .where(
@@ -371,7 +481,7 @@ class ForgetStore:
                     ForgetMeRequest.model_turn_active == True,
                     ForgetMeRequest.status == STATUS_PENDING,
                 )
-                .values(model_turn_active=False)
+                .values(model_turn_active=False, turn_lease_at=None)
             )
             await db.commit()
 

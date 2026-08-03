@@ -736,11 +736,11 @@ async def test_linked_member_pending_forget_me_cancelled_by_typing_invite_code(r
 # --- P1 (fix-r9): durable deleting request gates linking/switch ----------
 
 
-async def test_deleting_request_gates_linking_private_recovers_deletion(runtime):
-    """A linked Member with a deleting (confirmed) forget-me request who
-    taps an invite code on a private turn must have the deletion recovered
-    BEFORE linking can repoint identity.  The goodbye is returned, not a
-    linking reply, and the Member is deleted."""
+async def test_deleting_request_gates_linking_private_exact_phrase_recovers(runtime):
+    """fix-r10: Only the exact confirmation phrase resumes deletion.
+    A linked Member with a deleting request who sends the exact phrase
+    on a private turn must have the deletion completed BEFORE linking can
+    repoint identity."""
     from datetime import datetime, timezone
 
     gym = await runtime.stores.linking.create_gym("Iron Temple")
@@ -759,19 +759,57 @@ async def test_deleting_request_gates_linking_private_recovers_deletion(runtime)
     assert claimed is not None
     assert claimed.status == "deleting"
 
-    # Tap the gym's invite code on a PRIVATE turn — the deleting gate
-    # must detect the deleting row and complete deletion FIRST.
+    # Send the exact confirmation phrase on a PRIVATE turn — must
+    # complete deletion and return goodbye.
     reply = await runtime.handle_message(
-        incoming("/start x", link_code=gym.invite_code)
+        incoming(phrase, link_code=None)
     )
-    # Must be a goodbye, not a linking reply.
     assert "deleted" in str(reply).lower() or "eliminados" in str(reply).lower()
-    assert "Iron Temple" not in str(reply)
 
     # The Member must be deleted.
     identity = await runtime.stores.linking.identity_for("telegram", "42")
-    assert identity is None, "Member must be deleted before linking can repoint"
+    assert identity is None, "exact phrase must recover deletion"
     assert await member_count(runtime.stores.linking) == 0
+
+
+async def test_deleting_request_non_matching_message_does_not_delete(runtime):
+    """fix-r10: A linked Member with a deleting request who sends a
+    non-matching message (like an invite code) on a private turn must
+    NOT have the deletion auto-completed.  Only the exact confirmation
+    phrase resumes deletion — any other message returns 'deletion in
+    progress' and the Member is NOT deleted."""
+    from datetime import datetime, timezone
+
+    gym = await runtime.stores.linking.create_gym("Iron Temple")
+    await runtime.stores.linking.link_member(gym.id, "Ana", "telegram", "42")
+    linked = await runtime.stores.linking.identity_for("telegram", "42")
+    assert linked is not None
+
+    # Seed a deleting request (confirmed deletion, not yet completed).
+    now = datetime.now(timezone.utc)
+    phrase = await runtime.stores.forget.request_forget_me(
+        linked.member.id, gym.id, now, 300, "en"
+    )
+    claimed = await runtime.stores.forget.claim_forget_me_request(
+        linked.member.id, phrase, now
+    )
+    assert claimed is not None
+    assert claimed.status == "deleting"
+
+    # Tap the gym's invite code on a PRIVATE turn — NOT the exact phrase.
+    # The deleting gate must NOT auto-complete deletion.
+    reply = await runtime.handle_message(
+        incoming("/start x", link_code=gym.invite_code)
+    )
+    # Must be a 'deletion in progress' message, NOT a goodbye.
+    assert "progress" in str(reply).lower() or "curso" in str(reply).lower()
+
+    # The Member must NOT be deleted.
+    identity = await runtime.stores.linking.identity_for("telegram", "42")
+    assert identity is not None, (
+        "non-matching message must NOT trigger deletion"
+    )
+    assert await member_count(runtime.stores.linking) == 1
 
 
 async def test_deleting_request_gates_linking_group_redirects_privately(runtime):
@@ -812,9 +850,11 @@ async def test_deleting_request_gates_linking_group_redirects_privately(runtime)
     assert deleting_req is not None, "deleting row must survive group turn"
 
 
-async def test_deleting_request_prevents_gym_switch(runtime):
-    """A linked Member with a deleting request who taps another gym's
-    invite code must have the deletion completed BEFORE the switch."""
+async def test_deleting_request_prevents_gym_switch_without_exact_phrase(runtime):
+    """fix-r10: A linked Member with a deleting request who taps another
+    gym's invite code must NOT have the deletion auto-completed — only the
+    exact confirmation phrase resumes deletion.  The gym switch is blocked
+    by the model gate, which returns 'deletion in progress'."""
     from datetime import datetime, timezone
 
     old_gym = await runtime.stores.linking.create_gym("Iron Temple")
@@ -832,12 +872,18 @@ async def test_deleting_request_prevents_gym_switch(runtime):
     )
     assert claimed is not None
 
+    # Tap ANOTHER gym's invite code — NOT the exact phrase.
     reply = await runtime.handle_message(
         incoming("/start x", link_code=new_gym.invite_code)
     )
-    assert "deleted" in str(reply).lower() or "eliminados" in str(reply).lower()
+    # Must be 'deletion in progress' — NOT a goodbye, NOT a gym switch.
+    assert "progress" in str(reply).lower() or "curso" in str(reply).lower()
     assert "Steel Yard" not in str(reply)
 
+    # Identity must still be at the OLD gym — no switch, no deletion.
     identity = await runtime.stores.linking.identity_for("telegram", "42")
-    assert identity is None, "deleting gate must recover deletion before Gym switch"
-    assert await member_count(runtime.stores.linking) == 0
+    assert identity is not None, (
+        "non-matching message must NOT trigger deletion or gym switch"
+    )
+    assert identity.gym.id == old_gym.id
+    assert await member_count(runtime.stores.linking) == 1
