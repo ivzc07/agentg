@@ -5,14 +5,14 @@ Entry point for any agent working on this repo. For the full house rules see `CL
 ## Automated review on pull requests
 
 Every PR gets an automated review with comments tagged by severity: `[P1]` (bug / correctness, must fix), `[P2]` (should fix), `[P3]` (optional).
-The reviewer is the Pi coding agent (Greptile's trial credits are exhausted; a Greptile credit-limit notice counts as no review).
+The reviewer is the Pi coding agent via `scripts/pi-review`, which runs the review in a visible TUI pane (inside Herdr) or headless otherwise.
 The review does not trigger itself, and a green check does **not** mean there are no findings - always read the comments.
 
 After opening any PR (and again after pushing substantive fixes): run `scripts/pi-review <N>` from Git Bash.
 
 Before merging any PR:
 
-1. Fetch the comments (with `--paginate` so later pages of findings are not missed): Pi posts PR-level comments (`gh api --paginate repos/ivzc07/agentg/issues/<N>/comments`); older PRs may carry Greptile inline comments (`gh api --paginate repos/ivzc07/agentg/pulls/<N>/comments`).
+1. Fetch the comments (with `--paginate` so later pages of findings are not missed): the reviewer posts PR-level comments (`gh api --paginate repos/ivzc07/agentg/issues/<N>/comments`).
 2. For every P1 and P2: diagnose it against the actual code and confirm it is real, then fix it - do not "fix" a finding without verifying it. If it is wrong or not worth fixing, dismiss it by replying on the comment thread with the reason.
 3. Reply on each thread noting what you did (fix commit or dismissal reason) so nothing is silently ignored.
 

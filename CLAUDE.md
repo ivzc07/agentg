@@ -16,5 +16,6 @@ Single-context: one `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/age
 
 ### PR merges
 
-After opening any PR, trigger the automated review with `scripts/pi-review <N>` (Greptile is out of credits; Pi is the reviewer, and it must be re-run after substantive fix pushes).
-Before merging, handle the review's P1/P2 findings (diagnose against the code, then fix or dismiss with a reason) and require the pytest check to pass. See `docs/agents/pr-merges.md`.
+After opening any PR, trigger the automated review with `scripts/pi-review <N>` (Pi is the reviewer, and it must be re-run after substantive fix pushes).
+Before merging, handle the review's P1/P2 findings (diagnose against the code, then fix or dismiss with a reason) and require the pytest check to pass.
+Merge with `--delete-branch`, then clean up local branches, agent worktrees, and `.scratch/`. See `docs/agents/pr-merges.md`.
