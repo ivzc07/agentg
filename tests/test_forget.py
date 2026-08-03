@@ -1571,6 +1571,116 @@ async def test_barrier_consume_between_read_and_upsert(env):
     assert deleting_row.language == "en"  # original language preserved
 
 
+async def test_generic_forget_me_must_not_delete_when_sentinel_returned(env):
+    """P1 fix-r15: when request_forget_me returns the '' sentinel
+    (a deleting row was detected — another runtime claimed the pending
+    request between the fast-path read and the upsert), the caller must
+    NEVER call forget_member.  Only a private message matching the
+    stored exact confirmation phrase may execute/retry deletion.
+
+    The caller must return truthful in-progress guidance
+    (_FORGET_DELETING_IN_PROGRESS) — not a goodbye and not a model
+    fall-through.  The Member's data must stay completely intact.
+
+    Uses the _pre_upsert_hook barrier for deterministic interleaving:
+    1. Runtime A enters request_forget_me with a generic "forget me"
+       message (not a confirmation phrase).
+    2. Fast-path read sees a pending row → proceeds.
+    3. _pre_upsert_hook fires: Runtime B claims the pending request
+       (status → 'deleting').
+    4. Runtime A's upsert is a no-op (ON CONFLICT DO NOTHING).
+    5. Post-upsert re-read sees the deleting row → returns ''.
+    6. The caller must NOT call forget_member — Member data survives.
+    7. Only the exact confirmation phrase (held by Runtime B's winner)
+       can later complete deletion."""
+    import asyncio
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+
+    # Seed chat history to prove nothing is added or wiped.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+    ])
+
+    # First request creates a pending row (the "winner's" phrase).
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+    assert phrase.startswith("DELETE-ME-")
+    assert await _pending_count(env, member.id) == 1
+
+    # Barrier events for deterministic interleaving.
+    read_done = asyncio.Event()
+    consume_done = asyncio.Event()
+
+    async def pre_upsert_hook():
+        """Called between read and upsert inside request_forget_me."""
+        read_done.set()
+        await consume_done.wait()
+
+    env.forget._pre_upsert_hook = pre_upsert_hook
+
+    result_a: str | None = None
+
+    async def task_a():
+        nonlocal result_a
+        # Generic initiating "forget me" — NOT the confirmation phrase.
+        # The pending row already exists, so request_forget_me will:
+        #   read → hook (pauses) → upsert → re-read
+        result_a = await env.forget.request_forget_me(
+            member.id, env.gym_id, now, 300, "es"
+        )
+
+    async def task_b():
+        await read_done.wait()
+        # Claim the pending request while Task A is paused.
+        claimed = await env.forget.claim_forget_me_request(
+            member.id, phrase, datetime.now(UTC)
+        )
+        assert claimed is not None
+        consume_done.set()
+
+    await asyncio.gather(task_a(), task_b())
+    env.forget._pre_upsert_hook = None
+
+    # Task A received the sentinel — a deleting row exists.
+    assert result_a == "", (
+        f"request_forget_me must return sentinel when row was"
+        f" claimed between read and upsert, got {result_a!r}"
+    )
+
+    # THE KEY ASSERTION: The caller must NOT call forget_member.
+    # The Member's data must be completely intact.
+    assert await count(env, Member, id=member.id) == 1, (
+        "Member must NOT be deleted by a generic forget-me request"
+    )
+    assert await count(env, Session, member_id=member.id) == 1
+    assert await count(env, MemberNote, member_id=member.id) == 1
+    assert await count(env, Routine, member_id=member.id) == 1
+
+    # Chat history must be intact — no goodbye or model residue.
+    items = await session.get_items()
+    assert len(items) == 1
+
+    # The deleting row exists (the winner's claim succeeded).
+    deleting_req = await env.forget.get_deleting_request(member.id)
+    assert deleting_req is not None
+    assert deleting_req.status == "deleting"
+    assert deleting_req.confirmation_phrase == phrase
+
+    # Now: only the exact confirmation phrase can complete deletion.
+    # Sending the correct phrase recovers and deletes.
+    recovered = await env.forget.get_deleting_by_phrase(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert recovered is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+    items = await session.get_items()
+    assert items == []
+
+
 # -- Failure-injection: partial wipe recovery via exact phrase (fix-3) -----
 
 

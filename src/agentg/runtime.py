@@ -769,10 +769,23 @@ class AgentRuntime:
             # Empty string is the sentinel: a deleting row was
             # detected between the fast-path read and the conditional
             # upsert — another runtime claimed this Member's deletion.
-            # Complete it deterministically (issue #212, fix-r6).
+            # We must NEVER call forget_member here: only a private
+            # message matching the stored exact confirmation phrase may
+            # execute/retry deletion.  Return truthful in-progress
+            # guidance and let the winner/retry phrase complete it
+            # (issue #212, fix-r15).
             if not phrase:
-                await self.stores.forget.forget_member(linked.member.id)
-                return Reply(_FORGET_GOODBYE[lang])
+                deleting_req = await self.stores.forget.get_deleting_request(
+                    linked.member.id
+                )
+                if deleting_req is not None:
+                    return Reply(
+                        _FORGET_DELETING_IN_PROGRESS[
+                            deleting_req.language or "es"
+                        ]
+                    )
+                # Fallback if the deleting row disappeared.
+                return Reply(_FORGET_DELETING_IN_PROGRESS["es"])
             minutes = max(1, self.forget_me_confirmation_seconds // 60)
             warning = _FORGET_WARNING[lang].format(
                 phrase=phrase,
