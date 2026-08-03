@@ -21,7 +21,7 @@ export default {
           stroke: "#3a3a3c",
         },
         "elevation-3": {
-          DEFAULT: "#242528",
+          DEFAULT: "#1c1d1f",
           stroke: "#4a4b4e",
         },
         // Accent

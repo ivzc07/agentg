@@ -201,7 +201,7 @@ async def test_messaging_after_forget_dead_ends_in_linking(env):
 
     # a fresh linking sees no identity → the polite invite-code dead end
     linking = Linking(env.linking, identity_phraser)
-    msg = IncomingMessage(channel="telegram", channel_user_id="42", text="hey again")
+    msg = IncomingMessage(channel="telegram", channel_user_id="42", text="hey again", is_private=True)
     linked = await env.linking.identity_for("telegram", "42")
     reply = await linking.handle(msg, linked)
     assert reply == DEAD_END_INSTRUCTION

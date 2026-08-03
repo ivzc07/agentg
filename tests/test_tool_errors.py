@@ -6,8 +6,10 @@ messages stay Member-safe and always include a recovery cue (what to try next).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+from datetime import timedelta
 
 import pytest
 from agents.tool_context import ToolContext
@@ -23,10 +25,13 @@ from agentg.tools import (
     edit_logged_sets,
     get_last_sets,
     log_sets,
+    open_session,
     retire_note,
     save_routine,
     snooze_checkins,
 )
+from agentg.training import SESSION_AUTO_CLOSE
+from conftest import FakeClock
 
 # Problem statement, then an em dash, then what to change before retrying.
 _RECOVERY = re.compile(r"—.+\S")
@@ -171,6 +176,38 @@ async def test_edit_with_no_sets_in_session_names_exercise_and_recovery(env):
     assert has_recovery_cue(result["error"])
     lower = result["error"].lower()
     assert "check" in lower or "ask" in lower or "log" in lower
+
+
+async def test_copy_last_sets_tool_response_includes_ordered_copied_sets(env):
+    """The copy_last_sets tool result carries ``copied_sets`` with mixed
+    weights, optional fields, and ordering so the Agent can restate each
+    set with its own weight."""
+    # Log mixed warm-up and working sets across two log calls (batches).
+    await env.stores.training.log_sets(env.member_id, env.gym_id, "bench 40 10",
+                                       rpe=6.5, note="warm-up")
+    await env.stores.training.log_sets(env.member_id, env.gym_id, "bench 60 5,5",
+                                       rpe=8.0, note="paused")
+    await env.stores.training.close_session(env.member_id)
+
+    # New session — copy the previous.
+    await env.stores.training.open_session(env.member_id, env.gym_id)
+    result = await call_tool(copy_last_sets, env.context, exercise="bench")
+
+    # Top-set summary still works for progression.
+    assert result["exercise"] in ("bench press", "bench")
+    assert result["weight"] == 60.0
+    assert result["reps"] == [10, 5, 5]
+
+    # The per-set detail the Agent needs for an accurate restatement.
+    assert "copied_sets" in result
+    copied = result["copied_sets"]
+    assert isinstance(copied, list)
+    assert len(copied) == 3
+
+    # Order is preserved — warm-up first, then working sets.
+    assert copied[0] == {"weight": 40.0, "reps": 10, "rpe": 6.5, "note": "warm-up"}
+    assert copied[1] == {"weight": 60.0, "reps": 5, "rpe": 8.0, "note": "paused"}
+    assert copied[2] == {"weight": 60.0, "reps": 5, "rpe": 8.0, "note": "paused"}
 
 
 async def _collect_tool_error_messages(env) -> dict[str, str]:
@@ -345,3 +382,77 @@ async def test_every_tool_error_path_includes_a_recovery_cue(env):
     assert not missing, "error paths missing a recovery cue:\n" + "\n".join(
         f"  {label}: {msg!r}" for label, msg in sorted(missing.items())
     )
+
+
+async def test_concurrent_get_last_sets_and_open_session_serialized_by_lock(tmp_path):
+    """get_last_sets calls _open_session_row which can auto-close a stale
+    Session — a mutating path.  Without _session_lock it could race other
+    session tools in the same Agent turn (issue #213).  This test proves
+    concurrent calls do not corrupt session state."""
+    from sqlalchemy import select, func
+
+    from agentg.models import Session as SessionModel
+
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'tool-race.db'}")
+    clock = FakeClock()
+    stores = Stores.from_engine(engine, clock=clock)
+    await stores.linking.ensure_schema()
+    await stores.training.ensure_seeded()
+    training = stores.training
+
+    gym = await stores.linking.create_gym("Iron Temple")
+    member = await stores.linking.link_member(gym.id, "Dani", "telegram", "42")
+
+    # Seed a closed session with known numbers for get_last_sets to find.
+    await training.open_session(member.id, gym.id)
+    await training.log_sets(member.id, gym.id, "bench 60 8,8,8")
+    await training.close_session(member.id)
+
+    # Now open a session, then age it past SESSION_AUTO_CLOSE so the
+    # auto-close path in _open_session_row triggers on the next call.
+    await training.open_session(member.id, gym.id)
+    await training.log_sets(member.id, gym.id, "squat 100 5,5,5")
+
+    # Advance the clock past the auto-close threshold.
+    clock.advance(SESSION_AUTO_CLOSE + timedelta(minutes=1))
+
+    context = MemberContext(
+        stores=stores,
+        member_id=member.id,
+        gym_id=gym.id,
+        member_name=member.name,
+        gym_name=gym.name,
+        weight_unit="kg",
+        is_coach=False,
+    )
+
+    # Run get_last_sets and open_session concurrently — they share the
+    # same MemberContext so they contend on _session_lock.
+    r_get, r_open = await asyncio.gather(
+        call_tool(get_last_sets, context, exercise="bench"),
+        call_tool(open_session, context),
+    )
+
+    # get_last_sets returns the previous session's numbers.
+    assert "error" not in r_get
+    assert r_get.get("weight") == 60.0
+    assert r_get.get("reps") == [8, 8, 8]
+
+    # open_session returns a new (or reopened) session — the stale one
+    # was auto-closed.
+    assert "error" not in r_open
+    assert "session_id" in r_open
+
+    # Exactly one open Session remains.
+    async with training._sessions() as db:
+        count = await db.scalar(
+            select(func.count())
+            .select_from(SessionModel)
+            .where(
+                SessionModel.member_id == member.id,
+                SessionModel.closed_at.is_(None),
+            )
+        )
+        assert count == 1
+
+    await engine.dispose()

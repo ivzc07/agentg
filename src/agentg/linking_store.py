@@ -279,6 +279,40 @@ def _add_missing_columns(conn: Connection) -> None:
                         "ON safety_outbox_jobs (note_id, coach_member_id)"
                     )
                 )
+    # One open Session per Member, DB-enforced (issue #213).
+    sessions_indexes = {i["name"] for i in inspect(conn).get_indexes("sessions")}
+    if "uq_sessions_one_open_per_member" not in sessions_indexes:
+        # Detect historical duplicate open Sessions: a legacy database may
+        # hold Members with two open Sessions (pre-constraint writes could
+        # interleave and leave two rows with closed_at=NULL). Fail with
+        # actionable Member IDs — silently choosing one would drop Sets.
+        if conn.dialect.name == "sqlite":
+            dups = conn.execute(
+                text(
+                    "SELECT member_id, COUNT(*) as cnt FROM sessions "
+                    "WHERE closed_at IS NULL GROUP BY member_id HAVING cnt > 1"
+                )
+            ).fetchall()
+        else:
+            dups = conn.execute(
+                text(
+                    "SELECT member_id, COUNT(*) as cnt FROM sessions "
+                    "WHERE closed_at IS NULL GROUP BY member_id HAVING COUNT(*) > 1"
+                )
+            ).fetchall()
+        if dups:
+            ids = ", ".join(str(row[0]) for row in dups)
+            raise RuntimeError(
+                f"Historical duplicate open Sessions detected for Member(s): {ids}. "
+                "Manually close the duplicates (set closed_at) before restarting — "
+                "the constraint cannot be created over them."
+            )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_sessions_one_open_per_member "
+                "ON sessions (member_id) WHERE closed_at IS NULL"
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -366,6 +400,25 @@ async def _redeem_coach_code(db, gym_id: int, coach_code: str) -> bool:
     return result.rowcount > 0
 
 
+async def _redeem_member_code(db, gym_id: int, invite_code: str) -> bool:
+    """Confirm the member Invite code is still active while locking the Gym row.
+
+    Same pattern as ``_redeem_coach_code``: the no-op UPDATE on the Gym
+    row serialises a concurrent ``regenerate_invite_code`` — whichever
+    commits first wins. The caller creates/repaints the Member inside the
+    same transaction so the check and the write stay atomic.
+    """
+    code = normalize_invite_code(invite_code)
+    if not code:
+        return False
+    result = await db.execute(
+        update(Gym)
+        .where(Gym.id == gym_id, Gym.invite_code == code)
+        .values(invite_code=code)
+    )
+    return result.rowcount > 0
+
+
 class LinkingStore:
     def __init__(self, engine: AsyncEngine) -> None:
         self.engine = engine
@@ -444,9 +497,33 @@ class LinkingStore:
         switch), leaving the old Member row untouched. The read-then-write on
         the pointer is race-free only because exactly one replica runs (spec
         §Hosting) and the runtime serializes turns per identity.
+
+        Trusted callers (admin scripts, tests) use this directly; linking
+        flows should use ``link_member_with_code`` for atomic redemption.
         """
         async with self._sessions() as db:
             member = await _link_member_in_session(db, gym_id, name, channel, channel_user_id)
+            await db.commit()
+            return member
+
+    async def link_member_with_code(
+        self, gym_id: int, name: str, channel: str, channel_user_id: str, invite_code: str
+    ) -> Member | None:
+        """Redeem a member Invite code: create a Member and re-point the channel
+        identity atomically.
+
+        One transaction: the Member row and channel pointer are written only if
+        the code is still active — a code regenerated mid-flow revokes the
+        whole link. Returns ``None`` when the code is no longer active; nothing
+        is written then.
+        """
+        async with self._sessions() as db:
+            if not await _redeem_member_code(db, gym_id, invite_code):
+                await db.rollback()
+                return None
+            member = await _link_member_in_session(
+                db, gym_id, name, channel, channel_user_id
+            )
             await db.commit()
             return member
 

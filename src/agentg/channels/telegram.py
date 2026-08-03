@@ -24,6 +24,10 @@ CHANNEL = "telegram"
 MAX_MESSAGE_LENGTH = 4096  # Telegram's hard cap per message
 ERROR_REPLY = "Uy — algo falló de mi lado. Inténtalo de nuevo en un momento."
 EMPTY_REPLY_FALLBACK = "Mmm, me quedé en blanco — ¿lo intentas de nuevo?"
+GROUP_REJECTION_REPLY = (
+    "👋 ¡Hola! Solo puedo entrenarte por chat directo, no en grupos. "
+    "Envíame un mensaje privado y empezamos."
+)
 
 ReplyFn = Callable[[IncomingMessage], Awaitable[Reply]]
 
@@ -189,6 +193,13 @@ async def _deliver_streamed(
 
 def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[None]]:
     async def on_text(message: Message) -> None:
+        # Reject shared chats at the highest channel boundary — no typing,
+        # no identity resolution, no model call, no store access (#211).
+        # Checked before from_user so anonymous-admin / sender-chat messages
+        # (which have no from_user) still receive the rejection.
+        if message.chat.type != "private":
+            await message.answer(GROUP_REJECTION_REPLY)
+            return
         if message.from_user is None or message.text is None:
             return
         incoming = IncomingMessage(
@@ -197,7 +208,7 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
             text=message.text,
             display_name=message.from_user.full_name or "",
             link_code=parse_start_payload(message.text),
-            is_group=message.chat.type != "private",
+            is_private=True,
         )
         # Send the first typing action synchronously so it lands before the
         # Agent starts work, then keep refreshing in the background (Telegram
@@ -258,9 +269,35 @@ def make_message_handler(reply_fn: ReplyFn) -> Callable[[Message], Awaitable[Non
     return on_text
 
 
+def _edited_handler(handler: Callable[[Message], Awaitable[None]]) -> Callable[[Message], Awaitable[None]]:
+    """Wrap a message handler so edited private messages are silently dropped.
+
+    Edited non-private text still flows through to receive the deterministic
+    rejection; edited private DMs are dropped without invoking the Agent or
+    sending any reply — private conversations must remain unchanged (#211).
+    """
+    async def on_edited(message: Message) -> None:
+        if message.chat.type == "private":
+            return  # Private conversations must remain unchanged.
+        await handler(message)
+
+    return on_edited
+
+
 def create_dispatcher(reply_fn: ReplyFn) -> Dispatcher:
     dispatcher = Dispatcher()
-    dispatcher.message.register(make_message_handler(reply_fn), F.text)
+    handler = make_message_handler(reply_fn)
+    # Private/group messages arrive as message updates; channel posts
+    # (where the bot is an admin) arrive as channel_post updates (#211).
+    dispatcher.message.register(handler, F.text)
+    dispatcher.channel_post.register(handler, F.text)
+    # Edited messages arrive through separate observers — register the
+    # edited-update wrapper on both so that edited shared-chat text still
+    # receives the non-private rejection while edited private DMs are
+    # silently dropped (#211).
+    eh = _edited_handler(handler)
+    dispatcher.edited_message.register(eh, F.text)
+    dispatcher.edited_channel_post.register(eh, F.text)
     return dispatcher
 
 

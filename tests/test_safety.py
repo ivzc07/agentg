@@ -588,7 +588,8 @@ async def test_coach_pings_are_deferred_after_the_member_reply_at_runtime_level(
 
     reply = await runtime_env.runtime.handle_message(
         IncomingMessage(
-            channel="telegram", channel_user_id="42", text="my knee hurts"
+            channel="telegram", channel_user_id="42", text="my knee hurts",
+            is_private=True,
         )
     )
 

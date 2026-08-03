@@ -9,6 +9,7 @@ fact, not a fixed enum.
 from __future__ import annotations
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentg.models import Exercise
@@ -65,7 +66,22 @@ async def find_or_create_exercise(db: AsyncSession, name: str) -> Exercise:
     found = await find_exercise(db, norm)
     if found is not None:
         return found
-    created = Exercise(name=norm, aliases="")
-    db.add(created)
-    await db.flush()
-    return created
+    # A savepoint isolates the INSERT so a unique-constraint loser can
+    # recover without trashing the outer transaction (issue #213).
+    nested = await db.begin_nested()
+    try:
+        created = Exercise(name=norm, aliases="")
+        db.add(created)
+        await db.flush()
+        await nested.commit()
+        return created
+    except IntegrityError:
+        await nested.rollback()
+        # Another caller won the race — use their Exercise.
+        winner = await find_exercise(db, norm)
+        if winner is None:
+            raise RuntimeError(
+                f"Failed to find or create exercise {norm!r}: "
+                "unique constraint violation but no matching exercise exists"
+            )
+        return winner

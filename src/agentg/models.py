@@ -193,8 +193,19 @@ class Session(Base):
     """One real gym visit — the record of what actually happened."""
 
     __tablename__ = "sessions"
-    # (member_id, started_at) powers gap queries and the check-in sweep.
-    __table_args__ = (Index("ix_sessions_member_started", "member_id", "started_at"),)
+    __table_args__ = (
+        # (member_id, started_at) powers gap queries and the check-in sweep.
+        Index("ix_sessions_member_started", "member_id", "started_at"),
+        # At most one open Session per Member, DB-enforced (issue #213).
+        # Both Postgres and SQLite support partial unique indexes.
+        Index(
+            "uq_sessions_one_open_per_member",
+            "member_id",
+            unique=True,
+            sqlite_where=text("closed_at IS NULL"),
+            postgresql_where=text("closed_at IS NULL"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     gym_id: Mapped[int] = mapped_column(ForeignKey("gyms.id"))
