@@ -7,315 +7,21 @@ import { RoutineEditor } from "../components/RoutineEditor";
 // Vite serves the component's own source as a string, so the guard below reads
 // production code without pulling node builtins into the typechecked build.
 import routineEditorSource from "../components/RoutineEditor.tsx?raw";
-import tailwindConfig from "../../tailwind.config";
 
 // ---------------------------------------------------------------------------
-//  Text-colour utility inventory — derived from the live Tailwind config so
-//  the tests stay in sync when design tokens are added or removed.  The
-//  inventory covers project custom colours, standard Tailwind keywords, and
-//  the full default palette.  Arbitrary-value classes (text-[14px]) are never
-//  colour utilities.
+//  Save-button contrast helpers — strict allowlist, not a CSS-colour parser.
+//  Any text-* class beyond the known set is flagged regardless of whether it
+//  "looks like a colour", because an incomplete parser is the bug.
 // ---------------------------------------------------------------------------
 
-/** Build a Set of known `text-*` colour-utility class names. */
-function buildTextColorInventory(): Set<string> {
-  const set = new Set<string>();
-
-  // Standard fixed Tailwind colour keywords
-  for (const kw of ["white", "black", "current", "transparent", "inherit"]) {
-    set.add(`text-${kw}`);
-  }
-
-  // Project design tokens from tailwind.config.ts theme.extend.colors
-  const colors = (tailwindConfig.theme?.extend?.colors ?? {}) as Record<
-    string,
-    unknown
-  >;
-  for (const [key, val] of Object.entries(colors)) {
-    if (typeof val === "string") {
-      set.add(`text-${key}`);
-    } else if (typeof val === "object" && val !== null) {
-      // Nested colour object: the key itself is the DEFAULT shade.
-      set.add(`text-${key}`);
-      for (const sub of Object.keys(val as Record<string, unknown>)) {
-        // DEFAULT is an alias for the key — skip the explicit form.
-        if (sub !== "DEFAULT") set.add(`text-${key}-${sub}`);
-      }
-    }
-  }
-
-  // Standard Tailwind palette: text-{name}-{shade}
-  const PALETTE_NAMES = [
-    "slate",
-    "gray",
-    "zinc",
-    "neutral",
-    "stone",
-    "red",
-    "orange",
-    "amber",
-    "yellow",
-    "lime",
-    "green",
-    "emerald",
-    "teal",
-    "cyan",
-    "sky",
-    "blue",
-    "indigo",
-    "violet",
-    "purple",
-    "fuchsia",
-    "pink",
-    "rose",
-  ];
-  const SHADES = [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950];
-  for (const name of PALETTE_NAMES) {
-    for (const shade of SHADES) {
-      set.add(`text-${name}-${shade}`);
-    }
-  }
-
-  return set;
-}
-
-const TEXT_COLOR_INVENTORY = buildTextColorInventory();
-
-// CSS named colours (CSS Color Module Level 4).  Tailwind compiles
-// arbitrary-value utilities such as text-[red] and text-[rebeccapurple]
-// as colour utilities, so the conflict guard must recognise them.
-const CSS_NAMED_COLORS: Set<string> = new Set([
-  // CSS basic colour keywords
-  "black",
-  "silver",
-  "gray",
-  "white",
-  "maroon",
-  "red",
-  "purple",
-  "fuchsia",
-  "green",
-  "lime",
-  "olive",
-  "yellow",
-  "navy",
-  "blue",
-  "teal",
-  "aqua",
-  // Extended colour keywords
-  "aliceblue",
-  "antiquewhite",
-  "aquamarine",
-  "azure",
-  "beige",
-  "bisque",
-  "blanchedalmond",
-  "blueviolet",
-  "brown",
-  "burlywood",
-  "cadetblue",
-  "chartreuse",
-  "chocolate",
-  "coral",
-  "cornflowerblue",
-  "cornsilk",
-  "crimson",
-  "cyan",
-  "darkblue",
-  "darkcyan",
-  "darkgoldenrod",
-  "darkgray",
-  "darkgreen",
-  "darkgrey",
-  "darkkhaki",
-  "darkmagenta",
-  "darkolivegreen",
-  "darkorange",
-  "darkorchid",
-  "darkred",
-  "darksalmon",
-  "darkseagreen",
-  "darkslateblue",
-  "darkslategray",
-  "darkslategrey",
-  "darkturquoise",
-  "darkviolet",
-  "deeppink",
-  "deepskyblue",
-  "dimgray",
-  "dimgrey",
-  "dodgerblue",
-  "firebrick",
-  "floralwhite",
-  "forestgreen",
-  "gainsboro",
-  "ghostwhite",
-  "gold",
-  "goldenrod",
-  "greenyellow",
-  "grey",
-  "honeydew",
-  "hotpink",
-  "indianred",
-  "indigo",
-  "ivory",
-  "khaki",
-  "lavender",
-  "lavenderblush",
-  "lawngreen",
-  "lemonchiffon",
-  "lightblue",
-  "lightcoral",
-  "lightcyan",
-  "lightgoldenrodyellow",
-  "lightgray",
-  "lightgreen",
-  "lightgrey",
-  "lightpink",
-  "lightsalmon",
-  "lightseagreen",
-  "lightskyblue",
-  "lightslategray",
-  "lightslategrey",
-  "lightsteelblue",
-  "lightyellow",
-  "limegreen",
-  "linen",
-  "magenta",
-  "mediumaquamarine",
-  "mediumblue",
-  "mediumorchid",
-  "mediumpurple",
-  "mediumseagreen",
-  "mediumslateblue",
-  "mediumspringgreen",
-  "mediumturquoise",
-  "mediumvioletred",
-  "midnightblue",
-  "mintcream",
-  "mistyrose",
-  "moccasin",
-  "navajowhite",
-  "oldlace",
-  "olivedrab",
-  "orange",
-  "orangered",
-  "orchid",
-  "palegoldenrod",
-  "palegreen",
-  "paleturquoise",
-  "palevioletred",
-  "papayawhip",
-  "peachpuff",
-  "peru",
-  "pink",
-  "plum",
-  "powderblue",
-  "rebeccapurple",
-  "rosybrown",
-  "royalblue",
-  "saddlebrown",
-  "salmon",
-  "sandybrown",
-  "seagreen",
-  "seashell",
-  "sienna",
-  "skyblue",
-  "slateblue",
-  "slategray",
-  "slategrey",
-  "snow",
-  "springgreen",
-  "steelblue",
-  "tan",
-  "thistle",
-  "tomato",
-  "turquoise",
-  "violet",
-  "wheat",
-  "whitesmoke",
-  "yellowgreen",
-  // transparent / currentColor / inherit are already in TEXT_COLOR_INVENTORY
-  // as text-transparent / text-current / text-inherit, but they are also
-  // valid CSS named colours inside text-[…] so include them here too.
-  "transparent",
-  "currentcolor",
-  "inherit",
-]);
-
-/** True when `value` looks like a colour: hex, CSS colour function, CSS
- *  named colour, or a CSS variable that resolves to a colour. */
-function looksLikeColor(value: string): boolean {
-  // Hex colour: #rgb, #rrggbb, #rgba, #rrggbbaa
-  if (/^#[0-9a-fA-F]{3,8}$/.test(value)) return true;
-  // Colour functions
-  if (/^(rgb|rgba|hsl|hsla|hwb|lab|lch|oklch|oklab|color)\(/.test(value)) return true;
-  // CSS variable — likely a colour variable (e.g. var(--foreground))
-  if (/^var\(--/.test(value)) return true;
-  // CSS named colour keyword (e.g. red, rebeccapurple)
-  if (CSS_NAMED_COLORS.has(value.toLowerCase())) return true;
-  return false;
-}
-
-/** True when the content inside `text-[...]` looks like a colour (hex, rgb(),
- *  hsl(), etc.).  Also recognises typed arbitrary values such as
- *  `text-[color:#fff]` and `text-[color:var(--foreground)]`.  Returns false
- *  for sizing values like `text-[14px]`, non-colour typed values like
- *  `text-[font-size:14px]`, and ambiguous bare CSS variables like
- *  `text-[--custom]`. */
-function isArbitraryTextColor(cls: string): boolean {
-  // Strip important prefix before matching (e.g. !text-[color:inherit]).
-  cls = cls.replace(/^!/, "");
-  // Match text-[<value>] or text-[<type>:<value>] with an optional
-  // /<alpha-modifier>.  Modifiers may be numeric (/50) or arbitrary
-  // bracket opacity (/[.5], /[var(--my-opacity)]).
-  const m = cls.match(/^text-\[(.+?)\](?:\/(?:\d+|\[[^\]]*\]))?$/);
-  if (!m) return false;
-  const inner = m[1];
-
-  // Typed arbitrary value: text-[color:#fff], text-[color:var(--foreground)], etc.
-  // Only match when the type is "color"; reject text-[font-size:14px], etc.
-  const typed = inner.match(/^color:(.+)$/);
-  if (typed) return looksLikeColor(typed[1]);
-
-  // Bare arbitrary value: text-[#fff], text-[rgb(…)], etc.
-  return looksLikeColor(inner);
-}
-
-/** Strip a Tailwind slash-opacity modifier (e.g. text-bg/50 → text-bg,
- *  text-red-500/25 → text-red-500) so the base utility can be classified
- *  against the inventory.  Non-slash classes are returned unchanged. */
-function stripOpacityModifier(cls: string): string {
-  // Strip arbitrary bracket opacity (/[.5], /[0.5]) first, then
-  // numeric opacity (/50, /25).  Both are valid Tailwind modifiers.
-  return cls
-    .replace(/\/\[[^\]]*\]$/, "")
-    .replace(/\/\d+$/, "");
-}
-
-/** True when `cls` is a `text-*` colour utility.  Also detects arbitrary-value
- *  colour classes like `text-[#fff]`.  Returns false for sizing, alignment,
- *  decoration, and other non-colour `text-*` utilities.
- *
- *  Slash-opacity variants (text-bg/50, text-white/50, text-red-500/25) are
- *  classified by stripping the modifier and checking the base class. */
-function isTextColorClass(cls: string): boolean {
-  // Strip important prefix before classifying (e.g. !text-[color:inherit]).
-  cls = cls.replace(/^!/, "");
-  if (!cls.startsWith("text-")) return false;
-  // Strip slash-opacity modifier before classifying (P2, PR review)
-  const base = stripOpacityModifier(cls);
-  // Known tokens from the inventory (arbitrary-value classes never match here)
-  if (TEXT_COLOR_INVENTORY.has(base)) return true;
-  // Arbitrary-value colour classes: text-[#fff], text-[rgb(…)], etc.
-  // (isArbitraryTextColor already handles its own slash-opacity suffix)
-  if (isArbitraryTextColor(base)) return true;
-  return false;
-}
-
-/** Split a className string into individual tokens. */
-function classTokens(className: string): string[] {
-  return className.split(/\s+/).filter(Boolean);
+/** Extract every `text-*` class token from a className string.
+ *  Strips the Tailwind important prefix (`!`) so `!text-white` is found. */
+function textTokens(className: string): string[] {
+  return className
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((t) => t.replace(/^!/, ""))
+    .filter((t) => t.startsWith("text-"));
 }
 
 const EN_BOOTSTRAP = {
@@ -820,29 +526,29 @@ describe("RoutineEditor", () => {
       expect(btn.classList.contains("bg-magenta")).toBe(true);
       expect(btn.classList.contains("text-bg")).toBe(true);
 
-      // --- foreground: exactly one effective design-token colour on the --
-      //     default-state button.  Classify every text-* token against the
-      //     inventory derived from the live Tailwind config so arbitrary-
-      //     value utilities like text-[14px] are never misclassified.
-      const colorClasses = classTokens(btn.className).filter(isTextColorClass);
-      expect(colorClasses).toEqual(["text-bg"]);
+      // --- foreground: strict allowlist — every text-* class on the -----
+      //     button must match the known set.  Any additional text-* token,
+      //     even arbitrary syntax like text-[--custom] or text-[red], is
+      //     caught without needing a CSS-colour parser.
+      const txts = textTokens(btn.className);
+      expect(new Set(txts)).toEqual(new Set(["text-bg", "text-[14px]"]));
     });
 
-    it("rejects conflicting text-color utilities alongside text-bg", () => {
+    it("rejects any extra text-* class on the submit button (allowlist guard)", () => {
       const src = routineEditorSource;
       // Locate the submit button block by its type="submit" attr.
       const submitIdx = src.indexOf('type="submit"');
       expect(submitIdx).not.toBe(-1);
       const block = src.slice(submitIdx, submitIdx + 400);
 
-      // Parse every className token that looks like text-* and classify
-      // with the same inventory built from the live Tailwind config.
-      const allTokenRe = /\b(text-\S+)\b/g;
-      const rawTokens = [...block.matchAll(allTokenRe)].map((m) => m[1]);
-      const colorClasses = rawTokens.filter(isTextColorClass);
+      // Extract every text-* token from the button's className and assert
+      // the full set matches the allowlist — no colour parser needed.
+      // [^\s"] matches one token: non-whitespace, stops before closing quote.
+      const allTokenRe = /text-[^\s"]+/g;
+      const rawTokens = [...block.matchAll(allTokenRe)].map((m) => m[0]);
 
-      // Exactly one text-color token on the submit button.
-      expect(colorClasses).toEqual(["text-bg"]);
+      // The complete set of text-* classes on the submit button.
+      expect(new Set(rawTokens)).toEqual(new Set(["text-bg", "text-[14px]"]));
     });
 
     it("rejects modifier-only background on the submit button", () => {
@@ -866,211 +572,80 @@ describe("RoutineEditor", () => {
     });
   });
 
-  // --- Synthetic / helper tests: prove the low-level guards work --------
-  //     independently of rendering, so future edits to the component
-  //     can't silently weaken the contrast requirements.
-  describe("contrast helpers (unit)", () => {
-    describe("isTextColorClass", () => {
-      it("recognises project design-token text-colour classes", () => {
-        expect(isTextColorClass("text-bg")).toBe(true);
-        expect(isTextColorClass("text-magenta")).toBe(true);
-        expect(isTextColorClass("text-magenta-tint")).toBe(true);
-        expect(isTextColorClass("text-ink")).toBe(true);
-        expect(isTextColorClass("text-ink-2")).toBe(true);
-        expect(isTextColorClass("text-elevation-0")).toBe(true);
-        expect(isTextColorClass("text-elevation-0-stroke")).toBe(true);
-      });
+  // --- Allowlist unit tests: prove specific arbitrary examples are ------]
+  //     caught by the strict text-* allowlist without needing a CSS-colour
+  //     parser.  The allowlist is ["text-bg", "text-[14px]"]; any extra
+  //     text-* token is rejected.
+  describe("save button text-token allowlist (unit)", () => {
+    const ALLOWLIST = new Set(["text-bg", "text-[14px]"]);
 
-      it("recognises standard Tailwind colour keywords", () => {
-        expect(isTextColorClass("text-white")).toBe(true);
-        expect(isTextColorClass("text-black")).toBe(true);
-        expect(isTextColorClass("text-current")).toBe(true);
-        expect(isTextColorClass("text-transparent")).toBe(true);
-        expect(isTextColorClass("text-inherit")).toBe(true);
-      });
+    it("accepts the known safe className", () => {
+      const tokens = textTokens(
+        "inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-magenta text-bg text-[14px] font-medium"
+      );
+      expect(new Set(tokens)).toEqual(ALLOWLIST);
+    });
 
-      it("recognises standard Tailwind palette shades", () => {
-        expect(isTextColorClass("text-red-500")).toBe(true);
-        expect(isTextColorClass("text-blue-100")).toBe(true);
-        expect(isTextColorClass("text-slate-950")).toBe(true);
-      });
+    it("rejects text-[--custom] (bare CSS custom property)", () => {
+      const tokens = textTokens(
+        "bg-magenta text-bg text-[14px] text-[--custom]"
+      );
+      expect(tokens).toContain("text-[--custom]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
 
-      it("rejects non-colour arbitrary-value classes like text-[14px]", () => {
-        expect(isTextColorClass("text-[14px]")).toBe(false);
-        expect(isTextColorClass("text-[--custom]")).toBe(false);
-        // Typed arbitrary values with a non-colour type
-        expect(isTextColorClass("text-[font-size:14px]")).toBe(false);
-        expect(isTextColorClass("text-[line-height:1.5]")).toBe(false);
-      });
+    it("rejects text-[red] (CSS named colour in arbitrary value)", () => {
+      const tokens = textTokens("bg-magenta text-bg text-[14px] text-[red]");
+      expect(tokens).toContain("text-[red]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
 
-      it("recognises typed arbitrary-value colour classes", () => {
-        // Typed color: literal
-        expect(isTextColorClass("text-[color:#fff]")).toBe(true);
-        expect(isTextColorClass("text-[color:#f00]")).toBe(true);
-        expect(isTextColorClass("text-[color:#ffffff]")).toBe(true);
-        // Typed color: CSS variable
-        expect(isTextColorClass("text-[color:var(--foreground)]")).toBe(true);
-        expect(isTextColorClass("text-[color:var(--color-red-500)]")).toBe(true);
-        // Typed color: CSS function
-        expect(isTextColorClass("text-[color:rgb(255,0,0)]")).toBe(true);
-        expect(isTextColorClass("text-[color:hsl(0,100%,50%)]")).toBe(true);
-        expect(isTextColorClass("text-[color:oklch(0.5_0.2_180)]")).toBe(true);
-        // Typed color: inherit / currentColor (P2, fix-r5)
-        expect(isTextColorClass("text-[color:inherit]")).toBe(true);
-        expect(isTextColorClass("text-[color:currentColor]")).toBe(true);
-        expect(isTextColorClass("text-[color:CurrentColor]")).toBe(true);
-      });
+    it("rejects text-[#fff] (bare hex in arbitrary value)", () => {
+      const tokens = textTokens("bg-magenta text-bg text-[14px] text-[#fff]");
+      expect(tokens).toContain("text-[#fff]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
 
-      it("recognises typed arbitrary-value colour classes with alpha modifier", () => {
-        expect(isTextColorClass("text-[color:#fff]/50")).toBe(true);
-        expect(isTextColorClass("text-[color:var(--foreground)]/75")).toBe(true);
-        // Typed color: inherit / currentColor with alpha modifier (P2, fix-r5)
-        expect(isTextColorClass("text-[color:inherit]/50")).toBe(true);
-        expect(isTextColorClass("text-[color:currentColor]/75")).toBe(true);
-      });
+    it("rejects text-[#fff]/[.5] (hex with arbitrary bracket opacity)", () => {
+      const tokens = textTokens(
+        "bg-magenta text-bg text-[14px] text-[#fff]/[.5]"
+      );
+      expect(tokens).toContain("text-[#fff]/[.5]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
 
-      it("recognises arbitrary-value colour classes", () => {
-        expect(isTextColorClass("text-[#f00]")).toBe(true);
-        expect(isTextColorClass("text-[#fff]")).toBe(true);
-        expect(isTextColorClass("text-[#ffffff]")).toBe(true);
-        expect(isTextColorClass("text-[#000000]")).toBe(true);
-        expect(isTextColorClass("text-[rgb(255,0,0)]")).toBe(true);
-        expect(isTextColorClass("text-[hsl(0,100%,50%)]")).toBe(true);
-      });
+    it("rejects text-white (standard keyword extra token)", () => {
+      const tokens = textTokens("bg-magenta text-bg text-[14px] text-white");
+      expect(tokens).toContain("text-white");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
 
-      it("recognises arbitrary-value colour classes with alpha modifier", () => {
-        expect(isTextColorClass("text-[#fff]/50")).toBe(true);
-        expect(isTextColorClass("text-[#ffffff]/10")).toBe(true);
-      });
+    it("rejects text-red-500/25 (palette shade with slash-opacity)", () => {
+      const tokens = textTokens(
+        "bg-magenta text-bg text-[14px] text-red-500/25"
+      );
+      expect(tokens).toContain("text-red-500/25");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
 
-      // P2, fix-r4: CSS named colours inside arbitrary values must be
-      // recognised so they cannot silently coexist with text-bg.
-      it("recognises CSS named-colour arbitrary values", () => {
-        // Basic keywords
-        expect(isTextColorClass("text-[red]")).toBe(true);
-        expect(isTextColorClass("text-[blue]")).toBe(true);
-        expect(isTextColorClass("text-[green]")).toBe(true);
-        expect(isTextColorClass("text-[yellow]")).toBe(true);
-        expect(isTextColorClass("text-[purple]")).toBe(true);
-        // Extended keyword (the motivating case from fix-r4)
-        expect(isTextColorClass("text-[rebeccapurple]")).toBe(true);
-        expect(isTextColorClass("text-[cornflowerblue]")).toBe(true);
-        expect(isTextColorClass("text-[darkorange]")).toBe(true);
-        expect(isTextColorClass("text-[mediumspringgreen]")).toBe(true);
-        // Case-insensitive
-        expect(isTextColorClass("text-[RebeccaPurple]")).toBe(true);
-        expect(isTextColorClass("text-[CornflowerBlue]")).toBe(true);
-        // transparent / currentColor / inherit
-        expect(isTextColorClass("text-[transparent]")).toBe(true);
-        expect(isTextColorClass("text-[currentcolor]")).toBe(true);
-        expect(isTextColorClass("text-[currentColor]")).toBe(true);
-        expect(isTextColorClass("text-[inherit]")).toBe(true);
-        expect(isTextColorClass("text-[Inherit]")).toBe(true);
-      });
+    it("rejects !text-[color:inherit] (important-prefixed typed arbitrary colour)", () => {
+      // textTokens strips the ! prefix so the token is found regardless.
+      const tokens = textTokens(
+        "bg-magenta text-bg text-[14px] !text-[color:inherit]"
+      );
+      expect(tokens).toContain("text-[color:inherit]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
+    });
 
-      it("recognises CSS named-colour arbitrary values with alpha modifier", () => {
-        expect(isTextColorClass("text-[red]/50")).toBe(true);
-        expect(isTextColorClass("text-[rebeccapurple]/25")).toBe(true);
-        expect(isTextColorClass("text-[cornflowerblue]/[.5]")).toBe(true);
-        // inherit with alpha modifier (P2, fix-r5)
-        expect(isTextColorClass("text-[inherit]/50")).toBe(true);
-        expect(isTextColorClass("text-[inherit]/[.5]")).toBe(true);
-      });
-
-      it("rejects non-colour bare words in arbitrary values", () => {
-        // Sizing/length values are never colours
-        expect(isTextColorClass("text-[14px]")).toBe(false);
-        expect(isTextColorClass("text-[1.5rem]")).toBe(false);
-        expect(isTextColorClass("text-[2em]")).toBe(false);
-        // Typed non-colour still rejected
-        expect(isTextColorClass("text-[font-size:14px]")).toBe(false);
-        // Bogus bare word that isn't a valid CSS colour
-        expect(isTextColorClass("text-[squat]")).toBe(false);
-        expect(isTextColorClass("text-[bench]")).toBe(false);
-        // Typed non-colour property with a valid colour value is not a
-        // colour utility (P2, fix-r5)
-        expect(isTextColorClass("text-[line-height:inherit]")).toBe(false);
-        expect(isTextColorClass("text-[font-weight:inherit]")).toBe(false);
-      });
-
-      it("rejects typography / non-colour text-* utilities", () => {
-        expect(isTextColorClass("text-left")).toBe(false);
-        expect(isTextColorClass("text-sm")).toBe(false);
-        expect(isTextColorClass("text-lg")).toBe(false);
-        expect(isTextColorClass("text-ellipsis")).toBe(false);
-        expect(isTextColorClass("text-nowrap")).toBe(false);
-        expect(isTextColorClass("text-opacity-50")).toBe(false);
-      });
-
-      // P2, PR review: slash-opacity colour variants
-      it("recognises slash-opacity colour variants", () => {
-        // Standard keywords with opacity
-        expect(isTextColorClass("text-white/50")).toBe(true);
-        expect(isTextColorClass("text-black/10")).toBe(true);
-        expect(isTextColorClass("text-current/75")).toBe(true);
-        expect(isTextColorClass("text-transparent/0")).toBe(true);
-
-        // Project design tokens with opacity
-        expect(isTextColorClass("text-bg/50")).toBe(true);
-        expect(isTextColorClass("text-magenta/25")).toBe(true);
-        expect(isTextColorClass("text-ink/80")).toBe(true);
-        expect(isTextColorClass("text-ink-2/60")).toBe(true);
-
-        // Standard palette with opacity
-        expect(isTextColorClass("text-red-500/25")).toBe(true);
-        expect(isTextColorClass("text-slate-950/5")).toBe(true);
-      });
-
-      it("rejects non-colour text-* utilities that resemble slash-opacity", () => {
-        // text-opacity-50 is a standalone non-colour utility, not a slash variant
-        expect(isTextColorClass("text-opacity-50")).toBe(false);
-        // Arbitrary non-colour values with a slash should still be rejected
-        expect(isTextColorClass("text-[14px]/50")).toBe(false);
-        expect(isTextColorClass("text-[font-size:14px]/50")).toBe(false);
-      });
-
-      // P2, fix-r3: arbitrary bracket opacity variants
-      it("recognises slash-opacity colour variants with arbitrary bracket opacity", () => {
-        // Standard keywords with arbitrary opacity
-        expect(isTextColorClass("text-white/[.5]")).toBe(true);
-        expect(isTextColorClass("text-black/[0.5]")).toBe(true);
-        expect(isTextColorClass("text-current/[.25]")).toBe(true);
-
-        // Project design tokens with arbitrary opacity
-        expect(isTextColorClass("text-bg/[.5]")).toBe(true);
-        expect(isTextColorClass("text-magenta/[.25]")).toBe(true);
-        expect(isTextColorClass("text-ink/[.8]")).toBe(true);
-        expect(isTextColorClass("text-ink-2/[.6]")).toBe(true);
-
-        // Standard palette with arbitrary opacity
-        expect(isTextColorClass("text-red-500/[.5]")).toBe(true);
-        expect(isTextColorClass("text-slate-950/[.05]")).toBe(true);
-
-        // Arbitrary-value colour classes with arbitrary opacity modifier
-        expect(isTextColorClass("text-[#fff]/[.5]")).toBe(true);
-        expect(isTextColorClass("text-[color:var(--foreground)]/[.75]")).toBe(true);
-
-        // Non-colour arbitrary values with bracket opacity must still be rejected
-        expect(isTextColorClass("text-[14px]/[.5]")).toBe(false);
-        expect(isTextColorClass("text-[font-size:14px]/[.5]")).toBe(false);
-      });
-
-      it("rejects conflicting arbitrary-opacity text-color tokens", () => {
-        // text-bg text-white/[.5] must be flagged as a conflict — the
-        // arbitrary-opacity utility is still a colour class.
-        const tokens = classTokens("text-bg text-white/[.5] bg-magenta");
-        const colorClasses = tokens.filter(isTextColorClass);
-        expect(colorClasses).toHaveLength(2);
-        expect(colorClasses).toContain("text-bg");
-        expect(colorClasses).toContain("text-white/[.5]");
-
-        // Same with a project token + arbitrary opacity
-        const tokens2 = classTokens("text-bg text-bg/[.5] bg-magenta");
-        const colorClasses2 = tokens2.filter(isTextColorClass);
-        expect(colorClasses2).toHaveLength(2);
-        expect(colorClasses2).toContain("text-bg");
-        expect(colorClasses2).toContain("text-bg/[.5]");
-      });
+    it("rejects !text-[theme(colors.white)] (important + theme() arbitrary)", () => {
+      // textTokens strips the ! prefix; the theme() form evaluates to a
+      // colour at build time, so it must be caught just like any other
+      // text-* colour utility outside the allowlist.
+      const tokens = textTokens(
+        "bg-magenta text-bg text-[14px] !text-[theme(colors.white)]"
+      );
+      expect(tokens).toContain("text-[theme(colors.white)]");
+      expect(new Set(tokens)).not.toEqual(ALLOWLIST);
     });
 
     it("rejects modifier-only background (lookbehind guard)", () => {
@@ -1084,124 +659,6 @@ describe("RoutineEditor", () => {
       expect("hover:bg-magenta text-bg").not.toMatch(baseBgRe);
       expect("focus:bg-magenta").not.toMatch(baseBgRe);
       expect("disabled:bg-magenta").not.toMatch(baseBgRe);
-    });
-
-    it("rejects conflicting text-color tokens on the same element", () => {
-      // A className with two text-colour tokens must be flagged.
-      const tokens = classTokens("text-bg text-white bg-magenta");
-      const colorClasses = tokens.filter(isTextColorClass);
-      // This is a positive signal: the synthetic conflict is detected.
-      expect(colorClasses).toHaveLength(2);
-      expect(colorClasses).toContain("text-bg");
-      expect(colorClasses).toContain("text-white");
-    });
-
-    it("rejects conflicting slash-opacity text-color tokens on the same element", () => {
-      // A className with text-bg and a slash-opacity colour variant must be
-      // flagged — the opacity-modified utility is still a colour class (P2, PR review).
-      const tokens = classTokens("text-bg text-white/50 bg-magenta");
-      const colorClasses = tokens.filter(isTextColorClass);
-      expect(colorClasses).toHaveLength(2);
-      expect(colorClasses).toContain("text-bg");
-      expect(colorClasses).toContain("text-white/50");
-
-      // Same with a project token slash-opacity variant
-      const tokens2 = classTokens("text-bg text-bg/50 bg-magenta");
-      const colorClasses2 = tokens2.filter(isTextColorClass);
-      expect(colorClasses2).toHaveLength(2);
-      expect(colorClasses2).toContain("text-bg");
-      expect(colorClasses2).toContain("text-bg/50");
-    });
-
-    // P2, fix-r4: CSS named colours inside text-[...] must be flagged as
-    // colour utilities so they cannot silently coexist with text-bg.
-    it("rejects conflicting CSS named-colour arbitrary values alongside text-bg", () => {
-      const tokens = classTokens("text-bg text-[red] bg-magenta");
-      const colorClasses = tokens.filter(isTextColorClass);
-      expect(colorClasses).toHaveLength(2);
-      expect(colorClasses).toContain("text-bg");
-      expect(colorClasses).toContain("text-[red]");
-
-      // Extended keyword
-      const tokens2 = classTokens("text-bg text-[rebeccapurple] bg-magenta");
-      const colorClasses2 = tokens2.filter(isTextColorClass);
-      expect(colorClasses2).toHaveLength(2);
-      expect(colorClasses2).toContain("text-bg");
-      expect(colorClasses2).toContain("text-[rebeccapurple]");
-
-      // With alpha modifier
-      const tokens3 = classTokens("text-bg text-[red]/50 bg-magenta");
-      const colorClasses3 = tokens3.filter(isTextColorClass);
-      expect(colorClasses3).toHaveLength(2);
-      expect(colorClasses3).toContain("text-bg");
-      expect(colorClasses3).toContain("text-[red]/50");
-    });
-
-    // P2, fix-r5: typed arbitrary colour forms with important prefix or
-    // inherit / currentColor values must be recognised as colour utilities.
-    describe("important-prefixed and inherit/currentColor typed arbitrary values", () => {
-      it("recognises important-prefixed colour utilities", () => {
-        // Important-prefixed standard tokens
-        expect(isTextColorClass("!text-white")).toBe(true);
-        expect(isTextColorClass("!text-bg")).toBe(true);
-        expect(isTextColorClass("!text-red-500")).toBe(true);
-        // Important-prefixed slash-opacity
-        expect(isTextColorClass("!text-white/50")).toBe(true);
-        expect(isTextColorClass("!text-bg/[.5]")).toBe(true);
-        // Important-prefixed arbitrary-value colours
-        expect(isTextColorClass("!text-[#fff]")).toBe(true);
-        expect(isTextColorClass("!text-[red]")).toBe(true);
-        expect(isTextColorClass("!text-[#fff]/50")).toBe(true);
-        // Important-prefixed typed arbitrary colour values (the motivating case)
-        expect(isTextColorClass("!text-[color:inherit]")).toBe(true);
-        expect(isTextColorClass("!text-[color:currentColor]")).toBe(true);
-        expect(isTextColorClass("!text-[color:#fff]")).toBe(true);
-        expect(isTextColorClass("!text-[color:var(--foreground)]")).toBe(true);
-        expect(isTextColorClass("!text-[color:rgb(255,0,0)]")).toBe(true);
-        // Important-prefixed typed arbitrary colour with alpha modifier
-        expect(isTextColorClass("!text-[color:inherit]/50")).toBe(true);
-        expect(isTextColorClass("!text-[color:currentColor]/75")).toBe(true);
-      });
-
-      it("rejects important-prefixed non-colour utilities", () => {
-        expect(isTextColorClass("!text-[14px]")).toBe(false);
-        expect(isTextColorClass("!text-[font-size:14px]")).toBe(false);
-        expect(isTextColorClass("!text-left")).toBe(false);
-        expect(isTextColorClass("!text-sm")).toBe(false);
-        // Important-prefixed typed non-colour still rejected
-        expect(isTextColorClass("!text-[font-weight:inherit]")).toBe(false);
-        expect(isTextColorClass("!text-[line-height:inherit]")).toBe(false);
-      });
-
-      it("rejects conflicting important-prefixed colour tokens alongside text-bg", () => {
-        // Important-prefixed typed arbitrary colour must be flagged
-        const tokens = classTokens("text-bg !text-[color:inherit] bg-magenta");
-        const colorClasses = tokens.filter(isTextColorClass);
-        expect(colorClasses).toHaveLength(2);
-        expect(colorClasses).toContain("text-bg");
-        expect(colorClasses).toContain("!text-[color:inherit]");
-
-        // Important-prefixed named colour
-        const tokens2 = classTokens("text-bg !text-[red] bg-magenta");
-        const colorClasses2 = tokens2.filter(isTextColorClass);
-        expect(colorClasses2).toHaveLength(2);
-        expect(colorClasses2).toContain("text-bg");
-        expect(colorClasses2).toContain("!text-[red]");
-
-        // Important-prefixed standard token
-        const tokens3 = classTokens("text-bg !text-white bg-magenta");
-        const colorClasses3 = tokens3.filter(isTextColorClass);
-        expect(colorClasses3).toHaveLength(2);
-        expect(colorClasses3).toContain("text-bg");
-        expect(colorClasses3).toContain("!text-white");
-
-        // Important-prefixed with alpha modifier
-        const tokens4 = classTokens("text-bg !text-[color:inherit]/50 bg-magenta");
-        const colorClasses4 = tokens4.filter(isTextColorClass);
-        expect(colorClasses4).toHaveLength(2);
-        expect(colorClasses4).toContain("text-bg");
-        expect(colorClasses4).toContain("!text-[color:inherit]/50");
-      });
     });
   });
 
