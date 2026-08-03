@@ -1196,6 +1196,148 @@ async def test_coach_self_flag_excludes_self(env):
     assert env.coach2_id in job_coach_ids
 
 
+# ── multi-channel Coach dedup ───────────────────────────────────────────────
+
+
+async def test_multi_channel_coach_gets_one_job(env):
+    """A Coach with multiple MemberChannel rows (e.g. Telegram and a
+    future WhatsApp) gets exactly one outbox job — the unique constraint
+    on (note_id, coach_member_id) requires deduplication at query time.
+    The channel chosen is deterministic (first by channel name)."""
+    # Give Coach Sam a second channel identity.
+    from agentg.models import MemberChannel
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    async with async_sessionmaker(env.engine)() as db:
+        db.add(
+            MemberChannel(
+                gym_id=env.gym_id,
+                member_id=env.coach1_id,
+                channel="whatsapp",
+                channel_user_id="+1555-COACH",
+            )
+        )
+        await db.commit()
+
+    # Use the linking_store path so _coaches_for_gym_in_session runs
+    # (the dedup lives there).
+    note, jobs = await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        linking_store=env.linking,
+        exclude_member_id=env.member_id,
+    )
+
+    # Two Coaches in the gym, but one has two channels — still exactly
+    # two jobs (one per Coach).
+    assert len(jobs) == 2
+    coach_ids = {j.coach_member_id for j in jobs}
+    assert coach_ids == {env.coach1_id, env.coach2_id}
+
+    # Coach Sam's job must pick "telegram" (deterministic: before "whatsapp").
+    sam_job = next(j for j in jobs if j.coach_member_id == env.coach1_id)
+    assert sam_job.channel == "telegram"
+    assert sam_job.channel_user_id == "7"
+
+
+async def test_multi_channel_coach_deterministic_delivery(env):
+    """When a multi-channel Coach's job is delivered, the authorization
+    re-resolution at delivery time picks the same deterministic channel."""
+    from agentg.models import MemberChannel
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    # Give Coach Sam a second channel.
+    async with async_sessionmaker(env.engine)() as db:
+        db.add(
+            MemberChannel(
+                gym_id=env.gym_id,
+                member_id=env.coach1_id,
+                channel="whatsapp",
+                channel_user_id="+1555-COACH",
+            )
+        )
+        await db.commit()
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[
+            (env.coach1_id, "Coach Sam", "telegram", "7"),
+            (env.coach2_id, "Coach Jo", "telegram", "8"),
+        ],
+    )
+
+    worker = _make_worker(env)
+    await worker.drain_once(limit=50)
+
+    # Coach Sam must receive messages via "telegram" (the deterministic pick).
+    sam_sends = [
+        m for m in env.notifier.sent if m[1] == "7"
+    ]
+    assert len(sam_sends) == 2  # heads-up + link
+    for send in sam_sends:
+        assert send[0] == "telegram"
+
+
+async def test_multi_channel_coach_linking_store_dedup(env):
+    """linking_store.coaches_for_gym also deduplicates multi-channel
+    Coaches — used when pre-resolving coaches before passing them to
+    create_note_and_jobs."""
+    from agentg.models import MemberChannel
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    async with async_sessionmaker(env.engine)() as db:
+        db.add(
+            MemberChannel(
+                gym_id=env.gym_id,
+                member_id=env.coach1_id,
+                channel="whatsapp",
+                channel_user_id="+1555-COACH",
+            )
+        )
+        await db.commit()
+
+    coaches = await env.linking.coaches_for_gym(env.gym_id)
+    # Two Coaches (not three rows).
+    assert len(coaches) == 2
+    coach_ids = {c[0] for c in coaches}
+    assert coach_ids == {env.coach1_id, env.coach2_id}
+    # Coach Sam has "telegram" (before "whatsapp").
+    sam = next(c for c in coaches if c[0] == env.coach1_id)
+    assert sam[2] == "telegram"
+
+
+async def test_coach_channel_in_gym_deterministic(env):
+    """coach_channel_in_gym returns a deterministic channel when the Coach
+    has multiple identities."""
+    from agentg.models import MemberChannel
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    async with async_sessionmaker(env.engine)() as db:
+        db.add(
+            MemberChannel(
+                gym_id=env.gym_id,
+                member_id=env.coach1_id,
+                channel="whatsapp",
+                channel_user_id="+1555-COACH",
+            )
+        )
+        await db.commit()
+
+    channel_info = await env.linking.coach_channel_in_gym(
+        env.coach1_id, env.gym_id,
+    )
+    assert channel_info is not None
+    # Deterministic: "telegram" before "whatsapp".
+    assert channel_info == ("telegram", "7")
+
+
 # ── P1 #2: demoted coach does not receive safety delivery ───────────────────
 
 

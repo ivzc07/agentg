@@ -493,9 +493,13 @@ class LinkingStore:
     async def coaches_for_gym(
         self, gym_id: int, exclude_member_id: int | None = None
     ) -> list[tuple[int, str, str, str]]:
-        """The Gym's Coaches reachable on a channel, as
+        """Exactly one Coach per Coach in the Gym, as
         ``(member_id, name, channel, channel_user_id)`` — who a safety flag
-        gets pinged to."""
+        gets pinged to.
+
+        A Coach may have multiple channel identities (MemberChannel rows);
+        exactly one is selected per Coach (deterministic: first by channel
+        name, then by channel_user_id)."""
         async with self._sessions() as db:
             rows = (
                 await db.execute(
@@ -507,13 +511,21 @@ class LinkingStore:
                     )
                     .join(MemberChannel, MemberChannel.member_id == Member.id)
                     .where(Member.gym_id == gym_id, Member.is_coach.is_(True))
+                    .order_by(
+                        Member.id,
+                        MemberChannel.channel,
+                        MemberChannel.channel_user_id,
+                    )
                 )
             ).all()
-        return [
-            (member_id, name, channel, channel_user_id)
-            for member_id, name, channel, channel_user_id in rows
-            if member_id != exclude_member_id
-        ]
+        seen: set[int] = set()
+        result: list[tuple[int, str, str, str]] = []
+        for member_id, name, channel, channel_user_id in rows:
+            if member_id == exclude_member_id or member_id in seen:
+                continue
+            seen.add(member_id)
+            result.append((member_id, name, channel, channel_user_id))
+        return result
 
     async def coach_channel_in_gym(
         self, member_id: int, gym_id: int
@@ -522,6 +534,9 @@ class LinkingStore:
         still reachable in *gym_id* and still flagged as Coach, or ``None``
         when the channel was repointed (gym switch leaving no channel row for
         the old member) or the Coach flag was removed.
+
+        When a Coach has multiple channels, the determination is
+        deterministic (by channel name, then channel_user_id).
 
         This is called at delivery time so a coach who switched gyms or was
         demoted between job creation and delivery never receives a cross-gym
@@ -539,6 +554,10 @@ class LinkingStore:
                         MemberChannel.member_id == member_id,
                         MemberChannel.gym_id == gym_id,
                         Member.is_coach.is_(True),
+                    )
+                    .order_by(
+                        MemberChannel.channel,
+                        MemberChannel.channel_user_id,
                     )
                 )
             ).first()

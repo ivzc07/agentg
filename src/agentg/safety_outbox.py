@@ -54,9 +54,14 @@ async def _coaches_for_gym_in_session(
     gym_id: int,
     exclude_member_id: int | None = None,
 ) -> list[tuple[int, str, str, str]]:
-    """Return the Gym's Coaches reachable on a channel, as
+    """Return exactly one Coach per Coach in the Gym, as
     ``(member_id, name, channel, channel_user_id)``, queried within an
     already-open session so eligibility is atomic with the Note commit.
+
+    A Coach may have multiple channel identities (MemberChannel rows).
+    Exactly one is selected per Coach (deterministic: first by channel
+    name, then by channel_user_id) so the outbox invariant — one job per
+    Note/Coach — always holds.
 
     The Gym row is locked (SELECT … FOR UPDATE) so a concurrent
     *promote_to_coach* or *set_coach* serializes with this query — a
@@ -77,13 +82,23 @@ async def _coaches_for_gym_in_session(
             )
             .join(MemberChannel, MemberChannel.member_id == Member.id)
             .where(Member.gym_id == gym_id, Member.is_coach.is_(True))
+            .order_by(
+                Member.id,
+                MemberChannel.channel,
+                MemberChannel.channel_user_id,
+            )
         )
     ).all()
-    return [
-        (member_id, name, channel, channel_user_id)
-        for member_id, name, channel, channel_user_id in rows
-        if member_id != exclude_member_id
-    ]
+    # Deduplicate: a Coach may have multiple MemberChannel rows.
+    # Pick the first channel per Coach deterministically (ordering above).
+    seen: set[int] = set()
+    result: list[tuple[int, str, str, str]] = []
+    for member_id, name, channel, channel_user_id in rows:
+        if member_id == exclude_member_id or member_id in seen:
+            continue
+        seen.add(member_id)
+        result.append((member_id, name, channel, channel_user_id))
+    return result
 
 
 class SafetyOutbox:
@@ -602,7 +617,8 @@ class OutboxWorker:
 
             # Check authorization on the locked connection: the Member
             # must still be flagged Coach with a channel pointing at the
-            # correct Gym.
+            # correct Gym.  Order deterministically so when a Coach has
+            # multiple channels the same one is always picked.
             result = await conn.execute(
                 sa_select(
                     MemberChannel.channel, MemberChannel.channel_user_id,
@@ -612,6 +628,10 @@ class OutboxWorker:
                     MemberChannel.member_id == job.coach_member_id,
                     MemberChannel.gym_id == job.gym_id,
                     Member.is_coach.is_(True),
+                )
+                .order_by(
+                    MemberChannel.channel,
+                    MemberChannel.channel_user_id,
                 )
             )
             row = result.first()
