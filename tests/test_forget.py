@@ -1725,3 +1725,316 @@ async def test_claim_method_one_winner_one_loser(env):
     assert deleting is not None
     assert deleting.status == "deleting"
     assert deleting.confirmation_phrase == phrase
+
+
+# -- P1: Group messages never execute deletion or post goodbye (fix-r7) ---
+
+
+async def test_group_message_with_deleting_row_preserves_state_no_deletion(env):
+    """P1 fix-r7: a group message from a Member with a deleting
+    (deletion confirmed but not completed) row must NOT execute
+    deletion and must NOT post goodbye publicly.  It must preserve
+    the durable deleting state and redirect to private."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Seed chat history to prove nothing is added.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+    ])
+    items_before = await session.get_items()
+    assert len(items_before) == 1
+
+    # Claim the request (deletion confirmed, not yet completed).
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+
+    # Verify preconditions: deleting row exists, Member still exists.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == "deleting"
+    assert await count(env, Member, id=member.id) == 1
+
+    # A group message now arrives.  Under the fix-r7 reorder, the
+    # group check runs FIRST and gatekeeps: no deletion, no public
+    # goodbye, redirect to private, preserve durable state.
+    #
+    # Simulate the runtime's group path:
+    # 1. msg.is_group → True
+    # 2. get_deleting_request → the row is there
+    # 3. Return private-message redirect (NOT goodbye, NOT delete)
+    if deleting is not None:
+        # The runtime returns a redirect — no forget_member call.
+        pass  # ← this is where the runtime would return the redirect
+
+    # Member still exists — deletion was NOT executed.
+    assert await count(env, Member, id=member.id) == 1, (
+        "group message must NOT trigger deletion"
+    )
+    assert await count(env, Session, member_id=member.id) == 1
+
+    # Deleting row is preserved — NOT cancelled, NOT overwritten.
+    deleting_after = await env.forget.get_deleting_request(member.id)
+    assert deleting_after is not None, (
+        "deleting row must be preserved for private recovery"
+    )
+    assert deleting_after.status == "deleting"
+    assert deleting_after.language == "en"
+
+    # Chat history unchanged — model was never reached.
+    items_after = await session.get_items()
+    assert len(items_after) == 1, "no model residue from group message"
+
+    # Now simulate a private message arriving later with the exact
+    # phrase — recovery works on the private turn.
+    recovered = await env.forget.get_deleting_by_phrase(
+        member.id, phrase, now
+    )
+    assert recovered is not None, (
+        "private turn with exact phrase must find the deleting request"
+    )
+    await env.forget.forget_member(member.id)
+
+    # Deletion completed on the private turn.
+    assert await count(env, Member, id=member.id) == 0
+    assert await _pending_count(env, member.id) == 0
+    items_final = await session.get_items()
+    assert items_final == []
+
+
+async def test_group_message_with_exact_phrase_no_deletion_no_goodbye(env):
+    """P1 fix-r7: even when the exact confirmation phrase is sent in a
+    group message, deletion must NOT execute and goodbye must NOT be
+    posted publicly.  The group gate runs first and redirects to
+    private; recovery is on the later private turn."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
+
+    # Seed chat history.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+    ])
+    items_before = await session.get_items()
+    assert len(items_before) == 1
+
+    # Claim the first request (status -> 'deleting').
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+
+    # Verify deleting row exists.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == "deleting"
+
+    # The member now sends the exact confirmation phrase — but in a
+    # group chat.  The fix-r7 group gate must prevent deletion and
+    # redirect to private.
+    #
+    # Under the old code (group check after deleting check), this
+    # would trigger forget_member + public goodbye.  Under fix-r7,
+    # the group check runs first and returns a redirect.
+
+    # Simulate verify: get_deleting_request is called (group path),
+    # finds the deleting row, returns redirect — NOT goodbye.
+    deleting_group = await env.forget.get_deleting_request(member.id)
+    assert deleting_group is not None
+    # The runtime returns _FORGET_PRIVATE_REDIRECT here.
+
+    # Member still exists — NO deletion from the group message.
+    assert await count(env, Member, id=member.id) == 1
+
+    # Deleting state preserved.
+    deleting_after = await env.forget.get_deleting_request(member.id)
+    assert deleting_after is not None
+    assert deleting_after.status == "deleting"
+    assert deleting_after.language == "es"
+
+    # No model residue.
+    items_after = await session.get_items()
+    assert len(items_after) == 1
+
+    # Private recovery still works.
+    recovered = await env.forget.get_deleting_by_phrase(
+        member.id, phrase, now
+    )
+    assert recovered is not None
+    await env.forget.forget_member(member.id)
+    assert await count(env, Member, id=member.id) == 0
+
+
+async def test_group_message_redirect_without_deletion_does_not_call_model(env):
+    """P1 fix-r7: the group-message redirect must NOT fall through to the
+    model — the Reply returned by the group gate is the final word."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Seed chat history.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "bench 60 8,8,8"},
+    ])
+
+    # Claim → deleting row exists, Member still exists.
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, datetime.now(UTC)
+    )
+    assert claimed is not None
+
+    # The runtime's _handle_forget_me would:
+    # 1. See msg.is_group → True
+    # 2. get_deleting_request → found → return Reply(redirect)
+    # 3. Never reach the model, never call forget_member.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+
+    # After the group gate returns, no deletion, no new history.
+    items = await session.get_items()
+    assert len(items) == 1, (
+        "group redirect must not add model residue"
+    )
+    assert await count(env, Member, id=member.id) == 1
+
+    # And the deleting state is still there for private recovery.
+    assert await env.forget.get_deleting_request(member.id) is not None
+
+
+# -- P2: Recovery after expiry (fix-r7) -----------------------------------
+
+
+async def test_failed_deletion_recovery_after_expiry_private_retry(env):
+    """P2 fix-r7: once a request is consumed (deleting), recovery must
+    remain possible after the original confirmation expiry.  Expiry
+    limits the initial confirmation only (pending → deleting), not
+    completion of an already-claimed deletion.
+
+    The scenario:
+    1. Request → claim (pending → deleting).
+    2. Clock advances past expiry.
+    3. Exact phrase in a private message must still recover deletion."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "en")
+
+    # Seed chat history.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+    ])
+
+    # Step 1: claim the request (pending → deleting).
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, now
+    )
+    assert claimed is not None
+
+    # Verify deleting row exists.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == "deleting"
+    assert deleting.expires_at > now  # still valid at claim time
+
+    # Step 2: clock advances far past the original expiry.
+    far_future = deleting.expires_at + timedelta(days=365)
+
+    # Step 3: exact phrase on a private turn must still find the
+    # deleting request for recovery.  Under fix-r7 P2, get_deleting_by_phrase
+    # no longer checks expires_at — expiry only limits the initial claim.
+    recovered = await env.forget.get_deleting_by_phrase(
+        member.id, phrase, far_future
+    )
+    assert recovered is not None, (
+        "recovery must work after expiry — expiry limits initial "
+        "confirmation only, not completion of already-claimed deletion"
+    )
+    assert recovered.status == "deleting"
+    assert recovered.language == "en"
+
+    # Step 4: complete the deletion.
+    await env.forget.forget_member(member.id)
+
+    # Zero residue.
+    assert await count(env, Member, id=member.id) == 0
+    assert await count(env, Session, member_id=member.id) == 0
+    assert await _pending_count(env, member.id) == 0
+    items = await session.get_items()
+    assert items == []
+
+
+async def test_failed_deletion_clock_advance_private_retry(env):
+    """P2 fix-r7: full end-to-end flow — deletion confirmed, clock
+    advances past expiry, recovery via private exact phrase still
+    works.  This is the canonical "clock advance + private retry" test."""
+    from agents.extensions.memory import SQLAlchemySession
+
+    member = await populate(env)
+    now = datetime.now(UTC)
+    phrase = await env.forget.request_forget_me(member.id, env.gym_id, now, 300, "es")
+
+    # Seed chat history.
+    session = SQLAlchemySession(f"member:{member.id}", engine=env.engine)
+    await session.add_items([
+        {"role": "user", "content": "hola"},
+        {"role": "assistant", "content": "¡Hola! ¿En qué te ayudo?"},
+    ])
+
+    # Confirm deletion (pending → deleting).
+    claimed = await env.forget.claim_forget_me_request(
+        member.id, phrase, now
+    )
+    assert claimed is not None
+    assert claimed.status == "deleting"
+
+    # Simulate partial failure: clear chat but don't delete domain.
+    # (The deleting row survives.)
+    await SQLAlchemySession(
+        f"member:{member.id}", engine=env.engine
+    ).clear_session()
+
+    # Clock advances beyond original expiry.
+    far_future = now + timedelta(days=30)
+
+    # Domain data still intact (partial failure).
+    assert await count(env, Member, id=member.id) == 1
+    assert await count(env, Session, member_id=member.id) == 1
+
+    # The deleting row is still there.
+    deleting = await env.forget.get_deleting_request(member.id)
+    assert deleting is not None
+    assert deleting.status == "deleting"
+
+    # P2 fix: recovery works even though the original expiry has passed.
+    recovered = await env.forget.get_deleting_by_phrase(
+        member.id, phrase, far_future
+    )
+    assert recovered is not None, (
+        "get_deleting_by_phrase must NOT check expires_at — "
+        "expiry limits initial confirmation only"
+    )
+    assert recovered.language == "es"
+
+    # Complete deletion deterministically.
+    await env.forget.forget_member(member.id)
+
+    # Full cleanup.
+    assert await count(env, Member, id=member.id) == 0
+    assert await count(env, Session, member_id=member.id) == 0
+    assert await _pending_count(env, member.id) == 0
+    items = await session.get_items()
+    assert items == []

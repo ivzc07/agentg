@@ -129,6 +129,19 @@ _FORGET_WARNING: dict[str, str] = {
     ),
 }
 
+# Private-message redirect when a Member tries to confirm or interact with
+# a deletion from a group chat (issue #212, fix-r7 P1).
+_FORGET_PRIVATE_REDIRECT: dict[str, str] = {
+    "en": (
+        "Your data deletion is in progress. "
+        "Please send the confirmation phrase as a private message to complete it."
+    ),
+    "es": (
+        "La eliminaci\u00f3n de tus datos est\u00e1 en curso. "
+        "Env\u00eda la frase de confirmaci\u00f3n como mensaje privado para completarla."
+    ),
+}
+
 
 @dataclass
 class AgentRuntime:
@@ -476,10 +489,33 @@ class AgentRuntime:
 
         now = datetime.now(timezone.utc)
 
+        # P1: Group messages must NEVER execute Forget-me deletion or post
+        # goodbye publicly, even when a deleting/consumed row exists.
+        # Preserve durable deleting state and return only the required
+        # private-message redirect; recovery occurs on a later private
+        # turn (issue #212, fix-r7 P1).
+        if msg.is_group:
+            # Check for deleting (in-progress or interrupted) deletion
+            # first — preserve the durable state, redirect to private.
+            deleting_req = await self.stores.forget.get_deleting_request(
+                linked.member.id
+            )
+            if deleting_req is not None:
+                return Reply(
+                    _FORGET_PRIVATE_REDIRECT[deleting_req.language or "es"]
+                )
+            # Cancel any pending request — group messages never confirm
+            # deletion.
+            pending = await self.stores.forget.get_pending_request(
+                linked.member.id
+            )
+            if pending is not None:
+                await self.stores.forget.cancel_forget_me(linked.member.id)
+            return None
+
         # P1: Check for a deleting (in-progress or interrupted) deletion
-        # FIRST — before the group early return, before anything else.  A
-        # deleting row is the durable signal that deletion was already
-        # confirmed.
+        # FIRST — before anything else.  A deleting row is the durable
+        # signal that deletion was already confirmed.
         #
         # When the exact confirmation phrase is repeated, resume deletion
         # deterministically (partial-failure recovery, issue #212, fix-3).
@@ -491,17 +527,6 @@ class AgentRuntime:
         if deleting_req is not None:
             await self.stores.forget.forget_member(linked.member.id)
             return Reply(_FORGET_GOODBYE[deleting_req.language or "es"])
-
-        # Group messages never trigger or confirm forget-me, but a
-        # group/different message from a Member with a pending request
-        # must clear the pending intent without deletion.
-        if msg.is_group:
-            pending = await self.stores.forget.get_pending_request(
-                linked.member.id
-            )
-            if pending is not None:
-                await self.stores.forget.cancel_forget_me(linked.member.id)
-            return None
 
         pending = await self.stores.forget.get_pending_request(
             linked.member.id

@@ -277,7 +277,13 @@ class ForgetStore:
         self, member_id: int, confirmation_phrase: str, now: datetime
     ) -> ForgetMeRequest | None:
         """Return a deleting request whose confirmation phrase still matches
-        and hasn't expired — the retry primitive for partial-failure recovery.
+        — the retry primitive for partial-failure recovery.
+
+        Expiry is NOT checked here: expiry limits the initial confirmation
+        (pending → deleting) only, not completion of an already-claimed
+        deletion.  Once deletion is confirmed, sending the exact phrase
+        resumes it regardless of how much time has passed (issue #212,
+        fix-r7 P2).
 
         Only a message carrying the exact confirmation phrase can resume
         deletion; any other message falls through to normal processing.
@@ -287,7 +293,6 @@ class ForgetStore:
                 select(ForgetMeRequest).where(
                     ForgetMeRequest.member_id == member_id,
                     ForgetMeRequest.confirmation_phrase == confirmation_phrase,
-                    ForgetMeRequest.expires_at > now,
                     ForgetMeRequest.status == STATUS_DELETING,
                 )
             )
