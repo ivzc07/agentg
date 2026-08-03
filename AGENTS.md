@@ -16,7 +16,7 @@ Before merging any PR:
 2. For every P1 and P2: diagnose it against the actual code and confirm it is real, then fix it - do not "fix" a finding without verifying it. If it is wrong or not worth fixing, dismiss it by replying on the comment thread with the reason.
 3. Reply on each thread noting what you did (fix commit or dismissal reason) so nothing is silently ignored.
 
-Merge with `gh pr merge <N> --merge --delete-branch` - the repo does **not** delete branches on merge, so omitting the flag leaks a branch every time. Resolving a merge conflict counts as "substantive fixes": re-run `scripts/pi-review <N>` on the result before merging.
+Merge with `gh pr merge <N> --merge --delete-branch` - the repo does **not** delete branches on merge, so omitting the flag leaks a branch every time. Merge a batch **one PR at a time**, waiting for GitHub to recompute mergeability between merges. Resolving a merge conflict counts as "substantive fixes": re-run `scripts/pi-review <N>` on the result before merging. Never force-push `main` - the ruleset would not stop you.
 
 When the work is done, clean up: local branches (`git branch -d`), leftover agent worktrees under `~/.herdr/worktrees/`, and `.scratch/` review artifacts. Finish with `git status --porcelain` clean.
 
