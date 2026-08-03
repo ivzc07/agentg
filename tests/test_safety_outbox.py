@@ -1398,13 +1398,18 @@ async def test_reset_stale_claims_does_not_requeue_delivered(env):
     jobs = await env.outbox.claim_pending(limit=50)
     assert len(jobs) == 2
 
-    # Backdate claimed_at so they look stale.
+    # Backdate claimed_at so they look stale.  A really-slow delivery
+    # carries its (old) claim stamp in memory too, so mirror the backdate
+    # on the in-memory jobs — the lease-stamp fence in mark_delivered
+    # compares them.
+    stale_time = datetime.now(UTC) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
     async with env.engine.begin() as conn:
-        stale_time = datetime.now(UTC) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
         await conn.execute(
             text("UPDATE safety_outbox_jobs SET claimed_at = :ts"),
-            {"ts": stale_time},
+            {"ts": stale_time.replace(tzinfo=None)},
         )
+    for j in jobs:
+        j.claimed_at = stale_time
 
     # Deliver one job first (simulating slow delivery completing).
     await env.outbox.mark_delivered(jobs[0])
@@ -1811,14 +1816,14 @@ async def test_job_still_sending_rejects_non_sending_status(env):
 
     worker = _make_worker(env)
 
-    # Should return True when status is 'sending'.
-    assert await worker._job_still_sending(jobs[0].id) is True
+    # Should return True when status is 'sending' under our claim.
+    assert await worker._job_still_sending(jobs[0]) is True
 
     # Mark the job as failed (simulating forget-me or permanent failure).
     await env.outbox.mark_failed(jobs[0], "member data deleted")
 
     # Should now return False — status is 'failed', not 'sending'.
-    assert await worker._job_still_sending(jobs[0].id) is False
+    assert await worker._job_still_sending(jobs[0]) is False
 
 
 # ── P1 #3: eligibility query locked against concurrent promotion ───────────
@@ -3693,3 +3698,70 @@ async def test_mark_delivered_still_sets_delivered_at(env):
     assert row.failed_at is None, (
         "mark_delivered must not set failed_at"
     )
+
+
+# ── Lease-stamp fencing: a stale owner cannot clobber a re-claimed job ──────
+
+
+async def test_stale_owner_cannot_clobber_reclaimed_job(env):
+    """After reset_stale_claims + a fresh claim_pending, the STALE owner's
+    mark_delivered / mark_failed / reset_for_retry must all no-op — only
+    the current lease holder (matching claimed_at) may transition the job."""
+    from agentg.safety_outbox import LEASE_TIMEOUT_SECONDS
+
+    await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text="sharp knee pain",
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+    stale_jobs = await env.outbox.claim_pending(limit=50)
+    assert len(stale_jobs) == 1
+
+    # The stale owner's send hangs; its lease expires and is reset.
+    stale_time = datetime.now(UTC) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE safety_outbox_jobs SET claimed_at = :ts"),
+            {"ts": stale_time.replace(tzinfo=None)},
+        )
+    stale_jobs[0].claimed_at = stale_time
+    assert await env.outbox.reset_stale_claims() == 1
+
+    # A new owner claims the job with a fresh lease stamp.
+    new_jobs = await env.outbox.claim_pending(limit=50)
+    assert len(new_jobs) == 1
+    assert new_jobs[0].id == stale_jobs[0].id
+
+    async def _status():
+        async with env.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT status, claimed_at FROM safety_outbox_jobs "
+                        "WHERE id = :id"
+                    ),
+                    {"id": stale_jobs[0].id},
+                )
+            ).first()
+        return row
+
+    # The stale owner's transitions must all no-op against the new claim.
+    await env.outbox.mark_delivered(stale_jobs[0])
+    assert (await _status()).status == "sending"
+    await env.outbox.mark_failed(stale_jobs[0], "stale failure")
+    assert (await _status()).status == "sending"
+    before = (await _status()).claimed_at
+    await env.outbox.reset_for_retry(stale_jobs[0], "stale retry")
+    row = await _status()
+    assert row.status == "sending", (
+        "a stale owner's reset_for_retry must not clobber the live claim"
+    )
+    assert row.claimed_at == before
+
+    # The current owner's transition works normally.
+    await env.outbox.mark_delivered(new_jobs[0])
+    assert (await _status()).status == "delivered"

@@ -8,6 +8,15 @@ delivery time, and falls back to text-only when minting fails.
 Global lock order across all paths that acquire multiple row locks:
   Gym → Member → MemberChannel → SafetyOutboxJob → MemberNote
 
+The row-lock serialization below relies on ``SELECT … FOR UPDATE``, which
+is honoured on PostgreSQL (the production default, spec §Hosting) but is a
+no-op on SQLite — there, a forget-me commit can interleave between the
+delivery re-checks and the network send.  SQLite deployments (tests, dev)
+instead rely on the status/lease re-checks, which close all but the final
+check-to-send window; the full guarantee is PostgreSQL-only.  Taking
+SQLite's real write lock (the noop-UPDATE idiom used elsewhere) is not an
+option here: it would hold the global write lock across a network send.
+
 Every path that needs two or more of these rows must acquire them in this
 order.  The delivery path (_authorized_send) locks Member then
 MemberChannel then SafetyOutboxJob then MemberNote.  The gym-switch path
@@ -236,13 +245,16 @@ class SafetyOutbox:
 
     async def mark_delivered(self, job: SafetyOutboxJob) -> None:
         """Mark a single job as delivered — only if it is still in the
-        ``sending`` state (a retry may have already reset it)."""
+        ``sending`` state under OUR claim (``claimed_at`` lease stamp).
+        A stale owner whose claim was reset and re-claimed cannot clobber
+        the new owner's live claim."""
         async with self._sessions() as db:
             await db.execute(
                 update(SafetyOutboxJob)
                 .where(
                     SafetyOutboxJob.id == job.id,
                     SafetyOutboxJob.status == "sending",
+                    SafetyOutboxJob.claimed_at == job.claimed_at,
                 )
                 .values(status="delivered", delivered_at=self._clock(), last_error=None)
             )
@@ -252,13 +264,15 @@ class SafetyOutbox:
         """Mark a single job as permanently failed — only if still ``sending``.
 
         ``delivered_at`` stays ``None`` — no delivery occurred.
-        ``failed_at`` records the failure timestamp for audit."""
+        ``failed_at`` records the failure timestamp for audit.
+        Guarded by the ``claimed_at`` lease stamp like ``mark_delivered``."""
         async with self._sessions() as db:
             await db.execute(
                 update(SafetyOutboxJob)
                 .where(
                     SafetyOutboxJob.id == job.id,
                     SafetyOutboxJob.status == "sending",
+                    SafetyOutboxJob.claimed_at == job.claimed_at,
                 )
                 .values(
                     status="failed",
@@ -275,8 +289,10 @@ class SafetyOutbox:
         count — the backoff is bounded at *MAX_BACKOFF_SECONDS* so
         persistently-failing jobs retry at that ceiling forever (P1 #4).
 
-        Only acts when the job is still ``sending`` — a delivery that
-        completed between the attempt and this guard is not overwritten.
+        Only acts when the job is still ``sending`` under OUR claim
+        (``claimed_at`` lease stamp) — a delivery that completed between
+        the attempt and this guard, or a claim reset-and-re-claimed by
+        another owner, is not overwritten.
         ``claimed_at`` is cleared so the next claim can stamp a fresh lease.
         ``last_error`` records the transient reason for diagnostics.
         ``next_retry_at`` gates the next claim so the bounded backoff is
@@ -290,6 +306,7 @@ class SafetyOutbox:
                 .where(
                     SafetyOutboxJob.id == job.id,
                     SafetyOutboxJob.status == "sending",
+                    SafetyOutboxJob.claimed_at == job.claimed_at,
                 )
                 .values(
                     status="pending",
@@ -468,7 +485,7 @@ class OutboxWorker:
 
             # Verify the job still exists (cascade-delete from forget-me
             # would remove it).  If it's gone, nothing more to do.
-            if not await self._job_still_sending(job.id):
+            if not await self._job_still_sending(job):
                 return
 
             text = f"Heads-up from your member {job.member_name}: {note_text}"
@@ -494,7 +511,7 @@ class OutboxWorker:
             headsup_failed: str | None = None
             async with self._semaphore:
                 # Pre-verify the job is still sending before authorizing.
-                if not await self._job_still_sending(job.id):
+                if not await self._job_still_sending(job):
                     headsup_failed = "job_gone"
                 else:
                     headsup_failed = await self._authorized_send(
@@ -522,7 +539,7 @@ class OutboxWorker:
                 # land between authorization and link send (P1 #2 r5).
                 link_failed: str | None = None
                 async with self._semaphore:
-                    if not await self._job_still_sending(job.id):
+                    if not await self._job_still_sending(job):
                         link_failed = "job_gone"
                     else:
                         link_failed = await self._authorized_send(
@@ -579,6 +596,10 @@ class OutboxWorker:
         — no demotion, gym-switch, or forget-me can interleave between the
         check and the notifier call.
 
+        PostgreSQL-only guarantee: SQLite ignores ``FOR UPDATE`` (see the
+        module docstring), so on SQLite these are plain reads and the
+        interleave window between the re-checks and the send remains.
+
         Returns ``None`` on success, or an error code string on failure.
         """
         from sqlalchemy import select as sa_select
@@ -621,6 +642,7 @@ class OutboxWorker:
                     .where(
                         SafetyOutboxJob.id == job.id,
                         SafetyOutboxJob.status == "sending",
+                        SafetyOutboxJob.claimed_at == job.claimed_at,
                     )
                     .with_for_update()
                 )
@@ -702,14 +724,21 @@ class OutboxWorker:
             note = await db.get(MemberNote, note_id)
             return note.text if note is not None else None
 
-    async def _job_still_sending(self, job_id: int) -> bool:
-        """True when the outbox job still exists AND is in ``sending`` status.
+    async def _job_still_sending(self, job: SafetyOutboxJob) -> bool:
+        """True when the outbox job still exists, is in ``sending`` status,
+        AND still carries OUR ``claimed_at`` lease stamp.
 
         A job that was cascade-deleted (via forget-me deleting its Note)
         returns False here, so delivery can bail out without sending.
         A job whose status changed to ``failed`` (e.g. forget-me marking it
         before cascade) also returns False — defense in depth for P1 #1.
+        A job reset by ``reset_stale_claims`` and re-claimed by another
+        owner also returns False — the stale owner must not deliver.
         """
         async with self._outbox._sessions() as db:
-            row = await db.get(SafetyOutboxJob, job_id)
-            return row is not None and row.status == "sending"
+            row = await db.get(SafetyOutboxJob, job.id)
+            return (
+                row is not None
+                and row.status == "sending"
+                and row.claimed_at == job.claimed_at
+            )

@@ -542,14 +542,16 @@ class AgentRuntime:
     async def shutdown(self) -> None:
         """Stop background tasks.  Safe to call when none were started."""
         if self._outbox_worker is not None:
-            # Final drain before stopping the poll loop.
-            # Atomically claimed jobs prevent duplication with the poll
-            # task (claim_pending transitions status pending→sending).
+            # Stop the poll loop BEFORE the final drain: a live poll loop
+            # could reset_stale_claims a slow drain-claimed job (worst-case
+            # drain exceeds the lease timeout) and re-claim it, so the same
+            # job would be delivered twice.  With the loop stopped, the
+            # drain owns every claim it makes.
+            await self._outbox_worker.stop()
             try:
                 await self._outbox_worker.drain_once()
             except Exception:
                 logger.exception("final outbox drain failed")
-            await self._outbox_worker.stop()
             self._outbox_worker = None
 
     def session_for_member(self, member_id: int) -> SQLAlchemySession:
