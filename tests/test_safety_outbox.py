@@ -3074,6 +3074,69 @@ async def _build_legacy_outbox_table(conn, form: str) -> None:
         )
 
 
+async def _outbox_uq_ddl_during(engine, action) -> list[str]:
+    """Return the mutating DDL naming uq_outbox_job_note_coach that `action`
+    emits.  Read-only introspection (PRAGMA index_info and friends) mentions
+    the constraint too, so only DROP/CREATE/ALTER counts."""
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    sync_engine = engine.sync_engine
+    event.listen(sync_engine, "before_cursor_execute", _record)
+    try:
+        await action()
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _record)
+
+    return [
+        s
+        for s in statements
+        if "uq_outbox_job_note_coach" in s
+        and s.lstrip().upper().startswith(("DROP", "CREATE", "ALTER"))
+    ]
+
+
+async def test_fresh_database_boot_never_touches_the_unique_constraint(tmp_path):
+    """A healthy create_all database boots without re-running the migration.
+
+    The gate is \"is the 2-column form absent\", so on every normal boot the
+    only thing preventing a DROP + CREATE is the inline UniqueConstraint
+    create_all emits being reported through get_unique_constraints.  That is
+    load-bearing: were it to stop holding, every production boot would drop
+    and recreate uniqueness, and since this DDL autocommits each boot would
+    open a real window with no enforcement — on every database, not just
+    legacy ones (PR #231 round 3 P3)."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'fresh.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+
+    touched = await _outbox_uq_ddl_during(engine, linking.ensure_schema)
+    assert not touched, (
+        "a fresh database must be recognised as already migrated; emitting "
+        f"this DDL on a healthy boot removes uniqueness mid-boot: {touched}"
+    )
+
+    # And the constraint is genuinely in force, so the skip is not vacuous.
+    gym = await linking.create_gym("Gym")
+    coach = await linking.link_member(gym.id, "Coach", "telegram", "99")
+    await linking.set_coach(coach.id)
+    async with engine.begin() as conn:
+        note_id = await _seed_note(conn, gym_id=gym.id, member_id=coach.id)
+        await _seed_legacy_outbox_row(
+            conn, gym_id=gym.id, note_id=note_id, coach_member_id=coach.id
+        )
+    with pytest.raises(IntegrityError) as excinfo:
+        async with engine.begin() as conn:
+            await _seed_legacy_outbox_row(
+                conn, gym_id=gym.id, note_id=note_id, coach_member_id=coach.id
+            )
+    _assert_rejected_by_note_coach_uniqueness(excinfo.value)
+
+    await engine.dispose()
+
+
 async def _seed_note(conn, *, gym_id, member_id) -> int:
     """Insert a MemberNote directly, returning its id.
 
@@ -3092,13 +3155,20 @@ async def _seed_note(conn, *, gym_id, member_id) -> int:
 
 
 async def _seed_legacy_outbox_row(conn, *, gym_id, note_id, coach_member_id):
-    """Insert one pre-migration outbox row straight into the legacy table."""
+    """Insert one outbox row with raw SQL, bypassing the ORM.
+
+    Every NOT NULL column is supplied explicitly: the legacy DDL carries
+    server-side defaults for retry_count and member_is_coach but the model's
+    table does not, so an insert relying on them succeeds against a legacy
+    table and fails against a fresh one.
+    """
     await conn.execute(
         text(
             "INSERT INTO safety_outbox_jobs (gym_id, note_id, coach_member_id,"
-            " channel, channel_user_id, member_id, member_name, status,"
-            " created_at) VALUES (:gym, :note, :coach, 'telegram', '99',"
-            " :coach, 'Legacy Member', 'pending', '2026-01-01 00:00:00')"
+            " channel, channel_user_id, member_id, member_name,"
+            " member_is_coach, status, retry_count, created_at) VALUES"
+            " (:gym, :note, :coach, 'telegram', '99', :coach,"
+            " 'Legacy Member', 0, 'pending', 0, '2026-01-01 00:00:00')"
         ),
         {"gym": gym_id, "note": note_id, "coach": coach_member_id},
     )
@@ -3162,26 +3232,7 @@ async def test_legacy_rows_survive_the_unique_constraint_migration(
     )
 
     # Second boot: the migration must recognise its own work and do nothing.
-    statements: list[str] = []
-
-    def _record(conn, cursor, statement, parameters, context, executemany):
-        statements.append(statement)
-
-    sync_engine = engine.sync_engine
-    event.listen(sync_engine, "before_cursor_execute", _record)
-    try:
-        await linking.ensure_schema()
-    finally:
-        event.remove(sync_engine, "before_cursor_execute", _record)
-
-    # Introspection (PRAGMA index_info and friends) is expected; mutating
-    # DDL against the constraint is not.
-    touched = [
-        s
-        for s in statements
-        if "uq_outbox_job_note_coach" in s
-        and s.lstrip().upper().startswith(("DROP", "CREATE", "ALTER"))
-    ]
+    touched = await _outbox_uq_ddl_during(engine, linking.ensure_schema)
     assert not touched, (
         "ensure_schema must converge — re-running the drop/create on every "
         "boot re-opens a window with no 2-column enforcement, because the "
