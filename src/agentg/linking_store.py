@@ -291,6 +291,13 @@ def _add_missing_columns(conn: Connection) -> None:
                 "ALTER TABLE safety_outbox_jobs ADD COLUMN login_token_hash VARCHAR(64)"
             )
         )
+    # attempt_started_at separates "claimed" from "actually attempted", so
+    # crash recovery cannot charge the retry budget for a send that was never
+    # issued.  NULL on existing rows is the safe reading: not yet attempted.
+    if "attempt_started_at" not in outbox_columns:
+        conn.execute(
+            text("ALTER TABLE safety_outbox_jobs ADD COLUMN attempt_started_at TIMESTAMP")
+        )
     # P1 #1: tighten unique constraint from (gym_id, note_id, coach_member_id)
     # to (note_id, coach_member_id) — one job per Note/Coach regardless of
     # gym_id (the Note already owns the Gym scope; the gym_id column is

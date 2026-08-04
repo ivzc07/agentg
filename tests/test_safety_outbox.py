@@ -765,12 +765,14 @@ async def test_reset_stale_claims_recovers_hung_jobs(env):
     jobs = await env.outbox.claim_pending(limit=50)
     assert len(jobs) == 2
 
-    # Backdate claimed_at so they appear stale.
+    # Backdate claimed_at so they appear stale.  Write it *naive* like
+    # TZDateTime does: a raw text() UPDATE bypasses the type decorator, and
+    # the lease fence compares the stored value against an ORM-bound one.
     async with env.engine.begin() as conn:
         stale_time = datetime.now(UTC) - timedelta(seconds=LEASE_TIMEOUT_SECONDS + 10)
         await conn.execute(
             text("UPDATE safety_outbox_jobs SET claimed_at = :ts"),
-            {"ts": stale_time},
+            {"ts": stale_time.replace(tzinfo=None)},
         )
 
     # reset_stale_claims should recover them.
@@ -4444,6 +4446,23 @@ def _explode_link_send(worker):
     return worker
 
 
+async def _expire_leases(env):
+    """Backdate every live claim so the lease looks expired.
+
+    Writes a *naive* UTC value because a raw text() UPDATE bypasses
+    TZDateTime's bind processor, and the per-row lease fence compares the
+    stored value against an ORM-bound one.
+    """
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE safety_outbox_jobs SET claimed_at = :t "
+                "WHERE status = 'sending'"
+            ),
+            {"t": (datetime.now(UTC) - timedelta(hours=1)).replace(tzinfo=None)},
+        )
+
+
 async def _one_job(env, coach_id=None, body="sharp knee pain"):
     return await env.outbox.create_note_and_jobs(
         member_id=env.member_id,
@@ -4468,11 +4487,7 @@ async def test_stale_owner_cannot_revoke_the_live_owners_credential(env):
     assert len(stale) == 1
 
     # The lease expires and the poll loop hands the job to a new owner.
-    async with env.engine.begin() as conn:
-        await conn.execute(
-            text("UPDATE safety_outbox_jobs SET claimed_at = :t"),
-            {"t": datetime.now(UTC) - timedelta(hours=1)},
-        )
+    await _expire_leases(env)
     assert await env.outbox.reset_stale_claims() == 1
 
     worker = _make_worker(env)
@@ -4507,11 +4522,7 @@ async def test_stale_owner_cannot_overwrite_the_live_login_token_hash(env):
     await _one_job(env)
     stale = await env.outbox.claim_pending(limit=10)
 
-    async with env.engine.begin() as conn:
-        await conn.execute(
-            text("UPDATE safety_outbox_jobs SET claimed_at = :t"),
-            {"t": datetime.now(UTC) - timedelta(hours=1)},
-        )
+    await _expire_leases(env)
     await env.outbox.reset_stale_claims()
     live = await env.outbox.claim_pending(limit=10)
     assert len(live) == 1
@@ -4543,8 +4554,9 @@ async def test_abandoned_claims_consume_an_attempt(env):
     for expected in range(1, MAX_DELIVERY_ATTEMPTS):
         claimed = await env.outbox.claim_pending(limit=10)
         assert len(claimed) == 1, f"attempt {expected} should have been claimable"
-        # "Crash": the owner dies without recording an outcome; the next boot
-        # runs reset_claimed.
+        # "Crash": the send was issued, then the owner died without recording
+        # an outcome; the next boot runs reset_claimed.
+        assert await env.outbox.mark_attempt_started(claimed[0]) is True
         assert await env.outbox.reset_claimed() == 1
         async with env.engine.connect() as conn:
             row = (
@@ -4560,7 +4572,9 @@ async def test_abandoned_claims_consume_an_attempt(env):
         assert row.last_error == "claim abandoned (restart)"
 
     # The last abandoned claim trips the terminal policy.
-    assert len(await env.outbox.claim_pending(limit=10)) == 1
+    last = await env.outbox.claim_pending(limit=10)
+    assert len(last) == 1
+    assert await env.outbox.mark_attempt_started(last[0]) is True
     assert await env.outbox.reset_claimed() == 1
     failed = await env.outbox.failed_jobs()
     assert len(failed) == 1
@@ -4576,15 +4590,11 @@ async def test_expired_leases_converge_on_the_terminal_policy(env):
 
     claims = 0
     for _ in range(MAX_DELIVERY_ATTEMPTS + 4):
-        claims += len(await env.outbox.claim_pending(limit=10))
-        async with env.engine.begin() as conn:
-            await conn.execute(
-                text(
-                    "UPDATE safety_outbox_jobs SET claimed_at = :t "
-                    "WHERE status = 'sending'"
-                ),
-                {"t": datetime.now(UTC) - timedelta(hours=1)},
-            )
+        claimed = await env.outbox.claim_pending(limit=10)
+        claims += len(claimed)
+        for job in claimed:  # the send was issued, then the worker hung
+            await env.outbox.mark_attempt_started(job)
+        await _expire_leases(env)
         await env.outbox.reset_stale_claims()
 
     assert claims == MAX_DELIVERY_ATTEMPTS, (
@@ -4600,7 +4610,8 @@ async def test_recovery_does_not_retire_a_job_with_attempts_left(env):
     """Recovery must not over-fire: a job well short of the ceiling comes
     back pending and is delivered normally."""
     await _one_job(env)
-    await env.outbox.claim_pending(limit=10)
+    claimed = await env.outbox.claim_pending(limit=10)
+    await env.outbox.mark_attempt_started(claimed[0])
     assert await env.outbox.reset_claimed() == 1
 
     assert await _make_worker(env).drain_once(limit=10) == 1
@@ -4824,3 +4835,260 @@ def test_sanitize_error_backstop_catches_unlabelled_high_entropy_values():
     assert sanitize_error("coach no longer reachable in this gym") == (
         "coach no longer reachable in this gym"
     )
+
+
+# ── PR #228 review r2: a claim is not an attempt (P2) ─────────────────────
+
+
+async def test_unattempted_claims_are_not_charged_against_the_retry_budget(env):
+    """A crash loop must never retire a safety ping that was never sent.
+
+    claim_pending flips a whole batch to 'sending' before any send goes out
+    (and the batch is wider than the delivery fan-out), so charging every
+    recovered claim would let repeated crashes retire jobs as
+    'retry_exhausted' having never reached the notifier at all
+    (PR #228 review r2, P2).
+    """
+    await _one_job(env, coach_id=env.coach1_id)
+
+    for boot in range(MAX_DELIVERY_ATTEMPTS + 4):
+        claimed = await env.outbox.claim_pending(limit=50)
+        assert len(claimed) == 1, f"boot {boot}: the job must stay claimable"
+        # SIGKILL before any send is issued — no attempt_started_at stamp.
+        assert await env.outbox.reset_claimed() == 1
+        async with env.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT status, retry_count, failure_kind, last_error "
+                        "FROM safety_outbox_jobs"
+                    )
+                )
+            ).first()
+        assert row.status == "pending", f"boot {boot}: got {row.status}"
+        assert row.retry_count == 0, "an unissued send is not an attempt"
+        assert row.failure_kind is None
+        assert row.last_error is None
+
+    assert env.notifier.sent == []
+    assert await env.outbox.failed_jobs() == []
+
+    # And it still delivers once a worker actually runs.
+    assert await _make_worker(env).drain_once(limit=10) == 1
+    assert len(env.notifier.sent) == 2  # heads-up + link
+
+
+async def test_attempt_stamp_is_scoped_to_the_current_claim(env):
+    """A stamp left by an earlier attempt must not make the *next* abandoned
+    claim look attempted — otherwise one real attempt could be charged twice
+    (PR #228 review r2, P2)."""
+    await _one_job(env)
+
+    first = await env.outbox.claim_pending(limit=10)
+    assert await env.outbox.mark_attempt_started(first[0]) is True
+    assert await env.outbox.reset_claimed() == 1
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT retry_count FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.retry_count == 1  # a real attempt was charged
+
+    # Second claim, no send issued: the older stamp predates this claim.
+    second = await env.outbox.claim_pending(limit=10)
+    assert len(second) == 1
+    assert await env.outbox.reset_claimed() == 1
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status, retry_count FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "pending"
+    assert row.retry_count == 1, "a stale stamp must not charge a new claim"
+
+
+async def test_delivery_stamps_the_attempt_before_sending(env):
+    """The worker records the attempt durably before the heads-up goes out,
+    so a crash mid-send is charged (PR #228 review r2, P2)."""
+    await _one_job(env)
+
+    worker = _make_worker(env, notifier=FakeNotifier(failing_id="7"))
+    await worker.drain_once(limit=10)
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT attempt_started_at, retry_count, status "
+                    "FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.attempt_started_at is not None, (
+        "a real delivery attempt must leave a durable stamp"
+    )
+    assert row.retry_count == 1
+    assert row.status == "pending"
+
+
+async def test_recovery_ignores_a_job_whose_lease_moved_on(env):
+    """_recover_claims is fenced per row on (id, claimed_at), so a recoverer
+    working from a stale read cannot rewrite a job another owner has already
+    re-claimed — and does not report or announce it either
+    (PR #228 review r2, P3)."""
+    await _one_job(env)
+    stale_view = await env.outbox.claim_pending(limit=10)
+    assert len(stale_view) == 1
+    await env.outbox.mark_attempt_started(stale_view[0])
+
+    # Another recoverer gets there first: the job is requeued and re-claimed
+    # with a fresh lease stamp.
+    await _expire_leases(env)
+    assert await env.outbox.reset_stale_claims() == 1
+    live = await env.outbox.claim_pending(limit=10)
+    assert len(live) == 1
+    assert live[0].claimed_at != stale_view[0].claimed_at
+
+    emitted = []
+    handler = logging.Handler()
+    handler.emit = lambda r: (
+        emitted.append(r.outbox) if hasattr(r, "outbox") else None
+    )
+    logging.getLogger("agentg.safety_outbox").addHandler(handler)
+    try:
+        # The stale view still says "sending, mine" — recovery must no-op.
+        assert await env.outbox._recover_claims(stale_view, "stale recovery") == 0
+    finally:
+        logging.getLogger("agentg.safety_outbox").removeHandler(handler)
+
+    assert emitted == [], "a fenced-out row must not emit terminal telemetry"
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, claimed_at, last_error FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.status == "sending", "the live owner's claim must survive"
+    # "claim lease expired" is the *legitimate* earlier recovery; the point is
+    # that the fenced-out "stale recovery" write did not land on top of it.
+    assert row.last_error == "claim lease expired"
+
+
+async def test_recovery_does_not_announce_a_delivered_job_as_terminal(env):
+    """A job delivered between the read and the write must not produce
+    terminal telemetry or inflate the recovered count
+    (PR #228 review r2, P3)."""
+    await _one_job(env)
+    view = await env.outbox.claim_pending(limit=10)
+    await env.outbox.mark_attempt_started(view[0])
+    # Push it to the edge of the policy so an unfenced write would retire it.
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE safety_outbox_jobs SET retry_count = :n"),
+            {"n": MAX_DELIVERY_ATTEMPTS - 1},
+        )
+    view[0].retry_count = MAX_DELIVERY_ATTEMPTS - 1
+
+    # It actually gets delivered before recovery runs.
+    await env.outbox.mark_delivered(view[0])
+
+    emitted = []
+    handler = logging.Handler()
+    handler.emit = lambda r: (
+        emitted.append(r.outbox) if hasattr(r, "outbox") else None
+    )
+    logging.getLogger("agentg.safety_outbox").addHandler(handler)
+    try:
+        assert await env.outbox._recover_claims(view, "claim lease expired") == 0
+    finally:
+        logging.getLogger("agentg.safety_outbox").removeHandler(handler)
+
+    assert emitted == [], (
+        "a delivered job must never be announced as retry_exhausted"
+    )
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status, failure_kind FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"
+    assert row.failure_kind is None
+
+
+# ── PR #228 review r2: labelled Authorization headers (P2) ────────────────
+
+
+def test_sanitize_error_handles_a_labelled_authorization_header():
+    """A recognised key in front of Bearer/Basic must not swallow the scheme
+    word and publish the credential (PR #228 review r2, P2).
+
+    This is the mirror of the Telegram ordering bug: whichever rule fires
+    first must consume the whole credential, never just its label.
+    """
+    cases = [
+        (
+            "auth_token: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+        ),
+        (
+            "credential = Basic dXNlcjpwYXNzd29yZDEyMw==",
+            "dXNlcjpwYXNzd29yZDEyMw==",
+        ),
+        (
+            'headers={"authorization": "Bearer sk-abcdefghijklmnopqrstuvwx"}',
+            "sk-abcdefghijklmnopqrstuvwx",
+        ),
+    ]
+    for raw, secret in cases:
+        cleaned = sanitize_error(raw)
+        assert secret not in cleaned, f"{raw!r} -> {cleaned!r}"
+        assert "[redacted]" in cleaned
+
+    # The unlabelled form the earlier ordering fixed must still work, so the
+    # two rules cannot be traded off against each other again.
+    assert "eyJhbGciOiJIUzI1NiJ9abcdef" not in sanitize_error(
+        "401: Authorization: Bearer eyJhbGciOiJIUzI1NiJ9abcdef"
+    )
+    assert "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw" not in sanitize_error(
+        "telegram rejected token 123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+    )
+    # And readable telemetry is still readable.
+    assert sanitize_error('{"id": 5, "attempt": 2}') == '{"id": 5, "attempt": 2}'
+
+
+# ── PR #228 review r2: the except-path orphan revoke (P3) ─────────────────
+
+
+async def test_orphaned_credential_is_revoked_when_recording_raises(env):
+    """The `except` arm of _mint_link's orphan handling, not just the False
+    return: a raising record_login_token must also undo the mint
+    (PR #228 review r2, P3)."""
+    await _one_job(env)
+
+    async def boom(job, token_hash):
+        raise RuntimeError("db hiccup")
+
+    env.outbox.record_login_token = boom
+
+    await _make_worker(env).drain_once(limit=10)
+
+    heads = [m for m in env.notifier.sent if "/login/" not in m[2]]
+    links = [m for m in env.notifier.sent if "/login/" in m[2]]
+    assert len(heads) == 1, "the safety heads-up still goes out text-only"
+    assert links == []
+    assert await _live_token_count(env) == 0, (
+        "a token minted before the record raised is orphaned and must be revoked"
+    )
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status, login_token_hash FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"
+    assert row.login_token_hash is None

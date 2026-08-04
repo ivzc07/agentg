@@ -440,6 +440,15 @@ class SafetyOutboxJob(Base):
     # NULL means immediately claimable.
     next_retry_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     claimed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    # When the worker actually began sending under the current claim (issue
+    # #217).  A claim alone is not an attempt: claim_pending flips a whole
+    # batch to `sending` before any send is issued, so crash recovery uses
+    # `attempt_started_at >= claimed_at` to tell "we tried and died" from
+    # "we never got to it" and only charges the former against the retry
+    # budget.  NULL until the first send under any claim.
+    attempt_started_at: Mapped[datetime | None] = mapped_column(
+        TZDateTime(), default=None
+    )
     last_error: Mapped[str | None] = mapped_column(String(400), default=None)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     delivered_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)

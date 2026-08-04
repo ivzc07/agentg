@@ -26,8 +26,9 @@ What *is* bounded:
 * At most ``MAX_DELIVERY_ATTEMPTS`` attempts per job, after which the
   terminal policy retires it as ``failed`` with
   ``failure_kind="retry_exhausted"``.  An abandoned claim (crash, expired
-  lease) consumes an attempt too, so a crash loop converges on the policy
-  instead of re-claiming the same job forever.
+  lease) consumes an attempt too — but only when the send had actually been
+  issued (``attempt_started_at``), so a crash loop converges on the policy
+  without ever retiring a ping nobody tried to deliver.
 * At most **one live dashboard credential per job**: every mint first revokes
   the token the previous attempt left outstanding (``login_token_hash``), so
   a crash-loop cannot accumulate valid magic links for their 10-minute TTL.
@@ -142,11 +143,17 @@ TERMINAL_FAILURE_KINDS = frozenset(
 MAX_ERROR_LENGTH = 200
 _REDACTED = "[redacted]"
 #
-# Order matters, and the whole-credential rules must come FIRST: a header rule
-# that fires early can eat the prefix a later rule needs and leave the actual
-# secret behind.  Concretely, redacting the ``token 123456789`` half of
-# ``token 123456789:AAH…`` destroys the ``\d{6,}:`` anchor of the Telegram
-# rule and publishes the secret half verbatim (PR #228 review, P2).
+# Order matters in BOTH directions, and getting it wrong leaks the secret
+# rather than the label.  A rule that fires early can eat the prefix a later
+# rule needs:
+#   * the header rule ahead of the Telegram rule redacts the ``token 123456789``
+#     half of ``token 123456789:AAH…`` and publishes the secret half;
+#   * the key=value rule ahead of the header rule stops at whitespace, so
+#     ``auth_token: Bearer <jwt>`` loses only the word ``Bearer`` and publishes
+#     the JWT.
+# So: rules that match a credential *whole* first (magic link, bot token, API
+# key), then the header rule, then the label rule, then the length backstop
+# (PR #228 review r1 P2, r2 P2).
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # Our own magic links: https://dash/login/<raw token>.
     (re.compile(r"(?i)(/login/)[A-Za-z0-9._\-~+/=]+"), r"\1" + _REDACTED),
@@ -157,6 +164,13 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?<!\d)\d{6,}:[A-Za-z0-9_\-]{20,}"), _REDACTED),
     # Provider API keys with a conventional prefix.
     (re.compile(r"(?i)\b(sk|pk|rk|api)[-_][A-Za-z0-9]{16,}\b"), _REDACTED),
+    # Authorization headers: "Bearer eyJ...", "Basic dXNlcjpwdw==".  Must run
+    # before the key=value rule: a labelled header ("auth_token: Bearer <jwt>")
+    # otherwise loses only the scheme word and keeps the credential.
+    (
+        re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._\-~+/=]{8,}"),
+        r"\1 " + _REDACTED,
+    ),
     # key=value / "key": "value" secrets in URLs, JSON, and repr() output.
     # The optional quote before the separator is what makes the JSON and
     # repr() forms ('"token": "…"', "{'token': '…'}") match at all.
@@ -167,11 +181,6 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
             r"[\"']?\s*[=:]\s*[\"']?[^\s\"'&,;}]+"
         ),
         r"\1=" + _REDACTED,
-    ),
-    # Authorization headers: "Bearer eyJ...", "Basic dXNlcjpwdw==".
-    (
-        re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._\-~+/=]{8,}"),
-        r"\1 " + _REDACTED,
     ),
     # Backstop: anything else long and high-entropy enough to be a credential.
     (re.compile(r"\b[A-Za-z0-9_\-]{40,}\b"), _REDACTED),
@@ -606,6 +615,29 @@ class SafetyOutbox:
         async with self._sessions() as db:
             return list((await db.scalars(stmt)).all())
 
+    async def mark_attempt_started(self, job: SafetyOutboxJob) -> bool:
+        """Stamp that a send is now being issued under OUR claim; ``True``
+        when the stamp landed.
+
+        This is what turns a claim into an *attempt* for the retry budget.
+        It is written immediately before the heads-up send and fenced on the
+        ``claimed_at`` lease, so crash recovery can tell a job that was tried
+        and abandoned from one that was merely claimed and never reached
+        (PR #228 review r2, P2).
+        """
+        async with self._sessions() as db:
+            result = await db.execute(
+                update(SafetyOutboxJob)
+                .where(
+                    SafetyOutboxJob.id == job.id,
+                    SafetyOutboxJob.status == "sending",
+                    SafetyOutboxJob.claimed_at == job.claimed_at,
+                )
+                .values(attempt_started_at=self._clock())
+            )
+            await db.commit()
+            return bool(result.rowcount)  # type: ignore[attr-defined]
+
     async def record_login_token(
         self, job: SafetyOutboxJob, token_hash: str
     ) -> bool:
@@ -669,25 +701,57 @@ class SafetyOutbox:
             await db.commit()
             return current
 
+    @staticmethod
+    def _was_attempted(row: SafetyOutboxJob) -> bool:
+        """True when a send was actually issued under this row's *current*
+        claim.
+
+        A claim is not an attempt.  ``claim_pending`` flips a whole batch to
+        ``sending`` in one statement before any send goes out, and the
+        delivery fan-out is narrower than the batch, so at any instant most
+        claimed jobs have no send in flight.  Charging those against the
+        retry budget would let a crash loop retire safety pings as
+        "retry_exhausted" that were never sent even once (PR #228 review r2,
+        P2).  ``attempt_started_at`` is stamped by the worker immediately
+        before the heads-up send; comparing it against ``claimed_at`` scopes
+        it to this claim, so a stamp left by an earlier attempt does not
+        count twice.
+        """
+        return (
+            row.attempt_started_at is not None
+            and row.claimed_at is not None
+            and row.attempt_started_at >= row.claimed_at
+        )
+
     async def _recover_claims(
         self, rows: list[SafetyOutboxJob], reason: str
     ) -> int:
-        """Return abandoned claims to ``pending``, **consuming one attempt
-        each**, and retire the ones that reach the terminal policy.
+        """Return abandoned claims to ``pending`` and retire the ones that
+        reach the terminal policy.  Returns how many rows actually changed.
 
-        The attempt has to be counted here.  ``retry_count`` used to be
-        incremented only in ``reset_for_retry``, which requires the owner to
-        live long enough to record an outcome — so a worker that crashed (or
-        whose lease expired) after the send came back to ``pending`` with the
-        counter untouched and was re-claimed immediately.  A crash-looping
-        process could then attempt one job forever, which is precisely the
-        unbounded background load ``MAX_DELIVERY_ATTEMPTS`` exists to stop
-        (PR #228 review, P2).
+        An abandoned claim whose send *was* issued consumes an attempt.  That
+        has to happen here: ``retry_count`` used to be incremented only in
+        ``reset_for_retry``, which requires the owner to live long enough to
+        record an outcome — so a worker that crashed (or whose lease expired)
+        after the send came back to ``pending`` with the counter untouched
+        and was re-claimed immediately, and a crash-looping process could
+        attempt one job forever (PR #228 review r1, P2).
+
+        An abandoned claim whose send was *never* issued is requeued
+        untouched — see ``_was_attempted``.  A safety ping that nobody tried
+        to deliver must never be retired as if a provider had rejected it.
 
         No backoff is applied: an abandoned claim is not a provider
         rejection, and delaying a safety ping because the process restarted
         would be the wrong trade.  The attempt ceiling is what bounds the
         loop.
+
+        Each write is fenced per row on ``(id, claimed_at)`` — the same lease
+        stamp every other write in this module uses.  ``status == 'sending'``
+        alone cannot tell the lease that was read from a newer one, and the
+        read and the write are in different transactions here, so telemetry
+        and the return count are gated on the fenced ``rowcount`` rather than
+        on what the read saw (PR #228 review r2, P3).
 
         A job retired here may still hold one outstanding dashboard
         credential; the store has no dashboard to revoke it with, so that one
@@ -698,46 +762,48 @@ class SafetyOutbox:
             return 0
         now = self._clock()
         safe = sanitize_error(reason)
-        retire = [r for r in rows if r.retry_count + 1 >= MAX_DELIVERY_ATTEMPTS]
-        requeue_ids = [
-            r.id for r in rows if r.retry_count + 1 < MAX_DELIVERY_ATTEMPTS
-        ]
+        recovered = 0
+        retired: list[SafetyOutboxJob] = []
         async with self._sessions() as db:
-            if requeue_ids:
-                await db.execute(
-                    update(SafetyOutboxJob)
-                    .where(
-                        SafetyOutboxJob.id.in_(requeue_ids),
-                        SafetyOutboxJob.status == "sending",
-                    )
-                    .values(
-                        status="pending",
-                        claimed_at=None,
-                        retry_count=SafetyOutboxJob.retry_count + 1,
-                        last_error=safe,
-                    )
-                )
-            if retire:
-                await db.execute(
-                    update(SafetyOutboxJob)
-                    .where(
-                        SafetyOutboxJob.id.in_([r.id for r in retire]),
-                        SafetyOutboxJob.status == "sending",
-                    )
-                    .values(
-                        status="failed",
-                        claimed_at=None,
-                        retry_count=SafetyOutboxJob.retry_count + 1,
-                        last_error=safe,
-                        failure_reason=(
-                            f"{safe} (terminal after {MAX_DELIVERY_ATTEMPTS} attempts)"
+            for row in rows:
+                attempted = self._was_attempted(row)
+                next_count = row.retry_count + (1 if attempted else 0)
+                if attempted and next_count >= MAX_DELIVERY_ATTEMPTS:
+                    values: dict[str, object] = {
+                        "status": "failed",
+                        "claimed_at": None,
+                        "retry_count": next_count,
+                        "last_error": safe,
+                        "failure_reason": (
+                            f"{safe} (terminal after {next_count} attempts)"
                         ),
-                        failure_kind=FailureKind.RETRY_EXHAUSTED,
-                        failed_at=now,
+                        "failure_kind": FailureKind.RETRY_EXHAUSTED,
+                        "failed_at": now,
+                    }
+                else:
+                    values = {
+                        "status": "pending",
+                        "claimed_at": None,
+                        "retry_count": next_count,
+                    }
+                    if attempted:
+                        values["last_error"] = safe
+                result = await db.execute(
+                    update(SafetyOutboxJob)
+                    .where(
+                        SafetyOutboxJob.id == row.id,
+                        SafetyOutboxJob.status == "sending",
+                        SafetyOutboxJob.claimed_at == row.claimed_at,
                     )
+                    .values(**values)
                 )
+                if not result.rowcount:  # type: ignore[attr-defined]
+                    continue  # the lease moved on; not ours to recover
+                recovered += 1
+                if values["status"] == "failed":
+                    retired.append(row)
             await db.commit()
-        for row in retire:
+        for row in retired:
             _emit_telemetry(
                 delivery_telemetry(
                     row,
@@ -747,7 +813,7 @@ class SafetyOutbox:
                     failure_kind=FailureKind.RETRY_EXHAUSTED,
                 )
             )
-        return len(rows)
+        return recovered
 
     async def reset_claimed(self) -> int:
         """Reset every ``sending`` job back to ``pending``.
@@ -935,6 +1001,10 @@ class OutboxWorker:
                 if not await self._job_still_sending(job):
                     headsup_failed = "job_gone"
                 else:
+                    # Durably record that this claim is now a real attempt,
+                    # so a crash from here on is charged against the retry
+                    # budget — and one before here is not (PR #228 review r2).
+                    await self._outbox.mark_attempt_started(job)
                     headsup_failed = await self._authorized_send(
                         job, text, disable_preview=True, protect_content=False,
                     )
