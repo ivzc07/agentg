@@ -4909,28 +4909,11 @@ async def test_attempt_stamp_is_scoped_to_the_current_claim(env):
     assert row.retry_count == 1, "a stale stamp must not charge a new claim"
 
 
-async def test_delivery_stamps_the_attempt_before_sending(env):
-    """The worker records the attempt durably before the heads-up goes out,
-    so a crash mid-send is charged (PR #228 review r2, P2)."""
-    await _one_job(env)
-
-    worker = _make_worker(env, notifier=FakeNotifier(failing_id="7"))
-    await worker.drain_once(limit=10)
-
-    async with env.engine.connect() as conn:
-        row = (
-            await conn.execute(
-                text(
-                    "SELECT attempt_started_at, retry_count, status "
-                    "FROM safety_outbox_jobs"
-                )
-            )
-        ).first()
-    assert row.attempt_started_at is not None, (
-        "a real delivery attempt must leave a durable stamp"
-    )
-    assert row.retry_count == 1
-    assert row.status == "pending"
+# (The round-2 "stamps the attempt" test lived here.  It asserted the stamp
+# *after* delivery, which could not distinguish stamping before the send from
+# stamping after it — it survived exactly that mutation (PR #228 review r3).
+# test_attempt_is_stamped_before_the_send_is_issued replaces it by reading the
+# row while the send is still blocked.)
 
 
 async def test_recovery_ignores_a_job_whose_lease_moved_on(env):
@@ -5092,3 +5075,276 @@ async def test_orphaned_credential_is_revoked_when_recording_raises(env):
         ).first()
     assert row.status == "delivered"
     assert row.login_token_hash is None
+
+
+# ── PR #228 review r3: attempt-ness is durable, not clock-derived (P2) ────
+
+
+async def test_attempt_stamp_is_cleared_by_every_claim(env):
+    """`claim_pending` clears `attempt_started_at`, so "was this claim
+    attempted?" is a stored fact rather than a comparison of two wall-clock
+    readings (PR #228 review r3, P2)."""
+    await _one_job(env)
+
+    claimed = await env.outbox.claim_pending(limit=10)
+    assert await env.outbox.mark_attempt_started(claimed[0]) is True
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT attempt_started_at FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.attempt_started_at is not None
+
+    # Recovery charges that real attempt and clears the stamp with the claim.
+    assert await env.outbox.reset_claimed() == 1
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT retry_count, attempt_started_at "
+                    "FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.retry_count == 1
+    assert row.attempt_started_at is None
+
+    # The next claim starts clean, with no send issued.
+    again = await env.outbox.claim_pending(limit=10)
+    assert len(again) == 1
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT attempt_started_at FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.attempt_started_at is None
+
+    # claim_pending clears the stamp itself, independently of the requeue
+    # paths that also clear it.  Pinned directly, because the requeue paths
+    # would otherwise hide a claim that stopped clearing: a pending row is
+    # given a stale stamp (a legacy row, or a future requeue path that
+    # forgets), and the claim must still start un-attempted.
+    await env.outbox.reset_claimed()
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "UPDATE safety_outbox_jobs SET attempt_started_at = :t, "
+                "next_retry_at = NULL"
+            ),
+            {"t": datetime.now(UTC).replace(tzinfo=None)},
+        )
+    reclaimed = await env.outbox.claim_pending(limit=10)
+    assert len(reclaimed) == 1
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT attempt_started_at FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.attempt_started_at is None, (
+        "a fresh claim must start un-attempted whatever the row carried"
+    )
+    # And recovery therefore charges nothing for that unattempted claim.
+    assert await env.outbox.reset_claimed() == 1
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT retry_count FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.retry_count == 1
+
+
+async def test_retry_requeue_clears_the_attempt_stamp(env):
+    """The same invariant through reset_for_retry, the ordinary failure
+    path (PR #228 review r3, P2)."""
+    await _one_job(env)
+    claimed = await env.outbox.claim_pending(limit=10)
+    await env.outbox.mark_attempt_started(claimed[0])
+    assert await env.outbox.reset_for_retry(claimed[0], "notifier send failed")
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count, attempt_started_at "
+                    "FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.status == "pending"
+    assert row.retry_count == 1
+    assert row.attempt_started_at is None
+
+
+async def test_unattempted_claims_survive_a_backwards_clock_step(env):
+    """A backwards wall-clock step (NTP correction, VM resume) must not make
+    crash-before-send look like a delivery attempt (PR #228 review r3, P2).
+
+    The old `attempt_started_at >= claimed_at` predicate rested on the wall
+    clock advancing; one 60s step backwards retired an unsent safety ping as
+    retry_exhausted.
+    """
+    now = [datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)]
+    env.outbox._clock = lambda: now[0]
+    await _one_job(env)
+
+    # One genuine attempt, charged.
+    claimed = await env.outbox.claim_pending(limit=10)
+    await env.outbox.mark_attempt_started(claimed[0])
+    assert await env.outbox.reset_claimed() == 1
+
+    now[0] -= timedelta(seconds=60)  # the clock steps backwards
+
+    for boot in range(MAX_DELIVERY_ATTEMPTS + 2):
+        assert len(await env.outbox.claim_pending(limit=10)) == 1
+        assert await env.outbox.reset_claimed() == 1  # crash before any send
+        async with env.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT status, retry_count, failure_kind "
+                        "FROM safety_outbox_jobs"
+                    )
+                )
+            ).first()
+        assert row.status == "pending", f"boot {boot}: got {row.status}"
+        assert row.retry_count == 1, (
+            "only the one real attempt may ever be charged"
+        )
+        assert row.failure_kind is None
+
+    assert env.notifier.sent == []
+    assert await env.outbox.failed_jobs() == []
+
+
+# ── PR #228 review r3: the stamp must precede the send (P2) ───────────────
+
+
+async def test_attempt_is_stamped_before_the_send_is_issued(env):
+    """The stamp must be durable *before* `notifier.send` is entered.
+
+    This is the load-bearing ordering of the whole attempt-accounting
+    design: a worker SIGKILLed mid-send (hung provider plus a liveness kill,
+    OOM, deploy restart) must be charged, or `_recover_claims` requeues it
+    at retry_count 0 and it re-sends forever. Asserting the stamp *after*
+    delivery cannot tell the two orderings apart, so this test reads the row
+    while the send is still blocked (PR #228 review r3, P2).
+    """
+    await _one_job(env)
+
+    inside_send = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingNotifier:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, channel, channel_user_id, text_, **kw):
+            self.sent.append(text_)
+            inside_send.set()
+            await release.wait()
+
+    worker = _make_worker(env, notifier=BlockingNotifier())
+    task = asyncio.create_task(worker.drain_once(limit=10))
+    try:
+        await asyncio.wait_for(inside_send.wait(), timeout=5)
+
+        # The send is in flight right now: the stamp must already be durable.
+        async with env.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT status, attempt_started_at "
+                        "FROM safety_outbox_jobs"
+                    )
+                )
+            ).first()
+        assert row.status == "sending"
+        assert row.attempt_started_at is not None, (
+            "a crash during the send must be charged, so the stamp has to be "
+            "written before notifier.send is entered"
+        )
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=5)
+
+
+async def test_crash_during_the_send_is_charged_as_an_attempt(env):
+    """The consequence of that ordering: a job killed mid-send comes back
+    with the attempt charged, so repeated mid-send kills converge on the
+    terminal policy instead of re-sending forever (PR #228 review r3, P2)."""
+    await _one_job(env)
+
+    inside_send = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingNotifier:
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, channel, channel_user_id, text_, **kw):
+            self.sent.append(text_)
+            inside_send.set()
+            await release.wait()
+
+    notifier = BlockingNotifier()
+    worker = _make_worker(env, notifier=notifier)
+    task = asyncio.create_task(worker.drain_once(limit=10))
+    await asyncio.wait_for(inside_send.wait(), timeout=5)
+
+    # SIGKILL mid-send: the delivery never records an outcome.
+    task.cancel()
+    release.set()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert len(notifier.sent) == 1, "the send really was in flight"
+    assert await env.outbox.reset_claimed() == 1  # next boot recovers it
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count, attempt_started_at "
+                    "FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.status == "pending"
+    assert row.retry_count == 1, (
+        "a crash during the send must consume an attempt"
+    )
+    assert row.attempt_started_at is None
+
+
+# ── PR #228 review r3: segmented provider API keys (P3) ───────────────────
+
+
+def test_sanitize_error_redacts_segmented_provider_api_keys():
+    """Real provider keys are segmented, and are too short for the {40,}
+    backstop — the prefix rule has to allow inner separators
+    (PR #228 review r3, P3)."""
+    for raw, secret in (
+        ("provider rejected: sk_live_51H8xkjKLmNoPqRsTuVwX", "sk_live_51H8xkjKLmNoPqRsTuVwX"),
+        ("sk-ant-api03-abcdefghijklmnopqrstuvwxyz", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"),
+        ("pk_live_51H8xkjKLmNoPqRsTuVwX", "pk_live_51H8xkjKLmNoPqRsTuVwX"),
+        ("sk_abcdefghijklmnopqrstuvwx", "sk_abcdefghijklmnopqrstuvwx"),
+    ):
+        cleaned = sanitize_error(raw)
+        assert secret not in cleaned, f"{raw!r} -> {cleaned!r}"
+        assert "[redacted]" in cleaned
+
+    # The widened class must not start eating the fixed error vocabulary or
+    # readable telemetry.
+    for benign in (
+        "coach no longer reachable in this gym",
+        "safety note no longer exists",
+        "notifier send timed out",
+        "delivery error: RuntimeError",
+        '{"id": 5, "attempt": 2}',
+    ):
+        assert sanitize_error(benign) == benign

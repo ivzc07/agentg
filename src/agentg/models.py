@@ -442,10 +442,11 @@ class SafetyOutboxJob(Base):
     claimed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     # When the worker actually began sending under the current claim (issue
     # #217).  A claim alone is not an attempt: claim_pending flips a whole
-    # batch to `sending` before any send is issued, so crash recovery uses
-    # `attempt_started_at >= claimed_at` to tell "we tried and died" from
-    # "we never got to it" and only charges the former against the retry
-    # budget.  NULL until the first send under any claim.
+    # batch to `sending` before any send is issued, so crash recovery needs
+    # to tell "we tried and died" from "we never got to it" and only charge
+    # the former against the retry budget.  Cleared by every claim and every
+    # requeue and set only immediately before a send, so its mere presence
+    # answers that question without comparing wall-clock readings.
     attempt_started_at: Mapped[datetime | None] = mapped_column(
         TZDateTime(), default=None
     )

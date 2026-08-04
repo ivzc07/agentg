@@ -162,8 +162,12 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # word characters so \b can never anchor.  (?<!\d) keeps the whole numeric
     # half inside the match instead of letting it start mid-number.
     (re.compile(r"(?<!\d)\d{6,}:[A-Za-z0-9_\-]{20,}"), _REDACTED),
-    # Provider API keys with a conventional prefix.
-    (re.compile(r"(?i)\b(sk|pk|rk|api)[-_][A-Za-z0-9]{16,}\b"), _REDACTED),
+    # Provider API keys with a conventional prefix.  The value class allows
+    # inner separators because real keys are segmented — "sk_live_51H8…",
+    # "sk-ant-api03-…" — and stopping at the second separator let every one
+    # of those through while being too short for the {40,} backstop
+    # (PR #228 review r3, P3).
+    (re.compile(r"(?i)\b(sk|pk|rk|api)[-_][A-Za-z0-9_\-]{16,}\b"), _REDACTED),
     # Authorization headers: "Bearer eyJ...", "Basic dXNlcjpwdw==".  Must run
     # before the key=value rule: a labelled header ("auth_token: Bearer <jwt>")
     # otherwise loses only the scheme word and keeps the credential.
@@ -450,7 +454,10 @@ class SafetyOutbox:
                     SafetyOutboxJob.id.in_(sub),
                     SafetyOutboxJob.status == "pending",
                 )
-                .values(status="sending", claimed_at=now)
+                # Clearing attempt_started_at is what makes "was this claim
+                # attempted?" a durable fact rather than a comparison of two
+                # wall-clock readings — see _was_attempted (PR #228 review r3).
+                .values(status="sending", claimed_at=now, attempt_started_at=None)
                 .returning(SafetyOutboxJob)
             )
             rows = result.fetchall()
@@ -576,6 +583,9 @@ class SafetyOutbox:
                     retry_count=next_count,
                     last_error=safe,
                     claimed_at=None,
+                    # Cleared with the claim: the next attempt must stamp its
+                    # own (PR #228 review r3).
+                    attempt_started_at=None,
                     next_retry_at=next_retry_at,
                 )
             )
@@ -712,16 +722,19 @@ class SafetyOutbox:
         claimed jobs have no send in flight.  Charging those against the
         retry budget would let a crash loop retire safety pings as
         "retry_exhausted" that were never sent even once (PR #228 review r2,
-        P2).  ``attempt_started_at`` is stamped by the worker immediately
-        before the heads-up send; comparing it against ``claimed_at`` scopes
-        it to this claim, so a stamp left by an earlier attempt does not
-        count twice.
+        P2).
+
+        The stamp is *cleared* whenever the job is claimed or requeued, and
+        set only by ``mark_attempt_started`` immediately before the send, so
+        its mere presence answers the question.  An earlier version compared
+        ``attempt_started_at >= claimed_at`` instead, which silently rested
+        on ``datetime.now(UTC)`` advancing monotonically — it is a wall
+        clock, so one backwards NTP step or VM resume made every
+        crash-before-send during that window look attempted and could retire
+        an unsent safety ping (PR #228 review r3, P2).  Presence is a durable
+        fact; ordering was an assumption about the host.
         """
-        return (
-            row.attempt_started_at is not None
-            and row.claimed_at is not None
-            and row.attempt_started_at >= row.claimed_at
-        )
+        return row.attempt_started_at is not None
 
     async def _recover_claims(
         self, rows: list[SafetyOutboxJob], reason: str
@@ -784,6 +797,7 @@ class SafetyOutbox:
                     values = {
                         "status": "pending",
                         "claimed_at": None,
+                        "attempt_started_at": None,
                         "retry_count": next_count,
                     }
                     if attempted:

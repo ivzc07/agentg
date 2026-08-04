@@ -217,7 +217,7 @@ Everything the screens *show* is already recorded; the changes are new queries p
 | `safety_outbox_jobs` table | one durable coach ping per (Note, Coach), committed with the Note | [#216](https://github.com/ivzc07/agentg/issues/216) |
 | `safety_outbox_jobs.failure_kind` | why a terminal failure happened (`retry_exhausted`, `unauthorized`, `note_deleted`), so failures are queryable by cause | [#217](https://github.com/ivzc07/agentg/issues/217) |
 | `safety_outbox_jobs.login_token_hash` | the one credential a job has outstanding; each retry revokes it before minting the next | [#217](https://github.com/ivzc07/agentg/issues/217) |
-| `safety_outbox_jobs.attempt_started_at` | when a send was actually issued under the current claim, so crash recovery charges the retry budget only for real attempts | [#217](https://github.com/ivzc07/agentg/issues/217) |
+| `safety_outbox_jobs.attempt_started_at` | set immediately before a send and cleared by every claim and requeue, so crash recovery charges the retry budget only for sends that were actually issued | [#217](https://github.com/ivzc07/agentg/issues/217) |
 | index on `sets.exercise_id` | per-Exercise history reads currently scan | [#74](https://github.com/ivzc07/agentg/issues/74) |
 | Gap honours `Gym.timezone` | fix UTC day boundaries in `TrainingStore.today()` / `RoutineStore._today()` | [#74](https://github.com/ivzc07/agentg/issues/74), [#75](https://github.com/ivzc07/agentg/issues/75) |
 
