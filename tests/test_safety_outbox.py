@@ -9,7 +9,8 @@ import time
 from datetime import datetime, timedelta, UTC
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
+from sqlalchemy.exc import IntegrityError
 
 from agentg.db import create_engine
 from agentg.dashboard_store import DashboardStore
@@ -2765,6 +2766,61 @@ async def test_send_timeout_retry_eventually_succeeds(env, monkeypatch):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+# The pre-migration safety_outbox_jobs table.  ``{constraint}`` is either
+# empty (uniqueness supplied separately as a standalone legacy INDEX) or the
+# legacy 3-column table-level CONSTRAINT clause.  Deliberately omits the
+# model's 2-column UniqueConstraint, and the columns added by later entries
+# in _add_missing_columns, so ensure_schema has real work to do.
+_LEGACY_OUTBOX_TABLE_DDL = (
+    "CREATE TABLE safety_outbox_jobs ("
+    "  id INTEGER PRIMARY KEY,"
+    "  gym_id INTEGER NOT NULL REFERENCES gyms(id),"
+    "  note_id INTEGER NOT NULL REFERENCES member_notes(id) ON DELETE CASCADE,"
+    "  coach_member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,"
+    "  channel VARCHAR(32) NOT NULL,"
+    "  channel_user_id VARCHAR(64) NOT NULL,"
+    "  member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,"
+    "  member_name VARCHAR(100) NOT NULL,"
+    "  member_is_coach BOOLEAN NOT NULL DEFAULT 0,"
+    "  status VARCHAR(20) NOT NULL DEFAULT 'pending',"
+    "  retry_count INTEGER NOT NULL DEFAULT 0,"
+    "  next_retry_at TIMESTAMP,"
+    "  claimed_at TIMESTAMP,"
+    "  last_error VARCHAR(400),"
+    "  created_at TIMESTAMP NOT NULL,"
+    "  delivered_at TIMESTAMP,"
+    "  failure_reason VARCHAR(400)"
+    "{constraint}"
+    ")"
+)
+
+
+def _assert_rejected_by_note_coach_uniqueness(exc: BaseException) -> None:
+    """Assert an IntegrityError came from the migrated 2-column unique
+    constraint on (note_id, coach_member_id).
+
+    Without this, a foreign-key rejection (e.g. a duplicate built with a
+    gym_id that does not exist) would satisfy a bare ``raises`` and restore
+    the false green these tests exist to prevent (issue #229).
+    """
+    message = str(exc.orig if exc.orig is not None else exc)
+    assert "FOREIGN KEY" not in message.upper(), (
+        f"duplicate was rejected by a foreign key, not the unique "
+        f"constraint: {message}"
+    )
+    assert "UNIQUE" in message.upper(), (
+        f"expected a unique-constraint violation, got: {message}"
+    )
+    assert "note_id" in message and "coach_member_id" in message, (
+        f"expected the violation to name the migrated 2-column constraint, "
+        f"got: {message}"
+    )
+    assert "gym_id" not in message, (
+        f"violation names gym_id — the legacy 3-column constraint is still "
+        f"the one enforcing this, so the migration did not run: {message}"
+    )
+
+
 async def test_migration_inspects_unique_constraints_not_indexes(tmp_path):
     """The migration code uses get_unique_constraints (not get_indexes)
     to inspect existing unique constraints on safety_outbox_jobs, which
@@ -2829,16 +2885,38 @@ async def test_legacy_three_column_index_migrated_on_sqlite(tmp_path):
     linking = LinkingStore(engine)
     await linking.ensure_schema()
 
-    # Simulate a legacy 3-column unique INDEX by dropping the correct
-    # one and creating the old form.
+    # Build the legacy schema: the table with NO inline unique constraint,
+    # plus a standalone 3-column unique INDEX.
+    #
+    # The table must be rebuilt, not just re-indexed.  create_all emits the
+    # model's 2-column UniqueConstraint *inline* in CREATE TABLE, which
+    # SQLite implements as sqlite_autoindex_safety_outbox_jobs_1 rather than
+    # a droppable index named uq_outbox_job_note_coach.  A bare
+    # DROP INDEX IF EXISTS uq_outbox_job_note_coach is therefore a silent
+    # no-op that leaves the migrated constraint in force, and the assertion
+    # below would hold with the migration deleted (issue #229).
     async with engine.begin() as conn:
-        await conn.execute(text("DROP INDEX IF EXISTS uq_outbox_job_note_coach"))
+        await conn.execute(text("DROP TABLE IF EXISTS safety_outbox_jobs"))
+        await conn.execute(text(_LEGACY_OUTBOX_TABLE_DDL.format(constraint="")))
         await conn.execute(
             text(
                 "CREATE UNIQUE INDEX uq_outbox_job_note_coach "
                 "ON safety_outbox_jobs (gym_id, note_id, coach_member_id)"
             )
         )
+
+    # Guard the guard: the legacy setup must really have removed the
+    # 2-column enforcement, or this test cannot detect a missing migration.
+    async with engine.connect() as conn:
+        table_sql = (
+            await conn.execute(
+                text("SELECT sql FROM sqlite_master WHERE name='safety_outbox_jobs'")
+            )
+        ).scalar()
+    assert "UNIQUE" not in (table_sql or "").upper(), (
+        "legacy table must carry no inline unique constraint, else the "
+        f"migration under test is not what enforces uniqueness: {table_sql}"
+    )
 
     # ensure_schema runs the migration which drops + recreates the index.
     await linking.ensure_schema()
@@ -2848,6 +2926,9 @@ async def test_legacy_three_column_index_migrated_on_sqlite(tmp_path):
     member = await linking.link_member(gym.id, "Test Member", "telegram", "99")
     await linking.set_coach(member.id)
     other_member = await linking.link_member(gym.id, "Other Member", "telegram", "100")
+    # A real second Gym: the duplicate must be rejected by the migrated
+    # unique constraint, not by a foreign-key violation on gym_id.
+    other_gym = await linking.create_gym("Other Gym")
 
     from agentg.safety_outbox import SafetyOutbox
     outbox = SafetyOutbox(engine)
@@ -2863,11 +2944,11 @@ async def test_legacy_three_column_index_migrated_on_sqlite(tmp_path):
 
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
-    with pytest.raises(Exception):  # IntegrityError
+    with pytest.raises(IntegrityError) as excinfo:
         async with sessions() as db:
             db.add(
                 SafetyOutboxJob(
-                    gym_id=gym.id,
+                    gym_id=other_gym.id,
                     note_id=note.id,
                     coach_member_id=member.id,
                     channel="telegram",
@@ -2880,6 +2961,8 @@ async def test_legacy_three_column_index_migrated_on_sqlite(tmp_path):
                 )
             )
             await db.commit()
+
+    _assert_rejected_by_note_coach_uniqueness(excinfo.value)
 
     await engine.dispose()
 
@@ -2907,27 +2990,11 @@ async def test_legacy_three_column_uniqueness_migrated_behavior(tmp_path):
         await conn.execute(text("DROP TABLE IF EXISTS safety_outbox_jobs"))
         await conn.execute(
             text(
-                "CREATE TABLE safety_outbox_jobs ("
-                "  id INTEGER PRIMARY KEY,"
-                "  gym_id INTEGER NOT NULL REFERENCES gyms(id),"
-                "  note_id INTEGER NOT NULL REFERENCES member_notes(id) ON DELETE CASCADE,"
-                "  coach_member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,"
-                "  channel VARCHAR(32) NOT NULL,"
-                "  channel_user_id VARCHAR(64) NOT NULL,"
-                "  member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,"
-                "  member_name VARCHAR(100) NOT NULL,"
-                "  member_is_coach BOOLEAN NOT NULL DEFAULT 0,"
-                "  status VARCHAR(20) NOT NULL DEFAULT 'pending',"
-                "  retry_count INTEGER NOT NULL DEFAULT 0,"
-                "  next_retry_at TIMESTAMP,"
-                "  claimed_at TIMESTAMP,"
-                "  last_error VARCHAR(400),"
-                "  created_at TIMESTAMP NOT NULL,"
-                "  delivered_at TIMESTAMP,"
-                "  failure_reason VARCHAR(400),"
-                "  CONSTRAINT uq_outbox_job_note_coach "
-                "    UNIQUE (gym_id, note_id, coach_member_id)"
-                ")"
+                _LEGACY_OUTBOX_TABLE_DDL.format(
+                    constraint=","
+                    "  CONSTRAINT uq_outbox_job_note_coach "
+                    "    UNIQUE (gym_id, note_id, coach_member_id)"
+                )
             )
         )
 
@@ -2940,6 +3007,9 @@ async def test_legacy_three_column_uniqueness_migrated_behavior(tmp_path):
     member = await linking.link_member(gym.id, "Coach", "telegram", "99")
     await linking.set_coach(member.id)
     other = await linking.link_member(gym.id, "Member", "telegram", "100")
+    # A real second Gym: the duplicate must be rejected by the migrated
+    # unique constraint, not by a foreign-key violation on gym_id.
+    other_gym = await linking.create_gym("Other Gym")
 
     from agentg.safety_outbox import SafetyOutbox
     outbox = SafetyOutbox(engine)
@@ -2953,11 +3023,11 @@ async def test_legacy_three_column_uniqueness_migrated_behavior(tmp_path):
     # Duplicate (note_id, coach_member_id) must be rejected.
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
-    with pytest.raises(Exception):  # IntegrityError
+    with pytest.raises(IntegrityError) as excinfo:
         async with sessions() as db:
             db.add(
                 SafetyOutboxJob(
-                    gym_id=gym.id, note_id=note.id,
+                    gym_id=other_gym.id, note_id=note.id,
                     coach_member_id=member.id,
                     channel="telegram", channel_user_id="99",
                     member_id=other.id, member_name="Member",
@@ -2967,7 +3037,426 @@ async def test_legacy_three_column_uniqueness_migrated_behavior(tmp_path):
             )
             await db.commit()
 
+    _assert_rejected_by_note_coach_uniqueness(excinfo.value)
+
     await engine.dispose()
+
+
+# The two shapes a pre-migration database can be in.  They are not
+# interchangeable: on SQLite a table-level CONSTRAINT becomes an autoindex
+# that get_unique_constraints reports forever and DROP INDEX cannot remove,
+# while a standalone INDEX is visible only to get_indexes and *is*
+# droppable.  Every migration property must hold for both.
+_LEGACY_FORMS = ("table-constraint", "standalone-index")
+
+
+async def _build_legacy_outbox_table(conn, form: str) -> None:
+    """Replace safety_outbox_jobs with the given pre-migration shape."""
+    assert form in _LEGACY_FORMS, form
+    await conn.execute(text("DROP TABLE IF EXISTS safety_outbox_jobs"))
+    if form == "table-constraint":
+        await conn.execute(
+            text(
+                _LEGACY_OUTBOX_TABLE_DDL.format(
+                    constraint=","
+                    "  CONSTRAINT uq_outbox_job_note_coach "
+                    "    UNIQUE (gym_id, note_id, coach_member_id)"
+                )
+            )
+        )
+    else:
+        await conn.execute(text(_LEGACY_OUTBOX_TABLE_DDL.format(constraint="")))
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_outbox_job_note_coach "
+                "ON safety_outbox_jobs (gym_id, note_id, coach_member_id)"
+            )
+        )
+
+
+async def _outbox_uq_ddl_during(engine, action) -> list[str]:
+    """Return the mutating DDL naming uq_outbox_job_note_coach that `action`
+    emits.  Read-only introspection (PRAGMA index_info and friends) mentions
+    the constraint too, so only DROP/CREATE/ALTER counts."""
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    sync_engine = engine.sync_engine
+    event.listen(sync_engine, "before_cursor_execute", _record)
+    try:
+        await action()
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _record)
+
+    return [
+        s
+        for s in statements
+        if "uq_outbox_job_note_coach" in s
+        and s.lstrip().upper().startswith(("DROP", "CREATE", "ALTER"))
+    ]
+
+
+async def test_fresh_database_boot_never_touches_the_unique_constraint(tmp_path):
+    """A healthy create_all database boots without re-running the migration.
+
+    The gate is \"is the 2-column form absent\", so on every normal boot the
+    only thing preventing a DROP + CREATE is the inline UniqueConstraint
+    create_all emits being reported through get_unique_constraints.  That is
+    load-bearing: were it to stop holding, every production boot would drop
+    and recreate uniqueness, and since this DDL autocommits each boot would
+    open a real window with no enforcement — on every database, not just
+    legacy ones (PR #231 round 3 P3)."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'fresh.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+
+    touched = await _outbox_uq_ddl_during(engine, linking.ensure_schema)
+    assert not touched, (
+        "a fresh database must be recognised as already migrated; emitting "
+        f"this DDL on a healthy boot removes uniqueness mid-boot: {touched}"
+    )
+
+    # And the constraint is genuinely in force, so the skip is not vacuous.
+    gym = await linking.create_gym("Gym")
+    coach = await linking.link_member(gym.id, "Coach", "telegram", "99")
+    await linking.set_coach(coach.id)
+    async with engine.begin() as conn:
+        note_id = await _seed_note(conn, gym_id=gym.id, member_id=coach.id)
+        await _seed_legacy_outbox_row(
+            conn, gym_id=gym.id, note_id=note_id, coach_member_id=coach.id
+        )
+    with pytest.raises(IntegrityError) as excinfo:
+        async with engine.begin() as conn:
+            await _seed_legacy_outbox_row(
+                conn, gym_id=gym.id, note_id=note_id, coach_member_id=coach.id
+            )
+    _assert_rejected_by_note_coach_uniqueness(excinfo.value)
+
+    await engine.dispose()
+
+
+async def _seed_note(conn, *, gym_id, member_id) -> int:
+    """Insert a MemberNote directly, returning its id.
+
+    The legacy outbox table carries a real FK to member_notes, so seeded
+    jobs need a real Note or the insert fails for the wrong reason.
+    """
+    result = await conn.execute(
+        text(
+            "INSERT INTO member_notes (gym_id, member_id, kind, text, "
+            "created_at) VALUES (:gym, :member, 'safety', 'legacy flag', "
+            "'2026-01-01 00:00:00')"
+        ),
+        {"gym": gym_id, "member": member_id},
+    )
+    return result.lastrowid
+
+
+async def _seed_legacy_outbox_row(conn, *, gym_id, note_id, coach_member_id):
+    """Insert one outbox row with raw SQL, bypassing the ORM.
+
+    Every NOT NULL column is supplied explicitly: the legacy DDL carries
+    server-side defaults for retry_count and member_is_coach but the model's
+    table does not, so an insert relying on them succeeds against a legacy
+    table and fails against a fresh one.
+    """
+    await conn.execute(
+        text(
+            "INSERT INTO safety_outbox_jobs (gym_id, note_id, coach_member_id,"
+            " channel, channel_user_id, member_id, member_name,"
+            " member_is_coach, status, retry_count, created_at) VALUES"
+            " (:gym, :note, :coach, 'telegram', '99', :coach,"
+            " 'Legacy Member', 0, 'pending', 0, '2026-01-01 00:00:00')"
+        ),
+        {"gym": gym_id, "note": note_id, "coach": coach_member_id},
+    )
+
+
+@pytest.mark.parametrize("legacy_form", _LEGACY_FORMS)
+async def test_legacy_rows_survive_the_unique_constraint_migration(
+    tmp_path, legacy_form
+):
+    """Migrating the constraint preserves the rows already in the table.
+
+    Issue #229 asked for "the constraint was rewritten *and existing rows
+    survived*"; the two tests above migrate an empty table, so a migration
+    that rebuilt safety_outbox_jobs and dropped every job would leave them
+    green.  Also pins idempotency: ensure_schema is a startup path and runs
+    again on every boot, so a second run must be a no-op rather than
+    re-dropping and re-creating the constraint.
+
+    Both legacy forms are exercised because they converge by different
+    routes: the index form stops matching once its 3-column index is gone,
+    but the table-constraint form is an undroppable autoindex that keeps
+    reporting 3 columns forever, so only an explicit already-migrated check
+    stops it re-running the drop/create on every boot.
+    """
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'rows.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+
+    gym = await linking.create_gym("Gym")
+    coach = await linking.link_member(gym.id, "Coach", "telegram", "99")
+    await linking.set_coach(coach.id)
+
+    # Legacy table holding rows the migration must keep.
+    async with engine.begin() as conn:
+        await _build_legacy_outbox_table(conn, legacy_form)
+        note_ids = [
+            await _seed_note(conn, gym_id=gym.id, member_id=coach.id)
+            for _ in range(2)
+        ]
+        for note_id in note_ids:
+            await _seed_legacy_outbox_row(
+                conn, gym_id=gym.id, note_id=note_id, coach_member_id=coach.id
+            )
+
+    await linking.ensure_schema()
+
+    async with engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT note_id, coach_member_id, member_name, status "
+                    "FROM safety_outbox_jobs ORDER BY note_id"
+                )
+            )
+        ).fetchall()
+    assert [(r[0], r[1]) for r in rows] == [
+        (note_id, coach.id) for note_id in sorted(note_ids)
+    ]
+    assert all(r[2] == "Legacy Member" and r[3] == "pending" for r in rows), (
+        f"row contents must survive the migration unchanged, got {rows}"
+    )
+
+    # Second boot: the migration must recognise its own work and do nothing.
+    touched = await _outbox_uq_ddl_during(engine, linking.ensure_schema)
+    assert not touched, (
+        "ensure_schema must converge — re-running the drop/create on every "
+        "boot re-opens a window with no 2-column enforcement, because the "
+        f"DDL autocommits. Statements: {touched}"
+    )
+
+    await engine.dispose()
+
+
+@pytest.mark.parametrize("legacy_form", _LEGACY_FORMS)
+async def test_migration_refuses_to_narrow_over_duplicate_note_coach_rows(
+    tmp_path, legacy_form
+):
+    """A legacy DB holding rows the 2-column form would reject fails loudly,
+    with the old constraint and the rows left intact.
+
+    The legacy 3-column form permits two jobs sharing (note_id,
+    coach_member_id) under different gym_id.  CREATE UNIQUE INDEX over those
+    raises — and because pysqlite does not open a transaction for DDL, the
+    preceding DROP is *not* rolled back, so an unguarded migration would
+    leave the next boot with no constraint to find, skip the block, and run
+    on permanently unenforced (PR #231 P1)."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'dups.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+
+    gym_a = await linking.create_gym("Gym A")
+    gym_b = await linking.create_gym("Gym B")
+    coach = await linking.link_member(gym_a.id, "Coach", "telegram", "99")
+    await linking.set_coach(coach.id)
+
+    async with engine.begin() as conn:
+        await _build_legacy_outbox_table(conn, legacy_form)
+        # Legal under the 3-column form, rejected by the 2-column form.
+        note_id = await _seed_note(conn, gym_id=gym_a.id, member_id=coach.id)
+        for gym_id in (gym_a.id, gym_b.id):
+            await _seed_legacy_outbox_row(
+                conn, gym_id=gym_id, note_id=note_id, coach_member_id=coach.id
+            )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await linking.ensure_schema()
+    message = str(excinfo.value)
+    assert str(note_id) in message and str(coach.id) in message, (
+        f"the error must name the offending Note/Coach pair, got: {message}"
+    )
+
+    # The refusal must be non-destructive: rows intact, and the legacy
+    # 3-column enforcement still actually enforcing.  Checked behaviourally
+    # rather than by index name, because the table-constraint form is an
+    # unnamed sqlite autoindex.
+    async with engine.connect() as conn:
+        count = (
+            await conn.execute(text("SELECT COUNT(*) FROM safety_outbox_jobs"))
+        ).scalar()
+    assert count == 2, f"rows must not be destroyed by the refusal, got {count}"
+
+    with pytest.raises(IntegrityError) as dup_exc:
+        async with engine.begin() as conn:
+            await _seed_legacy_outbox_row(
+                conn, gym_id=gym_a.id, note_id=note_id, coach_member_id=coach.id
+            )
+    assert "UNIQUE" in str(dup_exc.value.orig).upper(), (
+        "the legacy constraint must survive a refused migration — dropping it "
+        "before failing would leave the next boot with nothing to migrate "
+        f"and no enforcement at all: {dup_exc.value.orig}"
+    )
+
+    # And the refusal must be stable: a restart hits the same guard rather
+    # than sliding through on a half-dropped constraint.
+    with pytest.raises(RuntimeError):
+        await linking.ensure_schema()
+
+    await engine.dispose()
+
+
+async def test_ensure_schema_restores_uniqueness_lost_mid_migration(tmp_path):
+    """A table left with no uniqueness at all is repaired on the next boot.
+
+    The migration's DDL autocommits, so an interruption (SIGKILL, OOM, deploy
+    timeout) between the DROP and the CREATE leaves safety_outbox_jobs with
+    no unique constraint whatsoever.  Gating the migration on still *finding*
+    a legacy 3-column form meant such a database had nothing to match on and
+    stayed unenforced forever, silently allowing duplicate safety alerts;
+    create_all does not rescue it either, since checkfirst skips the existing
+    table (PR #231 round 2 P2)."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'heal.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+
+    gym = await linking.create_gym("Gym")
+    coach = await linking.link_member(gym.id, "Coach", "telegram", "99")
+    await linking.set_coach(coach.id)
+
+    # Legacy table, then the interrupted migration: DROP without the CREATE.
+    async with engine.begin() as conn:
+        await _build_legacy_outbox_table(conn, "standalone-index")
+        note_id = await _seed_note(conn, gym_id=gym.id, member_id=coach.id)
+        await _seed_legacy_outbox_row(
+            conn, gym_id=gym.id, note_id=note_id, coach_member_id=coach.id
+        )
+        await conn.execute(text("DROP INDEX IF EXISTS uq_outbox_job_note_coach"))
+
+    await linking.ensure_schema()
+
+    # The 2-column form must be back, and enforcing.
+    from sqlalchemy import inspect as sa_inspect
+
+    async with engine.connect() as conn:
+        def _check(sync_conn):
+            unique = [
+                sorted(i["column_names"])
+                for i in sa_inspect(sync_conn).get_indexes("safety_outbox_jobs")
+                if i.get("unique")
+            ] + [
+                sorted(c["column_names"])
+                for c in sa_inspect(sync_conn).get_unique_constraints(
+                    "safety_outbox_jobs"
+                )
+            ]
+            assert sorted(["note_id", "coach_member_id"]) in unique, (
+                "ensure_schema must restore the 2-column form on a table that "
+                f"lost its uniqueness mid-migration, found: {unique}"
+            )
+
+        await conn.run_sync(_check)
+
+    with pytest.raises(IntegrityError) as excinfo:
+        async with engine.begin() as conn:
+            await _seed_legacy_outbox_row(
+                conn, gym_id=gym.id, note_id=note_id, coach_member_id=coach.id
+            )
+    _assert_rejected_by_note_coach_uniqueness(excinfo.value)
+
+    # The pre-existing row must have survived the repair.
+    async with engine.connect() as conn:
+        count = (
+            await conn.execute(text("SELECT COUNT(*) FROM safety_outbox_jobs"))
+        ).scalar()
+    assert count == 1, f"the repair must not drop rows, got {count}"
+
+    await engine.dispose()
+
+
+def test_outbox_unique_constraint_ddl_compiles_on_postgres():
+    """The hand-written PostgreSQL arms must match what SQLAlchemy emits.
+
+    Neither PostgreSQL branch is executed by any test — CI is SQLite-only — so
+    a deploy would be the first place that DDL ever runs, and a malformed
+    statement rolls back the whole ensure_schema transaction and fails the
+    boot.  Same technique as
+    test_the_safety_flag_migration_columns_compile_on_postgres: pin the
+    strings against the dialect's own compilation rather than a live server."""
+    from sqlalchemy import Column, Integer, MetaData, Table, UniqueConstraint
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import AddConstraint, CreateIndex, Index
+
+    from agentg.linking_store import (
+        ADD_OUTBOX_UQ_CONSTRAINT_DDL,
+        CREATE_OUTBOX_UQ_INDEX_DDL,
+        DROP_OUTBOX_UQ_CONSTRAINT_DDL,
+        DROP_OUTBOX_UQ_INDEX_DDL,
+        OUTBOX_UQ_COLUMNS,
+        OUTBOX_UQ_NAME,
+    )
+    from agentg.models import SafetyOutboxJob
+
+    dialect = postgresql.dialect()
+
+    def _normalise(sql: str) -> str:
+        return " ".join(sql.split()).rstrip(";")
+
+    # The migrated target must be exactly the model's own constraint, or the
+    # migration would converge on a shape create_all does not produce.
+    model_uq = next(
+        c
+        for c in SafetyOutboxJob.__table__.constraints
+        if isinstance(c, UniqueConstraint) and c.name == OUTBOX_UQ_NAME
+    )
+    assert tuple(c.name for c in model_uq.columns) == OUTBOX_UQ_COLUMNS
+
+    # Build a standalone table so compiling does not mutate model metadata.
+    metadata = MetaData()
+    table = Table(
+        "safety_outbox_jobs",
+        metadata,
+        Column("note_id", Integer),
+        Column("coach_member_id", Integer),
+        UniqueConstraint(*OUTBOX_UQ_COLUMNS, name=OUTBOX_UQ_NAME),
+    )
+    expected_uq = next(
+        c for c in table.constraints if isinstance(c, UniqueConstraint)
+    )
+    assert _normalise(ADD_OUTBOX_UQ_CONSTRAINT_DDL) == _normalise(
+        str(AddConstraint(expected_uq).compile(dialect=dialect))
+    )
+
+    index_metadata = MetaData()
+    index_table = Table(
+        "safety_outbox_jobs",
+        index_metadata,
+        Column("note_id", Integer),
+        Column("coach_member_id", Integer),
+    )
+    expected_index = Index(
+        OUTBOX_UQ_NAME,
+        *[index_table.c[name] for name in OUTBOX_UQ_COLUMNS],
+        unique=True,
+    )
+    assert _normalise(CREATE_OUTBOX_UQ_INDEX_DDL) == _normalise(
+        str(CreateIndex(expected_index).compile(dialect=dialect))
+    )
+
+    # The two DROPs are not schema items SQLAlchemy will emit for us, so pin
+    # their spellings directly.  DROP INDEX is the statement the PostgreSQL
+    # index arm executes, so leaving it unpinned would keep exactly the hole
+    # this test exists to close.
+    assert DROP_OUTBOX_UQ_CONSTRAINT_DDL == (
+        f"ALTER TABLE safety_outbox_jobs DROP CONSTRAINT {OUTBOX_UQ_NAME}"
+    )
+    assert DROP_OUTBOX_UQ_INDEX_DDL == f"DROP INDEX IF EXISTS {OUTBOX_UQ_NAME}"
+    # Valid on both dialects: PostgreSQL and SQLite share this spelling, and
+    # neither accepts a table-qualified form here.
+    assert "safety_outbox_jobs" not in DROP_OUTBOX_UQ_INDEX_DDL
 
 
 # ═══════════════════════════════════════════════════════════════════════════
