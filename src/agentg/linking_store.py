@@ -303,20 +303,36 @@ def _add_missing_columns(conn: Connection) -> None:
     # gym_id (the Note already owns the Gym scope; the gym_id column is
     # denormalised for convenience and must match the Note's gym_id).
     #
-    # Use get_unique_constraints (not get_indexes) so the inspection works
-    # on PostgreSQL (where unique constraints are not regular indexes) and
-    # column_names are strings — iterate them directly (P1 #5 r5).
+    # get_unique_constraints is required for PostgreSQL, where unique
+    # constraints are not reported as regular indexes; column_names are
+    # strings in both, so iterate them directly (P1 #5 r5).
+    #
+    # The legacy form may exist either as a table-level UNIQUE constraint or
+    # as a standalone CREATE UNIQUE INDEX, and the two are reported by
+    # *different* inspector calls: on SQLite a unique index is visible only
+    # through get_indexes, and get_unique_constraints returns nothing for it.
+    # Inspecting constraints alone therefore left the index form silently
+    # unmigrated, and its enforcement stuck at three columns (issue #229).
     outbox_uniques = {
         c["name"]: c
         for c in inspect(conn).get_unique_constraints("safety_outbox_jobs")
     }
-    if "uq_outbox_job_note_coach" in outbox_uniques:
-        existing_cols = list(
-            outbox_uniques["uq_outbox_job_note_coach"]["column_names"]
-        )
+    outbox_unique_indexes = {
+        i["name"]: i
+        for i in inspect(conn).get_indexes("safety_outbox_jobs")
+        if i.get("unique")
+    }
+    legacy = outbox_uniques.get("uq_outbox_job_note_coach") or (
+        outbox_unique_indexes.get("uq_outbox_job_note_coach")
+    )
+    if legacy is not None:
+        existing_cols = list(legacy["column_names"])
         # Recreate if the old three-column form is still present.
         if "gym_id" in existing_cols:
-            if conn.dialect.name == "postgresql":
+            # Drop through the matching mechanism: DROP CONSTRAINT only
+            # works on a real constraint, DROP INDEX only on an index.
+            is_constraint = "uq_outbox_job_note_coach" in outbox_uniques
+            if conn.dialect.name == "postgresql" and is_constraint:
                 conn.execute(
                     text(
                         "ALTER TABLE safety_outbox_jobs "
@@ -328,6 +344,16 @@ def _add_missing_columns(conn: Connection) -> None:
                         "ALTER TABLE safety_outbox_jobs "
                         "ADD CONSTRAINT uq_outbox_job_note_coach "
                         "UNIQUE (note_id, coach_member_id)"
+                    )
+                )
+            elif conn.dialect.name == "postgresql":
+                conn.execute(
+                    text("DROP INDEX IF EXISTS uq_outbox_job_note_coach")
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX uq_outbox_job_note_coach "
+                        "ON safety_outbox_jobs (note_id, coach_member_id)"
                     )
                 )
             else:
