@@ -3258,6 +3258,74 @@ async def test_migration_refuses_to_narrow_over_duplicate_note_coach_rows(
     await engine.dispose()
 
 
+async def test_ensure_schema_restores_uniqueness_lost_mid_migration(tmp_path):
+    """A table left with no uniqueness at all is repaired on the next boot.
+
+    The migration's DDL autocommits, so an interruption (SIGKILL, OOM, deploy
+    timeout) between the DROP and the CREATE leaves safety_outbox_jobs with
+    no unique constraint whatsoever.  Gating the migration on still *finding*
+    a legacy 3-column form meant such a database had nothing to match on and
+    stayed unenforced forever, silently allowing duplicate safety alerts;
+    create_all does not rescue it either, since checkfirst skips the existing
+    table (PR #231 round 2 P2)."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'heal.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+
+    gym = await linking.create_gym("Gym")
+    coach = await linking.link_member(gym.id, "Coach", "telegram", "99")
+    await linking.set_coach(coach.id)
+
+    # Legacy table, then the interrupted migration: DROP without the CREATE.
+    async with engine.begin() as conn:
+        await _build_legacy_outbox_table(conn, "standalone-index")
+        note_id = await _seed_note(conn, gym_id=gym.id, member_id=coach.id)
+        await _seed_legacy_outbox_row(
+            conn, gym_id=gym.id, note_id=note_id, coach_member_id=coach.id
+        )
+        await conn.execute(text("DROP INDEX IF EXISTS uq_outbox_job_note_coach"))
+
+    await linking.ensure_schema()
+
+    # The 2-column form must be back, and enforcing.
+    from sqlalchemy import inspect as sa_inspect
+
+    async with engine.connect() as conn:
+        def _check(sync_conn):
+            unique = [
+                sorted(i["column_names"])
+                for i in sa_inspect(sync_conn).get_indexes("safety_outbox_jobs")
+                if i.get("unique")
+            ] + [
+                sorted(c["column_names"])
+                for c in sa_inspect(sync_conn).get_unique_constraints(
+                    "safety_outbox_jobs"
+                )
+            ]
+            assert sorted(["note_id", "coach_member_id"]) in unique, (
+                "ensure_schema must restore the 2-column form on a table that "
+                f"lost its uniqueness mid-migration, found: {unique}"
+            )
+
+        await conn.run_sync(_check)
+
+    with pytest.raises(IntegrityError) as excinfo:
+        async with engine.begin() as conn:
+            await _seed_legacy_outbox_row(
+                conn, gym_id=gym.id, note_id=note_id, coach_member_id=coach.id
+            )
+    _assert_rejected_by_note_coach_uniqueness(excinfo.value)
+
+    # The pre-existing row must have survived the repair.
+    async with engine.connect() as conn:
+        count = (
+            await conn.execute(text("SELECT COUNT(*) FROM safety_outbox_jobs"))
+        ).scalar()
+    assert count == 1, f"the repair must not drop rows, got {count}"
+
+    await engine.dispose()
+
+
 def test_outbox_unique_constraint_ddl_compiles_on_postgres():
     """The hand-written PostgreSQL arms must match what SQLAlchemy emits.
 
@@ -3275,6 +3343,7 @@ def test_outbox_unique_constraint_ddl_compiles_on_postgres():
         ADD_OUTBOX_UQ_CONSTRAINT_DDL,
         CREATE_OUTBOX_UQ_INDEX_DDL,
         DROP_OUTBOX_UQ_CONSTRAINT_DDL,
+        DROP_OUTBOX_UQ_INDEX_DDL,
         OUTBOX_UQ_COLUMNS,
         OUTBOX_UQ_NAME,
     )
@@ -3326,11 +3395,17 @@ def test_outbox_unique_constraint_ddl_compiles_on_postgres():
         str(CreateIndex(expected_index).compile(dialect=dialect))
     )
 
-    # DROP CONSTRAINT is not a schema item SQLAlchemy will emit for us; pin
-    # the spelling PostgreSQL requires (SQLite has no such statement).
+    # The two DROPs are not schema items SQLAlchemy will emit for us, so pin
+    # their spellings directly.  DROP INDEX is the statement the PostgreSQL
+    # index arm executes, so leaving it unpinned would keep exactly the hole
+    # this test exists to close.
     assert DROP_OUTBOX_UQ_CONSTRAINT_DDL == (
         f"ALTER TABLE safety_outbox_jobs DROP CONSTRAINT {OUTBOX_UQ_NAME}"
     )
+    assert DROP_OUTBOX_UQ_INDEX_DDL == f"DROP INDEX IF EXISTS {OUTBOX_UQ_NAME}"
+    # Valid on both dialects: PostgreSQL and SQLite share this spelling, and
+    # neither accepts a table-qualified form here.
+    assert "safety_outbox_jobs" not in DROP_OUTBOX_UQ_INDEX_DDL
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -70,19 +70,28 @@ ADD_NEXT_PATH_DDL = (
 # only ever execute on a live deploy, where a malformed statement rolls back
 # ensure_schema and the process fails to boot.  Pinned against SQLAlchemy's
 # own PostgreSQL DDL compilation in tests (issue #229).
+# Derived from the name and column list rather than re-spelled, so the
+# detection logic, the emitted DDL and the tests cannot drift apart.
+OUTBOX_TABLE = "safety_outbox_jobs"
 OUTBOX_UQ_NAME = "uq_outbox_job_note_coach"
 OUTBOX_UQ_COLUMNS = ("note_id", "coach_member_id")
+_OUTBOX_UQ_COLUMN_LIST = ", ".join(OUTBOX_UQ_COLUMNS)
 DROP_OUTBOX_UQ_CONSTRAINT_DDL = (
-    "ALTER TABLE safety_outbox_jobs DROP CONSTRAINT uq_outbox_job_note_coach"
+    f"ALTER TABLE {OUTBOX_TABLE} DROP CONSTRAINT {OUTBOX_UQ_NAME}"
 )
 ADD_OUTBOX_UQ_CONSTRAINT_DDL = (
-    "ALTER TABLE safety_outbox_jobs ADD CONSTRAINT uq_outbox_job_note_coach "
-    "UNIQUE (note_id, coach_member_id)"
+    f"ALTER TABLE {OUTBOX_TABLE} ADD CONSTRAINT {OUTBOX_UQ_NAME} "
+    f"UNIQUE ({_OUTBOX_UQ_COLUMN_LIST})"
 )
-DROP_OUTBOX_UQ_INDEX_DDL = "DROP INDEX IF EXISTS uq_outbox_job_note_coach"
+DROP_OUTBOX_UQ_INDEX_DDL = f"DROP INDEX IF EXISTS {OUTBOX_UQ_NAME}"
 CREATE_OUTBOX_UQ_INDEX_DDL = (
-    "CREATE UNIQUE INDEX uq_outbox_job_note_coach "
-    "ON safety_outbox_jobs (note_id, coach_member_id)"
+    f"CREATE UNIQUE INDEX {OUTBOX_UQ_NAME} "
+    f"ON {OUTBOX_TABLE} ({_OUTBOX_UQ_COLUMN_LIST})"
+)
+# Rows the narrowed form would reject, used to refuse the migration.
+SELECT_OUTBOX_UQ_DUPLICATES_SQL = (
+    f"SELECT {_OUTBOX_UQ_COLUMN_LIST}, COUNT(*) FROM {OUTBOX_TABLE} "
+    f"GROUP BY {_OUTBOX_UQ_COLUMN_LIST} HAVING COUNT(*) > 1"
 )
 
 
@@ -335,11 +344,11 @@ def _add_missing_columns(conn: Connection) -> None:
     # unmigrated, and its enforcement stuck at three columns (issue #229).
     outbox_uniques = {
         c["name"]: c
-        for c in inspect(conn).get_unique_constraints("safety_outbox_jobs")
+        for c in inspect(conn).get_unique_constraints(OUTBOX_TABLE)
     }
     outbox_unique_indexes = {
         i["name"]: i
-        for i in inspect(conn).get_indexes("safety_outbox_jobs")
+        for i in inspect(conn).get_indexes(OUTBOX_TABLE)
         if i.get("unique")
     }
     #
@@ -351,52 +360,55 @@ def _add_missing_columns(conn: Connection) -> None:
     # duplicate guard below) each rerun briefly left the table with no
     # 2-column enforcement at all.  Treat the presence of the 2-column form
     # under *either* mechanism as migrated.
-    target_cols = ["note_id", "coach_member_id"]
+    #
+    # Gate on the *absence of the target*, not the presence of a legacy form.
+    # DDL here autocommits, so an interruption between the DROP and the
+    # CREATE below leaves the table with no uniqueness at all; keying off the
+    # legacy form meant such a database found nothing to migrate and stayed
+    # unenforced forever (create_all cannot rescue it either — checkfirst
+    # skips the existing table).  Rebuilding the target whenever it is
+    # missing makes that state self-healing on the next boot.
     found = [
         entry
         for entry in (
-            outbox_uniques.get("uq_outbox_job_note_coach"),
-            outbox_unique_indexes.get("uq_outbox_job_note_coach"),
+            outbox_uniques.get(OUTBOX_UQ_NAME),
+            outbox_unique_indexes.get(OUTBOX_UQ_NAME),
         )
         if entry is not None
     ]
     already_migrated = any(
-        sorted(entry["column_names"]) == sorted(target_cols) for entry in found
+        sorted(entry["column_names"]) == sorted(OUTBOX_UQ_COLUMNS)
+        for entry in found
     )
     legacy = next(
         (entry for entry in found if "gym_id" in entry["column_names"]), None
     )
-    if legacy is not None and not already_migrated:
+    if not already_migrated:
         # Refuse to narrow the constraint over rows the new form would
         # reject.  A legacy database can legitimately hold two jobs sharing
         # (note_id, coach_member_id) under different gym_id values, and
-        # CREATE UNIQUE INDEX over them raises.  pysqlite does not open a
-        # transaction for DDL, so the DROP below is *not* rolled back by
-        # that failure: the next boot would find no constraint at all,
-        # skip this block, and leave the table permanently unenforced.
-        # Fail loudly instead, with the old form still intact.  Mirrors the
+        # CREATE UNIQUE INDEX over them raises.  Because the DDL autocommits
+        # the DROP is *not* rolled back by that failure, so an unguarded
+        # attempt would strip what enforcement remained.  Fail loudly
+        # instead, leaving the table exactly as it was.  Mirrors the
         # uq_sessions_one_open_per_member guard below.
-        dups = conn.execute(
-            text(
-                "SELECT note_id, coach_member_id, COUNT(*) FROM "
-                "safety_outbox_jobs GROUP BY note_id, coach_member_id "
-                "HAVING COUNT(*) > 1"
-            )
-        ).fetchall()
+        dups = conn.execute(text(SELECT_OUTBOX_UQ_DUPLICATES_SQL)).fetchall()
         if dups:
             pairs = ", ".join(f"(note {row[0]}, coach {row[1]})" for row in dups)
             raise RuntimeError(
                 "Historical duplicate safety-outbox jobs detected for "
                 f"Note/Coach pair(s): {pairs}. Delete the redundant job rows "
-                "before restarting — uq_outbox_job_note_coach cannot be "
-                "narrowed to (note_id, coach_member_id) over them."
+                f"before restarting — {OUTBOX_UQ_NAME} cannot be narrowed to "
+                f"{tuple(OUTBOX_UQ_COLUMNS)} over them."
             )
         # Drop through the mechanism that matches what was found:
         # DROP CONSTRAINT works only on a real constraint, DROP INDEX only
         # on an index.  Only the PostgreSQL constraint form needs the
-        # ALTER TABLE spelling; every other case is an index.
+        # ALTER TABLE spelling; every other case is an index, including the
+        # no-legacy-form-at-all case, where DROP INDEX IF EXISTS is a
+        # harmless no-op before the target is recreated.
         is_constraint = (
-            outbox_uniques.get("uq_outbox_job_note_coach") is legacy
+            legacy is not None and outbox_uniques.get(OUTBOX_UQ_NAME) is legacy
         )
         if conn.dialect.name == "postgresql" and is_constraint:
             conn.execute(text(DROP_OUTBOX_UQ_CONSTRAINT_DDL))
