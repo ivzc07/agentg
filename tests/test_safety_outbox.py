@@ -4411,3 +4411,416 @@ async def test_revoke_login_token_is_idempotent(env):
     assert await env.dashboard.revoke_login_token(hash_token(raw)) is False
     assert await env.dashboard.revoke_login_token("") is False
     assert await env.dashboard.revoke_login_token("not-a-real-hash") is False
+
+
+# ── PR #228 review: lease fencing of the credential columns (P2) ──────────
+
+
+async def _live_token_count(env):
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT COUNT(*) AS n FROM dashboard_login_tokens "
+                    "WHERE used_at IS NULL"
+                )
+            )
+        ).first()
+    return row.n
+
+
+def _explode_link_send(worker):
+    """Make the *link* send raise, so every attempt mints a credential and
+    then fails in a retryable way — the only shape that leaves a token
+    outstanding across attempts."""
+    real = worker._authorized_send
+
+    async def patched(job, text_, **kw):
+        if "/login/" in text_:
+            raise RuntimeError("link send exploded")
+        return await real(job, text_, **kw)
+
+    worker._authorized_send = patched
+    return worker
+
+
+async def _one_job(env, coach_id=None, body="sharp knee pain"):
+    return await env.outbox.create_note_and_jobs(
+        member_id=env.member_id,
+        gym_id=env.gym_id,
+        text=body,
+        member_name=env.member_name,
+        member_is_coach=False,
+        coaches=[(coach_id or env.coach1_id, "Coach Sam", "telegram", "7")],
+    )
+
+
+async def test_stale_owner_cannot_revoke_the_live_owners_credential(env):
+    """After a lease expiry and re-claim, the stale owner's teardown must not
+    kill the magic link the *new* owner already sent (PR #228 review, P2).
+
+    Without the lease fence on take_login_token_hash the stale owner revoked
+    a live, already-delivered credential while the job stayed 'delivered'.
+    """
+    await _one_job(env)
+
+    stale = await env.outbox.claim_pending(limit=10)
+    assert len(stale) == 1
+
+    # The lease expires and the poll loop hands the job to a new owner.
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE safety_outbox_jobs SET claimed_at = :t"),
+            {"t": datetime.now(UTC) - timedelta(hours=1)},
+        )
+    assert await env.outbox.reset_stale_claims() == 1
+
+    worker = _make_worker(env)
+    assert await worker.drain_once(limit=10) == 1
+    links = [m[2] for m in env.notifier.sent if "/login/" in m[2]]
+    assert len(links) == 1
+    raw = links[0].rsplit("/login/", 1)[1]
+    assert await env.dashboard.peek_login_token(raw) is not None
+
+    # Now the stale owner finally comes back and tries to tear down.
+    await worker._fail(stale[0], "stale failure", FailureKind.UNAUTHORIZED)
+    await worker._retry(stale[0], "stale retry")
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, login_token_hash FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.status == "delivered", "the stale owner must not change status"
+    assert row.login_token_hash == hash_token(raw)
+    assert await env.dashboard.peek_login_token(raw) is not None, (
+        "a stale owner must not revoke the live owner's delivered magic link"
+    )
+
+
+async def test_stale_owner_cannot_overwrite_the_live_login_token_hash(env):
+    """The mirror image: a stale owner recording its own hash would make the
+    live owner's token unrevokable for its full TTL (PR #228 review, P2)."""
+    await _one_job(env)
+    stale = await env.outbox.claim_pending(limit=10)
+
+    async with env.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE safety_outbox_jobs SET claimed_at = :t"),
+            {"t": datetime.now(UTC) - timedelta(hours=1)},
+        )
+    await env.outbox.reset_stale_claims()
+    live = await env.outbox.claim_pending(limit=10)
+    assert len(live) == 1
+
+    assert await env.outbox.record_login_token(live[0], "live-hash") is True
+    assert await env.outbox.record_login_token(stale[0], "stale-hash") is False
+
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT login_token_hash FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.login_token_hash == "live-hash"
+    # And the stale owner cannot take it either.
+    assert await env.outbox.take_login_token_hash(stale[0]) is None
+    assert await env.outbox.take_login_token_hash(live[0]) == "live-hash"
+
+
+# ── PR #228 review: recovery consumes an attempt (P2) ─────────────────────
+
+
+async def test_abandoned_claims_consume_an_attempt(env):
+    """A crash between claim and outcome costs one attempt, so a crash loop
+    converges on the terminal policy instead of retrying forever
+    (PR #228 review, P2)."""
+    await _one_job(env)
+
+    for expected in range(1, MAX_DELIVERY_ATTEMPTS):
+        claimed = await env.outbox.claim_pending(limit=10)
+        assert len(claimed) == 1, f"attempt {expected} should have been claimable"
+        # "Crash": the owner dies without recording an outcome; the next boot
+        # runs reset_claimed.
+        assert await env.outbox.reset_claimed() == 1
+        async with env.engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    text(
+                        "SELECT status, retry_count, last_error "
+                        "FROM safety_outbox_jobs"
+                    )
+                )
+            ).first()
+        assert row.status == "pending"
+        assert row.retry_count == expected
+        assert row.last_error == "claim abandoned (restart)"
+
+    # The last abandoned claim trips the terminal policy.
+    assert len(await env.outbox.claim_pending(limit=10)) == 1
+    assert await env.outbox.reset_claimed() == 1
+    failed = await env.outbox.failed_jobs()
+    assert len(failed) == 1
+    assert failed[0].failure_kind == FailureKind.RETRY_EXHAUSTED
+    assert failed[0].retry_count == MAX_DELIVERY_ATTEMPTS
+    assert await env.outbox.claim_pending(limit=10) == []
+
+
+async def test_expired_leases_converge_on_the_terminal_policy(env):
+    """The same bound through the lease-expiry path, which the poll loop
+    runs every cycle (PR #228 review, P2)."""
+    await _one_job(env)
+
+    claims = 0
+    for _ in range(MAX_DELIVERY_ATTEMPTS + 4):
+        claims += len(await env.outbox.claim_pending(limit=10))
+        async with env.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE safety_outbox_jobs SET claimed_at = :t "
+                    "WHERE status = 'sending'"
+                ),
+                {"t": datetime.now(UTC) - timedelta(hours=1)},
+            )
+        await env.outbox.reset_stale_claims()
+
+    assert claims == MAX_DELIVERY_ATTEMPTS, (
+        "an endlessly-hanging job must stop being re-claimed at the policy"
+    )
+    failed = await env.outbox.failed_jobs()
+    assert len(failed) == 1
+    assert failed[0].failure_kind == FailureKind.RETRY_EXHAUSTED
+    assert failed[0].last_error == "claim lease expired"
+
+
+async def test_recovery_does_not_retire_a_job_with_attempts_left(env):
+    """Recovery must not over-fire: a job well short of the ceiling comes
+    back pending and is delivered normally."""
+    await _one_job(env)
+    await env.outbox.claim_pending(limit=10)
+    assert await env.outbox.reset_claimed() == 1
+
+    assert await _make_worker(env).drain_once(limit=10) == 1
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text("SELECT status, retry_count FROM safety_outbox_jobs")
+            )
+        ).first()
+    assert row.status == "delivered"
+    assert row.retry_count == 1
+
+
+# ── PR #228 review: credential teardown is asserted (P2) ──────────────────
+
+
+async def test_terminal_failure_revokes_the_outstanding_credential(env):
+    """When the terminal policy retires a job, the magic link its last
+    attempt minted is revoked, not left live for its TTL
+    (PR #228 review, P2)."""
+    await _one_job(env)
+
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+    env.outbox._rng = lambda: 0.5
+    env.dashboard._clock = lambda: clock_val[0]
+
+    worker = _explode_link_send(_make_worker(env))
+    for _ in range(MAX_DELIVERY_ATTEMPTS):
+        clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
+        await worker.drain_once(limit=10)
+        # Each attempt mints, so at most one credential is ever live.
+        assert await _live_token_count(env) <= 1
+
+    failed = await env.outbox.failed_jobs()
+    assert len(failed) == 1
+    assert failed[0].failure_kind == FailureKind.RETRY_EXHAUSTED
+    assert failed[0].login_token_hash is None
+    assert await _live_token_count(env) == 0, (
+        "a retired job must not leave a live dashboard credential behind"
+    )
+
+
+async def test_terminal_authorization_failure_revokes_the_credential(env):
+    """A job that minted a credential on one attempt and is then retired for
+    losing authorization has that credential revoked (PR #228 review, P2)."""
+    await _one_job(env)
+
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+    env.outbox._rng = lambda: 0.5
+    env.dashboard._clock = lambda: clock_val[0]
+
+    # Attempt 1 mints a credential, then fails retryably.
+    await _explode_link_send(_make_worker(env)).drain_once(limit=10)
+    assert await _live_token_count(env) == 1
+    async with env.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                text(
+                    "SELECT status, retry_count, login_token_hash "
+                    "FROM safety_outbox_jobs"
+                )
+            )
+        ).first()
+    assert row.status == "pending"
+    assert row.retry_count == 1
+    assert row.login_token_hash is not None
+
+    # Attempt 2: the Coach has been demoted — a terminal, unauthorized end.
+    await env.linking.set_coach(env.coach1_id, False)
+    clock_val[0] += timedelta(seconds=MAX_BACKOFF_SECONDS + 10)
+    await _make_worker(env).drain_once(limit=10)
+
+    failed = await env.outbox.failed_jobs()
+    assert len(failed) == 1
+    assert failed[0].failure_kind == FailureKind.UNAUTHORIZED
+    assert failed[0].login_token_hash is None
+    assert await _live_token_count(env) == 0, (
+        "a credential outliving the Coach's authorization must be revoked"
+    )
+
+
+async def test_forget_me_between_headsup_and_link_revokes_the_credential(env):
+    """The worst case: the Note is forgotten between the heads-up and the
+    link send, so a magic link into that Member's page was already minted.
+    It must be killed, not left redeemable (PR #228 review, P2)."""
+    await _one_job(env)
+    worker = _make_worker(env)
+
+    # _job_still_sending is called three times per delivery: top of the
+    # delivery, before the heads-up, and before the link.  Fail the third —
+    # i.e. the job vanished (forget-me cascade) after the credential was
+    # minted.
+    real_check = worker._job_still_sending
+    calls = {"n": 0}
+
+    async def patched(job):
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            return False
+        return await real_check(job)
+
+    worker._job_still_sending = patched
+    await worker.drain_once(limit=10)
+
+    assert calls["n"] >= 3, "the link pre-check must have run"
+    links = [m for m in env.notifier.sent if "/login/" in m[2]]
+    assert links == [], "no link may be sent once the job is gone"
+    assert await _live_token_count(env) == 0, (
+        "a credential minted for a forgotten Note must be revoked"
+    )
+
+
+async def test_orphaned_credential_is_revoked_when_recording_fails(env):
+    """The mint and the record are two transactions.  If the record does not
+    land, the token can never be revoked by any later path — so _mint_link
+    undoes it immediately (PR #228 review, P3)."""
+    await _one_job(env)
+
+    async def refuse(job, token_hash):
+        return False
+
+    env.outbox.record_login_token = refuse
+
+    worker = _make_worker(env)
+    await worker.drain_once(limit=10)
+
+    # The heads-up still went out, text-only.
+    heads = [m for m in env.notifier.sent if "/login/" not in m[2]]
+    links = [m for m in env.notifier.sent if "/login/" in m[2]]
+    assert len(heads) == 1
+    assert links == []
+    assert await _live_token_count(env) == 0, (
+        "an unrecorded token is unrevokable later, so it must be revoked now"
+    )
+
+
+# ── PR #228 review: failed_jobs ordering and limit (P3) ───────────────────
+
+
+async def test_failed_jobs_orders_newest_first_and_honours_limit(env):
+    """The operator surface behind AC #4 really is newest-first and bounded
+    (PR #228 review, P3)."""
+    clock_val = [datetime.now(UTC)]
+    env.outbox._clock = lambda: clock_val[0]
+
+    # Three Notes whose single job is retired at three distinct times.
+    order = []
+    for i in range(3):
+        _note, jobs = await _one_job(env, body=f"flag {i}")
+        claimed = await env.outbox.claim_pending(limit=10)
+        clock_val[0] += timedelta(minutes=1)
+        await env.outbox.mark_failed(
+            claimed[0], "coach gone", kind=FailureKind.UNAUTHORIZED
+        )
+        order.append(claimed[0].id)
+
+    failed = await env.outbox.failed_jobs()
+    assert [j.id for j in failed] == list(reversed(order)), (
+        "failed_jobs must return the newest failure first"
+    )
+    assert [j.id for j in await env.outbox.failed_jobs(limit=2)] == list(
+        reversed(order)
+    )[:2]
+    assert len(await env.outbox.failed_jobs(limit=1)) == 1
+    # Both filters at once still work.
+    assert len(
+        await env.outbox.failed_jobs(
+            gym_id=env.gym_id, kind=FailureKind.UNAUTHORIZED
+        )
+    ) == 3
+    assert await env.outbox.failed_jobs(
+        gym_id=env.gym_id, kind=FailureKind.RETRY_EXHAUSTED
+    ) == []
+
+
+# ── PR #228 review: sanitizer rule ordering and coverage (P2, P3) ─────────
+
+
+def test_sanitize_error_handles_every_telegram_token_rendering():
+    """The header rule must not eat the prefix the bot-token rule needs, and
+    the canonical /bot<token>/ URL form must match too (PR #228 review, P2).
+    """
+    secret = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
+    for raw in (
+        f"telegram rejected token 123456789:{secret}",
+        f"telegram rejected bot 123456789:{secret}",
+        f"https://api.telegram.org/bot123456789:{secret}/sendMessage",
+        f"401 {{'bot_token': '123456789:{secret}'}}",
+    ):
+        cleaned = sanitize_error(raw)
+        assert secret not in cleaned, f"secret survived in {raw!r} -> {cleaned!r}"
+        assert "123456789" not in cleaned
+        assert "[redacted]" in cleaned
+
+
+def test_sanitize_error_handles_json_and_repr_secret_forms():
+    """The key=value rule covers the JSON and repr() renderings its comment
+    claims, not just bare key=value (PR #228 review, P3)."""
+    for raw in (
+        '{"token": "s3cr3tvalue123", "id": 5}',
+        "{'token': 's3cr3tvalue123'}",
+        "token=s3cr3tvalue123",
+        'access_token: "s3cr3tvalue123"',
+    ):
+        cleaned = sanitize_error(raw)
+        assert "s3cr3tvalue123" not in cleaned, f"{raw!r} -> {cleaned!r}"
+        assert "[redacted]" in cleaned
+    # Non-secret keys are untouched, so telemetry stays readable.
+    assert sanitize_error('{"id": 5, "attempt": 2}') == '{"id": 5, "attempt": 2}'
+
+
+def test_sanitize_error_backstop_catches_unlabelled_high_entropy_values():
+    """The length backstop is load-bearing: a credential with no recognisable
+    label still cannot reach the logs (PR #228 review, P3)."""
+    opaque = "Zk9" + "aB3xQ7" * 8  # 51 chars, no prefix, no key, no colon
+    assert len(opaque) >= 40
+    assert opaque not in sanitize_error(f"upstream said {opaque}")
+    # Ordinary prose is left alone — the backstop must not eat readable text.
+    assert sanitize_error("coach no longer reachable in this gym") == (
+        "coach no longer reachable in this gym"
+    )

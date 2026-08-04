@@ -25,7 +25,9 @@ What *is* bounded:
 * One job per (Note, Coach) forever — ``uq_outbox_job_note_coach``.
 * At most ``MAX_DELIVERY_ATTEMPTS`` attempts per job, after which the
   terminal policy retires it as ``failed`` with
-  ``failure_kind="retry_exhausted"``.
+  ``failure_kind="retry_exhausted"``.  An abandoned claim (crash, expired
+  lease) consumes an attempt too, so a crash loop converges on the policy
+  instead of re-claiming the same job forever.
 * At most **one live dashboard credential per job**: every mint first revokes
   the token the previous attempt left outstanding (``login_token_hash``), so
   a crash-loop cannot accumulate valid magic links for their 10-minute TTL.
@@ -139,25 +141,39 @@ TERMINAL_FAILURE_KINDS = frozenset(
 # exception *type* names, never a Member's Note text or an exception message.
 MAX_ERROR_LENGTH = 200
 _REDACTED = "[redacted]"
+#
+# Order matters, and the whole-credential rules must come FIRST: a header rule
+# that fires early can eat the prefix a later rule needs and leave the actual
+# secret behind.  Concretely, redacting the ``token 123456789`` half of
+# ``token 123456789:AAH…`` destroys the ``\d{6,}:`` anchor of the Telegram
+# rule and publishes the secret half verbatim (PR #228 review, P2).
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
-    # Authorization headers: "Bearer eyJ...", "Basic dXNlcjpwdw==".
-    (re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._\-~+/=]{8,}"), r"\1 " + _REDACTED),
     # Our own magic links: https://dash/login/<raw token>.
     (re.compile(r"(?i)(/login/)[A-Za-z0-9._\-~+/=]+"), r"\1" + _REDACTED),
-    # Telegram bot tokens: "123456789:AAH...".
-    (re.compile(r"\b\d{6,}:[A-Za-z0-9_\-]{20,}\b"), _REDACTED),
+    # Telegram bot tokens: "123456789:AAH...".  No leading \b: the canonical
+    # provider rendering is "/bot123456789:AAH…", where "t" and "1" are both
+    # word characters so \b can never anchor.  (?<!\d) keeps the whole numeric
+    # half inside the match instead of letting it start mid-number.
+    (re.compile(r"(?<!\d)\d{6,}:[A-Za-z0-9_\-]{20,}"), _REDACTED),
     # Provider API keys with a conventional prefix.
     (re.compile(r"(?i)\b(sk|pk|rk|api)[-_][A-Za-z0-9]{16,}\b"), _REDACTED),
     # key=value / "key": "value" secrets in URLs, JSON, and repr() output.
+    # The optional quote before the separator is what makes the JSON and
+    # repr() forms ('"token": "…"', "{'token': '…'}") match at all.
     (
         re.compile(
             r"(?i)\b(api[-_]?key|access[-_]?token|refresh[-_]?token|auth[-_]?token"
             r"|token|secret|password|passwd|pwd|signature|credential)\b"
-            r"\s*[=:]\s*[\"']?[^\s\"'&,;}]+"
+            r"[\"']?\s*[=:]\s*[\"']?[^\s\"'&,;}]+"
         ),
         r"\1=" + _REDACTED,
     ),
-    # Anything else long and high-entropy enough to be a credential.
+    # Authorization headers: "Bearer eyJ...", "Basic dXNlcjpwdw==".
+    (
+        re.compile(r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._\-~+/=]{8,}"),
+        r"\1 " + _REDACTED,
+    ),
+    # Backstop: anything else long and high-entropy enough to be a credential.
     (re.compile(r"\b[A-Za-z0-9_\-]{40,}\b"), _REDACTED),
 )
 
@@ -590,34 +606,53 @@ class SafetyOutbox:
         async with self._sessions() as db:
             return list((await db.scalars(stmt)).all())
 
-    async def record_login_token(self, job_id: int, token_hash: str) -> None:
+    async def record_login_token(
+        self, job: SafetyOutboxJob, token_hash: str
+    ) -> bool:
         """Remember the dashboard credential this job currently has
         outstanding, so the next attempt can revoke it before minting
-        another (issue #217).
+        another (issue #217).  ``True`` when the write landed.
 
-        Written by job id rather than under the lease guard on purpose: a
-        token that exists but is not recorded could never be revoked, which
-        is exactly the leak this column closes.
+        Fenced by the ``claimed_at`` lease stamp like every other write:
+        without it a stale owner could overwrite the live owner's hash and
+        make the live, already-sent token unrevokable for its full TTL
+        (PR #228 review, P2).  A caller whose write does *not* land still
+        holds the raw token and must revoke it — see ``_mint_link``.
         """
         async with self._sessions() as db:
-            await db.execute(
+            result = await db.execute(
                 update(SafetyOutboxJob)
-                .where(SafetyOutboxJob.id == job_id)
+                .where(
+                    SafetyOutboxJob.id == job.id,
+                    SafetyOutboxJob.claimed_at == job.claimed_at,
+                )
                 .values(login_token_hash=token_hash)
             )
             await db.commit()
+            return bool(result.rowcount)  # type: ignore[attr-defined]
 
-    async def take_login_token_hash(self, job_id: int) -> str | None:
-        """Read and clear this job's outstanding dashboard-credential hash.
+    async def take_login_token_hash(self, job: SafetyOutboxJob) -> str | None:
+        """Read and clear this job's outstanding dashboard-credential hash,
+        under OUR claim.  ``None`` when the job holds none, or when the lease
+        has moved on.
 
-        Returns ``None`` when the job holds none.  The read and the clear are
-        two statements; a lost race can only revoke the same hash twice,
-        which the revoke itself makes idempotent.
+        The lease fence matters: after a lease expiry and re-claim, an
+        unfenced take would let the stale owner revoke the *new* owner's
+        token — one already sent to the Coach — killing a live magic link on
+        a job that goes on to be marked delivered (PR #228 review, P2).
+
+        Fenced on ``claimed_at`` only, not on ``status``: the terminal path
+        revokes *after* ``mark_failed`` has already moved the row to
+        ``failed``, and that revoke must still land.
+
+        The read and the clear are two statements; a lost race can only
+        revoke the same hash twice, which the revoke itself makes idempotent.
         """
         async with self._sessions() as db:
             current = await db.scalar(
                 select(SafetyOutboxJob.login_token_hash).where(
-                    SafetyOutboxJob.id == job_id
+                    SafetyOutboxJob.id == job.id,
+                    SafetyOutboxJob.claimed_at == job.claimed_at,
                 )
             )
             if current is None:
@@ -625,7 +660,8 @@ class SafetyOutbox:
             await db.execute(
                 update(SafetyOutboxJob)
                 .where(
-                    SafetyOutboxJob.id == job_id,
+                    SafetyOutboxJob.id == job.id,
+                    SafetyOutboxJob.claimed_at == job.claimed_at,
                     SafetyOutboxJob.login_token_hash == current,
                 )
                 .values(login_token_hash=None)
@@ -633,20 +669,105 @@ class SafetyOutbox:
             await db.commit()
             return current
 
+    async def _recover_claims(
+        self, rows: list[SafetyOutboxJob], reason: str
+    ) -> int:
+        """Return abandoned claims to ``pending``, **consuming one attempt
+        each**, and retire the ones that reach the terminal policy.
+
+        The attempt has to be counted here.  ``retry_count`` used to be
+        incremented only in ``reset_for_retry``, which requires the owner to
+        live long enough to record an outcome — so a worker that crashed (or
+        whose lease expired) after the send came back to ``pending`` with the
+        counter untouched and was re-claimed immediately.  A crash-looping
+        process could then attempt one job forever, which is precisely the
+        unbounded background load ``MAX_DELIVERY_ATTEMPTS`` exists to stop
+        (PR #228 review, P2).
+
+        No backoff is applied: an abandoned claim is not a provider
+        rejection, and delaying a safety ping because the process restarted
+        would be the wrong trade.  The attempt ceiling is what bounds the
+        loop.
+
+        A job retired here may still hold one outstanding dashboard
+        credential; the store has no dashboard to revoke it with, so that one
+        token expires on its own 10-minute TTL.  Still bounded at one per
+        job, which is the guarantee.
+        """
+        if not rows:
+            return 0
+        now = self._clock()
+        safe = sanitize_error(reason)
+        retire = [r for r in rows if r.retry_count + 1 >= MAX_DELIVERY_ATTEMPTS]
+        requeue_ids = [
+            r.id for r in rows if r.retry_count + 1 < MAX_DELIVERY_ATTEMPTS
+        ]
+        async with self._sessions() as db:
+            if requeue_ids:
+                await db.execute(
+                    update(SafetyOutboxJob)
+                    .where(
+                        SafetyOutboxJob.id.in_(requeue_ids),
+                        SafetyOutboxJob.status == "sending",
+                    )
+                    .values(
+                        status="pending",
+                        claimed_at=None,
+                        retry_count=SafetyOutboxJob.retry_count + 1,
+                        last_error=safe,
+                    )
+                )
+            if retire:
+                await db.execute(
+                    update(SafetyOutboxJob)
+                    .where(
+                        SafetyOutboxJob.id.in_([r.id for r in retire]),
+                        SafetyOutboxJob.status == "sending",
+                    )
+                    .values(
+                        status="failed",
+                        claimed_at=None,
+                        retry_count=SafetyOutboxJob.retry_count + 1,
+                        last_error=safe,
+                        failure_reason=(
+                            f"{safe} (terminal after {MAX_DELIVERY_ATTEMPTS} attempts)"
+                        ),
+                        failure_kind=FailureKind.RETRY_EXHAUSTED,
+                        failed_at=now,
+                    )
+                )
+            await db.commit()
+        for row in retire:
+            _emit_telemetry(
+                delivery_telemetry(
+                    row,
+                    outcome="terminal",
+                    error=safe,
+                    attempt=row.retry_count + 1,
+                    failure_kind=FailureKind.RETRY_EXHAUSTED,
+                )
+            )
+        return len(rows)
+
     async def reset_claimed(self) -> int:
         """Reset every ``sending`` job back to ``pending``.
 
         Called on startup so jobs orphaned by a prior crash (claimed but
-        never delivered) are retried.
+        never delivered) are retried.  The abandoned attempt is counted, so
+        a crash loop still converges on the terminal policy rather than
+        retrying forever — see ``_recover_claims``.
         """
         async with self._sessions() as db:
-            result = await db.execute(
-                update(SafetyOutboxJob)
-                .where(SafetyOutboxJob.status == "sending")
-                .values(status="pending", claimed_at=None)
+            rows = list(
+                (
+                    await db.scalars(
+                        select(SafetyOutboxJob).where(
+                            SafetyOutboxJob.status == "sending"
+                        )
+                    )
+                ).all()
             )
-            await db.commit()
-            return result.rowcount  # type: ignore[attr-defined]
+        return await self._recover_claims(rows, "claim abandoned (restart)")
 
     async def reset_stale_claims(
         self, max_age_seconds: int = LEASE_TIMEOUT_SECONDS
@@ -655,7 +776,9 @@ class SafetyOutbox:
         ``pending`` so a future poll cycle retries them.
 
         Called periodically by the poll loop so a hang (not a crash) that
-        outlasts the lease timeout does not permanently strand jobs.
+        outlasts the lease timeout does not permanently strand jobs.  Like
+        ``reset_claimed`` this counts the abandoned attempt, so a job that
+        hangs every time still hits the terminal policy.
         """
         cutoff = self._clock()
         async with self._sessions() as db:
@@ -668,23 +791,12 @@ class SafetyOutbox:
                     )
                 )
             ).all()
-            stale_ids = [
-                r.id for r in rows
+            stale = [
+                r for r in rows
                 if r.claimed_at is not None
                 and (cutoff - r.claimed_at).total_seconds() > max_age_seconds
             ]
-            if not stale_ids:
-                return 0
-            await db.execute(
-                update(SafetyOutboxJob)
-                .where(
-                    SafetyOutboxJob.id.in_(stale_ids),
-                    SafetyOutboxJob.status == "sending",
-                )
-                .values(status="pending", claimed_at=None)
-            )
-            await db.commit()
-            return len(stale_ids)
+        return await self._recover_claims(stale, "claim lease expired")
 
 
 class OutboxWorker:
@@ -932,7 +1044,7 @@ class OutboxWorker:
         crash, it just leaves the token to expire on its own TTL.
         """
         try:
-            token_hash = await self._outbox.take_login_token_hash(job.id)
+            token_hash = await self._outbox.take_login_token_hash(job)
             if token_hash is None:
                 return False
             return bool(await self._dashboard.revoke_login_token(token_hash))
@@ -955,15 +1067,21 @@ class OutboxWorker:
         """
         if self._base_url is None:
             return None
+        token: str | None = None
         try:
             await self._revoke_outstanding_token(job)
             next_path = "/" if job.member_is_coach else f"/members/{job.member_id}"
             token = await self._dashboard.create_login_token(
                 job.coach_member_id, job.gym_id, next_path=next_path,
             )
-            # Record before returning: an unrecorded token could never be
-            # revoked, which is the leak this whole path closes.
-            await self._outbox.record_login_token(job.id, hash_token(token))
+            # The mint and the record are two transactions, so the record can
+            # fail (or lose the lease) after a live credential already exists.
+            # An unrecorded token could never be revoked by any later path, so
+            # undo it here rather than leave it live for its TTL (PR #228
+            # review, P3).
+            if not await self._outbox.record_login_token(job, hash_token(token)):
+                await self._dashboard.revoke_login_token(hash_token(token))
+                return None
             return f"{self._base_url}/login/{token}"
         except Exception as exc:
             logger.error(
@@ -971,6 +1089,12 @@ class OutboxWorker:
                 job.id,
                 type(exc).__name__,
             )
+            if token is not None:
+                # Same reasoning: a minted-but-unrecorded token is orphaned.
+                try:
+                    await self._dashboard.revoke_login_token(hash_token(token))
+                except Exception:
+                    logger.error("failed to revoke orphaned token for job %s", job.id)
             return None
 
     async def _authorized_send(
