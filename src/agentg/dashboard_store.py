@@ -331,6 +331,34 @@ class DashboardStore:
             await db.commit()
         return raw
 
+    async def revoke_login_token(self, token_hash: str) -> bool:
+        """Retire an unredeemed magic-link token nobody used; ``True`` when a
+        live one was retired.
+
+        Spends the token (``used_at``) rather than deleting the row, so the
+        existing single-use gate does the enforcing and the audit trail
+        survives.  Idempotent: an already-used or expired token is a no-op.
+
+        The safety outbox calls this before each retry mints a replacement,
+        bounding one Note/Coach pair to a single live dashboard credential
+        no matter how many times delivery is retried (issue #217).
+        """
+        if not token_hash:
+            return False
+        now = self._clock()
+        async with self._sessions() as db:
+            result = await db.execute(
+                update(DashboardLoginToken)
+                .where(
+                    DashboardLoginToken.token_hash == token_hash,
+                    DashboardLoginToken.used_at.is_(None),
+                    DashboardLoginToken.expires_at > now,
+                )
+                .values(used_at=now)
+            )
+            await db.commit()
+            return bool(result.rowcount)
+
     async def peek_login_token(self, raw_token: str) -> DashboardLoginToken | None:
         """The token row if it is redeemable right now, without spending it.
 

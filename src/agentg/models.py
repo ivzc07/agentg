@@ -440,11 +440,30 @@ class SafetyOutboxJob(Base):
     # NULL means immediately claimable.
     next_retry_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     claimed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
+    # When the worker actually began sending under the current claim (issue
+    # #217).  A claim alone is not an attempt: claim_pending flips a whole
+    # batch to `sending` before any send is issued, so crash recovery needs
+    # to tell "we tried and died" from "we never got to it" and only charge
+    # the former against the retry budget.  Cleared by every claim and every
+    # requeue and set only immediately before a send, so its mere presence
+    # answers that question without comparing wall-clock readings.
+    attempt_started_at: Mapped[datetime | None] = mapped_column(
+        TZDateTime(), default=None
+    )
     last_error: Mapped[str | None] = mapped_column(String(400), default=None)
     created_at: Mapped[datetime] = mapped_column(TZDateTime())
     delivered_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     failed_at: Mapped[datetime | None] = mapped_column(TZDateTime(), default=None)
     failure_reason: Mapped[str | None] = mapped_column(String(400), default=None)
+    # Machine-readable class of a terminal failure (issue #217), so failed
+    # jobs stay queryable by *why* they died rather than by prose:
+    # see agentg.safety_outbox.FailureKind.  NULL while the job is still
+    # pending/sending/delivered.
+    failure_kind: Mapped[str | None] = mapped_column(String(32), default=None)
+    # Hash of the dashboard login token this job currently has outstanding
+    # (issue #217).  Retries revoke the previous one before minting a new
+    # one, so a Note/Coach pair never holds more than one live credential.
+    login_token_hash: Mapped[str | None] = mapped_column(String(64), default=None)
 
 
 class WorkoutExercise(Base):

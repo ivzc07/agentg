@@ -156,6 +156,23 @@ A safety flag becomes a **Note of its own kind** - not a prefix match, not a new
 - The flag is a **marker on the row, never a re-sort** - the Gap ordering holds.
 - A flag clears when a Coach ticks it or **ages out 30 days after `created_at`** (computed, no job); an expired unacknowledged flag stays on the Member page labelled "expired, never seen".
 
+### The delivery guarantee
+
+*Source: [#216](https://github.com/ivzc07/agentg/issues/216), hardened by [#217](https://github.com/ivzc07/agentg/issues/217).*
+
+The ping goes out through a durable outbox (`safety_outbox_jobs`): the safety Note and one job per eligible Coach commit in the same transaction, and a background worker sends them without delaying the Member's reply.
+
+**The guarantee is at-least-once with bounded duplicate risk - not exactly-once.** A Coach can see the same heads-up twice, and the product must read as if that is normal (it is a heads-up, not a ledger entry). The duplicate windows are named, not hand-waved: a job is claimed *before* the send and marked delivered *after* it, so a crash, an expired lease, or a restart in between re-queues a message that may already have landed; and a send that times out is retried even though the provider may have delivered it. The `claimed_at` lease stamp guarantees only that **one owner records the outcome** - it cannot un-send what a stale owner already put on the wire. Exactly-once here would need a distributed transaction with Telegram, which does not exist.
+
+What *is* bounded:
+
+- **One job per (Note, Coach), forever** - a DB unique constraint, so a retry loop can never fan out into more jobs.
+- **A named terminal policy**: eight attempts with exponential, jittered backoff (5s doubling to a 300s cap, +/-25% jitter so a provider outage does not retry a whole batch in lockstep), then the job is retired as `failed` with `failure_kind = "retry_exhausted"`. An *abandoned* claim - a crash or an expired lease, where the outcome was never recorded - costs an attempt too, so a crash-looping process converges on the policy instead of re-claiming the same job forever. But only if the send was actually issued: a job that was claimed and never reached is requeued untouched, because a safety ping nobody tried to deliver must never be retired as if a provider had rejected it. Retrying forever would turn one dead channel into unbounded background load and hide the failure; a retired job stays **queryable** by Gym and by failure kind instead.
+- **One live dashboard credential per job**: the magic link is minted only *after* the heads-up send has re-checked authorization, and each mint first revokes the token the previous attempt left outstanding. A crash-looping job therefore cannot accumulate valid magic links for their 10-minute TTL, and a Coach demoted before the first send never has one minted at all.
+- **Attempt metadata is durable**: attempt count, next-attempt time, last (sanitized) error, and terminal state all survive a restart, so a redeploy does not reset the backoff.
+
+Failure telemetry is structured and sanitized: it carries the job, Gym, Note and Coach **ids**, the channel name, the attempt schedule and the failure kind - and never the Note text, the message body, the magic link, the raw token, or the Coach's provider-side account id. Delivery-path logging records exception *classes*, never their messages or tracebacks, because an adapter's error text routinely echoes the request body or the URL.
+
 ## Settings
 
 *Source: [#75](https://github.com/ivzc07/agentg/issues/75), amended by [#90](https://github.com/ivzc07/agentg/issues/90).*
@@ -197,6 +214,10 @@ Everything the screens *show* is already recorded; the changes are new queries p
 | `gyms.default_preset_id` | one default slot, cleared on retire | [#83](https://github.com/ivzc07/agentg/issues/83) |
 | `gyms.coach_invite_code` | second regenerable code, `coach-` prefix | [#90](https://github.com/ivzc07/agentg/issues/90) |
 | `dashboard_login_tokens` table | token hash, member_id, gym_id, expires_at, used_at | [#79](https://github.com/ivzc07/agentg/issues/79) |
+| `safety_outbox_jobs` table | one durable coach ping per (Note, Coach), committed with the Note | [#216](https://github.com/ivzc07/agentg/issues/216) |
+| `safety_outbox_jobs.failure_kind` | why a terminal failure happened (`retry_exhausted`, `unauthorized`, `note_deleted`), so failures are queryable by cause | [#217](https://github.com/ivzc07/agentg/issues/217) |
+| `safety_outbox_jobs.login_token_hash` | the one credential a job has outstanding; each retry revokes it before minting the next | [#217](https://github.com/ivzc07/agentg/issues/217) |
+| `safety_outbox_jobs.attempt_started_at` | set immediately before a send and cleared by every claim and requeue, so crash recovery charges the retry budget only for sends that were actually issued | [#217](https://github.com/ivzc07/agentg/issues/217) |
 | index on `sets.exercise_id` | per-Exercise history reads currently scan | [#74](https://github.com/ivzc07/agentg/issues/74) |
 | Gap honours `Gym.timezone` | fix UTC day boundaries in `TrainingStore.today()` / `RoutineStore._today()` | [#74](https://github.com/ivzc07/agentg/issues/74), [#75](https://github.com/ivzc07/agentg/issues/75) |
 
