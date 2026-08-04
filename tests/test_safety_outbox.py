@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta, UTC
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import event, select, text
 from sqlalchemy.exc import IntegrityError
 
 from agentg.db import create_engine
@@ -3040,6 +3040,297 @@ async def test_legacy_three_column_uniqueness_migrated_behavior(tmp_path):
     _assert_rejected_by_note_coach_uniqueness(excinfo.value)
 
     await engine.dispose()
+
+
+# The two shapes a pre-migration database can be in.  They are not
+# interchangeable: on SQLite a table-level CONSTRAINT becomes an autoindex
+# that get_unique_constraints reports forever and DROP INDEX cannot remove,
+# while a standalone INDEX is visible only to get_indexes and *is*
+# droppable.  Every migration property must hold for both.
+_LEGACY_FORMS = ("table-constraint", "standalone-index")
+
+
+async def _build_legacy_outbox_table(conn, form: str) -> None:
+    """Replace safety_outbox_jobs with the given pre-migration shape."""
+    assert form in _LEGACY_FORMS, form
+    await conn.execute(text("DROP TABLE IF EXISTS safety_outbox_jobs"))
+    if form == "table-constraint":
+        await conn.execute(
+            text(
+                _LEGACY_OUTBOX_TABLE_DDL.format(
+                    constraint=","
+                    "  CONSTRAINT uq_outbox_job_note_coach "
+                    "    UNIQUE (gym_id, note_id, coach_member_id)"
+                )
+            )
+        )
+    else:
+        await conn.execute(text(_LEGACY_OUTBOX_TABLE_DDL.format(constraint="")))
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_outbox_job_note_coach "
+                "ON safety_outbox_jobs (gym_id, note_id, coach_member_id)"
+            )
+        )
+
+
+async def _seed_note(conn, *, gym_id, member_id) -> int:
+    """Insert a MemberNote directly, returning its id.
+
+    The legacy outbox table carries a real FK to member_notes, so seeded
+    jobs need a real Note or the insert fails for the wrong reason.
+    """
+    result = await conn.execute(
+        text(
+            "INSERT INTO member_notes (gym_id, member_id, kind, text, "
+            "created_at) VALUES (:gym, :member, 'safety', 'legacy flag', "
+            "'2026-01-01 00:00:00')"
+        ),
+        {"gym": gym_id, "member": member_id},
+    )
+    return result.lastrowid
+
+
+async def _seed_legacy_outbox_row(conn, *, gym_id, note_id, coach_member_id):
+    """Insert one pre-migration outbox row straight into the legacy table."""
+    await conn.execute(
+        text(
+            "INSERT INTO safety_outbox_jobs (gym_id, note_id, coach_member_id,"
+            " channel, channel_user_id, member_id, member_name, status,"
+            " created_at) VALUES (:gym, :note, :coach, 'telegram', '99',"
+            " :coach, 'Legacy Member', 'pending', '2026-01-01 00:00:00')"
+        ),
+        {"gym": gym_id, "note": note_id, "coach": coach_member_id},
+    )
+
+
+@pytest.mark.parametrize("legacy_form", _LEGACY_FORMS)
+async def test_legacy_rows_survive_the_unique_constraint_migration(
+    tmp_path, legacy_form
+):
+    """Migrating the constraint preserves the rows already in the table.
+
+    Issue #229 asked for "the constraint was rewritten *and existing rows
+    survived*"; the two tests above migrate an empty table, so a migration
+    that rebuilt safety_outbox_jobs and dropped every job would leave them
+    green.  Also pins idempotency: ensure_schema is a startup path and runs
+    again on every boot, so a second run must be a no-op rather than
+    re-dropping and re-creating the constraint.
+
+    Both legacy forms are exercised because they converge by different
+    routes: the index form stops matching once its 3-column index is gone,
+    but the table-constraint form is an undroppable autoindex that keeps
+    reporting 3 columns forever, so only an explicit already-migrated check
+    stops it re-running the drop/create on every boot.
+    """
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'rows.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+
+    gym = await linking.create_gym("Gym")
+    coach = await linking.link_member(gym.id, "Coach", "telegram", "99")
+    await linking.set_coach(coach.id)
+
+    # Legacy table holding rows the migration must keep.
+    async with engine.begin() as conn:
+        await _build_legacy_outbox_table(conn, legacy_form)
+        note_ids = [
+            await _seed_note(conn, gym_id=gym.id, member_id=coach.id)
+            for _ in range(2)
+        ]
+        for note_id in note_ids:
+            await _seed_legacy_outbox_row(
+                conn, gym_id=gym.id, note_id=note_id, coach_member_id=coach.id
+            )
+
+    await linking.ensure_schema()
+
+    async with engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT note_id, coach_member_id, member_name, status "
+                    "FROM safety_outbox_jobs ORDER BY note_id"
+                )
+            )
+        ).fetchall()
+    assert [(r[0], r[1]) for r in rows] == [
+        (note_id, coach.id) for note_id in sorted(note_ids)
+    ]
+    assert all(r[2] == "Legacy Member" and r[3] == "pending" for r in rows), (
+        f"row contents must survive the migration unchanged, got {rows}"
+    )
+
+    # Second boot: the migration must recognise its own work and do nothing.
+    statements: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    sync_engine = engine.sync_engine
+    event.listen(sync_engine, "before_cursor_execute", _record)
+    try:
+        await linking.ensure_schema()
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _record)
+
+    # Introspection (PRAGMA index_info and friends) is expected; mutating
+    # DDL against the constraint is not.
+    touched = [
+        s
+        for s in statements
+        if "uq_outbox_job_note_coach" in s
+        and s.lstrip().upper().startswith(("DROP", "CREATE", "ALTER"))
+    ]
+    assert not touched, (
+        "ensure_schema must converge — re-running the drop/create on every "
+        "boot re-opens a window with no 2-column enforcement, because the "
+        f"DDL autocommits. Statements: {touched}"
+    )
+
+    await engine.dispose()
+
+
+@pytest.mark.parametrize("legacy_form", _LEGACY_FORMS)
+async def test_migration_refuses_to_narrow_over_duplicate_note_coach_rows(
+    tmp_path, legacy_form
+):
+    """A legacy DB holding rows the 2-column form would reject fails loudly,
+    with the old constraint and the rows left intact.
+
+    The legacy 3-column form permits two jobs sharing (note_id,
+    coach_member_id) under different gym_id.  CREATE UNIQUE INDEX over those
+    raises — and because pysqlite does not open a transaction for DDL, the
+    preceding DROP is *not* rolled back, so an unguarded migration would
+    leave the next boot with no constraint to find, skip the block, and run
+    on permanently unenforced (PR #231 P1)."""
+    engine = create_engine(f"sqlite+aiosqlite:///{tmp_path / 'dups.db'}")
+    linking = LinkingStore(engine)
+    await linking.ensure_schema()
+
+    gym_a = await linking.create_gym("Gym A")
+    gym_b = await linking.create_gym("Gym B")
+    coach = await linking.link_member(gym_a.id, "Coach", "telegram", "99")
+    await linking.set_coach(coach.id)
+
+    async with engine.begin() as conn:
+        await _build_legacy_outbox_table(conn, legacy_form)
+        # Legal under the 3-column form, rejected by the 2-column form.
+        note_id = await _seed_note(conn, gym_id=gym_a.id, member_id=coach.id)
+        for gym_id in (gym_a.id, gym_b.id):
+            await _seed_legacy_outbox_row(
+                conn, gym_id=gym_id, note_id=note_id, coach_member_id=coach.id
+            )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await linking.ensure_schema()
+    message = str(excinfo.value)
+    assert str(note_id) in message and str(coach.id) in message, (
+        f"the error must name the offending Note/Coach pair, got: {message}"
+    )
+
+    # The refusal must be non-destructive: rows intact, and the legacy
+    # 3-column enforcement still actually enforcing.  Checked behaviourally
+    # rather than by index name, because the table-constraint form is an
+    # unnamed sqlite autoindex.
+    async with engine.connect() as conn:
+        count = (
+            await conn.execute(text("SELECT COUNT(*) FROM safety_outbox_jobs"))
+        ).scalar()
+    assert count == 2, f"rows must not be destroyed by the refusal, got {count}"
+
+    with pytest.raises(IntegrityError) as dup_exc:
+        async with engine.begin() as conn:
+            await _seed_legacy_outbox_row(
+                conn, gym_id=gym_a.id, note_id=note_id, coach_member_id=coach.id
+            )
+    assert "UNIQUE" in str(dup_exc.value.orig).upper(), (
+        "the legacy constraint must survive a refused migration — dropping it "
+        "before failing would leave the next boot with nothing to migrate "
+        f"and no enforcement at all: {dup_exc.value.orig}"
+    )
+
+    # And the refusal must be stable: a restart hits the same guard rather
+    # than sliding through on a half-dropped constraint.
+    with pytest.raises(RuntimeError):
+        await linking.ensure_schema()
+
+    await engine.dispose()
+
+
+def test_outbox_unique_constraint_ddl_compiles_on_postgres():
+    """The hand-written PostgreSQL arms must match what SQLAlchemy emits.
+
+    Neither PostgreSQL branch is executed by any test — CI is SQLite-only — so
+    a deploy would be the first place that DDL ever runs, and a malformed
+    statement rolls back the whole ensure_schema transaction and fails the
+    boot.  Same technique as
+    test_the_safety_flag_migration_columns_compile_on_postgres: pin the
+    strings against the dialect's own compilation rather than a live server."""
+    from sqlalchemy import Column, Integer, MetaData, Table, UniqueConstraint
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import AddConstraint, CreateIndex, Index
+
+    from agentg.linking_store import (
+        ADD_OUTBOX_UQ_CONSTRAINT_DDL,
+        CREATE_OUTBOX_UQ_INDEX_DDL,
+        DROP_OUTBOX_UQ_CONSTRAINT_DDL,
+        OUTBOX_UQ_COLUMNS,
+        OUTBOX_UQ_NAME,
+    )
+    from agentg.models import SafetyOutboxJob
+
+    dialect = postgresql.dialect()
+
+    def _normalise(sql: str) -> str:
+        return " ".join(sql.split()).rstrip(";")
+
+    # The migrated target must be exactly the model's own constraint, or the
+    # migration would converge on a shape create_all does not produce.
+    model_uq = next(
+        c
+        for c in SafetyOutboxJob.__table__.constraints
+        if isinstance(c, UniqueConstraint) and c.name == OUTBOX_UQ_NAME
+    )
+    assert tuple(c.name for c in model_uq.columns) == OUTBOX_UQ_COLUMNS
+
+    # Build a standalone table so compiling does not mutate model metadata.
+    metadata = MetaData()
+    table = Table(
+        "safety_outbox_jobs",
+        metadata,
+        Column("note_id", Integer),
+        Column("coach_member_id", Integer),
+        UniqueConstraint(*OUTBOX_UQ_COLUMNS, name=OUTBOX_UQ_NAME),
+    )
+    expected_uq = next(
+        c for c in table.constraints if isinstance(c, UniqueConstraint)
+    )
+    assert _normalise(ADD_OUTBOX_UQ_CONSTRAINT_DDL) == _normalise(
+        str(AddConstraint(expected_uq).compile(dialect=dialect))
+    )
+
+    index_metadata = MetaData()
+    index_table = Table(
+        "safety_outbox_jobs",
+        index_metadata,
+        Column("note_id", Integer),
+        Column("coach_member_id", Integer),
+    )
+    expected_index = Index(
+        OUTBOX_UQ_NAME,
+        *[index_table.c[name] for name in OUTBOX_UQ_COLUMNS],
+        unique=True,
+    )
+    assert _normalise(CREATE_OUTBOX_UQ_INDEX_DDL) == _normalise(
+        str(CreateIndex(expected_index).compile(dialect=dialect))
+    )
+
+    # DROP CONSTRAINT is not a schema item SQLAlchemy will emit for us; pin
+    # the spelling PostgreSQL requires (SQLite has no such statement).
+    assert DROP_OUTBOX_UQ_CONSTRAINT_DDL == (
+        f"ALTER TABLE safety_outbox_jobs DROP CONSTRAINT {OUTBOX_UQ_NAME}"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
