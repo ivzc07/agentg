@@ -44,28 +44,45 @@ async def seed_demo_data(
 
     member_defs: list[dict] = [
         # name, checkin_state, snoozed_until offset, gap offset (days since last session),
-        # has_routine, session_count, missed_window_days
-        {"name": "Elena Vargas", "state": ON, "gap": 1, "routine": True, "sessions": 12, "missed": 3},
-        {"name": "Marcus Chen", "state": ON, "gap": 2, "routine": True, "sessions": 8, "missed": 1},
-        {"name": "Sofia Ricci", "state": ON, "gap": 0, "routine": True, "sessions": 20, "missed": 0},
-        {"name": "Jamal Owens", "state": ON, "gap": 6, "routine": True, "sessions": 4, "missed": 5},
-        {"name": "Yuki Tanaka", "state": ON, "gap": 3, "routine": True, "sessions": 15, "missed": 2},
-        {"name": "Piotr Nowak", "state": SNOOZED, "gap": 8, "routine": True, "sessions": 6, "missed": 4,
+        # has_routine, session_count, missed_window_days, optional notes / flag
+        {
+            "name": "Elena Vargas", "state": ON, "gap": 1, "routine": True, "sessions": 12,
+            "notes": [{"kind": "goal", "text": "Build a 100kg squat", "days_ago": 40}],
+        },
+        {
+            "name": "Marcus Chen", "state": ON, "gap": 2, "routine": True, "sessions": 8,
+            "notes": [{"kind": "preference", "text": "Hates burpees, will not do them", "days_ago": 21}],
+        },
+        {
+            "name": "Sofia Ricci", "state": ON, "gap": 0, "routine": True, "sessions": 20,
+            "notes": [{"kind": "constraint", "text": "Solo puede entrenar por la mañana", "days_ago": 14}],
+        },
+        {"name": "Jamal Owens", "state": ON, "gap": 10, "routine": True, "sessions": 4},
+        {
+            "name": "Yuki Tanaka", "state": ON, "gap": 3, "routine": True, "sessions": 15,
+            "notes": [
+                {"kind": "injury", "text": "Old shoulder pinch on overhead press", "days_ago": 60, "retired_days_ago": 12},
+                {"kind": "preference", "text": "Wants sessions under 60 minutes", "days_ago": 9},
+            ],
+        },
+        {"name": "Piotr Nowak", "state": SNOOZED, "gap": 8, "routine": True, "sessions": 6,
          "snoozed_days": 4},
-        {"name": "Clara Beaufort", "state": ON, "gap": 1, "routine": False, "sessions": 0, "missed": 0},
-        {"name": "Ravi Kapoor", "state": LAPSED, "gap": 18, "routine": True, "sessions": 3, "missed": 12},
-        {"name": "Leila Haddad", "state": ON, "gap": 4, "routine": True, "sessions": 10, "missed": 3},
-        {"name": "Tom Bakker", "state": ON, "gap": 0, "routine": True, "sessions": 7, "missed": 0},
-        {"name": "Nia Mensah", "state": OFF, "gap": 10, "routine": False, "sessions": 0, "missed": 0},
-        {"name": "Diego Moretti", "state": ON, "gap": 5, "routine": True, "sessions": 2, "missed": 6,
-         "safety_flag": "sharp knee pain reported"},
+        {"name": "Clara Beaufort", "state": ON, "gap": 1, "routine": False, "sessions": 0},
+        {"name": "Ravi Kapoor", "state": LAPSED, "gap": 18, "routine": True, "sessions": 3},
+        {"name": "Leila Haddad", "state": ON, "gap": 4, "routine": True, "sessions": 10},
+        {"name": "Tom Bakker", "state": ON, "gap": 0, "routine": True, "sessions": 7},
+        {"name": "Nia Mensah", "state": OFF, "gap": 10, "routine": False, "sessions": 0},
+        {
+            "name": "Diego Moretti", "state": ON, "gap": 5, "routine": True, "sessions": 2,
+            "safety_flag": "sharp knee pain reported",
+            "notes": [{"kind": "injury", "text": "Right knee twinges on the last squat set", "days_ago": 5}],
+        },
     ]
 
-    # Exercises for sessions
+    # Catalog names only — routines resolve through find_exercise.
     exercises_list = [
         "squat", "bench press", "deadlift", "overhead press", "barbell row",
-        "pull-up", "dip", "lunge", "leg press", "bicep curl",
-        "tricep extension", "lat pulldown", "calf raise", "plank",
+        "pull-up", "dips", "lunge", "lat pulldown", "biceps curl",
     ]
 
     async with store.session() as db:
@@ -107,7 +124,7 @@ async def seed_demo_data(
                 {"weekday": 0, "name": "Push", "exercises": [
                     {"exercise": "bench press", "sets": 4, "reps": "8-10"},
                     {"exercise": "overhead press", "sets": 3, "reps": "10-12"},
-                    {"exercise": "dip", "sets": 3, "reps": "8-12"},
+                    {"exercise": "dips", "sets": 3, "reps": "8-12"},
                 ]},
                 {"weekday": 2, "name": "Pull", "exercises": [
                     {"exercise": "deadlift", "sets": 4, "reps": "5"},
@@ -117,7 +134,7 @@ async def seed_demo_data(
                 {"weekday": 4, "name": "Legs", "exercises": [
                     {"exercise": "squat", "sets": 4, "reps": "8-10"},
                     {"exercise": "lunge", "sets": 3, "reps": "10"},
-                    {"exercise": "calf raise", "sets": 3, "reps": "15"},
+                    {"exercise": "biceps curl", "sets": 3, "reps": "12"},
                 ]},
             ]
             routine = await store.save_routine_from_web(
@@ -179,9 +196,22 @@ async def seed_demo_data(
                     await db.commit()
                 created_sessions += 1
 
-        # Add safety flag if specified
-        if md.get("safety_flag"):
-            async with store.session() as db:
+        # Durable notes the Coach can read on the Member page — injuries,
+        # preferences, goals, plus the safety flag that marks the roster.
+        async with store.session() as db:
+            for note in md.get("notes", []):
+                retired_at = None
+                if note.get("retired_days_ago") is not None:
+                    retired_at = now - timedelta(days=note["retired_days_ago"])
+                db.add(MemberNote(
+                    member_id=member.id,
+                    gym_id=gym_id,
+                    kind=note["kind"],
+                    text=note["text"],
+                    created_at=now - timedelta(days=note["days_ago"]),
+                    retired_at=retired_at,
+                ))
+            if md.get("safety_flag"):
                 db.add(MemberNote(
                     member_id=member.id,
                     gym_id=gym_id,
@@ -189,7 +219,7 @@ async def seed_demo_data(
                     text=md["safety_flag"],
                     created_at=now - timedelta(days=2),
                 ))
-                await db.commit()
+            await db.commit()
 
     return {
         "members": created_members,

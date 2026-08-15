@@ -17,6 +17,10 @@ vi.mock("../hooks/useT", () => ({
       new_tag: "new",
       snoozed_tag: "paused until {date}",
       flag_tag: "⚑ safety",
+      col_name: "Name",
+      col_status: "Status",
+      col_gap: "Days away",
+      col_missed: "Missed",
     };
     return strings[key] ?? key;
   },
@@ -91,5 +95,32 @@ describe("RosterTable", () => {
   it("applies data-name attribute for search filtering", () => {
     renderTable([makeMember({ name: "Alice" })]);
     expect(screen.getByText("Alice").closest("li")).toHaveAttribute("data-name", "Alice");
+  });
+
+  it("renders an attendance strip from real day cells", () => {
+    const { container } = renderTable([
+      makeMember({
+        attendance: [
+          { on: "2026-08-01", state: "hit" },
+          { on: "2026-08-02", state: "miss" },
+          { on: "2026-08-03", state: "plain" },
+        ],
+      }),
+    ]);
+    expect(container.querySelectorAll(".strip i")).toHaveLength(3);
+  });
+
+  it("omits the redundant attendance micro-chart in coach-queue rows", () => {
+    const { container } = render(
+      <MemoryRouter>
+        <RosterTable
+          layout="queue"
+          members={[makeMember({ attendance: [{ on: "2026-08-01", state: "hit" }] })]}
+        />
+      </MemoryRouter>
+    );
+    expect(container.querySelector(".strip")).toBeNull();
+    expect(screen.getByText("2 planned days missed")).toBeInTheDocument();
+    expect(screen.getByText("3 days away")).toBeInTheDocument();
   });
 });

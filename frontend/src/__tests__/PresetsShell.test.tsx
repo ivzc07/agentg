@@ -9,6 +9,7 @@ vi.mock("../hooks/useT", () => ({
       presets: "Presets",
       settings: "Settings",
       nav_sections: "Sections",
+      nav_roster: "Members",
       back_to_roster: "← All members",
     };
     return strings[key] ?? key;

@@ -33,7 +33,7 @@ export function LoginPage() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-screen text-ink-2">
+      <div className="flex items-center justify-center min-h-screen text-ink-2" aria-busy="true">
         Loading…
       </div>
     );
@@ -43,16 +43,15 @@ export function LoginPage() {
   // server-rendered door page — Spanish is the no-signal default).
   if (!valid) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-bg">
-        <div className="door max-w-md mx-auto px-gut text-center">
-          <div className="card bg-elevation-1 border border-elevation-1-stroke rounded-sm p-8 space-y-4">
-            <h1 className="text-[20px] font-semibold">Este enlace ya no sirve</h1>
-            <p className="text-[14px] text-ink-2">
-              Los enlaces al dashboard caducan y solo se pueden usar una vez.
-              Envía <b>/dashboard</b> a tu bot en Telegram para recibir uno
-              nuevo.
-            </p>
-          </div>
+      <div className="flex items-center justify-center min-h-screen bg-bg px-gut">
+        <div className="door w-full max-w-sm text-center">
+          <p className="eyebrow mb-3">Dashboard</p>
+          <h1 className="text-[22px] font-semibold tracking-[-0.02em]">Este enlace ya no sirve</h1>
+          <p className="text-[14px] text-ink-2 mt-3 leading-relaxed">
+            Los enlaces al dashboard caducan y solo se pueden usar una vez.
+            Envía <b className="text-ink font-semibold">/dashboard</b> a tu bot en Telegram para recibir uno
+            nuevo.
+          </p>
         </div>
       </div>
     );
@@ -61,24 +60,23 @@ export function LoginPage() {
   // Valid token: show the interstitial with a sign-in button that POSTs
   // to the server-side redemption route.
   return (
-    <div className="flex items-center justify-center min-h-screen bg-bg">
-      <div className="door max-w-md mx-auto px-gut text-center">
-        <div className="card bg-elevation-1 border border-elevation-1-stroke rounded-sm p-8 space-y-4">
-          <h1 className="text-[20px] font-semibold">
-            Abriendo tu dashboard…
-          </h1>
-          <form method="post" action={`/login/${token}`}>
-            <button
-              type="submit"
-              className="px-6 py-3 bg-ink text-bg font-semibold text-[15px] rounded-sm hover:bg-ink/90 transition-colors duration-fast"
-            >
-              Entrar al dashboard
-            </button>
-          </form>
-          <p className="text-[13px] text-ink-3">
-            Serás redirigido a tu dashboard.
-          </p>
-        </div>
+    <div className="flex items-center justify-center min-h-screen bg-bg px-gut">
+      <div className="door w-full max-w-sm text-center">
+        <p className="eyebrow mb-3">Dashboard</p>
+        <h1 className="text-[22px] font-semibold tracking-[-0.02em]">
+          Abriendo tu dashboard…
+        </h1>
+        <form method="post" action={`/login/${token}`} className="mt-6">
+          <button
+            type="submit"
+            className="w-full px-6 py-3 bg-ink text-bg font-semibold text-[14px] rounded-sm hover:bg-ink/90 transition-colors duration-fast border-ink"
+          >
+            Entrar al dashboard
+          </button>
+        </form>
+        <p className="text-[13px] text-ink-3 mt-4">
+          Serás redirigido a tu dashboard.
+        </p>
       </div>
     </div>
   );

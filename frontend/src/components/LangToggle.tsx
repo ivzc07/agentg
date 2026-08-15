@@ -18,7 +18,10 @@ export function LangToggle() {
   const q = `?next=${encodeURIComponent(next)}`;
 
   return (
-    <span className="lang-toggle flex gap-1 text-[12px]" aria-label="Language">
+    <span
+      className="lang-toggle inline-flex items-center rounded-sm border border-elevation-2-stroke p-0.5 text-[11px] font-semibold tracking-[0.06em]"
+      aria-label="Language"
+    >
       {(["en", "es"] as const).map((l) => (
         <a
           key={l}
@@ -26,8 +29,8 @@ export function LangToggle() {
           aria-current={l === lang ? "true" : undefined}
           className={
             l === lang
-              ? "text-ink font-semibold"
-              : "text-ink-3 hover:text-ink transition-colors duration-fast"
+              ? "px-1.5 py-0.5 rounded-xs bg-ink text-bg"
+              : "px-1.5 py-0.5 rounded-xs text-ink-3 hover:text-ink transition-colors duration-fast"
           }
         >
           {l.toUpperCase()}

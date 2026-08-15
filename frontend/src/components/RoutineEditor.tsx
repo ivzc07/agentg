@@ -1,4 +1,4 @@
-import { LangToggle } from "./LangToggle";
+import { AppHeader } from "./AppHeader";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -290,17 +290,17 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
 
   return (
     <div className="min-h-screen bg-bg text-ink font-sans antialiased">
-      {/* Top bar */}
-      <header className="sticky top-0 z-20 flex items-center gap-2 min-h-[46px] px-gut py-1.5 bg-elevation-0 border-b border-elevation-0-stroke shadow-elevation-1">
-        <Link
-          to={preset ? "/presets" : `/members/${id}`}
-          className="text-[13px] text-ink-2 hover:text-ink motion-safe:transition-colors duration-fast"
-        >
-          ← {preset ? t("presets") : data.name}
-        </Link>
-        <span className="spacer flex-1" />
-        <LangToggle />
-      </header>
+      <AppHeader
+        showNav={false}
+        leading={
+          <Link
+            to={preset ? "/presets" : `/members/${id}`}
+            className="text-[13px] text-ink-2 hover:text-ink motion-safe:transition-colors duration-fast"
+          >
+            ← {preset ? t("presets") : data.name}
+          </Link>
+        }
+      />
 
       <main className="max-w-2xl mx-auto px-gut py-8">
         {/* Header */}
@@ -335,7 +335,7 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
         {feedback?.type === "success" && (
           <div
             role="status"
-            className="mb-6 flex items-center gap-2 px-4 py-3 rounded-lg bg-[#0d2818] border border-[#1a4d2e] text-[#4ade80] text-[14px]"
+            className="mb-6 flex items-center gap-2 px-4 py-3 rounded-sm bg-success-tint border border-success/30 text-success text-[14px]"
           >
             <Check className="w-4 h-4 flex-shrink-0" />
             <span>{feedback.message}</span>
@@ -350,7 +350,7 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
           <div className="mb-6">
             <div
               role="alert"
-              className="flex items-start gap-2 px-4 py-3 rounded-lg bg-[#2d1b1b] border border-[#5c2828] text-[#fca5a5] text-[14px] mb-4"
+              className="flex items-start gap-2 px-4 py-3 rounded-sm bg-coral-tint border border-coral/30 text-coral text-[14px] mb-4"
             >
               <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
               <span>{feedback.message}</span>
@@ -395,7 +395,7 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
 
           {/* Validation error summary */}
           {Object.keys(errors).length > 0 && (
-            <div className="mb-4 px-4 py-3 rounded-lg bg-[#2d1b1b] border border-[#5c2828] text-[#fca5a5] text-[14px]">
+            <div className="mb-4 px-4 py-3 rounded-sm bg-coral-tint border border-coral/30 text-coral text-[14px]">
               {errors.workouts?.root?.message && (
                 <p>{errors.workouts.root.message}</p>
               )}
@@ -422,7 +422,7 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
                         {...register(`workouts.${dayIndex}.weekday`, {
                           valueAsNumber: true,
                         })}
-                        className="w-full min-w-0 bg-elevation-0 border border-elevation-0-stroke rounded-lg px-3 py-2 text-[14px] text-ink focus:outline-none focus:ring-2 focus:ring-magenta appearance-none"
+                        className="w-full min-w-0 bg-elevation-0 border border-elevation-0-stroke rounded-sm px-3 py-2 text-[14px] text-ink focus:outline-none focus:border-ink-2 appearance-none"
                         style={{
                           backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%239e9ea8'%3E%3Cpath d='M3 5l3 3 3-3'/%3E%3C/svg%3E")`,
                           backgroundRepeat: "no-repeat",
@@ -458,7 +458,7 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
                         remove(dayIndex);
                         setFeedback(null);
                       }}
-                      className="flex-shrink-0 p-1.5 rounded-lg text-ink-2 hover:text-[#f87171] hover:bg-elevation-2 motion-safe:transition-colors duration-fast"
+                      className="flex-shrink-0 p-1.5 rounded-sm text-ink-2 hover:text-[#f87171] hover:bg-elevation-2 motion-safe:transition-colors duration-fast"
                       aria-label={t("remove_day")}
                     >
                       <Trash2 className="w-4 h-4" />
@@ -472,7 +472,7 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
                       {...register(`workouts.${dayIndex}.name`)}
                       placeholder={t("workout_name_placeholder")}
                       maxLength={100}
-                      className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-3 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-magenta"
+                      className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-sm px-3 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink-2"
                     />
                     {dayErrors?.name && (
                       <p className="mt-1 text-[12px] text-[#fca5a5]">
@@ -555,7 +555,7 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
             <button
               type="submit"
               disabled={saveMutation.isPending}
-              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-lg bg-magenta text-bg text-[14px] font-medium hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed motion-safe:transition-all duration-fast"
+              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-sm bg-magenta text-bg text-[14px] font-medium hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed motion-safe:transition-all duration-fast"
             >
               {saveMutation.isPending && (
                 <Loader2 className="w-4 h-4 motion-safe:animate-spin" />
@@ -606,7 +606,7 @@ function ExerciseList({
                 placeholder="squat"
                 list={`catalog-list-${dayIndex}`}
                 autoComplete="off"
-                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-3 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-magenta"
+                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-sm px-3 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink-2"
               />
               <datalist id={`catalog-list-${dayIndex}`}>
                 {catalog.map((name) => (
@@ -630,7 +630,7 @@ function ExerciseList({
                 placeholder="sets"
                 min={1}
                 max={99}
-                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-2 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-magenta text-center"
+                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-sm px-2 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink-2 text-center"
               />
               {exErrors?.sets && (
                 <p className="mt-0.5 text-[12px] text-[#fca5a5] text-center">
@@ -646,7 +646,7 @@ function ExerciseList({
                 {...register(`${exPath}.reps`)}
                 placeholder="8-10"
                 maxLength={40}
-                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-lg px-2 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:ring-2 focus:ring-magenta text-center"
+                className="w-full bg-elevation-0 border border-elevation-0-stroke rounded-sm px-2 py-2 text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink-2 text-center"
               />
               {exErrors?.reps && (
                 <p className="mt-0.5 text-[12px] text-[#fca5a5] text-center">
@@ -664,7 +664,7 @@ function ExerciseList({
                 }
               }}
               disabled={fields.length <= 1}
-              className="flex-shrink-0 p-1.5 mt-0.5 rounded-lg text-ink-2 hover:text-[#f87171] hover:bg-elevation-2 disabled:opacity-30 disabled:cursor-not-allowed motion-safe:transition-colors duration-fast"
+              className="flex-shrink-0 p-1.5 mt-0.5 rounded-sm text-ink-2 hover:text-[#f87171] hover:bg-elevation-2 disabled:opacity-30 disabled:cursor-not-allowed motion-safe:transition-colors duration-fast"
               aria-label={t("remove_exercise")}
             >
               <Trash2 className="w-4 h-4" />

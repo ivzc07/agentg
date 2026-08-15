@@ -161,7 +161,7 @@ export function PresetsPage() {
         <p>{t("presets_error")}</p>
         <button
           onClick={() => window.location.reload()}
-          className="px-4 py-2 rounded bg-elevation-1 border border-elevation-0-stroke text-ink hover:bg-elevation-2 transition-colors"
+          className="px-4 py-2 rounded-sm bg-elevation-1 border border-elevation-0-stroke text-ink hover:bg-elevation-2 transition-colors"
         >
           {t("presets_retry")}
         </button>
@@ -172,7 +172,7 @@ export function PresetsPage() {
   const { presets, members } = data;
 
   return (
-    <div className="max-w-2xl mx-auto px-gut py-6">
+    <div className="mx-auto w-full max-w-[1440px] px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
       {/* Messages */}
       {successMsg && (
         <p className="px-3 py-2 mb-4 rounded text-sm bg-elevation-1 border border-elevation-0-stroke text-ink">
@@ -186,11 +186,15 @@ export function PresetsPage() {
       )}
 
       {/* Create preset form */}
-      <section className="mb-8">
-        <h2 className="text-[13px] uppercase tracking-widest text-ink-2 mb-3">
+      <section className="mb-6">
+        <h1 className="mb-5 text-[27px] font-semibold tracking-[-0.03em]">
+          {t("presets_title")}
+        </h1>
+
+        <h2 className="mb-2 text-[12px] font-semibold text-ink-2">
           {t("create_preset")}
         </h2>
-        <form onSubmit={handleCreate} className="flex gap-2">
+        <form onSubmit={handleCreate} className="flex flex-col gap-2 rounded-xl border border-elevation-0-stroke bg-white p-4 shadow-shadow-1 sm:flex-row">
           <label className="sr-only" htmlFor="preset-name">
             {t("preset_name")}
           </label>
@@ -205,14 +209,12 @@ export function PresetsPage() {
             placeholder={t("preset_name")}
             maxLength={100}
             required
-            className="flex-1 h-10 px-3 bg-elevation-1 border border-elevation-0-stroke rounded text-ink text-sm placeholder:text-ink-3 
-                       focus:outline-none focus:border-magenta"
+            className="h-10 min-w-0 flex-1 rounded-md border border-elevation-0-stroke bg-elevation-0 px-3 text-sm text-ink placeholder:text-ink-3 focus:border-ink-3 focus:outline-none"
           />
           <button
             type="submit"
             disabled={createMutation.isPending}
-            className="h-10 px-4 bg-magenta text-black rounded text-sm font-medium 
-                       hover:brightness-110 disabled:opacity-50 transition-colors"
+            className="h-10 rounded-md border-ink bg-ink px-4 text-sm font-medium text-white transition-colors hover:bg-ink-900 disabled:opacity-50"
           >
             {t("create_preset")}
           </button>
@@ -222,10 +224,7 @@ export function PresetsPage() {
       {/* Preset cards */}
       {presets.length === 0 ? (
         <div className="text-center py-12 text-ink-2">
-          <div className="text-3xl mb-3" aria-hidden="true">
-            ◎
-          </div>
-          <h2 className="text-lg">{t("no_presets")}</h2>
+          <h2 className="text-[16px] font-semibold text-ink">{t("no_presets")}</h2>
         </div>
       ) : (
         <div className="space-y-6">
@@ -285,24 +284,20 @@ function PresetCard({
 
   return (
     <section
-      className={`p-4 rounded-lg border ${
-        preset.is_default
-          ? "border-magenta bg-elevation-1 shadow-glow-accent"
-          : "border-elevation-0-stroke bg-elevation-0"
-      }`}
+      className="rounded-xl border border-elevation-0-stroke bg-white p-5 shadow-shadow-1"
     >
       {/* Header row */}
       <div className="flex items-center gap-2 mb-4">
-        <h3 className="text-base font-semibold text-ink">{preset.name}</h3>
+        <h3 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">{preset.name}</h3>
         {preset.is_default && (
-          <span className="px-2 py-0.5 text-[11px] font-medium rounded-full bg-magenta text-black">
+          <span className="tag border-0 bg-lime text-ink">
             {t("preset_default")}
           </span>
         )}
         <span className="flex-1" />
         <Link
           to={`/presets/${preset.id}/routine`}
-          className="text-[13px] text-magenta hover:brightness-110 transition-colors"
+          className="text-[13px] text-ink-2 hover:text-ink transition-colors"
         >
           {t("edit_preset")}
         </Link>
@@ -310,7 +305,7 @@ function PresetCard({
 
       {/* Apply section */}
       <div className="mb-4">
-        <p className="text-[11px] uppercase tracking-widest text-ink-3 mb-2">
+        <p className="text-[12px] text-ink-2 mb-2">
           {t("apply_preset")}
         </p>
 
@@ -330,8 +325,7 @@ function PresetCard({
                 type="button"
                 onClick={onApplyAll}
                 disabled={isApplying}
-                className="px-2.5 py-1 text-[12px] rounded-full border border-magenta text-magenta 
-                           hover:bg-magenta hover:text-black disabled:opacity-50 transition-colors"
+                className="min-h-0 rounded-pill border border-ink bg-ink px-3 py-1.5 text-[12px] font-semibold text-bg transition-colors hover:bg-primary hover:text-primary-foreground disabled:opacity-50"
               >
                 {t("apply_all")}
               </button>
@@ -343,10 +337,10 @@ function PresetCard({
                     type="button"
                     onClick={() => onToggleMember(m.id)}
                     disabled={isApplying}
-                    className={`px-2.5 py-1 text-[12px] rounded-full border transition-colors disabled:opacity-50 ${
+                    className={`px-2.5 py-1 min-h-0 text-[12px] rounded-pill border transition-colors disabled:opacity-50 ${
                       selected
-                        ? "bg-magenta border-magenta text-black"
-                        : "border-elevation-0-stroke text-ink-2 hover:border-ink-2"
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-elevation-0-stroke bg-elevation-1 text-ink-2 hover:border-purple"
                     }`}
                   >
                     {m.name}
@@ -360,8 +354,7 @@ function PresetCard({
               type="button"
               onClick={onApply}
               disabled={!hasSelection || isApplying}
-              className="h-8 px-4 bg-magenta text-black rounded text-[13px] font-medium 
-                         hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              className="h-9 min-h-0 rounded-lg border-ink bg-ink px-5 text-[13px] font-bold text-bg transition-colors hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {t("apply")}
             </button>

@@ -35,6 +35,7 @@ vi.mock("../hooks/useT", () => ({
       done_default_set: "Default preset set.",
       done_default_cleared: "Default preset cleared.",
       done_preset_retired: "Preset retired.",
+      presets_title: "Presets",
       presets_loading: "Loading…",
       presets_error: "Something went wrong loading your presets.",
       presets_retry: "Retry",
