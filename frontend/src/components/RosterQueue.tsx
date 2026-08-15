@@ -45,7 +45,7 @@ export function RosterQueue({ members }: RosterQueueProps) {
 
   return (
     <div className="space-y-8">
-      {groups.map((group) => (
+      {groups.map((group, index) => (
         <section key={group.key} aria-labelledby={`queue-${group.key}`}>
           <div className="mb-3 flex items-end justify-between gap-4">
             <div>
@@ -65,7 +65,7 @@ export function RosterQueue({ members }: RosterQueueProps) {
           </div>
           <RosterTable
             members={group.members}
-            id={`roster-${group.key}`}
+            id={index === 0 ? "roster" : `roster-${group.key}`}
             layout="queue"
           />
         </section>

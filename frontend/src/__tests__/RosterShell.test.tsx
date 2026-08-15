@@ -150,6 +150,7 @@ describe("RosterShell", () => {
     await waitFor(() => {
       expect(screen.getByText("Alice")).toBeInTheDocument();
       expect(screen.getByText("Bob")).toBeInTheDocument();
+      expect(document.querySelector("ul#roster > li > a")).toBeInTheDocument();
     });
   });
 
