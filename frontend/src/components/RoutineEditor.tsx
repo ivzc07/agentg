@@ -555,7 +555,7 @@ export function RoutineEditor({ preset = false }: { preset?: boolean } = {}) {
             <button
               type="submit"
               disabled={saveMutation.isPending}
-              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-sm bg-magenta text-bg text-[14px] font-medium hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed motion-safe:transition-all duration-fast"
+              className="inline-flex items-center gap-2 px-6 py-2.5 rounded-sm bg-magenta text-ink text-[14px] font-medium hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed motion-safe:transition-all duration-fast"
             >
               {saveMutation.isPending && (
                 <Loader2 className="w-4 h-4 motion-safe:animate-spin" />

@@ -161,7 +161,7 @@ export function AppHeader({
           <Link
             key={to}
             to={to}
-            aria-label={`${label}, mobile navigation`}
+            aria-label={t("mobile_navigation_item").replace("{label}", label)}
             className={`flex flex-col items-center justify-center gap-1 text-[10px] font-medium transition-colors ${
               current ? "text-ink" : "text-ink-3"
             }`}

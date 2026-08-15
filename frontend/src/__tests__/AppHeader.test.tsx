@@ -12,6 +12,7 @@ vi.mock("../hooks/useT", () => ({
       nav_dashboard: "Dashboard",
       nav_workspace: "Workspace",
       nav_language: "Language",
+      mobile_navigation_item: "{label}, mobile navigation",
       nav_roster: "Members",
     };
     return strings[key] ?? key;

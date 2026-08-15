@@ -105,14 +105,14 @@
   --success: #047857;
   --border: #dddde2;
   --input: #b8b8c0;
-  --ring: #a8d100;
+  --ring: #1d4ed8;
   --radius: 0.625rem;
   --sidebar: #ffffff;
   --sidebar-foreground: #0a0a0b;
   --sidebar-accent: #f0f0f2;
   --sidebar-accent-foreground: #0a0a0b;
   --sidebar-border: #dddde2;
-  --sidebar-ring: #a8d100;
+  --sidebar-ring: #1d4ed8;
 }
 
 @layer base {

@@ -4,7 +4,8 @@ import { AttendanceStrip } from "../components/AttendanceStrip";
 import type { DayCell } from "../types/roster";
 
 vi.mock("../hooks/useT", () => ({
-  useT: () => (key: string): string => key,
+  useT: () => (key: string): string =>
+    key === "sr_missed" ? "Missed {date}." : key,
 }));
 
 describe("AttendanceStrip", () => {
@@ -16,6 +17,8 @@ describe("AttendanceStrip", () => {
     ];
     const { container } = render(<AttendanceStrip cells={cells} />);
     expect(container.querySelectorAll("i")).toHaveLength(3);
+    expect(container.querySelector(".strip")).toHaveAttribute("aria-hidden", "true");
+    expect(container).toHaveTextContent("Missed 2026-08-02.");
   });
 
   it("renders nothing when there is no attendance", () => {
