@@ -63,8 +63,20 @@ resource's own path.
 The initial backup completed successfully on 2026-08-15 and produced an offsite
 R2 object. That dump was restored into an isolated throwaway Postgres 16
 container and verified (19 public tables, 1 gym, 1 member), then the throwaway
-container was deleted. Restore future incidents through Database →
-`agentg-postgres` → Backups.
+container was deleted.
+
+The verified recovery shape is **replacement restore**, not an in-place import:
+
+1. Stop `agentg` first so no new writes can land during recovery.
+2. Provision a clean Postgres 16 replacement and restore the downloaded `.dmp`
+   through Coolify's **Import Backup** action (or `pg_restore --no-owner
+   --no-privileges` from an operator shell).
+3. Verify the expected schema and row counts before exposing it.
+4. Point `DATABASE_URL` at the replacement and redeploy `agentg`.
+5. Keep the failed/original database untouched until recovery is accepted.
+
+Never import the dump directly over a populated production database; Coolify's
+import operation is destructive.
 
 ## Environments
 
