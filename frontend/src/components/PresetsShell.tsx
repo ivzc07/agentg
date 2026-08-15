@@ -1,6 +1,4 @@
 import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
-import { useT } from "../hooks/useT";
 import { AppHeader } from "./AppHeader";
 
 interface PresetsShellProps {
@@ -15,14 +13,5 @@ interface PresetsShellProps {
  * state, and the coach's name.
  */
 export function PresetsShell({ name: _name, gym, children }: PresetsShellProps) {
-  const t = useT();
-
-  return (
-    <AppHeader gym={gym}>
-      <div className="sr-only">
-        <Link to="/">{t("back_to_roster")}</Link>
-      </div>
-      {children}
-    </AppHeader>
-  );
+  return <AppHeader gym={gym}>{children}</AppHeader>;
 }

@@ -30,20 +30,6 @@ describe("PresetsShell", () => {
     expect(screen.getByTestId("child")).toBeInTheDocument();
   });
 
-  it("renders a link back to the roster", () => {
-    render(
-      <MemoryRouter initialEntries={["/presets"]}>
-        <PresetsShell name="Coach" gym="Iron Temple">
-          <div />
-        </PresetsShell>
-      </MemoryRouter>,
-    );
-
-    const link = screen.getByRole("link", { name: "← All members" });
-    expect(link).toBeInTheDocument();
-    expect(link).toHaveAttribute("href", "/");
-  });
-
   it("renders the Presets nav link as active on /presets", () => {
     render(
       <MemoryRouter initialEntries={["/presets"]}>
