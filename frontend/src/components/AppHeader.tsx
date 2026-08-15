@@ -122,7 +122,7 @@ export function AppHeader({
             </p>
             <div className="flex items-center justify-between border-t border-white/10 pt-3">
               <span className="text-[11px] text-white/50">EN / ES</span>
-              <LangToggle />
+              <LangToggle inverse />
             </div>
           </div>
         </div>

@@ -47,4 +47,13 @@ describe("LangToggle", () => {
     expect(screen.getByText("ES")).toHaveAttribute("aria-current", "true");
     expect(screen.getByText("EN")).not.toHaveAttribute("aria-current");
   });
+
+  it("uses inverse contrast-safe styles inside dark chrome", () => {
+    window.__I18N__ = { _lang: "en", nav_language: "Language" };
+    render(<LangToggle inverse />);
+
+    expect(screen.getByLabelText("Language")).toHaveClass("lang-toggle-inverse");
+    expect(screen.getByText("EN")).toHaveClass("bg-white", "text-ink");
+    expect(screen.getByText("ES")).toHaveClass("text-white/60", "hover:text-white");
+  });
 });

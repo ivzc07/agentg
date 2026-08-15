@@ -1,4 +1,5 @@
 import { getLang } from "../lib/i18n";
+import { useT } from "../hooks/useT";
 
 /**
  * The per-browser EN/ES toggle (issue #106; part of the chrome since the
@@ -9,8 +10,9 @@ import { getLang } from "../lib/i18n";
  * and the i18n bootstrap is injected per request — so a full page load is
  * required for the new language to take effect anyway.
  */
-export function LangToggle() {
+export function LangToggle({ inverse = false }: { inverse?: boolean }) {
   const lang = getLang();
+  const t = useT();
   const next =
     typeof window === "undefined"
       ? "/"
@@ -19,8 +21,12 @@ export function LangToggle() {
 
   return (
     <span
-      className="lang-toggle inline-flex items-center rounded-sm border border-elevation-2-stroke p-0.5 text-[11px] font-semibold tracking-[0.06em]"
-      aria-label="Language"
+      className={`lang-toggle inline-flex items-center rounded-sm border p-0.5 text-[11px] font-semibold tracking-[0.06em] ${
+        inverse
+          ? "lang-toggle-inverse border-white/25 bg-white/5"
+          : "border-elevation-2-stroke"
+      }`}
+      aria-label={t("nav_language")}
     >
       {(["en", "es"] as const).map((l) => (
         <a
@@ -29,8 +35,10 @@ export function LangToggle() {
           aria-current={l === lang ? "true" : undefined}
           className={
             l === lang
-              ? "px-1.5 py-0.5 rounded-xs bg-ink text-bg"
-              : "px-1.5 py-0.5 rounded-xs text-ink-3 hover:text-ink transition-colors duration-fast"
+              ? `px-1.5 py-0.5 rounded-xs ${inverse ? "bg-white text-ink" : "bg-ink text-bg"}`
+              : `px-1.5 py-0.5 rounded-xs transition-colors duration-fast ${
+                  inverse ? "text-white/60 hover:text-white" : "text-ink-3 hover:text-ink"
+                }`
           }
         >
           {l.toUpperCase()}

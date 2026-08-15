@@ -157,6 +157,10 @@
     outline-offset: 2px;
   }
 
+  .lang-toggle-inverse a:focus-visible {
+    outline-color: #ffffff;
+  }
+
   button:not([data-slot]) {
     min-height: 36px;
     padding: 6px 12px;
