@@ -76,7 +76,7 @@ export function AppHeader({
                   {gym}
                 </Link>
               ))}
-              <span className="mt-1 block font-mono text-[9px] uppercase tracking-[0.18em] text-white/40">
+              <span className="mt-1 block font-mono text-[9px] uppercase tracking-[0.18em] text-white/55">
                 {t("nav_dashboard")}
               </span>
             </div>
@@ -84,7 +84,7 @@ export function AppHeader({
         </div>
 
         <nav className="flex-1 px-3" aria-label={t("nav_sections")}>
-          <p className="px-3 pb-2 pt-3 font-mono text-[9px] uppercase tracking-[0.18em] text-white/30">
+          <p className="px-3 pb-2 pt-3 font-mono text-[9px] uppercase tracking-[0.18em] text-white/55">
             {t("nav_workspace")}
           </p>
           <div className="space-y-1.5">
@@ -117,7 +117,7 @@ export function AppHeader({
 
         <div className="p-4">
           <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3.5">
-            <p className="mb-3 font-mono text-[9px] uppercase tracking-[0.16em] text-white/35">
+            <p className="mb-3 font-mono text-[9px] uppercase tracking-[0.16em] text-white/55">
               {t("nav_language")}
             </p>
             <div className="flex items-center justify-between border-t border-white/10 pt-3">
