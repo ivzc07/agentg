@@ -30,7 +30,7 @@ function AttendanceGrid({ cells }: { cells: DayCell[] }) {
       <div className="grid grid-cols-7 gap-0.5">
         {cells.map((cell, i) => {
           const stateClass: Record<string, string> = {
-            hit: "bg-magenta border-magenta",
+            hit: "bg-cyan border-cyan",
             miss: "border-coral bg-coral-tint",
             future: "border-dashed border-elevation-2-stroke",
             plain: "border-elevation-2-stroke bg-transparent",
@@ -82,13 +82,13 @@ function MemberCard({ member }: { member: RosterMember }) {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2 }}
-      className="mcard bg-elevation-1 border border-elevation-1-stroke rounded-md p-3"
+      className="mcard rounded-xl border border-elevation-0-stroke bg-elevation-3 p-4 shadow-shadow-1 transition-colors duration-fast hover:border-purple"
       data-name={member.name}
     >
       <div className="top-row flex justify-between items-start gap-2">
         <Link
           to={`/members/${member.member_id}`}
-          className="name text-[15px] font-semibold truncate hover:text-magenta transition-colors duration-fast"
+          className="name truncate text-base font-bold tracking-[-0.02em] transition-colors duration-fast hover:text-purple"
         >
           {member.name}
         </Link>
@@ -156,12 +156,12 @@ export function RosterCards({ members }: RosterCardsProps) {
         if (band.key === "new" && band.members.length === 0) return null;
         return (
           <section key={band.key} className={`band band-${band.key}`} id={`band-${band.key}`}>
-            <h2 className="flex items-center gap-2 text-[14px] font-semibold text-ink-2 mb-3">
-              <span className="chip-icon text-[16px]" aria-hidden="true">
+            <h2 className="mb-3 flex items-center gap-2 font-heading text-lg font-black tracking-[-0.025em] text-ink">
+              <span className="chip-icon text-[13px] text-purple" aria-hidden="true">
                 {band.icon}
               </span>
               {band.title}
-              <span className="count text-[13px] text-ink-3 font-normal">
+              <span className="count text-[12px] text-ink-3 font-normal tabular-nums">
                 {band.members.length}
               </span>
             </h2>
@@ -177,9 +177,9 @@ export function RosterCards({ members }: RosterCardsProps) {
       })}
 
       {/* Legend */}
-      <div className="legend flex gap-3 text-[12px] text-ink-3">
+      <div className="legend flex gap-3 text-[12px] text-ink-3 pb-2">
         <span className="flex items-center gap-1">
-          <i className="l-hit inline-block w-3 h-3 bg-magenta border border-magenta" />
+          <i className="l-hit inline-block w-3 h-3 bg-cyan border border-cyan" />
           {t("legend_hit")}
         </span>
         <span className="flex items-center gap-1">

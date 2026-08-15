@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
@@ -21,6 +21,9 @@ vi.mock("../hooks/useT", () => ({
       one_session: "1 session",
       n_sessions: "{n} sessions",
       last_session: "last session {date}",
+      fact_since: "Since",
+      fact_last: "Last session",
+      col_gap: "Days away",
       no_sessions_yet: "No sessions yet",
       trained_today: "trained today",
       one_day_away: "1 day away",
@@ -119,6 +122,9 @@ function mockT(key: string): string {
     one_session: "1 session",
     n_sessions: "{n} sessions",
     last_session: "last session {date}",
+    fact_since: "Since",
+    fact_last: "Last session",
+    col_gap: "Days away",
     no_sessions_yet: "No sessions yet",
     trained_today: "trained today",
     one_day_away: "1 day away",
@@ -254,16 +260,16 @@ describe("MemberPage", () => {
     expect(backLink).toHaveAttribute("href", "/?view=cards");
   });
 
-  it("renders the routine card with exercises", () => {
+  it("renders the routine board with exercises", () => {
     renderPage(makeMember());
-    expect(screen.getByText("Routine")).toBeInTheDocument();
-    expect(screen.getByText("squat")).toBeInTheDocument();
-    expect(screen.getByText(/4 × 8-10/)).toBeInTheDocument();
+    const routine = screen.getByRole("region", { name: "Routine" });
+    expect(within(routine).getByText("squat")).toBeInTheDocument();
+    expect(within(routine).getByText(/4 × 8-10/)).toBeInTheDocument();
   });
 
-  it("links the routine card to the editor (the Edit journey, #100/#154)", () => {
+  it("links the routine board to the editor (the Edit journey, #100/#154)", () => {
     renderPage(makeMember());
-    const link = screen.getByRole("link", { name: "Edit" });
+    const link = screen.getByRole("link", { name: "Edit routine" });
     expect(link).toHaveAttribute("href", "/members/1/routine");
   });
 
@@ -274,7 +280,7 @@ describe("MemberPage", () => {
 
   it("renders the sessions card", () => {
     renderPage(makeMember());
-    expect(screen.getByText("Sessions")).toBeInTheDocument();
+    expect(document.getElementById("sessions")).toBeInTheDocument();
     // Collapsed set line: "squat 65 kg × 8,8,6" rendered in the sessions section
     const sessionsSection = document.getElementById("sessions");
     expect(sessionsSection).toBeInTheDocument();
@@ -381,10 +387,10 @@ describe("MemberPage", () => {
 
   it("shows facts line with session count and gap", () => {
     renderPage(makeMember());
-    expect(screen.getByText(/Member since/)).toBeInTheDocument();
-    expect(screen.getByText(/sessions/)).toBeInTheDocument();
-    expect(screen.getByText(/days away/)).toBeInTheDocument();
-    expect(screen.getByText(/last session/)).toBeInTheDocument();
+    expect(screen.getByText("Since")).toBeInTheDocument();
+    expect(screen.getByText("2 sessions")).toBeInTheDocument();
+    expect(screen.getByText("3 days away")).toBeInTheDocument();
+    expect(screen.getByText("Last session")).toBeInTheDocument();
   });
 
   it("shows lapsed tag when member is lapsed", () => {

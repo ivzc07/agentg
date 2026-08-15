@@ -1,8 +1,9 @@
-import { LangToggle } from "./LangToggle";
 import { useParams, useSearchParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Pencil } from "lucide-react";
 import { useT } from "../hooks/useT";
 import { getMonths, getWeekdayInitials, getDecimalMark, getLang } from "../lib/i18n";
+import { AppHeader } from "./AppHeader";
 import { fetchMember, MemberAuthError, MemberNotFoundError, tickOffFlag } from "../api/member";
 import type { MemberPageData, SafetyFlag } from "../types/member";
 import type { RosterMember } from "../types/roster";
@@ -67,13 +68,13 @@ function SafetyBanner({
   if (flags.length === 0) return null;
 
   return (
-    <section className="card card-elevated rounded-sm border border-elevation-0-stroke bg-elevation-1 p-4 mb-5">
-      <h2 className="text-[15px] font-semibold mb-3">{t("safety_section")}</h2>
+    <section className="card card-elevated mb-5 rounded-xl border border-coral/30 bg-coral-tint p-5 shadow-shadow-1">
+      <h2 className="text-[13px] font-semibold mb-3 tracking-[-0.01em]">{t("safety_section")}</h2>
       <div className="flex flex-col gap-3">
         {flags.map((flag) => (
           <div
             key={flag.note_id}
-            className="flag flex items-start justify-between gap-3 p-3 bg-coral-tint border border-coral/20 rounded-sm"
+            className="flag flex items-start justify-between gap-3 rounded-lg border border-coral/20 bg-elevation-3 p-4"
           >
             <div className="flag-body min-w-0">
               <b className="text-[14px] block">{flag.text}</b>
@@ -126,17 +127,16 @@ function RoutineCard({
   const weekdays = getWeekdayInitials();
 
   return (
-    <section className="card card-elevated rounded-sm border border-elevation-0-stroke bg-elevation-1 p-4">
-      <h2 className="text-[15px] font-semibold mb-3 flex items-center gap-2">
-        <span className="opacity-60" aria-hidden="true">📋</span>
+    <section className="card card-elevated rounded-xl border border-elevation-0-stroke bg-elevation-3 p-5 shadow-shadow-1">
+      <h2 className="mb-4 flex flex-wrap items-center gap-2 text-[20px] font-semibold tracking-[-0.02em]">
         {t("routine")}
         {data.routine_preset_name && (
-          <span className="tag text-[10px] ml-2">
+          <span className="tag text-[10px]">
             {t("preset_chip").replace("{name}", data.routine_preset_name)}
           </span>
         )}
         {!data.routine_preset_name && (
-          <span className="tag text-[10px] ml-2">
+          <span className="tag text-[10px]">
             {data.coach_authored
               ? data.routine_author
                 ? t("chip_coach_named").replace("{name}", data.routine_author)
@@ -144,12 +144,12 @@ function RoutineCard({
               : t("chip_agent")}
           </span>
         )}
-        <span className="flex-1" />
+        <span className="hidden flex-1 sm:block" />
         {/* The Edit journey into the Routine editor — the entry point the
             server member page always had (#100); #154 carries it over. */}
         <Link
           to={`/members/${data.member_id}/routine`}
-          className="edit text-[12px] font-normal text-ink-2 hover:text-ink transition-colors duration-fast"
+          className="edit ml-auto text-[12px] font-normal text-ink-2 transition-colors duration-fast hover:text-ink"
         >
           {t("edit")}
         </Link>
@@ -185,6 +185,71 @@ function RoutineCard({
   );
 }
 
+function RoutineBoard({
+  data,
+  t,
+}: {
+  data: MemberPageData;
+  t: (key: string) => string;
+}) {
+  const weekdays = getWeekdayInitials();
+  const source = data.routine_preset_name
+    ? t("preset_chip").replace("{name}", data.routine_preset_name)
+    : data.coach_authored
+      ? data.routine_author
+        ? t("chip_coach_named").replace("{name}", data.routine_author)
+        : t("chip_coach")
+      : t("chip_agent");
+
+  return (
+    <section aria-labelledby="routine-heading">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <h2 id="routine-heading" className="text-[20px] font-semibold tracking-[-0.02em]">
+          {t("routine")}
+        </h2>
+        <span className="tag text-[10px]">{source}</span>
+      </div>
+
+      {data.routine.length === 0 ? (
+        <div className="rounded-xl border border-elevation-0-stroke bg-white p-5 text-[13px] text-ink-3 shadow-shadow-1">
+          {t("no_routine")}
+        </div>
+      ) : (
+        <div className="grid gap-px overflow-hidden rounded-xl border border-elevation-0-stroke bg-elevation-0-stroke shadow-shadow-1 sm:grid-cols-2 lg:grid-cols-3">
+          {data.routine.map((day, index) => (
+            <article
+              key={`${day.weekday}-${index}`}
+              className="bg-white p-4"
+            >
+              <div className="flex items-baseline justify-between gap-3">
+                <b className="text-[14px]">{day.name}</b>
+                <span className="font-mono text-[11px] text-ink-3">
+                  {weekdays[day.weekday]}
+                </span>
+              </div>
+              <ul className="mt-3 space-y-2">
+                {day.exercises.map((exercise, exerciseIndex) => (
+                  <li
+                    key={`${exercise.name}-${exerciseIndex}`}
+                    className="flex justify-between gap-3 text-[12px]"
+                  >
+                    <span className="text-ink-2">{exercise.name}</span>
+                    {(exercise.sets != null || exercise.reps != null) && (
+                      <span className="shrink-0 font-mono text-ink-3">
+                        {[exercise.sets, exercise.reps].filter(Boolean).join(" × ")}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function SessionsCard({
   data,
   t,
@@ -195,9 +260,8 @@ function SessionsCard({
   const { sessions, page, pages, member_id: memberId } = data;
 
   return (
-    <section className="card card-elevated rounded-sm border border-elevation-0-stroke bg-elevation-1 p-4" id="sessions">
-      <h2 className="text-[15px] font-semibold mb-3 flex items-center gap-2">
-        <span className="opacity-60" aria-hidden="true">📊</span>
+    <section className="card card-elevated rounded-xl border border-elevation-0-stroke bg-elevation-3 p-5 shadow-shadow-1" id="sessions">
+      <h2 className="mb-4 flex items-center gap-2 text-[20px] font-semibold tracking-[-0.02em]">
         {t("sessions")}
       </h2>
       {sessions.length === 0 ? (
@@ -240,7 +304,7 @@ function SessionsCard({
             }
 
             return (
-              <div key={i} className="sess">
+              <div key={i} className="sess pb-3 mb-3 border-b border-elevation-0-stroke last:border-0 last:pb-0 last:mb-0">
                 <b className="text-[13px]">{fmtDate(session.on)}</b>{" "}
                 <span className="muted text-[12px] text-ink-3">{headline}</span>
                 {Array.from(collapsed.entries()).map(
@@ -314,9 +378,8 @@ function WeightsCard({
   t: (key: string) => string;
 }) {
   return (
-    <section className="card rounded-sm border border-elevation-0-stroke bg-elevation-1 p-4">
-      <h2 className="text-[15px] font-semibold mb-3 flex items-center gap-2">
-        <span className="opacity-60" aria-hidden="true">⚖️</span>
+    <section className="card rounded-xl border border-elevation-0-stroke bg-elevation-3 p-5 shadow-shadow-1">
+      <h2 className="mb-4 text-[20px] font-semibold tracking-[-0.02em]">
         {t("last_weights")}
       </h2>
       {data.weights.length === 0 ? (
@@ -349,8 +412,8 @@ function NotesCard({
   const { notes, retired_notes: retired } = data;
 
   return (
-    <section className="card rounded-sm border border-elevation-0-stroke bg-elevation-1 p-4">
-      <h2 className="text-[15px] font-semibold mb-3">{t("notes")}</h2>
+    <section className="card rounded-xl border border-elevation-0-stroke bg-elevation-3 p-5 shadow-shadow-1">
+      <h2 className="mb-4 text-[20px] font-semibold tracking-[-0.02em]">{t("notes")}</h2>
       {notes.length === 0 && retired.length === 0 ? (
         <p className="muted text-[13px] text-ink-3">{t("no_notes")}</p>
       ) : (
@@ -396,9 +459,11 @@ function NotesCard({
 export function MemberPane({
   data,
   t,
+  layout = "compact",
 }: {
   data: MemberPageData;
   t: (key: string) => string;
+  layout?: "compact" | "board";
 }) {
   // Status chips
   const chips: string[] = [];
@@ -412,7 +477,6 @@ export function MemberPane({
     );
   }
 
-  // Facts line
   const countLabel =
     data.session_count === 1
       ? t("one_session")
@@ -426,45 +490,115 @@ export function MemberPane({
         ? t("one_day_away")
         : t("days_away").replace("{n}", String(data.gap_days));
 
-  const factsParts = [
-    t("member_since").replace("{date}", fmtDate(data.member_since)),
-    countLabel,
-    gapLabel,
+  const facts = [
+    { label: t("sessions"), value: countLabel },
+    { label: t("col_gap"), value: gapLabel },
+    { label: t("fact_since"), value: fmtDate(data.member_since) },
   ];
   if (data.last_session_on) {
-    factsParts.push(
-      t("last_session").replace("{date}", fmtDate(data.last_session_on))
+    facts.push({
+      label: t("fact_last"),
+      value: fmtDate(data.last_session_on),
+    });
+  }
+
+  if (layout === "board") {
+    return (
+      <div className="space-y-5">
+        <section className="overflow-hidden rounded-xl bg-ink text-white shadow-shadow-1">
+          <div className="flex flex-col gap-5 p-6 sm:flex-row sm:items-start sm:justify-between sm:p-8">
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-lime px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-ink">
+                  {t("member_eyebrow")}
+                </span>
+                {chips.map((chip, index) => (
+                  <span
+                    key={index}
+                    className="rounded-full border border-white/20 px-2.5 py-1 text-[11px] font-medium text-white/80"
+                  >
+                    {chip}
+                  </span>
+                ))}
+              </div>
+              <h1 className="mt-5 text-[34px] font-semibold leading-none tracking-[-0.035em]">
+                {data.name}
+              </h1>
+            </div>
+            <Link
+              to={`/members/${data.member_id}/routine`}
+              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-lime px-4 text-[13px] font-semibold text-ink transition-colors duration-fast hover:bg-lime-hover"
+            >
+              <Pencil size={14} aria-hidden="true" />
+              {t("edit")} {t("routine").toLocaleLowerCase(getLang())}
+            </Link>
+          </div>
+          <dl className="grid grid-cols-2 gap-x-5 gap-y-4 border-t border-white/10 bg-white/[0.04] p-6 sm:grid-cols-4 sm:p-8">
+            {facts.map((fact) => (
+              <div key={fact.label} className="min-w-0 border-t border-white/20 pt-3">
+                <dt className="text-[11px] font-medium text-white/60">
+                  {fact.label}
+                </dt>
+                <dd className="mt-1 text-[14px] font-semibold text-white tabular-nums">
+                  {fact.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <SafetyBanner
+          flags={data.safety_flags}
+          memberId={data.member_id}
+          t={t}
+        />
+
+        <RoutineBoard data={data} t={t} />
+
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1.7fr)_minmax(280px,.7fr)]">
+          <SessionsCard data={data} t={t} />
+          <aside className="flex flex-col gap-5">
+            <WeightsCard data={data} t={t} />
+            <NotesCard data={data} t={t} />
+          </aside>
+        </div>
+      </div>
     );
   }
 
   return (
     <>
-      {/* Headline */}
-      <span className="eyebrow">{t("member_eyebrow")}</span>
-      <h1 className="text-[28px] leading-tight mt-1">{data.name}</h1>
+      <section className="rounded-xl border border-elevation-0-stroke bg-white p-5 shadow-shadow-1 sm:p-6">
+        <p className="mb-3 inline-flex rounded-full bg-lime px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide text-ink">
+          {t("member_eyebrow")}
+        </p>
+        <h1 className="text-[27px] font-semibold leading-tight tracking-[-0.03em]">
+          {data.name}
+        </h1>
 
-      {/* Status chips */}
-      {chips.length > 0 && (
-        <div className="chips flex gap-2 mt-2">
-          {chips.map((chip, i) => (
-            <span key={i} className="tag text-[10px]">
-              {chip}
-            </span>
+        {chips.length > 0 && (
+          <div className="chips mt-4 flex flex-wrap gap-2">
+            {chips.map((chip, i) => (
+              <span key={i} className="tag bg-elevation-0 text-ink-2">
+                {chip}
+              </span>
+            ))}
+          </div>
+        )}
+
+        <dl className="facts mt-7 grid grid-cols-2 gap-x-4 gap-y-4 sm:grid-cols-4">
+          {facts.map((fact) => (
+            <div key={fact.label} className="min-w-0 border-t border-elevation-0-stroke pt-3">
+              <dt className="text-[11px] font-medium text-ink-3">
+                {fact.label}
+              </dt>
+              <dd className="mt-1 text-[14px] font-medium text-ink tabular-nums">
+                {fact.value}
+              </dd>
+            </div>
           ))}
-        </div>
-      )}
-
-      {/* Facts line */}
-      <div className="facts text-[13px] text-ink-2 mt-3 flex flex-wrap gap-x-3 gap-y-1">
-        {factsParts.map((part, i) => (
-          <span key={i}>
-            {i > 0 && (
-              <span className="mx-1.5 text-ink-3" aria-hidden="true">·</span>
-            )}
-            {part}
-          </span>
-        ))}
-      </div>
+        </dl>
+      </section>
 
       {/* Safety banner */}
       <div className="mt-5">
@@ -505,20 +639,20 @@ export function MemberPageContent({
 
   return (
     <div className="min-h-screen bg-bg text-ink font-sans antialiased">
-      {/* Sticky header with back link */}
-      <header className="sticky top-0 z-20 flex items-center gap-2 min-h-[46px] px-gut py-1.5 bg-elevation-0 border-b border-elevation-0-stroke shadow-elevation-1">
-        <Link
-          to={backTo}
-          className="text-[13px] text-ink-2 hover:text-ink transition-colors duration-fast"
-        >
-          ← {t("back_to_roster")}
-        </Link>
-        <span className="flex-1" />
-        <LangToggle />
-      </header>
+      <AppHeader
+        showNav={false}
+        leading={
+          <Link
+            to={backTo}
+            className="text-[13px] text-ink-2 hover:text-ink transition-colors duration-fast"
+          >
+            {t("back_to_roster")}
+          </Link>
+        }
+      />
 
-      <main className="max-w-2xl mx-auto px-gut py-6">
-        <MemberPane data={data} t={t} />
+      <main className="mx-auto max-w-6xl px-gut py-6 lg:px-10 lg:py-8">
+        <MemberPane data={data} t={t} layout="board" />
       </main>
     </div>
   );
@@ -560,7 +694,7 @@ export function MemberPage({ member: paneMember }: { member?: RosterMember } = {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-[200px] text-ink-3 text-[14px]">
+      <div className="flex items-center justify-center min-h-[200px] text-ink-3 text-[14px]" aria-busy="true">
         Loading…
       </div>
     );

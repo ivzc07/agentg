@@ -46,6 +46,20 @@ async def test_seed_demo_data_populates_the_roster(tmp_path):
         assert any(
             row.severity is not None and row.missed_days > 0 for row in rows
         ), "seeded data must produce a severity band"
+        # Member pages must not be hollow: at least one seeded member
+        # carries sessions, a routine, and a coach-readable Note.
+        page = None
+        for row in rows:
+            candidate = await store.member_page(gym.id, row.member_id)
+            if candidate and candidate.sessions and candidate.notes:
+                page = candidate
+                break
+        assert page is not None, "seeded data must fill a member page"
+        assert page.routine, "seeded member with notes must also have a routine"
+        assert page.weights, "seeded sessions must produce last weights"
+        assert any(row.has_safety_flag for row in rows), (
+            "seeded data must include a live safety flag"
+        )
     finally:
         await engine.dispose()
 

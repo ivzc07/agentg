@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useQuery } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
@@ -5,11 +6,16 @@ import { MotionConfig } from "framer-motion";
 import { fetchSession, SessionAuthError } from "./api/session";
 import { RosterShell } from "./components/RosterShell";
 import { MemberPage } from "./components/MemberPage";
-import { SettingsPage } from "./components/SettingsPage";
 import { LoginPage } from "./components/LoginPage";
 import { PresetsPage } from "./components/PresetsPage";
 import { PresetsShell } from "./components/PresetsShell";
 import { RoutineEditor } from "./components/RoutineEditor";
+
+const SettingsPage = lazy(() =>
+  import("./components/SettingsPage").then((module) => ({
+    default: module.SettingsPage,
+  })),
+);
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -55,7 +61,7 @@ export function Dashboard() {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-screen text-ink-2">
+      <div className="flex items-center justify-center min-h-screen text-ink-2" aria-busy="true">
         Loading…
       </div>
     );
@@ -65,11 +71,12 @@ export function Dashboard() {
     return (
       <div className="flex items-center justify-center min-h-screen text-ink-2">
         <div className="text-center space-y-4 max-w-sm px-gut">
-          <h1 className="text-[20px] font-semibold">
+          <p className="eyebrow">Dashboard</p>
+          <h1 className="text-[22px] font-semibold tracking-[-0.02em]">
             Dashboard no disponible
           </h1>
-          <p className="text-[14px] text-ink-2">
-            No estás autenticado. Envía <b>/dashboard</b> a tu bot en Telegram
+          <p className="text-[14px] text-ink-2 leading-relaxed">
+            No estás autenticado. Envía <b className="text-ink font-semibold">/dashboard</b> a tu bot en Telegram
             para recibir un enlace de acceso.
           </p>
         </div>
@@ -79,11 +86,11 @@ export function Dashboard() {
 
   if (error || !data) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-screen text-ink-2 gap-4">
+      <div className="flex flex-col items-center justify-center min-h-screen text-ink-2 gap-4 px-gut text-center">
         <p>Something went wrong loading your session.</p>
         <button
           onClick={() => window.location.reload()}
-          className="px-4 py-2 rounded bg-elevation-1 border border-elevation-0-stroke text-ink hover:bg-elevation-2 transition-colors"
+          className="px-4 py-2 rounded-sm bg-elevation-1 border border-elevation-0-stroke text-ink hover:bg-elevation-2 transition-colors"
         >
           Retry
         </button>
@@ -102,7 +109,20 @@ export function Dashboard() {
               member screen, without roster chrome around it. */}
           <Route path="members/:memberId" element={<MemberPage />} />
           {/* Settings screen (issue #153): full-page, no RosterShell chrome */}
-          <Route path="settings" element={<SettingsPage />} />
+          <Route
+            path="settings"
+            element={
+              <Suspense
+                fallback={
+                  <div className="flex min-h-[200px] items-center justify-center text-muted-foreground" aria-busy="true">
+                    Loading…
+                  </div>
+                }
+              >
+                <SettingsPage />
+              </Suspense>
+            }
+          />
           {/* Presets management screen (issue #152) — standalone full-page. */}
           <Route
             path="presets"

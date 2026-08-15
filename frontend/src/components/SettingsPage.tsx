@@ -1,21 +1,300 @@
-import { LangToggle } from "./LangToggle";
-import { useState, useEffect } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
-import { Copy, Check, RefreshCw } from "lucide-react";
-import { fetchSettings, regenerateInvite, regenerateCoach, renameGym } from "../api/settings";
+import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Building2Icon,
+  CheckIcon,
+  CopyIcon,
+  ShieldCheckIcon,
+  UsersRoundIcon,
+} from "lucide-react";
+import { toast } from "sonner";
+import {
+  fetchSettings,
+  regenerateCoach,
+  regenerateInvite,
+  renameGym,
+} from "../api/settings";
 import { useT } from "../hooks/useT";
+import { AppHeader } from "./AppHeader";
+import { Alert, AlertDescription } from "./ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "./ui/alert-dialog";
+import { Button } from "./ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from "./ui/card";
+import {
+  Field,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "./ui/field";
+import { Input } from "./ui/input";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput,
+} from "./ui/input-group";
+import { Spinner } from "./ui/spinner";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
+import { Toaster } from "./ui/sonner";
 
-/**
- * Full tenant Settings screen: invite link + QR, regenerate-invite,
- * coach link, regenerate-coach, and gym name (issue #153).
- *
- * Matches the five card blocks of the server-rendered settings page
- * (spec-dashboard §Settings) using the shared Tailwind theme tokens.
- */
+interface LinkCardProps {
+  description: string;
+  id: string;
+  onCopy: () => void;
+  regenerate: {
+    confirm: string;
+    error: Error | null;
+    isPending: boolean;
+    onChange: (value: string) => void;
+    onConfirm: () => Promise<unknown>;
+    onReset: () => void;
+    warning: string;
+  };
+  title: string;
+  url: string;
+  copied: boolean;
+  qrSvg?: string;
+}
+
+function plainConfirmationPrompt(template: string, word: string): string {
+  return template.replace(/<\/?b>/g, "").replace("{word}", word);
+}
+
+function RegenerateDialog({
+  confirm,
+  error,
+  isPending,
+  onChange,
+  onConfirm,
+  onReset,
+  title,
+  warning,
+}: LinkCardProps["regenerate"] & { title: string }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const confirmWord = t("confirm_word");
+  const matches = confirm.trim().toLowerCase() === confirmWord.toLowerCase();
+  const inputId = `confirm-${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+
+  const setDialogOpen = (next: boolean) => {
+    setOpen(next);
+    if (!next) {
+      onReset();
+    }
+  };
+
+  const submit = async () => {
+    try {
+      await onConfirm();
+      setOpen(false);
+    } catch {
+      // The mutation error is rendered next to the confirmation field.
+    }
+  };
+
+  return (
+    <AlertDialog open={open} onOpenChange={setDialogOpen}>
+      <AlertDialogTrigger
+        render={
+          <Button variant="destructive" type="button">
+            {t("regenerate")}
+          </Button>
+        }
+      />
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            {t("regenerate")}: {title.toLowerCase()}
+          </AlertDialogTitle>
+          <AlertDialogDescription>{warning}</AlertDialogDescription>
+        </AlertDialogHeader>
+
+        <FieldGroup>
+          <Field data-invalid={Boolean(error)}>
+            <FieldLabel htmlFor={inputId}>
+              {plainConfirmationPrompt(t("confirm_prompt"), confirmWord)}
+            </FieldLabel>
+            <Input
+              id={inputId}
+              value={confirm}
+              onChange={(event) => onChange(event.target.value)}
+              autoComplete="off"
+              placeholder={confirmWord}
+              aria-invalid={Boolean(error)}
+            />
+            <FieldError>{error?.message}</FieldError>
+          </Field>
+        </FieldGroup>
+
+        <AlertDialogFooter>
+          <AlertDialogCancel>{t("cancel")}</AlertDialogCancel>
+          <AlertDialogAction
+            variant="destructive"
+            onClick={submit}
+            disabled={!matches || isPending}
+          >
+            {isPending ? <Spinner data-icon="inline-start" /> : null}
+            {t("regenerate")}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+function LinkField({
+  copied,
+  id,
+  onCopy,
+  title,
+  url,
+}: Pick<LinkCardProps, "copied" | "id" | "onCopy" | "title" | "url">) {
+  const t = useT();
+
+  return (
+    <Field>
+      <FieldLabel htmlFor={`${id}-url`} className="sr-only">
+        {title}
+      </FieldLabel>
+      <InputGroup className="h-12 rounded-lg border-border bg-background px-1 shadow-none">
+        <InputGroupInput
+          id={`${id}-url`}
+          value={url}
+          readOnly
+          aria-label={title}
+          className="font-mono text-[13px] font-medium text-foreground"
+        />
+        <InputGroupAddon align="inline-end">
+          <InputGroupButton
+            size="sm"
+            variant={copied ? "secondary" : "default"}
+            className="h-9 px-3"
+            onClick={onCopy}
+            aria-label={copied ? t("copied") : t("copy")}
+            aria-live="polite"
+          >
+            {copied ? <CheckIcon data-icon="inline-start" /> : <CopyIcon data-icon="inline-start" />}
+            {copied ? t("copied") : t("copy")}
+          </InputGroupButton>
+        </InputGroupAddon>
+      </InputGroup>
+    </Field>
+  );
+}
+
+function LinkCard({
+  copied,
+  description,
+  id,
+  onCopy,
+  qrSvg,
+  regenerate,
+  title,
+  url,
+}: LinkCardProps) {
+  if (qrSvg) {
+    return (
+      <Card id={id} className="gap-0 overflow-hidden rounded-xl py-0 ring-1 ring-foreground/15">
+        <div className="grid lg:grid-cols-[minmax(0,1fr)_18rem]">
+          <div className="flex min-w-0 flex-col">
+            <CardHeader className="gap-3 px-6 pt-6 pb-5 md:px-8 md:pt-8">
+              <div className="flex items-center gap-3">
+                <UsersRoundIcon className="size-6 text-foreground" aria-hidden="true" />
+                <CardTitle className="text-[20px] font-semibold tracking-[-0.02em]">
+                  <h2>{title}</h2>
+                </CardTitle>
+              </div>
+              <CardDescription className="max-w-[52ch] text-[15px] leading-6">
+                {description}
+              </CardDescription>
+            </CardHeader>
+
+            <CardContent className="px-6 pb-7 md:px-8">
+              <LinkField
+                copied={copied}
+                id={id}
+                onCopy={onCopy}
+                title={title}
+                url={url}
+              />
+            </CardContent>
+
+            <CardFooter className="mt-auto justify-end px-6 py-4 md:px-8">
+              <RegenerateDialog title={title} {...regenerate} />
+            </CardFooter>
+          </div>
+
+          <div className="flex min-h-72 items-center justify-center border-t border-black/10 bg-foreground p-8 text-background lg:border-t-0 lg:border-l">
+            <div
+              className="size-52 max-w-full rounded-lg bg-white p-3 ring-1 ring-black/10 [&>svg]:size-full"
+              aria-label={title}
+              dangerouslySetInnerHTML={{ __html: qrSvg }}
+            />
+          </div>
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <Card id={id} className="gap-0 rounded-xl bg-primary py-0 text-primary-foreground ring-1 ring-foreground/30">
+      <div className="grid md:grid-cols-[minmax(14rem,0.68fr)_minmax(0,1fr)]">
+        <CardHeader className="gap-3 border-b border-foreground/20 px-6 py-6 md:border-r md:border-b-0 md:px-7">
+          <div className="flex items-center gap-3">
+            <ShieldCheckIcon className="size-6" aria-hidden="true" />
+            <CardTitle className="text-[20px] font-semibold tracking-[-0.02em]">
+              <h2>{title}</h2>
+            </CardTitle>
+          </div>
+          <CardDescription className="max-w-[34ch] leading-5 text-primary-foreground/70">
+            {description}
+          </CardDescription>
+        </CardHeader>
+
+        <div className="flex min-w-0 flex-col">
+          <CardContent className="px-6 py-6 md:px-7">
+            <LinkField
+              copied={copied}
+              id={id}
+              onCopy={onCopy}
+              title={title}
+              url={url}
+            />
+          </CardContent>
+          <CardFooter className="mt-auto justify-end bg-foreground px-6 py-4 md:px-7">
+            <RegenerateDialog title={title} {...regenerate} />
+          </CardFooter>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 export function SettingsPage() {
   const t = useT();
   const queryClient = useQueryClient();
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [inviteConfirm, setInviteConfirm] = useState("");
+  const [coachConfirm, setCoachConfirm] = useState("");
+  const [gymName, setGymName] = useState("");
+  const [gymNameDirty, setGymNameDirty] = useState(false);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["settings"],
@@ -23,361 +302,220 @@ export function SettingsPage() {
     staleTime: 30_000,
   });
 
-  // --- Regenerate Invite state ---
-  const [inviteConfirm, setInviteConfirm] = useState("");
-  const [inviteRegenerated, setInviteRegenerated] = useState(false);
+  useEffect(() => {
+    if (data && !gymNameDirty) {
+      setGymName(data.gym_name);
+    }
+  }, [data, gymNameDirty]);
 
   const regenerateInviteMutation = useMutation({
     mutationFn: () => regenerateInvite(inviteConfirm),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       setInviteConfirm("");
-      setInviteRegenerated(true);
-      setTimeout(() => setInviteRegenerated(false), 3000);
+      toast.success(t("done_link_regenerated"));
     },
   });
-
-  // --- Regenerate Coach state ---
-  const [coachConfirm, setCoachConfirm] = useState("");
-  const [coachRegenerated, setCoachRegenerated] = useState(false);
 
   const regenerateCoachMutation = useMutation({
     mutationFn: () => regenerateCoach(coachConfirm),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       setCoachConfirm("");
-      setCoachRegenerated(true);
-      setTimeout(() => setCoachRegenerated(false), 3000);
+      toast.success(t("done_link_regenerated"));
     },
   });
-
-  // --- Gym name state ---
-  const [gymName, setGymName] = useState("");
-  const [gymNameSaved, setGymNameSaved] = useState(false);
-
-  // Sync local gym name state when data loads
-  useEffect(() => {
-    if (data) {
-      setGymName(data.gym_name);
-    }
-  }, [data]);
 
   const renameGymMutation = useMutation({
     mutationFn: () => renameGym(gymName),
-    onSuccess: () => {
+    onSuccess: (response) => {
+      setGymName(response.gym_name);
+      setGymNameDirty(false);
       queryClient.invalidateQueries({ queryKey: ["settings"] });
-      setGymNameSaved(true);
-      setTimeout(() => setGymNameSaved(false), 3000);
+      toast.success(t("done_saved"));
     },
   });
 
-  // --- Copy to clipboard ---
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
-
-  const copyUrl = (text: string, key: string) => {
+  const copyUrl = async (text: string, key: string) => {
     if (!navigator.clipboard) {
+      toast.error(t("copy_failed"));
       return;
     }
-    navigator.clipboard.writeText(text).then(
-      () => {
-        setCopiedKey(key);
-        setTimeout(() => setCopiedKey(null), 2000);
-      },
-      () => {
-        // silently fail — the button is a convenience
-      },
-    );
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKey(key);
+      window.setTimeout(() => setCopiedKey(null), 2000);
+    } catch {
+      toast.error(t("copy_failed"));
+    }
   };
 
-  // --- Loading / error states ---
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-[200px] text-ink-2">
-        Loading…
+      <div className="flex min-h-[200px] items-center justify-center text-muted-foreground" aria-busy="true">
+        <Spinner />
+        <span className="sr">Loading…</span>
       </div>
     );
   }
 
   if (error || !data) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[200px] text-coral gap-4 px-gut">
-        <p>{t("settings_load_error")}</p>
+      <div className="mx-auto max-w-xl px-gut py-8">
+        <Alert variant="destructive">
+          <AlertDescription>{t("settings_load_error")}</AlertDescription>
+        </Alert>
       </div>
     );
   }
 
-  const confirmWord = t("confirm_word");
-  const inviteConfirmMatches =
-    inviteConfirm.trim().toLowerCase() === confirmWord.toLowerCase();
-  const coachConfirmMatches =
-    coachConfirm.trim().toLowerCase() === confirmWord.toLowerCase();
+  const inviteError = regenerateInviteMutation.error instanceof Error
+    ? regenerateInviteMutation.error
+    : null;
+  const coachError = regenerateCoachMutation.error instanceof Error
+    ? regenerateCoachMutation.error
+    : null;
+  const gymError = renameGymMutation.error instanceof Error
+    ? renameGymMutation.error
+    : null;
 
   return (
-    <div className="min-h-screen bg-bg text-ink font-sans antialiased">
-      {/* Top bar — matches RosterShell chrome */}
-      <header className="sticky top-0 z-20 flex items-center gap-2 flex-wrap min-h-[46px] px-gut py-1.5 bg-elevation-0 border-b border-elevation-0-stroke shadow-elevation-1">
-        <h1 className="text-[17px] font-semibold tracking-[-0.01em] overflow-hidden text-ellipsis whitespace-nowrap min-w-0">
-          {data.gym_name}
-        </h1>
-        <span className="flex-1" />
-        <nav
-          className="quick flex gap-2 text-[13px] text-ink-2"
-          aria-label={t("nav_sections")}
-        >
-          <Link to="/" className="hover:text-ink transition-colors duration-fast">
-            {t("nav_dashboard")}
-          </Link>
-          <span className="text-ink">{t("settings")}</span>
-        </nav>
+    <>
+      <AppHeader gym={data.gym_name} variant="settings-brand">
+        <main className="mx-auto w-full max-w-[1440px] px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
+          <Tabs defaultValue="access" className="gap-0">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+              <h1 className="text-[27px] font-semibold tracking-[-0.03em]">
+                {t("settings_title")}
+              </h1>
+              <TabsList
+                aria-label={t("settings_title")}
+                className="w-full border border-elevation-0-stroke bg-white p-1 shadow-shadow-1 group-data-horizontal/tabs:h-10 sm:w-auto"
+              >
+                <TabsTrigger value="access" className="px-6">
+                  {t("settings_tab_access")}
+                </TabsTrigger>
+                <TabsTrigger value="general" className="px-6">
+                  {t("settings_tab_general")}
+                </TabsTrigger>
+              </TabsList>
+            </div>
 
-        <LangToggle />
-      </header>
-
-      {/* Settings body */}
-      <main className="max-w-2xl mx-auto px-gut py-8 space-y-8">
-        <h1 className="text-[24px] font-bold tracking-[-0.02em]">
-          {t("settings_title")}
-        </h1>
-
-        {/* Success toasts */}
-        {inviteRegenerated && (
-          <p className="text-[14px] text-success bg-success/10 border border-success/30 px-4 py-2 rounded-sm">
-            {t("done_link_regenerated")}
-          </p>
-        )}
-        {coachRegenerated && (
-          <p className="text-[14px] text-success bg-success/10 border border-success/30 px-4 py-2 rounded-sm">
-            {t("done_link_regenerated")}
-          </p>
-        )}
-        {gymNameSaved && (
-          <p className="text-[14px] text-success bg-success/10 border border-success/30 px-4 py-2 rounded-sm">
-            {t("done_saved")}
-          </p>
-        )}
-
-        {/* Regenerate error */}
-        {(regenerateInviteMutation.error as Error) && (
-          <p className="text-[14px] text-coral bg-coral/10 border border-coral/30 px-4 py-2 rounded-sm">
-            {(regenerateInviteMutation.error as Error).message}
-          </p>
-        )}
-        {(regenerateCoachMutation.error as Error) && (
-          <p className="text-[14px] text-coral bg-coral/10 border border-coral/30 px-4 py-2 rounded-sm">
-            {(regenerateCoachMutation.error as Error).message}
-          </p>
-        )}
-        {(renameGymMutation.error as Error) && (
-          <p className="text-[14px] text-coral bg-coral/10 border border-coral/30 px-4 py-2 rounded-sm">
-            {(renameGymMutation.error as Error).message}
-          </p>
-        )}
-
-        {/* 1. Invite link + QR */}
-        <section
-          id="invite"
-          className="bg-elevation-1 border border-elevation-1-stroke rounded-sm p-5 space-y-4"
-        >
-          <h2 className="text-[16px] font-semibold tracking-[-0.01em]">
-            {t("invite_section")}
-          </h2>
-          <p className="text-[14px] text-ink-2">
-            {t("invite_blurb")} <b>{data.gym_name}</b>.
-          </p>
-
-          {/* Invite URL + copy */}
-          <div className="flex items-center gap-2 bg-elevation-0 border border-elevation-0-stroke rounded-sm px-3 py-2">
-            <code className="text-[13px] text-ink-2 flex-1 break-all">
-              {data.invite_url}
-            </code>
-            <button
-              type="button"
-              onClick={() => copyUrl(data.invite_url, "invite")}
-              className="flex items-center gap-1 min-h-0 px-2 py-1 text-[12px] bg-elevation-2 border border-elevation-2-stroke rounded-sm hover:border-ink-2 transition-colors duration-fast"
-              aria-label={t("copy")}
-            >
-              {copiedKey === "invite" ? (
-                <Check className="w-3.5 h-3.5 text-success" />
-              ) : (
-                <Copy className="w-3.5 h-3.5" />
-              )}
-              {copiedKey === "invite" ? t("copied") : t("copy")}
-            </button>
-          </div>
-
-          {/* QR code */}
-          <div
-            className="flex justify-center max-w-[240px] mx-auto"
-            dangerouslySetInnerHTML={{ __html: data.qr_svg }}
-          />
-        </section>
-
-        {/* 2. Regenerate invite */}
-        <section
-          id="regenerate-invite"
-          className="bg-elevation-1 border border-magenta/30 rounded-sm p-5 space-y-3"
-        >
-          <h2 className="text-[16px] font-semibold tracking-[-0.01em]">
-            {t("regenerate")}: {t("invite_section").toLowerCase()}
-          </h2>
-          <p className="text-[13px] text-ink-2">{t("invite_warning")}</p>
-
-          <div className="flex flex-col gap-2">
-            <label className="text-[13px] text-ink-2">
-              <span
-                dangerouslySetInnerHTML={{
-                  __html: t("confirm_prompt").replace(
-                    "{word}",
-                    `<b>${confirmWord}</b>`,
-                  ),
+            <TabsContent value="access" className="flex flex-col gap-5 pt-6">
+              <LinkCard
+                id="invite"
+                title={t("invite_section")}
+                description={`${t("invite_blurb")} ${data.gym_name}.`}
+                url={data.invite_url}
+                qrSvg={data.qr_svg}
+                copied={copiedKey === "invite"}
+                onCopy={() => copyUrl(data.invite_url, "invite")}
+                regenerate={{
+                  confirm: inviteConfirm,
+                  error: inviteError,
+                  isPending: regenerateInviteMutation.isPending,
+                  onChange: (value) => {
+                    regenerateInviteMutation.reset();
+                    setInviteConfirm(value);
+                  },
+                  onConfirm: () => regenerateInviteMutation.mutateAsync(),
+                  onReset: () => {
+                    regenerateInviteMutation.reset();
+                    setInviteConfirm("");
+                  },
+                  warning: t("invite_warning"),
                 }}
               />
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                name="confirm"
-                value={inviteConfirm}
-                onChange={(e) => setInviteConfirm(e.target.value)}
-                autoComplete="off"
-                placeholder={confirmWord}
-                className="flex-1 px-3 py-2 bg-elevation-0 border border-elevation-0-stroke rounded-sm text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink-2 transition-colors duration-fast"
-              />
-              <button
-                type="button"
-                onClick={() => regenerateInviteMutation.mutate()}
-                disabled={
-                  !inviteConfirmMatches || regenerateInviteMutation.isPending
-                }
-                className="flex items-center gap-1.5 px-4 py-2 bg-magenta text-bg font-semibold text-[14px] rounded-sm hover:bg-magenta/90 disabled:opacity-40 disabled:cursor-default transition-colors duration-fast"
-              >
-                {regenerateInviteMutation.isPending ? (
-                  <RefreshCw className="w-4 h-4 motion-safe:animate-spin" />
-                ) : null}
-                {t("regenerate")}
-              </button>
-            </div>
-          </div>
-        </section>
 
-        {/* 3. Coach link */}
-        <section
-          id="coach-link"
-          className="bg-elevation-1 border border-elevation-1-stroke rounded-sm p-5 space-y-4"
-        >
-          <h2 className="text-[16px] font-semibold tracking-[-0.01em]">
-            {t("coach_section")}
-          </h2>
-          <p className="text-[14px] text-ink-2">{t("coach_blurb")}</p>
-
-          <div className="flex items-center gap-2 bg-elevation-0 border border-elevation-0-stroke rounded-sm px-3 py-2">
-            <code className="text-[13px] text-ink-2 flex-1 break-all">
-              {data.coach_invite_url}
-            </code>
-            <button
-              type="button"
-              onClick={() => copyUrl(data.coach_invite_url, "coach")}
-              className="flex items-center gap-1 min-h-0 px-2 py-1 text-[12px] bg-elevation-2 border border-elevation-2-stroke rounded-sm hover:border-ink-2 transition-colors duration-fast"
-              aria-label={t("copy")}
-            >
-              {copiedKey === "coach" ? (
-                <Check className="w-3.5 h-3.5 text-success" />
-              ) : (
-                <Copy className="w-3.5 h-3.5" />
-              )}
-              {copiedKey === "coach" ? t("copied") : t("copy")}
-            </button>
-          </div>
-        </section>
-
-        {/* 4. Regenerate coach */}
-        <section
-          id="regenerate-coach"
-          className="bg-elevation-1 border border-magenta/30 rounded-sm p-5 space-y-3"
-        >
-          <h2 className="text-[16px] font-semibold tracking-[-0.01em]">
-            {t("regenerate")}: {t("coach_section").toLowerCase()}
-          </h2>
-          <p className="text-[13px] text-ink-2">{t("coach_warning")}</p>
-
-          <div className="flex flex-col gap-2">
-            <label className="text-[13px] text-ink-2">
-              <span
-                dangerouslySetInnerHTML={{
-                  __html: t("confirm_prompt").replace(
-                    "{word}",
-                    `<b>${confirmWord}</b>`,
-                  ),
+              <LinkCard
+                id="coach-link"
+                title={t("coach_section")}
+                description={t("coach_blurb")}
+                url={data.coach_invite_url}
+                copied={copiedKey === "coach"}
+                onCopy={() => copyUrl(data.coach_invite_url, "coach")}
+                regenerate={{
+                  confirm: coachConfirm,
+                  error: coachError,
+                  isPending: regenerateCoachMutation.isPending,
+                  onChange: (value) => {
+                    regenerateCoachMutation.reset();
+                    setCoachConfirm(value);
+                  },
+                  onConfirm: () => regenerateCoachMutation.mutateAsync(),
+                  onReset: () => {
+                    regenerateCoachMutation.reset();
+                    setCoachConfirm("");
+                  },
+                  warning: t("coach_warning"),
                 }}
               />
-            </label>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                name="confirm"
-                value={coachConfirm}
-                onChange={(e) => setCoachConfirm(e.target.value)}
-                autoComplete="off"
-                placeholder={confirmWord}
-                className="flex-1 px-3 py-2 bg-elevation-0 border border-elevation-0-stroke rounded-sm text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink-2 transition-colors duration-fast"
-              />
-              <button
-                type="button"
-                onClick={() => regenerateCoachMutation.mutate()}
-                disabled={
-                  !coachConfirmMatches || regenerateCoachMutation.isPending
-                }
-                className="flex items-center gap-1.5 px-4 py-2 bg-magenta text-bg font-semibold text-[14px] rounded-sm hover:bg-magenta/90 disabled:opacity-40 disabled:cursor-default transition-colors duration-fast"
+            </TabsContent>
+
+            <TabsContent value="general" className="pt-6">
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  renameGymMutation.mutate();
+                }}
               >
-                {regenerateCoachMutation.isPending ? (
-                  <RefreshCw className="w-4 h-4 motion-safe:animate-spin" />
-                ) : null}
-                {t("regenerate")}
-              </button>
-            </div>
-          </div>
-        </section>
+                <Card className="gap-0 overflow-hidden rounded-xl py-0 ring-1 ring-foreground/15">
+                  <div className="grid min-h-80 lg:grid-cols-[0.8fr_1.2fr]">
+                    <CardHeader className="content-start gap-5 bg-foreground px-6 py-8 text-background md:px-8 md:py-10">
+                      <Building2Icon className="size-8 text-lime" aria-hidden="true" />
+                      <div className="space-y-2">
+                        <CardTitle className="text-[22px] font-semibold tracking-[-0.02em]">
+                          <h2>{t("gym_name_section")}</h2>
+                        </CardTitle>
+                        <CardDescription className="max-w-[34ch] text-[15px] leading-6 text-background/70">
+                          {t("gym_name_help")}
+                        </CardDescription>
+                      </div>
+                    </CardHeader>
 
-        {/* 5. Gym name */}
-        <section
-          id="gym-name"
-          className="bg-elevation-1 border border-elevation-1-stroke rounded-sm p-5 space-y-3"
-        >
-          <h2 className="text-[16px] font-semibold tracking-[-0.01em]">
-            {t("gym_name_section")}
-          </h2>
-          <p className="text-[14px] text-ink-2">{t("gym_name_help")}</p>
-
-          <div className="flex gap-2">
-            <input
-              type="text"
-              name="name"
-              value={gymName}
-              onChange={(e) => setGymName(e.target.value)}
-              maxLength={200}
-              className="flex-1 px-3 py-2 bg-elevation-0 border border-elevation-0-stroke rounded-sm text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink-2 transition-colors duration-fast"
-            />
-            <button
-              type="button"
-              onClick={() => renameGymMutation.mutate()}
-              disabled={
-                !gymName.trim() || renameGymMutation.isPending
-              }
-              className="flex items-center gap-1.5 px-4 py-2 bg-ink text-bg font-semibold text-[14px] rounded-sm hover:bg-ink/90 disabled:opacity-40 disabled:cursor-default transition-colors duration-fast"
-            >
-              {t("save")}
-            </button>
-          </div>
-        </section>
-
-        {/* Back link */}
-        <Link
-          to="/"
-          className="inline-block text-[14px] text-ink-2 hover:text-ink transition-colors duration-fast"
-        >
-          ← {t("back_to_dashboard")}
-        </Link>
-      </main>
-    </div>
+                    <div className="flex min-w-0 flex-col">
+                      <CardContent className="flex-1 px-6 py-8 md:px-8 md:py-10">
+                        <FieldGroup>
+                          <Field data-invalid={Boolean(gymError)}>
+                            <FieldLabel htmlFor="gym-name" className="text-sm font-semibold">
+                              {t("gym_name_section")}
+                            </FieldLabel>
+                            <Input
+                              id="gym-name"
+                              name="name"
+                              value={gymName}
+                              className="h-12 bg-background px-4 text-base"
+                              onChange={(event) => {
+                                renameGymMutation.reset();
+                                setGymNameDirty(true);
+                                setGymName(event.target.value);
+                              }}
+                              maxLength={200}
+                              aria-invalid={Boolean(gymError)}
+                            />
+                            <FieldError>{gymError?.message}</FieldError>
+                          </Field>
+                        </FieldGroup>
+                      </CardContent>
+                      <CardFooter className="justify-end px-6 py-4 md:px-8">
+                        <Button
+                          type="submit"
+                          size="lg"
+                          disabled={!gymName.trim() || renameGymMutation.isPending}
+                        >
+                          {renameGymMutation.isPending ? <Spinner data-icon="inline-start" /> : null}
+                          {t("save")}
+                        </Button>
+                      </CardFooter>
+                    </div>
+                  </div>
+                </Card>
+              </form>
+            </TabsContent>
+          </Tabs>
+        </main>
+      </AppHeader>
+      <Toaster />
+    </>
   );
 }

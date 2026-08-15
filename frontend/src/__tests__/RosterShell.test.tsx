@@ -23,6 +23,24 @@ vi.mock("../hooks/useT", () => ({
       nav_sections: "Sections",
       presets: "Presets",
       settings: "Settings",
+      nav_roster: "Members",
+      col_name: "Name",
+      col_status: "Status",
+      col_gap: "Days away",
+      col_missed: "Missed",
+      summary_hot: "{n} need you now",
+      summary_warm: "{n} slipping",
+      summary_flag: "{n} flagged",
+      queue_label: "Coach queue",
+      queue_counts: "{active} active · {lapsed} lapsed",
+      queue_urgent_title: "Needs attention",
+      queue_urgent_description: "Contact or review today",
+      queue_watch_title: "Watch list",
+      queue_watch_description: "Starting to slip",
+      queue_steady_title: "On track",
+      queue_steady_description: "No immediate action",
+      queue_on_track: "On track",
+      pick_a_member_body: "Sessions, last weights, and notes open here.",
       // Roster rows
       no_sessions_yet: "No sessions yet",
       trained_today: "trained today",
@@ -120,10 +138,10 @@ describe("RosterShell", () => {
     });
   });
 
-  it("shows the member count", async () => {
+  it("shows active and lapsed counts in the queue header", async () => {
     renderShell(makeResponse());
     await waitFor(() => {
-      expect(screen.getByText("Members (2)")).toBeInTheDocument();
+      expect(screen.getByText("2 active · 1 lapsed")).toBeInTheDocument();
     });
   });
 
@@ -132,6 +150,7 @@ describe("RosterShell", () => {
     await waitFor(() => {
       expect(screen.getByText("Alice")).toBeInTheDocument();
       expect(screen.getByText("Bob")).toBeInTheDocument();
+      expect(document.querySelector("ul#roster > li > a")).toBeInTheDocument();
     });
   });
 
@@ -182,11 +201,45 @@ describe("RosterShell", () => {
     });
   });
 
-  it("shows the count bar with sort info", async () => {
+  it("labels the table as a coach queue", async () => {
     renderShell(makeResponse());
     await waitFor(() => {
-      expect(screen.getByText("Sorted by days away")).toBeInTheDocument();
+      expect(screen.getByText("Coach queue")).toBeInTheDocument();
     });
+  });
+
+  it("groups who needs attention from real roster data", async () => {
+    renderShell(
+      makeResponse({
+        active: [
+          makeMember(1, { name: "Alice", severity: "red", missed_days: 3, has_safety_flag: true }),
+          makeMember(2, { name: "Bob", severity: "amber", missed_days: 1 }),
+        ],
+        counts: { active: 2, lapsed: 1 },
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Watch list" })).toBeInTheDocument();
+      expect(screen.getByText("Alice")).toBeInTheDocument();
+      expect(screen.getByText("Bob")).toBeInTheDocument();
+    });
+  });
+
+  it("keeps the split rail attendance compact", async () => {
+    const user = userEvent.setup();
+    renderShell(makeResponse({
+      active: [makeMember(1, {
+        name: "Alice",
+        attendance: Array.from({ length: 28 }, (_, i) => ({
+          on: `2026-08-${String(i + 1).padStart(2, "0")}`,
+          state: "plain" as const,
+        })),
+      })],
+      counts: { active: 1, lapsed: 0 },
+    }));
+    await user.click(await screen.findByLabelText("Split"));
+    expect(document.querySelectorAll(".rail .strip i")).toHaveLength(14);
   });
 
   it("shows the view switcher with all three views", async () => {
@@ -372,6 +425,9 @@ describe("RosterShell", () => {
     // standalone page chrome (its own back link) must NOT be rendered —
     // that duplicated the roster header and dropped the coach out of Split.
     expect(screen.queryByText(/← /)).not.toBeInTheDocument();
+    // Mobile split has an explicit way back to the rail; CSS keeps it hidden
+    // beside the persistent desktop rail.
+    expect(screen.getByRole("button", { name: "Back to roster" })).toBeInTheDocument();
   });
 
   it("shows filtered count when searching", async () => {
@@ -437,8 +493,8 @@ describe("RosterShell", () => {
 
     await waitFor(() => {
       expect(screen.getByText("No member matches the search.")).toBeInTheDocument();
-      // The count bar is still present.
-      expect(screen.getByText("Sorted by days away")).toBeInTheDocument();
+      // The queue header and filtered count are still present.
+      expect(screen.getByText("0 of 2")).toBeInTheDocument();
     });
   });
 });

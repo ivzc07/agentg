@@ -1,12 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { SettingsPage } from "../components/SettingsPage";
 
-// Mock window.__I18N__ with ES strings (the no-signal default)
 const MOCK_I18N: Record<string, string> = {
   settings_title: "Ajustes",
+  settings_tab_general: "General",
+  settings_tab_access: "Acceso",
+  cancel: "Cancelar",
   invite_section: "Enlace de invitación",
   invite_blurb: "El que usan los nuevos miembros para unirse a",
   coach_section: "Enlace para coaches",
@@ -16,6 +19,7 @@ const MOCK_I18N: Record<string, string> = {
   gym_name_help: "Es el nombre que ven los miembros al unirse.",
   copy: "Copiar",
   copied: "Copiado",
+  copy_failed: "No se pudo copiar",
   regenerate: "Regenerar",
   confirm_word: "regenerar",
   confirm_prompt: "Escribe <b>{word}</b> para confirmar:",
@@ -27,7 +31,6 @@ const MOCK_I18N: Record<string, string> = {
     "Regenerar el enlace de coach invalida el código actual. Los coaches que ya se vincularon conservan su acceso.",
   gym_name_empty: "El nombre del gimnasio no puede estar vacío.",
   save: "Guardar",
-  back_to_dashboard: "Volver al dashboard",
   done_link_regenerated: "Enlace regenerado.",
   done_saved: "Guardado.",
   settings: "Ajustes",
@@ -35,6 +38,7 @@ const MOCK_I18N: Record<string, string> = {
   presets: "Presets",
   settings_load_error: "No se pudieron cargar los ajustes.",
   nav_dashboard: "Dashboard",
+  nav_roster: "Miembros",
 };
 
 const MOCK_SETTINGS = {
@@ -55,11 +59,20 @@ function renderWithProviders(ui: React.ReactElement) {
     },
   });
   (window as unknown as Record<string, unknown>).__I18N__ = MOCK_I18N;
-  return render(
+  const view = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>{ui}</MemoryRouter>
     </QueryClientProvider>,
   );
+  return { ...view, queryClient };
+}
+
+function mockSettings() {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve(MOCK_SETTINGS),
+  } as Response);
 }
 
 describe("SettingsPage", () => {
@@ -71,7 +84,7 @@ describe("SettingsPage", () => {
     delete (window as unknown as Record<string, unknown>).__I18N__;
   });
 
-  it("shows loading state initially", () => {
+  it("shows an accessible loading state initially", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       () =>
         new Promise<Response>(() => {
@@ -80,114 +93,119 @@ describe("SettingsPage", () => {
     );
 
     renderWithProviders(<SettingsPage />);
-    expect(screen.getByText("Loading…")).toBeDefined();
+    expect(screen.getByText("Loading…")).toBeInTheDocument();
   });
 
-  it("renders all five sections with settings data", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve(MOCK_SETTINGS),
-    } as Response);
-
+  it("groups access links into composed cards", async () => {
+    mockSettings();
     renderWithProviders(<SettingsPage />);
 
-    // Wait for data to load — gym name appears in the chrome and invite blurb
-    await waitFor(() => {
-      const matches = screen.getAllByText("Iron Temple");
-      expect(matches.length).toBeGreaterThanOrEqual(2);
+    const inviteHeading = await screen.findByRole("heading", {
+      name: "Enlace de invitación",
     });
-
-    // Five distinct sections
-    expect(screen.getByText("Enlace de invitación")).toBeDefined();
-    expect(screen.getByText("Enlace para coaches")).toBeDefined();
-    expect(screen.getByText("Nombre del gimnasio")).toBeDefined();
-
-    // Two Regenerate headings
-    const regenerateButtons = screen.getAllByText("Regenerar");
-    expect(regenerateButtons.length).toBe(2);
-
-    // Gym name input pre-filled
-    const nameInput = screen.getByDisplayValue("Iron Temple");
-    expect(nameInput).toBeDefined();
-
-    // QR SVG rendered
-    const container = screen.getByText("Enlace de invitación").closest("section");
-    expect(container?.innerHTML).toContain("<svg");
-
-    // Both invite URLs visible
     expect(
-      screen.getByText((content) =>
-        content.includes("t.me/testbot?start=abc12345"),
-      ),
-    ).toBeDefined();
-    expect(
-      screen.getByText((content) =>
-        content.includes("t.me/testbot?start=coach-xyz99"),
-      ),
-    ).toBeDefined();
-
-    // Back link
-    expect(
-      screen.getByText((content) => content.includes("Volver al dashboard")),
-    ).toBeDefined();
-  });
-
-  it("regenerate buttons are disabled until confirm word is typed", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve(MOCK_SETTINGS),
-    } as Response);
-
-    renderWithProviders(<SettingsPage />);
-    await waitFor(() => {
-      const matches = screen.getAllByText("Iron Temple");
-      expect(matches.length).toBeGreaterThanOrEqual(2);
-    });
-
-    // Both regenerate buttons start disabled
-    const regenerateButtons = screen.getAllByText("Regenerar");
-    for (const btn of regenerateButtons) {
-      expect((btn.closest("button") as HTMLButtonElement).disabled).toBe(true);
-    }
-
-    // Two confirm inputs
-    const confirmInputs = screen.getAllByPlaceholderText("regenerar");
-    expect(confirmInputs.length).toBe(2);
-
-    // Save button for gym name
-    const saveButton = screen.getByText("Guardar");
-    expect(saveButton).toBeDefined();
-  });
-
-  it("copy buttons are present for both invite links", async () => {
-    vi.spyOn(globalThis, "fetch").mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: () => Promise.resolve(MOCK_SETTINGS),
-    } as Response);
-
-    renderWithProviders(<SettingsPage />);
-    await waitFor(() => {
-      const matches = screen.getAllByText("Iron Temple");
-      expect(matches.length).toBeGreaterThanOrEqual(2);
-    });
-
-    const copyButtons = screen.getAllByText("Copiar");
-    expect(copyButtons.length).toBe(2);
-  });
-
-  it("shows error state when fetch fails", async () => {
-    vi.spyOn(globalThis, "fetch").mockRejectedValue(
-      new Error("Network error"),
+      screen.getByRole("heading", { name: "Enlace para coaches" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Acceso" })).toHaveAttribute(
+      "aria-selected",
+      "true",
     );
 
+    const inviteCard = inviteHeading.closest('[data-slot="card"]');
+    expect(inviteCard).not.toBeNull();
+    expect(inviteCard?.innerHTML).toContain("<svg");
+    expect(
+      screen.getByDisplayValue("https://t.me/testbot?start=abc12345"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByDisplayValue("https://t.me/testbot?start=coach-xyz99"),
+    ).toBeInTheDocument();
+  });
+
+  it("uses a labeled Field inside the General tab", async () => {
+    const user = userEvent.setup();
+    mockSettings();
     renderWithProviders(<SettingsPage />);
 
-    // Error state shows the real copy, not a roster empty-state string
-    await waitFor(() => {
-      expect(screen.getByText("No se pudieron cargar los ajustes.")).toBeDefined();
+    await screen.findByRole("tab", { name: "General" });
+    await user.click(screen.getByRole("tab", { name: "General" }));
+
+    const input = await screen.findByRole("textbox", {
+      name: "Nombre del gimnasio",
     });
+    expect(input).toHaveValue("Iron Temple");
+    expect(input).toHaveAttribute("id", "gym-name");
+    expect(input.closest('[data-slot="field"]')).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Guardar" })).toBeEnabled();
+  });
+
+  it("keeps destructive confirmation in an AlertDialog", async () => {
+    const user = userEvent.setup();
+    mockSettings();
+    renderWithProviders(<SettingsPage />);
+
+    await screen.findByRole("heading", { name: "Enlace de invitación" });
+    const triggers = screen.getAllByRole("button", { name: "Regenerar" });
+    expect(triggers).toHaveLength(2);
+
+    await user.click(triggers[0]);
+    const dialog = await screen.findByRole("alertdialog");
+    const confirmInput = within(dialog).getByLabelText(
+      "Escribe regenerar para confirmar:",
+    );
+    const action = within(dialog).getByRole("button", { name: "Regenerar" });
+    expect(action).toBeDisabled();
+
+    await user.type(confirmInput, "regenerar");
+    expect(action).toBeEnabled();
+    expect(within(dialog).getByRole("button", { name: "Cancelar" })).toBeInTheDocument();
+  });
+
+  it("uses InputGroup copy actions and announces copy success", async () => {
+    const user = userEvent.setup();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+    mockSettings();
+    renderWithProviders(<SettingsPage />);
+
+    await screen.findByRole("heading", { name: "Enlace de invitación" });
+    const copyButtons = screen.getAllByRole("button", { name: "Copiar" });
+    expect(copyButtons).toHaveLength(2);
+    expect(document.querySelectorAll('[data-slot="input-group"]')).toHaveLength(2);
+
+    await user.click(copyButtons[0]);
+    expect(
+      await screen.findByRole("button", { name: "Copiado" }),
+    ).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("does not overwrite an unsaved gym name when settings refetch", async () => {
+    const user = userEvent.setup();
+    mockSettings();
+    const { queryClient } = renderWithProviders(<SettingsPage />);
+
+    await user.click(await screen.findByRole("tab", { name: "General" }));
+    const input = await screen.findByRole("textbox", {
+      name: "Nombre del gimnasio",
+    });
+    await user.clear(input);
+    await user.type(input, "Nombre sin guardar");
+
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["settings"] });
+    });
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2));
+    expect(input).toHaveValue("Nombre sin guardar");
+  });
+
+  it("shows a semantic alert when settings fail to load", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Network error"));
+    renderWithProviders(<SettingsPage />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("No se pudieron cargar los ajustes.");
+    expect(alert).toHaveAttribute("data-slot", "alert");
   });
 });

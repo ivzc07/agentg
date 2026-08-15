@@ -9,6 +9,7 @@ vi.mock("../hooks/useT", () => ({
       presets: "Presets",
       settings: "Settings",
       nav_sections: "Sections",
+      nav_roster: "Members",
       back_to_roster: "← All members",
     };
     return strings[key] ?? key;
@@ -27,20 +28,6 @@ describe("PresetsShell", () => {
 
     expect(screen.getByText("Iron Temple")).toBeInTheDocument();
     expect(screen.getByTestId("child")).toBeInTheDocument();
-  });
-
-  it("renders a link back to the roster", () => {
-    render(
-      <MemoryRouter initialEntries={["/presets"]}>
-        <PresetsShell name="Coach" gym="Iron Temple">
-          <div />
-        </PresetsShell>
-      </MemoryRouter>,
-    );
-
-    const link = screen.getByRole("link", { name: "← All members" });
-    expect(link).toBeInTheDocument();
-    expect(link).toHaveAttribute("href", "/");
   });
 
   it("renders the Presets nav link as active on /presets", () => {

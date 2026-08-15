@@ -1,15 +1,16 @@
-import { LangToggle } from "./LangToggle";
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import { Search, LayoutList, LayoutGrid, Columns2, Users } from "lucide-react";
 import { fetchRoster } from "../api/roster";
 import type { RosterView } from "../types/roster";
 import { filterMembers } from "./roster-utils";
 import { useT } from "../hooks/useT";
+import { AppHeader } from "./AppHeader";
 import { RosterTable } from "./RosterTable";
 import { RosterCards } from "./RosterCards";
 import { RosterSplit } from "./RosterSplit";
+import { RosterQueue } from "./RosterQueue";
 
 interface RosterShellProps {
   /** The coach's name from /api/session. */
@@ -61,23 +62,41 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
 
   if (isLoading) {
     return (
-      <div className="flex items-center justify-center min-h-[200px] text-ink-2">
-        Loading…
-      </div>
+      <AppHeader gym={gym}>
+        <div className="px-gut py-8 lg:px-10 lg:py-9" aria-busy="true">
+          <span className="sr">Loading…</span>
+          <div className="h-8 w-40 skeleton rounded-sm mb-6" />
+          <div className="h-9 max-w-md skeleton rounded-sm mb-6" />
+          <ul className="space-y-0" aria-hidden="true">
+            {[0, 1, 2, 3, 4].map((i) => (
+              <li key={i} className="flex items-center gap-3 py-3 border-b border-elevation-0-stroke">
+                <span className="w-7 h-7 rounded-sm skeleton" />
+                <span className="flex-1 space-y-1.5">
+                  <span className="block h-3.5 w-32 skeleton rounded-xs" />
+                  <span className="block h-2.5 w-20 skeleton rounded-xs" />
+                </span>
+                <span className="h-3 w-16 skeleton rounded-xs" />
+              </li>
+            ))}
+          </ul>
+        </div>
+      </AppHeader>
     );
   }
 
   if (error || !data) {
     return (
-      <div className="flex flex-col items-center justify-center min-h-[200px] text-coral gap-4">
-        <p>{t("roster_error")}</p>
-        <button
-          onClick={() => refetch()}
-          className="px-4 py-2 rounded bg-elevation-1 border border-elevation-0-stroke text-ink hover:bg-elevation-2 transition-colors"
-        >
-          {t("roster_retry")}
-        </button>
-      </div>
+      <AppHeader gym={gym}>
+        <div className="flex flex-col items-center justify-center min-h-[280px] text-coral gap-4 px-gut">
+          <p>{t("roster_error")}</p>
+          <button
+            onClick={() => refetch()}
+            className="px-4 py-2 rounded-sm bg-elevation-1 border border-elevation-0-stroke text-ink hover:bg-elevation-2 transition-colors"
+          >
+            {t("roster_retry")}
+          </button>
+        </div>
+      </AppHeader>
     );
   }
 
@@ -85,105 +104,102 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
   const empty = data.active.length === 0 && data.lapsed.length === 0;
   const noMatch =
     !empty && filtered.active.length === 0 && filtered.lapsed.length === 0;
+  const hot = filtered.active.filter((m) => m.severity === "red").length;
+  const warm = filtered.active.filter((m) => m.severity === "amber").length;
+  const flagged = filtered.active.filter((m) => m.has_safety_flag).length;
+  const summaryBits = [
+    hot > 0 ? { key: "hot", text: t("summary_hot").replace("{n}", String(hot)), tone: "text-coral" } : null,
+    warm > 0 ? { key: "warm", text: t("summary_warm").replace("{n}", String(warm)), tone: "text-amber" } : null,
+    flagged > 0 ? { key: "flag", text: t("summary_flag").replace("{n}", String(flagged)), tone: "text-purple" } : null,
+  ].filter((bit): bit is { key: string; text: string; tone: string } => bit != null);
 
   return (
-    <div className="min-h-screen bg-bg text-ink font-sans antialiased">
-      {/* Top bar */}
-      <header className="sticky top-0 z-20 flex items-center gap-2 flex-wrap min-h-[46px] px-gut py-1.5 bg-elevation-0 border-b border-elevation-0-stroke shadow-elevation-1">
-        <h1 className="text-[17px] font-semibold tracking-[-0.01em] overflow-hidden text-ellipsis whitespace-nowrap min-w-0">
-          {gym}
-        </h1>
-
-        {/* Member count */}
-        <span className="count text-[13px] text-ink-2" id="members-count">
-          {query
-            ? t("match_count")
-                .replace("{shown}", String(filtered.active.length))
-                .replace("{total}", String(totalActive))
-            : t("members_count").replace("{n}", String(totalActive))}
-        </span>
-
-        <span className="flex-1" />
-
-        {/* View switcher */}
-        <nav className="seg flex rounded-sm overflow-hidden border border-elevation-2-stroke" aria-label={t("nav_views")}>
-          {(Object.keys(VIEW_ICONS) as RosterView[]).map((v) => {
-            const Icon = VIEW_ICONS[v];
-            const active = v === view;
-            return (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                className={`flex items-center gap-1 px-2.5 py-1.5 text-[12px] font-medium transition-colors duration-fast ${
-                  active
-                    ? "bg-ink text-bg"
-                    : "text-ink-2 hover:text-ink hover:bg-elevation-2"
-                }`}
-                aria-current={active ? "page" : undefined}
-                aria-label={t(`view_${v}`)}
-              >
-                <Icon className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">{t(`view_${v}`)}</span>
-              </button>
-            );
-          })}
-        </nav>
-
-        {/* Presets & Settings quick links */}
-        <nav className="quick flex gap-2 text-[13px] text-ink-2" aria-label={t("nav_sections")}>
-          <Link to="/presets" className="transition-colors hover:text-ink">{t("presets")}</Link>
-          <Link to="/settings" className="transition-colors hover:text-ink">{t("settings")}</Link>
-        </nav>
-
-        <LangToggle />
-      </header>
-
-      {/* Search bar */}
-      <div className="px-gut py-2 border-b border-elevation-0-stroke">
-        <div className="relative max-w-md">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-3 pointer-events-none" />
-          <label className="sr" htmlFor="search">
-            {t("search_placeholder")}
-          </label>
-          <input
-            id="search"
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={t("search_placeholder")}
-            autoComplete="off"
-            className="w-full pl-8 pr-3 py-2 bg-elevation-1 border border-elevation-1-stroke rounded-sm text-[14px] text-ink placeholder:text-ink-3 focus:outline-none focus:border-ink-2 transition-colors duration-fast"
-          />
+    <AppHeader gym={gym}>
+      <main className="roster-body mx-auto w-full max-w-[1440px] px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
+        <div className="mb-7 flex flex-wrap items-end gap-x-4 gap-y-4 border-b border-elevation-0-stroke pb-6">
+          <div className="min-w-0">
+            <p className="text-[12px] font-medium text-ink-3">
+              {t("queue_label")}
+            </p>
+            <h2 className="mt-1 text-[32px] font-semibold leading-tight tracking-[-0.035em]">
+              {t("nav_roster")}
+            </h2>
+            <p className="count mt-2 text-[13px] text-ink-2 tabular-nums" id="members-count">
+              {query
+                ? t("match_count")
+                    .replace("{shown}", String(filtered.active.length))
+                    .replace("{total}", String(totalActive))
+                : t("queue_counts")
+                    .replace("{active}", String(totalActive))
+                    .replace("{lapsed}", String(data.counts.lapsed))}
+            </p>
+          </div>
+          <span className="flex-1" />
+          <div className="relative w-full sm:w-56">
+            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-ink-2" />
+            <label className="sr" htmlFor="search">
+              {t("search_placeholder")}
+            </label>
+            <input
+              id="search"
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t("search_placeholder")}
+              autoComplete="off"
+              className="h-10 w-full rounded-md border border-elevation-0-stroke bg-white pr-3 pl-9 text-[13px] text-ink shadow-shadow-1 placeholder:text-ink-3 focus:border-ink-3 focus:outline-none transition-colors duration-fast"
+            />
+          </div>
+          <nav
+            className="seg flex h-10 overflow-hidden rounded-md border border-elevation-0-stroke bg-white p-1 shadow-shadow-1"
+            aria-label={t("nav_views")}
+          >
+            {(Object.keys(VIEW_ICONS) as RosterView[]).map((v) => {
+              const Icon = VIEW_ICONS[v];
+              const active = v === view;
+              return (
+                <button
+                  key={v}
+                  onClick={() => setView(v)}
+                  className={`flex min-h-0 h-8 items-center gap-1.5 rounded-sm border-0 px-3 text-[12px] font-medium transition-colors duration-fast ${
+                    active
+                      ? "bg-ink text-white"
+                      : "bg-transparent text-ink-2 hover:bg-elevation-1 hover:text-ink"
+                  }`}
+                  aria-current={active ? "page" : undefined}
+                  aria-label={t(`view_${v}`)}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">{t(`view_${v}`)}</span>
+                </button>
+              );
+            })}
+          </nav>
         </div>
-      </div>
-
-      {/* Main body */}
-      <main className="roster-body">
+        {view !== "table" && summaryBits.length > 0 && (
+          <p className="flex flex-wrap gap-x-3 gap-y-1 text-[13px] tabular-nums mb-6">
+            {summaryBits.map((bit, i) => (
+              <span key={bit.key} className={bit.tone}>
+                {i > 0 && <span className="text-ink-3 mr-3" aria-hidden="true">·</span>}
+                {bit.text}
+              </span>
+            ))}
+          </p>
+        )}
         {empty ? (
-          <div className="emptystate flex flex-col items-center justify-center min-h-[300px] text-center px-gut">
-            <span className="chip-icon text-[32px] text-ink-3 mb-3" aria-hidden="true">
-              ◎
+          <div className="emptystate flex flex-col items-center justify-center min-h-[360px] text-center px-gut">
+            <span className="chip-icon flex items-center justify-center w-12 h-12 rounded-sm bg-elevation-1 text-ink-3 mb-4" aria-hidden="true">
+              <Users className="w-5 h-5" />
             </span>
-            <h2 className="text-[18px] font-semibold text-ink-2">
+            <h2 className="text-[20px] font-semibold text-ink">
               {t("empty_roster_title")}
             </h2>
-            <p className="text-[14px] text-ink-3 mt-2 max-w-sm">
+            <p className="text-[14px] text-ink-2 mt-2 max-w-sm leading-relaxed">
               {t("empty_roster_body")}
             </p>
           </div>
         ) : (
           <>
-            {/* Count bar */}
-            <div className="countbar flex items-center gap-2 px-gut py-2 text-[13px] text-ink-2 border-b border-elevation-0-stroke">
-              <span className="chip-icon" aria-hidden="true">
-                ≡
-              </span>
-              {t("sorted_by_gap")}
-              <span className="numeral text-[18px] font-mono font-bold text-ink ml-auto">
-                {filtered.active.length}
-              </span>
-            </div>
-
             {/* No match state */}
             {noMatch && (
               <p className="emptystate text-center py-12 text-ink-3">
@@ -197,7 +213,7 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
                 that renders the member full-page without roster chrome. */}
             {!noMatch && (
               <>
-                {view === "table" && <RosterTable members={filtered.active} />}
+                {view === "table" && <RosterQueue members={filtered.active} />}
                 {view === "cards" && <RosterCards members={filtered.active} />}
                 {view === "split" && <RosterSplit members={filtered.active} />}
               </>
@@ -211,7 +227,7 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
                 open={effectiveLapsedOpen}
               >
                 <summary
-                  className="px-gut py-2 text-[13px] text-ink-2 cursor-pointer hover:text-ink transition-colors duration-fast"
+                  className="py-2 text-[13px] text-ink-2 cursor-pointer hover:text-ink transition-colors duration-fast"
                   onClick={(e) => {
                     e.preventDefault();
                     setLapsedOpen((prev) => !prev);
@@ -230,6 +246,6 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
           </>
         )}
       </main>
-    </div>
+    </AppHeader>
   );
 }
