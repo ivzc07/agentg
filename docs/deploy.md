@@ -10,13 +10,12 @@ Coolify — nothing secret is in this repo.
 
 - **Application `agentg`** (uuid `c13aisi5hlhwh48dzy8xvk62`) — Dockerfile build
   from `git@github.com:ivzc07/agentg.git`, branch `main`, cloned with a read-only
-  deploy key (`agentg-deploy-key`). No domain attached yet. The app long-polls
-  Telegram and now also serves the coach dashboard's embedded HTTP server
-  (spec-dashboard §Stack) on `DASHBOARD_PORT` (8080) inside the container —
-  attaching a flowstate subdomain to that port and setting `DASHBOARD_BASE_URL`
-  is deploy-day work; until then magic links point at the localhost default.
-  Single replica — exactly one instance may poll a given bot token; do not
-  scale this app.
+  deploy key (`agentg-deploy-key`). The public coach dashboard is
+  `https://agentg.187.77.195.48.sslip.io`, routed by Coolify to the embedded
+  HTTP server on `DASHBOARD_PORT` (8080). `DASHBOARD_BASE_URL` uses that same
+  HTTPS origin, so Telegram magic links open the public deployment. Single
+  replica — exactly one instance may poll a given bot token; do not scale this
+  app.
 - **Database `agentg-postgres`** (uuid `t5hwnbn31qoamtdr74vggj9k`) — a standalone
   Coolify Postgres 16 resource (not compose-managed, so Coolify's scheduled
   backups can cover it). Not publicly exposed; the app reaches it over the shared
@@ -43,32 +42,29 @@ Application → agentg → Webhooks.
 | Key | Value |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | production bot token from @BotFather |
-| `MODEL` | LiteLLM model string (`openai/gpt-4o-mini`) |
+| `MODEL` | LiteLLM model string (`deepseek/deepseek-chat` in production) |
 | `MODEL_API_KEY` | API key matching `MODEL` |
 | `DATABASE_URL` | `postgresql+asyncpg://…@t5hwnbn31qoamtdr74vggj9k:5432/agentg` |
 | `DASHBOARD_BASE_URL` | public origin for `/dashboard` magic links — set when the subdomain is attached (defaults to `http://localhost:8080`) |
 | `DASHBOARD_PORT` | embedded HTTP server port (defaults to `8080`) |
 | `DASHBOARD_SESSION_SECRET` | optional session-cookie HMAC key (defaults to the bot token) |
 
-`DATABASE_URL` is already set. `TELEGRAM_BOT_TOKEN` and `MODEL_API_KEY` hold
-`CHANGE_ME…` placeholders until the owner sets the real values in Coolify
-(Application → agentg → Environment Variables) and starts the app. With
-placeholders the container exits at aiogram's token validation — after it has
-connected to Postgres and created the schema, so clone, build, deploy, and
-database wiring are all verified; only the Telegram reply path waits on the real
-secrets.
+All required variables are configured in Coolify as runtime secrets. The
+production container is running, connected to Postgres, serving the dashboard,
+and long-polling Telegram. Never copy secret values into this repository.
 
 ## Backups
 
-**Not yet configured on this instance.** The spec calls for a daily `pg_dump`
-to an S3-compatible offsite bucket with ~30-day retention, but the Coolify
-instance has no S3 storage set up. To enable it:
+`agentg-postgres` has a Coolify scheduled backup at **03:00 UTC daily**. It
+keeps 7 local copies and 30 offsite copies in the existing Cloudflare R2
+storage (`r2-chatwoot`); Coolify isolates the agentg objects under the database
+resource's own path.
 
-1. In Coolify, add an S3-compatible storage (R2 / B2 / Hetzner) under Storages.
-2. On Database → `agentg-postgres` → Backups, add a scheduled backup: daily,
-   save to that S3 storage, ~30 offsite copies (7 local is a sensible default).
-
-Restore through the same Backups panel once it exists.
+The initial backup completed successfully on 2026-08-15 and produced an offsite
+R2 object. That dump was restored into an isolated throwaway Postgres 16
+container and verified (19 public tables, 1 gym, 1 member), then the throwaway
+container was deleted. Restore future incidents through Database →
+`agentg-postgres` → Backups.
 
 ## Environments
 
@@ -77,8 +73,8 @@ Production only. Developers test locally with a separate dev bot token
 
 ## Go-live checklist (one-time)
 
-1. Create the production bot with @BotFather.
-2. In Coolify, replace the `TELEGRAM_BOT_TOKEN` and `MODEL_API_KEY` placeholders.
-3. Start (or redeploy) the `agentg` application.
-4. Message the production bot — the Agent should reply.
-5. Set up the offsite backup (see [Backups](#backups)) — still pending.
+1. Production bot created and configured in Coolify.
+2. Production model and matching API key configured in Coolify.
+3. `agentg` application running from `main` as a single replica.
+4. Public dashboard routed over HTTPS to port 8080.
+5. Daily offsite backup configured and restore-tested (see [Backups](#backups)).
