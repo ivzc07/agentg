@@ -10,7 +10,6 @@ import { AppHeader } from "./AppHeader";
 import { RosterTable } from "./RosterTable";
 import { RosterCards } from "./RosterCards";
 import { RosterSplit } from "./RosterSplit";
-import { RosterQueue } from "./RosterQueue";
 
 interface RosterShellProps {
   /** The coach's name from /api/session. */
@@ -213,7 +212,7 @@ export function RosterShell({ name: _name, gym }: RosterShellProps) {
                 that renders the member full-page without roster chrome. */}
             {!noMatch && (
               <>
-                {view === "table" && <RosterQueue members={filtered.active} />}
+                {view === "table" && <RosterTable members={filtered.active} />}
                 {view === "cards" && <RosterCards members={filtered.active} />}
                 {view === "split" && <RosterSplit members={filtered.active} />}
               </>
