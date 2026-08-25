@@ -208,22 +208,60 @@ describe("RosterShell", () => {
     });
   });
 
-  it("groups who needs attention from real roster data", async () => {
+  it("keeps Gap order; a safety flag does not jump the list", async () => {
     renderShell(
       makeResponse({
         active: [
-          makeMember(1, { name: "Alice", severity: "red", missed_days: 3, has_safety_flag: true }),
-          makeMember(2, { name: "Bob", severity: "amber", missed_days: 1 }),
+          makeMember(1, {
+            name: "LongAway",
+            gap_days: 10,
+            severity: "amber",
+            missed_days: 1,
+            has_safety_flag: false,
+          }),
+          makeMember(2, {
+            name: "FlaggedRecent",
+            gap_days: 1,
+            severity: null,
+            missed_days: 0,
+            has_safety_flag: true,
+          }),
         ],
-        counts: { active: 2, lapsed: 1 },
+        lapsed: [],
+        counts: { active: 2, lapsed: 0 },
       }),
     );
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Needs attention" })).toBeInTheDocument();
-      expect(screen.getByRole("heading", { name: "Watch list" })).toBeInTheDocument();
-      expect(screen.getByText("Alice")).toBeInTheDocument();
-      expect(screen.getByText("Bob")).toBeInTheDocument();
+      expect(screen.getByText("LongAway")).toBeInTheDocument();
     });
+    const names = [...document.querySelectorAll("#roster li")].map((row) =>
+      row.getAttribute("data-name"),
+    );
+    expect(names).toEqual(["LongAway", "FlaggedRecent"]);
+  });
+
+  it("does not call a no-Routine Member on track", async () => {
+    renderShell(
+      makeResponse({
+        active: [
+          makeMember(1, {
+            name: "NewKid",
+            gap_days: 0,
+            has_sessions: false,
+            is_new: true,
+            severity: null,
+            missed_days: 0,
+          }),
+        ],
+        lapsed: [],
+        counts: { active: 1, lapsed: 0 },
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText("NewKid")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("On track")).toBeNull();
+    expect(screen.getByText("new")).toBeInTheDocument();
   });
 
   it("keeps the split rail attendance compact", async () => {

@@ -109,18 +109,4 @@ describe("RosterTable", () => {
     ]);
     expect(container.querySelectorAll(".strip i")).toHaveLength(3);
   });
-
-  it("omits the redundant attendance micro-chart in coach-queue rows", () => {
-    const { container } = render(
-      <MemoryRouter>
-        <RosterTable
-          layout="queue"
-          members={[makeMember({ attendance: [{ on: "2026-08-01", state: "hit" }] })]}
-        />
-      </MemoryRouter>
-    );
-    expect(container.querySelector(".strip")).toBeNull();
-    expect(screen.getByText("2 planned days missed")).toBeInTheDocument();
-    expect(screen.getByText("3 days away")).toBeInTheDocument();
-  });
 });
